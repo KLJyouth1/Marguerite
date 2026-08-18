@@ -27,6 +27,9 @@ use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use crate::agent::tool_cycle::ToolResult;
+use crate::desktop_automation::driver::{AppKind, DesktopError, UiAction};
+use crate::desktop_automation::policy::Policy;
+use crate::desktop_automation::registry::AppRegistry;
 use crate::mcp::registry::ToolRegistry;
 use crate::security::{sandboxed_exec, CommandGuard, DEFAULT_TIMEOUT};
 use crate::tools::builtin::make_local_tool;
@@ -1122,6 +1125,143 @@ pub async fn dispatch(
     }
 }
 
+/// 注册桌面应用操控工具：让 LLM 智能体直接驱动已注册的桌面应用（如 WPS 演示）。
+///
+/// 提供两个工具：
+/// - `desktop_launch`：按应用标识启动一个桌面应用，返回句柄 id；
+/// - `desktop_action`：对句柄执行一次 UI 动作（如「生成一周计划 PPT」），
+///   并复用 gateway/methods.rs 的安全闸门（敏感动作二次确认 + 注入扫描）。
+///
+/// 桌面自动化为 Windows-only 驱动（`AppRegistry::global()` 仅在 `#[cfg(windows)]` 下
+/// 注册 WpsPpt 等驱动）。非 Windows 环境下 `launch` 自然返回 `AppUnknown` 错误，
+/// 工具优雅降级，因此此处**不**加 `#[cfg(windows)]` 门控，保持与既有工具一致。
+fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
+    // 工具 1：desktop_launch —— 启动一个已注册的桌面应用，返回句柄 id。
+    let launch_run: ToolFn = std::sync::Arc::new(move |args: &HashMap<String, String>| {
+        let a = args.clone();
+        Box::pin(async move {
+            let app_kind = a.get("app_kind").cloned().unwrap_or_default();
+            let kind = match AppKind::from_str(&app_kind) {
+                Some(k) => k,
+                None => {
+                    return Ok(ToolResult::Error {
+                        message: format!("未知桌面应用: {app_kind}"),
+                        code: "DESKTOP_APP_UNKNOWN".into(),
+                    })
+                }
+            };
+            match AppRegistry::global().launch(kind, &json!({"app_kind": app_kind})) {
+                Ok(h) => Ok(ToolResult::Success {
+                    data: h.id.clone(),
+                    metadata: HashMap::new(),
+                }),
+                Err(e) => {
+                    let code = match e {
+                        DesktopError::AppUnknown(_) => "DESKTOP_APP_UNKNOWN",
+                        DesktopError::ComError(_) => "DESKTOP_COM_ERROR",
+                        _ => "DESKTOP_COM_ERROR",
+                    };
+                    Ok(ToolResult::Error {
+                        message: e.to_string(),
+                        code: code.into(),
+                    })
+                }
+            }
+        })
+    });
+    registry.register_local(make_local_tool(
+        "desktop_launch",
+        "启动一个已注册的桌面应用，返回句柄 id；后续 desktop_action 使用该句柄。\
+         目前支持 wps_ppt（WPS 演示）。调用约定：先用本工具拿到句柄，再把句柄传给 desktop_action 执行具体动作。",
+        json!({
+            "type": "object",
+            "properties": {
+                "app_kind": { "type": "string", "description": "应用标识，如 wps_ppt" }
+            },
+            "required": ["app_kind"]
+        }),
+        launch_run,
+    ));
+
+    // 工具 2：desktop_action —— 对句柄执行一次 UI 动作（如生成 WPS PPT）。
+    let action_run: ToolFn = std::sync::Arc::new(move |args: &HashMap<String, String>| {
+        let a = args.clone();
+        Box::pin(async move {
+            let handle = a.get("handle").cloned().unwrap_or_default();
+            if handle.is_empty() {
+                return Ok(ToolResult::Error {
+                    message: "缺少 handle".into(),
+                    code: "MISSING_HANDLE".into(),
+                });
+            }
+            let action_json = a.get("action").cloned().unwrap_or_default();
+            let action: UiAction = match serde_json::from_str(&action_json) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Ok(ToolResult::Error {
+                        message: format!("动作参数解析失败: {e}"),
+                        code: "ACTION_PARSE".into(),
+                    })
+                }
+            };
+            let approved = a.get("approved").map(|s| s == "true").unwrap_or(false);
+            if Policy::require_confirmation(&action) && !approved {
+                return Ok(ToolResult::Error {
+                    message: "该动作需要二次确认（请携带 approved=true）".into(),
+                    code: "ACTION_NEEDS_CONFIRM".into(),
+                });
+            }
+            if let Some(reason) = Policy::scan_injection(&action) {
+                return Ok(ToolResult::Error {
+                    message: reason,
+                    code: "ACTION_INJECTION".into(),
+                });
+            }
+            let session = a.get("session_key").cloned().unwrap_or_default();
+            match AppRegistry::global().run_action(&handle, &action, &session) {
+                Ok(receipt) => {
+                    let data = serde_json::to_string(&receipt).unwrap_or_default();
+                    Ok(ToolResult::Success {
+                        data,
+                        metadata: HashMap::new(),
+                    })
+                }
+                Err(e) => {
+                    let code = match e {
+                        DesktopError::AppUnknown(_) => "DESKTOP_APP_UNKNOWN",
+                        DesktopError::ActionDenied(_) => "ACTION_DENIED",
+                        _ => "DESKTOP_COM_ERROR",
+                    };
+                    Ok(ToolResult::Error {
+                        message: e.to_string(),
+                        code: code.into(),
+                    })
+                }
+            }
+        })
+    });
+    registry.register_local(make_local_tool(
+        "desktop_action",
+        "对句柄执行一次 UI 动作。参数 action 是 UiAction 的 JSON 字符串；\
+         例如生成 WPS PPT：\
+         {\"kind\":\"generate_presentation\",\"params\":{\"outline\":{\"slides\":[{\"title\":\"周一\",\"bullets\":[\"晨会\",\"需求评审\"]},{\"title\":\"周二\",\"bullets\":[\"编码\"]}]},\"output_path\":\"C:/Users/Administrator/Desktop/weekly-plan.pptx\"}}。\
+         可选 approved（敏感动作需 \"true\"）、session_key（审计会话键）。",
+        json!({
+            "type": "object",
+            "properties": {
+                "handle": { "type": "string", "description": "desktop_launch 返回的句柄 id" },
+                "action": { "type": "string", "description": "UiAction 的 JSON 字符串" },
+                "approved": { "type": "string", "description": "敏感动作二次确认开关，携带 \"true\" 表示已确认" },
+                "session_key": { "type": "string", "description": "审计会话键，用于在审计快照中定位本次会话" }
+            },
+            "required": ["handle", "action"]
+        }),
+        action_run,
+    ));
+
+    Ok(())
+}
+
 /// 注册计算机操控工具到注册表（三层架构接入 Marguerite 原生工具集）
 ///
 /// `vision` 为可选视觉能力：注入后 `locate` 完成「截图 → VLMM 坐标 → 自动点击」闭环；
@@ -1167,5 +1307,9 @@ pub fn register_computer_use_tools(
         }),
         run,
     ));
+
+    // 桌面应用操控工具（desktop_launch / desktop_action）一并注册进 LLM 工具表。
+    register_desktop_app_tools(registry)?;
+
     Ok(())
 }
