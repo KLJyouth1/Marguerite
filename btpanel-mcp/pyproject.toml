@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btpanel-mcp"
+version = "0.1.0"
+description = "宝塔面板(BT Panel) 标准 MCP Server：零第三方依赖，stdio / SSE 双传输"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+btpanel-mcp = "btpanel_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["btpanel_mcp*"]

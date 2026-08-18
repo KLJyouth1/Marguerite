@@ -1,0 +1,12 @@
+=== EXIT ===
+EXIT=101
+=== warning count ===
+0
+=== error count ===
+1
+=== Finished? ===
+0
+=== clippy specific (clippy::) warnings ===
+0
+=== my files mentioned? ===
+(none = clean)

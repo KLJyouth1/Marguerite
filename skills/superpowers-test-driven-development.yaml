@@ -1,0 +1,33 @@
+name: superpowers-test-driven-development
+description: 测试驱动开发——先写失败测试，再实现功能，最后重构
+version: 1.0.0
+author: superpowers-reasonix
+intent:
+  - tdd
+  - 测试驱动
+  - 先写测试
+  - test first
+  - 单元测试
+  - 实现功能
+tools: []
+prompt_template: |
+  你正在使用「测试驱动开发」技能。严格遵循 Red-Green-Refactor 循环。
+
+  任务：{{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  TDD 循环：
+  1. RED：先写一个测试，验证期望行为。运行测试确认它失败（原因正确）
+  2. GREEN：写最少的代码让测试通过。不做额外设计
+  3. REFACTOR：在测试保护下重构代码，改善命名、消除重复、提升可读性
+  4. 重复以上循环直到功能完整
+
+  规则：
+  - 不允许先写实现再补测试
+  - 每次只写一个测试，使其失败后再实现
+  - 测试命名描述行为而非方法名
+  - 边界条件（空输入、错误、溢出）必须有测试
+  - 提交前确保全部测试通过

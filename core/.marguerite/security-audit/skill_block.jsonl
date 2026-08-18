@@ -1,0 +1,6 @@
+{"ts":1787031866,"event":"skill_block","stage":""install"","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}
+{"ts":1787032284,"event":"skill_block","stage":"install","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}
+{"ts":1787033691,"event":"skill_block","stage":"install","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}
+{"ts":1787039039,"event":"skill_block","stage":"install","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}
+{"ts":1787041088,"event":"skill_block","stage":"install","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}
+{"ts":1787041150,"event":"skill_block","stage":"install","skill":"evil","path":"","code":"SKILL_MALWARE_BLOCKED","risk_score":100,"rules":["L2-EVAL@L4"]}

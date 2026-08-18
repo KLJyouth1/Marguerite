@@ -1,0 +1,7 @@
+=== ls lock ===
+-rw-r--r-- 1 Administrator 197121 0 Aug  4 20:25 target_v3/debug/.cargo-lock
+=== try rename ===
+mv: cannot move 'target_v3/debug/.cargo-lock' to 'target_v3/debug/.cargo-lock.bak': Permission denied
+mv rc=1
+=== ls after ===
+-rw-r--r-- 1 Administrator 197121 0 Aug  4 20:25 target_v3/debug/.cargo-lock

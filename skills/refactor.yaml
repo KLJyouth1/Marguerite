@@ -1,0 +1,21 @@
+name: refactor
+description: 重构代码，提高可读性和可维护性
+version: 1.0.0
+author: marguerite
+intent:
+  - refactor
+  - 重构
+  - 优化
+  - improve
+tools: []
+prompt_template: |
+  请重构以下代码，提高可读性和可维护性：
+
+  {{text}}
+
+  重构要求：
+  1. 保持原有功能不变
+  2. 提高代码可读性
+  3. 应用设计模式（如适用）
+  4. 添加必要的注释
+  5. 提供重构前后的对比

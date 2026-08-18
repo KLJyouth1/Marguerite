@@ -1,0 +1,14 @@
+﻿cargo : info: cargo-llvm-cov currently setting cfg(coverage); you can opt-out it by passing --no-cfg-coverage
+At line:15 char:6329
++ ... pgrep\bin'; cargo llvm-cov --workspace --exclude marguerite-gui --sum ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (info: cargo-llv...no-cfg-coverage:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[1m[32m   Compiling[0m marguerite-core v0.1.0 (D:\Downloads\Marguerite\marguerite\core)
+[1m[32m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 7.44s
+[1m[32m     Running[0m unittests src\lib.rs (target\llvm-cov-target\debug\deps\marguerite_core-a1545d0c3a99ade3.exe)
+
+running 264 tests
+test agent::runtime::tests::test_agent_state_display ... ok
+test agent::runtime::tests::test_message_roles ... ok

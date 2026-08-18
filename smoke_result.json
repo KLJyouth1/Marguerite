@@ -1,0 +1,26 @@
+{
+  "ok": false,
+  "steps": [],
+  "hello": {
+    "protocol": 3,
+    "methods_count": 125,
+    "events": [
+      "tick",
+      "sessions.changed",
+      "session.event.*"
+    ]
+  },
+  "has_chat_send": true,
+  "has_sessions_list": true,
+  "sessions_before_count": 27,
+  "error": "rpc timeout: chat.send",
+  "log": [
+    "[2026-08-17T13:47:07.700Z] == [1] handshake (client A) ==",
+    "[2026-08-17T13:47:07.716Z] hello ok | protocol=3 | methods=125 | events=[\"tick\",\"sessions.changed\",\"session.event.*\"]",
+    "[2026-08-17T13:47:07.716Z]   has chat.send=true has sessions.list=true",
+    "[2026-08-17T13:47:07.716Z] == [2] sessions.list (before) ==",
+    "[2026-08-17T13:47:12.739Z]   ok=true payload={\"keys\":[\"agent:main:webchat:zewciiep\",\"agent:main:webchat:1s9w2gte\",\"agent:main:webchat:pdc0e4d6\",\"task-news-4\",\"task-file-test\",\"task-fps\",\"task-news-3\",\"task",
+    "[2026-08-17T13:47:12.739Z] == [3] chat.send (start a Bloom turn) ==",
+    "[2026-08-17T13:47:37.739Z] FATAL rpc timeout: chat.send"
+  ]
+}

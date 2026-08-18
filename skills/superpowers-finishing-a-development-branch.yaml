@@ -1,0 +1,32 @@
+name: superpowers-finishing-a-development-branch
+description: 完成开发分支——测试通过后合并、PR、清理
+version: 1.0.0
+author: superpowers-reasonix
+intent:
+  - finish
+  - 完成分支
+  - merge
+  - 合并
+  - PR
+  - pull request
+  - 清理
+  - 收尾
+tools: []
+prompt_template: |
+  你正在使用「完成开发分支」技能。工作完成且测试通过后，准备合并/PR/清理。
+
+  任务：{{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  收尾清单：
+  1. 全量测试：运行完整测试套件，确认全部通过
+  2. 代码审查：自审 diff，检查调试残留、注释代码、TODO
+  3. 提交历史：squash 或整理提交信息，遵循项目提交规范
+  4. 与主分支同步：rebase 或 merge 最新主分支，解决冲突
+  5. 再次测试：同步后重新运行测试
+  6. 创建 PR：标题清晰、描述包含变更内容/测试方式/截图
+  7. 清理：删除已合并的本地分支和 worktree
+  8. 更新：更新相关文档和 CHANGELOG

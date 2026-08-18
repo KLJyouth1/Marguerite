@@ -1,0 +1,97 @@
+{
+  "ok": true,
+  "steps": [],
+  "hello": {
+    "protocol": 3,
+    "methods_count": 125,
+    "events": [
+      "tick",
+      "sessions.changed",
+      "session.event.*"
+    ]
+  },
+  "has_chat_send": true,
+  "has_sessions_list": true,
+  "sessions_before_count": 19,
+  "chat_send_ok": true,
+  "sessionKey": "smoke.1786975138498",
+  "D2_sessions_changed_running": true,
+  "D1_session_persisted_after_disconnect": true,
+  "session_after": {
+    "conversationKind": "chat",
+    "createdAt": 1786975152180,
+    "effectiveAgentId": "main",
+    "key": "smoke.1786975138498",
+    "messageCount": 2,
+    "projectPath": null,
+    "runStatus": "idle",
+    "session": "smoke.1786975138498",
+    "sessionKey": "smoke.1786975138498",
+    "sessionKind": "chat",
+    "status": "idle",
+    "subtitle": "",
+    "summary": "[Worker] 我是并行集群中一名聚焦「实现视角」的 Worker，专门负责把任务落地为可执行的方案与代码。\n\n[Worker] 我是并行集群中以「测试视角」工作的 Worker，专注于从正确性验证与边界条件出发来审视和保障任务交付质量。\n\n[Worker] 我是负责从「文档视角」梳理并产出清晰、易用的使用说明与文档的 Worker，专注于让任务的每一步操作都能被读者看懂、照做。\n\n[编码实现]…",
+    "surface": "web",
+    "title": "[Worker] 我是并行集群中一名聚焦「实现视角」的 Worker，专门负责把任务落地为可执行的方案与代码。\n\n[Worker] 我是并行集群中以「测试视角」工作的 Worker，专注于从正确性验证与边界条件出发来审视和保障任务交付质量。\n\n[Worker] 我是负责从「文档视角」梳理并产出清晰、易用的使用说明与文档的 Worker，专注于让任务的每一步操作都能被读者看懂、照做。\n\n[编码实现]…",
+    "updatedAt": 1786975152180
+  },
+  "D3_usage_event": true,
+  "D5_router_decision": false,
+  "D5_ensemble_progress": false,
+  "turn_done_or_idle": false,
+  "turn_error": false,
+  "D1_aborted_by_client_disconnect": false,
+  "events_A": [
+    {
+      "event": "sessions.changed",
+      "seq": 1
+    },
+    {
+      "event": "session.event.thinking",
+      "seq": 2
+    },
+    {
+      "event": "session.event.thinking",
+      "seq": 3
+    },
+    {
+      "event": "session.event.usage",
+      "seq": 4
+    },
+    {
+      "event": "session.event.usage",
+      "seq": 5
+    },
+    {
+      "event": "session.event.usage",
+      "seq": 6
+    },
+    {
+      "event": "session.event.usage",
+      "seq": 7
+    },
+    {
+      "event": "session.event.usage",
+      "seq": 8
+    }
+  ],
+  "events_B": [],
+  "log": [
+    "[2026-08-17T13:58:53.484Z] == [1] handshake (client A) ==",
+    "[2026-08-17T13:58:53.494Z] hello ok | protocol=3 | methods=125 | events=[\"tick\",\"sessions.changed\",\"session.event.*\"]",
+    "[2026-08-17T13:58:53.495Z]   has chat.send=true has sessions.list=true",
+    "[2026-08-17T13:58:53.495Z] == [2] sessions.list (before) ==",
+    "[2026-08-17T13:58:58.498Z]   ok=true payload={\"keys\":[\"smoke.1786974971809\",\"agent:main:webchat:zewciiep\",\"agent:main:webchat:1s9w2gte\",\"agent:main:webchat:pdc0e4d6\",\"task-news-4\",\"task-file-test\",\"task-fp",
+    "[2026-08-17T13:58:58.498Z] == [3] chat.send (start a Bloom turn) ==",
+    "[2026-08-17T13:59:08.580Z]   ok=true sessionKey=smoke.1786975138498 taskId=turn-0b6220e5-591d-41b5-88cd-c8a4589cffb9",
+    "[2026-08-17T13:59:18.587Z]   sessions.changed(running) observed: true",
+    "[2026-08-17T13:59:18.587Z] == [4] HARD-DISCONNECT client A (simulate user leaving the page) ==",
+    "[2026-08-17T13:59:18.588Z] == [5] wait 4s; turn must keep running server-side (D1) ==",
+    "[2026-08-17T13:59:22.587Z] == [6] reconnect (client B) ==",
+    "[2026-08-17T13:59:22.590Z]   hello ok B",
+    "[2026-08-17T13:59:22.590Z] == [7] sessions.list (after reconnect) — session must still exist (D1) ==",
+    "[2026-08-17T13:59:27.593Z]   session still listed after disconnect: true {\"conversationKind\":\"chat\",\"createdAt\":1786975152180,\"effectiveAgentId\":\"main\",\"key\":\"smoke.1786975138498\",\"messageCount\":2,\"projectPath\":null,\"runStatus\":\"idle",
+    "[2026-08-17T13:59:27.593Z] == [8] capture events on B for 9s (turn progress / completion) ==",
+    "[2026-08-17T13:59:36.594Z]   done/idle=false error=false usage=true router_decision=false ensemble_progress=false aborted_by_client_disconnect=false"
+  ]
+}

@@ -1,0 +1,52 @@
+# 密钥与环境（绝不提交）
+.env
+.env.local
+*.key
+
+# 构建产物
+/target
+**/target
+
+# 日志与临时
+*.log
+__deltest__.txt
+cc*.txt
+ctest*.txt
+gate*.log
+build*.log
+mgt_*
+marguerite-verify*
+
+# 操作系统
+Thumbs.db
+.DS_Store
+
+# Tauri 构建期由 build.rs 复制进 src-tauri 的资源（体积大，非源码，不提交）
+gui/src-tauri/webui/dist
+gui/src-tauri/skills
+
+# 前端依赖与构建产物（源码侧，非源码，体积大）
+**/node_modules
+/webui/dist
+
+# 其它构建/发布输出目录
+/target_v2
+/release
+
+# 根级临时 scratch 文件（自动化诊断/验证产生的 _*.txt）
+_*.txt
+
+# 第三方外部依赖冻结快照（非本项目源码，体积巨大，不纳入版本控制）
+/third_party/
+
+# 构建输出目录（任意层级，含 gui/dist、pyengine/*/dist、根级 dist）
+dist/
+
+# Python 运行/缓存产物
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+_tak*/

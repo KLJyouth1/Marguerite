@@ -1,0 +1,8 @@
+{
+  "//": [
+    "This tracked manifest ships EMPTY by design. The app's built-in ambient pad is generated at runtime via the Web Audio API (see src/composables/useAmbientSynth.ts) — it ships no audio file, so it survives a clean checkout, needs no license, and never trips the personal-BGM release gate.",
+    "To add your own tracks, drop audio files here and create playlist.local.json (gitignored). When present, playlist.local.json fully replaces this file. Track src is either a filename relative to this directory or an absolute https:// stream.",
+    "See README.md in this directory for the full format."
+  ],
+  "tracks": []
+}

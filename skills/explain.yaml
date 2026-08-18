@@ -1,0 +1,24 @@
+name: explain
+description: 解释代码的功能和逻辑
+version: 1.0.0
+author: marguerite
+intent:
+  - explain
+  - 解释
+  - what is
+  - how does
+tools: []
+prompt_template: |
+  请解释以下代码的功能和逻辑：
+
+  {{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  请提供：
+  1. 代码的整体功能
+  2. 关键逻辑和算法
+  3. 输入/输出说明
+  4. 潜在问题和改进建议

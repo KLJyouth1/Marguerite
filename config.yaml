@@ -1,0 +1,35 @@
+# Marguerite 默认配置模板
+# 首次运行时会自动复制到 ~/.marguerite/config.yaml
+
+model:
+  provider: "deepseek"
+  model_name: "deepseek-chat"
+  api_key: ""
+  base_url: "https://api.deepseek.com"
+
+mcp:
+  servers:
+    # 宝塔面板 MCP（本地 stdio）：在 Skills › Tools & capabilities 中可见。
+    # 调用工具前按需配置凭据（详见 marguerite/btpanel-mcp/README.md）：
+    #   BAOTA_BASE_URL：面板地址（含安全路径），如 http://127.0.0.1:8888/C70AGNQm
+    #   BAOTA_SESSION_FILE / BAOTA_REQUEST_TOKEN：面板会话（二选一）
+    # 默认 dry-run，写操作只模拟不执行。
+    - name: "btpanel"
+      command: "py"
+      args: ["-3.14", "-m", "btpanel_mcp.cli", "stdio"]
+      env:
+        BAOTA_BASE_URL: ""
+        BAOTA_SESSION_FILE: ""
+        BAOTA_DRY_RUN: "true"
+      url: null
+
+memory:
+  sensory_path: "memory/sensory"
+  short_term_path: "memory/short_term"
+
+skills:
+  skills_dir: "skills"
+
+log:
+  level: "info"
+  file: "logs/marguerite.log"

@@ -1,0 +1,32 @@
+=== EXIT marker ===
+=== error/warning summary counts ===
+error[: 0
+error: lines: 1
+warning: lines: 0
+=== first 80 lines containing error ===
+103:   Compiling thiserror v2.0.19
+133:   Compiling thiserror-impl v2.0.19
+228:test agent::tool_cycle::tests::test_call_tool_error ... ok
+233:test agent::tool_cycle::tests::test_parallel_error_and_success_mixed ... ok
+241:test agent::tool_cycle::tests::test_tool_error ... ok
+244:test agent::tool_cycle::tests::test_tool_result_is_error ... ok
+247:test agent::runtime::tests::test_process_input_llm_error ... ok
+279:test chain::builtin::tests::test_read_missing_file_returns_error ... ok
+334:test chain::executor::tests::c7_fatal_error_skips_rest ... ok
+371:test events::envelope::tests::test_e2b_v_future_returns_error ... ok
+389:test guard::fact::tests::test_check_with_mcp_call_error ... ok
+425:test guard::syntax::tests::test_valid_code_no_error ... ok
+431:test guard::tests::test_gateway_syntax_error_short_circuit ... ok
+460:test mcp::client::tests::test_mcp_call_tool_rpc_error ... ok
+473:test mcp::client::tests::test_mcp_list_tools_error_response ... ok
+474:test mcp::client::tests::test_mcp_list_tools_http_error ... ok
+479:test mcp::registry::tests::test_execute_local_tool_error ... ok
+501:test mcp::server::tests::test_jsonrpc_error_with_id ... ok
+502:test mcp::server::tests::test_jsonrpc_parse_error ... ok
+550:test mode::tests::test_mode_switch_error_display ... ok
+566:test model::llm::tests::test_chat_complete_non_retryable_error ... ok
+568:test model::llm::tests::test_chat_complete_stream_error ... ok
+569:test model::llm::tests::test_is_retryable_error ... ok
+638:test sandbox::rpc::tests::test_parse_error ... ok
+673:test skills::loader::tests::test_download_and_register_http_error ... ok
+868:error: test failed, to rerun pass `-p marguerite-core --lib`

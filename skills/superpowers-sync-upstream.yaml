@@ -1,0 +1,41 @@
+name: superpowers-sync-upstream
+description: 同步上游——检查并拉取上游仓库的技能和 harness 更新
+version: 1.0.0
+author: superpowers-reasonix
+intent:
+  - sync
+  - 同步
+  - 更新
+  - upstream
+  - 上游
+  - pull
+  - 升级
+tools: []
+prompt_template: |
+  你正在使用「同步上游」技能。检查上游仓库更新并合并到本地。
+
+  任务：{{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  同步流程：
+  1. 检查当前版本：记录本地 commit hash 和技能版本
+  2. 获取上游：git fetch upstream（或对应 remote）
+  3. 对比变更：
+     - 查看上游 changelog/release notes
+     - 检查技能文件的 diff
+     - 标注 breaking changes
+  4. 评估影响：
+     - 哪些本地定制会被覆盖
+     - 哪些新技能需要添加
+     - 哪些技能需要迁移适配
+  5. 合并策略：
+     - 无冲突：fast-forward 或 rebase
+     - 有冲突：逐文件解决，保留本地定制
+  6. 合并后验证：
+     - 运行全部测试
+     - 验证技能加载正常
+     - 检查配置兼容性
+  7. 记录变更：更新本地 changelog，标注上游版本和适配内容

@@ -1,0 +1,49 @@
+﻿cargo : [0mcore\src\context\paging.rs:140:42: [0m[0m[1m[38;5;11mwarning[0m[0m: writing `&mut Vec` instead of `&m
+ut [_]` involves a new object where a slice will do: help: change this to: `&mut [ContextPage]`[0m
+At line:15 char:6329
++ ... pgrep\bin'; cargo clippy --workspace --all-targets --message-format=s ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([0mcore\src\co...ntextPage]`[0m:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[0mcore\src\guard\contract.rs:37:5: [0m[0m[1m[38;5;11mwarning[0m[0m: you should consider adding a `Default` impl
+ementation for `ContractChecker`[0m
+[0mcore\src\guard\contract.rs:110:59: [0m[0m[1m[38;5;11mwarning[0m[0m: useless use of `format!`: help: consider 
+using `.to_string()`: `kw.to_string()`[0m
+[0mcore\src\guard\fact.rs:51:5: [0m[0m[1m[38;5;11mwarning[0m[0m: you should consider adding a `Default` implemen
+tation for `FactChecker`[0m
+[0mcore\src\guard\semantic.rs:33:5: [0m[0m[1m[38;5;11mwarning[0m[0m: you should consider adding a `Default` impl
+ementation for `SemanticChecker`[0m
+[0mcore\src\guard\syntax.rs:64:5: [0m[0m[1m[38;5;11mwarning[0m[0m: you should consider adding a `Default` implem
+entation for `SyntaxChecker`[0m
+[0mcore\src\guard\syntax.rs:176:31: [0m[0m[1m[38;5;11mwarning[0m[0m: redundant guard[0m
+[0mcore\src\memory\long_term.rs:59:34: [0m[0m[1m[38;5;11mwarning[0m[0m: this expression creates a reference whic
+h is immediately dereferenced by the compiler: help: change this to: `t`[0m
+[0mcore\src\memory\long_term.rs:89:32: [0m[0m[1m[38;5;11mwarning[0m[0m: checking if a string is ascii using iter
+ators: help: try: `word.is_ascii()`[0m
+[0mcore\src\persistence\task_queue.rs:187:43: [0m[0m[1m[38;5;11mwarning[0m[0m: this expression creates a referen
+ce which is immediately dereferenced by the compiler: help: change this to: `r`[0m
+[0mcore\src\persistence\task_queue.rs:256:46: [0m[0m[1m[38;5;11mwarning[0m[0m: this expression creates a referen
+ce which is immediately dereferenced by the compiler: help: change this to: `r`[0m
+[0mcore\src\persistence\task_queue.rs:268:69: [0m[0m[1m[38;5;11mwarning[0m[0m: this expression creates a referen
+ce which is immediately dereferenced by the compiler: help: change this to: `r`[0m
+[0mcore\src\model\dual.rs:160:32: [0m[0m[1m[38;5;11mwarning[0m[0m: useless use of `vec!`[0m
+[1m[33mwarning[0m[1m:[0m `marguerite-core` (lib) generated 13 warnings (run `cargo clippy --fix --lib -p marguerit
+e-core` to apply 11 suggestions)
+[0mcore\src\agent\subagent.rs:400:9: [0m[0m[1m[38;5;11mwarning[0m[0m: unused import: `async_trait::async_trait`
+[0m
+[0mcore\src\guard\repair.rs:289:9: [0m[0m[1m[38;5;11mwarning[0m[0m: field assignment outside of initializer for 
+an instance created with Default::default()[0m
+[0mcore\src\guard\mod.rs:241:9: [0m[0m[1m[38;5;11mwarning[0m[0m: field assignment outside of initializer for an 
+instance created with Default::default()[0m
+[0mcore\src\skills\engine.rs:325:43: [0m[0m[1m[38;5;11mwarning[0m[0m: redundant closure: help: replace the closu
+re with the function itself: `std::path::PathBuf::from`[0m
+[1m[33mwarning[0m[1m:[0m `marguerite-core` (lib test) generated 17 warnings (13 duplicates) (run `cargo clippy --f
+ix --lib -p marguerite-core --tests` to apply 2 suggestions)
+[1m[32m    Checking[0m marguerite-gui v0.1.0 (D:\Downloads\Marguerite\marguerite\gui\src-tauri)
+[0mgui\src-tauri\src\lib.rs:25:5: [0m[0m[1m[38;5;11mwarning[0m[0m: you should consider adding a `Default` implem
+entation for `AppState`[0m
+[1m[33mwarning[0m[1m:[0m `marguerite-gui` (lib test) generated 1 warning (1 duplicate)
+[1m[33mwarning[0m[1m:[0m `marguerite-gui` (lib) generated 1 warning (run `cargo clippy --fix --lib -p marguerite-g
+ui` to apply 1 suggestion)
+[1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 0.78s

@@ -1,0 +1,44 @@
+# mode/plan.yaml — 只读探索模式
+name: plan
+description: 只读探索，必须先产出书面计划，审批后才可执行
+allowed_tools:
+  - read_file
+  - search_files
+  - find_files
+  - list_dir
+  - git_status
+  - git_diff
+  - git_log
+  - web_search
+  - lsp
+  - syntax
+  - semantic
+  - fact
+  - contract
+denied_tools:
+  - edit_file
+  - write_code
+  - create_file
+  - delete_file
+  - rename_file
+  - exec
+  - terminal
+  - run_tests
+  - control_desktop
+  - browser_control
+  - git_commit
+  - install_dependency
+model_params:
+  temperature: 0.3
+  reasoning_effort: high
+anti_patterns:
+  - 直接修改文件
+  - 未计划先执行
+  - 跳过审批
+risk_level: low
+approval_policy:
+  mutating: confirm
+  exec_write: confirm
+  network: confirm
+  desktop: confirm
+  fallback_timeout_sec: 60

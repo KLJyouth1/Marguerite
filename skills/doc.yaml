@@ -1,0 +1,26 @@
+name: doc
+description: 生成代码文档和注释
+version: 1.0.0
+author: marguerite
+intent:
+  - doc
+  - 文档
+  - document
+  - 注释
+  - comment
+tools: []
+prompt_template: |
+  请为以下代码生成文档和注释：
+
+  {{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  文档要求：
+  1. 为公共 API 添加文档注释
+  2. 说明函数/方法的功能、参数和返回值
+  3. 提供使用示例
+  4. 遵循 Rust doc 风格（/// 或 //!）
+  5. 对复杂逻辑添加行内注释

@@ -1,0 +1,87 @@
+/* Theme: dark (value) — L1 token block. Split out of base.css into the
+   pluggable theme layer (P0). Values are Marguerite's fused palette: the
+   graphite surfaces + 6-channel spectral status inherit OpenSquilla, while the
+   brand anchors become blue-primary (#60A5FA) with the orange strike
+   (#F26A1B) as the secondary emphasis — per the Marguerite brand decision
+   "蓝主 + 橙强调". The default ground is declared on `:where(:root)` —
+   specificity 0, so ANY `[data-theme="<id>"]` block (0-1-0) beats it
+   regardless of the order Vite emits theme stylesheets in. */
+/* Dark theme — neutral graphite: achromatic charcoal surfaces (hierarchy by
+   lightness, like the leading agent consoles) with the blue strike + the
+   6-channel spectral status language (default). */
+[data-theme="dark"], :where(:root) {
+  /* Instrument — cool graphite: a 5-step luminance ladder (bg < surface <
+     surface-2 < elevated < hover) so surfaces separate by lightness AND by the
+     machined --elev shadow below. Deeper/cooler than the old #121212 so raised
+     surfaces read as lit. */
+  --bg: #18181A;
+  --bg-surface: #202022;
+  --bg-surface-2: #28282B;
+  --bg-elevated: #2D2D30;
+  --bg-hover: #353539;
+  --text: #F5F5F7;
+  --text-muted: #B0B0B6;
+  --text-dim: #87878E;
+  --border: #303034;
+  --border-strong: #444448;
+  --border-focus: #55555B;
+  --card: #202022;
+  --hairline: #29292C;
+
+  /* User bubble: the deeper graphite canvas needs one more step than the
+     foundation's 7% default for the fill to read at a glance. */
+  --msg-bubble: color-mix(in srgb, var(--text) 8%, var(--bg-surface));
+
+  /* Blue-primary brand — the primary action / focus / running-state anchor
+     (Marguerite blue family). On the dark graphite ground the accent must be a
+     light blue: #60A5FA clears the 4.5:1 text floor on --bg (7.37:1) and
+     --bg-surface (6.69:1), with a dark-navy --accent-foreground for filled
+     controls (8.3:1). */
+  --accent: #60A5FA;
+  --accent-hover: #93C5FD;
+  --accent-deep: #2563EB;
+  /* One disciplined orange strike — Marguerite's emphasis accent, reserved for
+     selected-nav, in-progress pulses and secondary emphasis. Family is
+     300=#FDBA74 / 500=#F97316 / hover-50=#FB923C / deep-700=#C2410C so it
+     matches the Rust theme.rs family exactly. */
+  --accent-secondary: #F97316;
+  --accent-secondary-hover: #FB923C;
+  --accent-secondary-fill: #FDBA74;
+  --accent-secondary-deep: #C2410C;
+  --accent-secondary-surface: color-mix(in srgb, #F97316 16%, var(--bg-surface));
+  --accent-foreground: #0B1A3B;
+
+  /* The spectrum — six calibrated channels (keep the existing semantic names;
+     --queued is the new sixth). Used only to encode run state, never decor. */
+  --ok: #39D7A2;
+  --warn: #E8B23A;
+  /* Brighter amber for small non-text fills (status dots, badge fills) where the
+     text-tuned --warn would read muddy. Keep --warn for any warn *text*. */
+  --warn-fill: #E8B23A;
+  --danger: #FF6B6B;
+  --info: #56C2E6;
+  --queued: #8C7DF2;
+
+  /* Syntax highlighting (chat code blocks) */
+  --syntax-comment: #8B93A6;
+  --syntax-keyword: #C792EA;
+  --syntax-string: #9ECE6A;
+  --syntax-literal: #E5C07B;
+  --syntax-title: #7AA2F7;
+  --syntax-attr: #56B6C2;
+}
+
+/* Structural identity — dark explicitly re-asserts the foundation type + radius
+   so a nested [data-theme="dark"] island (the share-export stage) fully escapes
+   an active theme's structural remaps (terminal's mono type, hard corners, …).
+   Scoped to the attribute only (not :root) — foundation already provides the
+   defaults; this exists purely to shadow inherited overrides in islands. */
+[data-theme="dark"] {
+  --font-sans: var(--font-sans-default);
+  --font-display: var(--font-display-default);
+  --radius-control: var(--radius-md);
+  --radius-card: var(--radius-lg);
+  --radius-panel: var(--radius-xl);
+  --radius-modal: var(--radius-2xl);
+  --radius-pill: var(--radius-full);
+}

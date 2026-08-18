@@ -1,0 +1,21 @@
+name: commit
+description: 生成规范的 Git 提交信息
+version: 1.0.0
+author: marguerite
+intent:
+  - commit
+  - 提交
+  - changelog
+  - release notes
+tools: []
+prompt_template: |
+  请根据以下代码变更生成 Git 提交信息：
+
+  {{text}}
+
+  提交信息规范：
+  1. 使用 Conventional Commits 格式（type(scope): description）
+  2. 类型包括：feat, fix, docs, style, refactor, perf, test, chore
+  3. 第一行不超过 72 字符
+  4. 正文说明变更原因和影响
+  5. 如有破坏性变更，标注 BREAKING CHANGE

@@ -1,0 +1,12 @@
+=== error lines with context ===
+1:error: failed to open: D:/Downloads/Marguerite/marguerite/target_v3\debug\.cargo-lock
+2-
+3-Caused by:
+4-  拒绝访问。 (os error 5)
+5-EXIT=101
+=== tail ===
+error: failed to open: D:/Downloads/Marguerite/marguerite/target_v3\debug\.cargo-lock
+
+Caused by:
+  拒绝访问。 (os error 5)
+EXIT=101

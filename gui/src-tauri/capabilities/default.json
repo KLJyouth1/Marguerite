@@ -1,0 +1,10 @@
+{
+  "identifier": "com.marguerite.workbench",
+  "description": "Marguerite CLI Workbench GUI 壳默认能力",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "global-shortcut:default"
+  ]
+}

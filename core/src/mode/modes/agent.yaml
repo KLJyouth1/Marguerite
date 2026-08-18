@@ -1,0 +1,16 @@
+# mode/agent.yaml — 交互审批模式（默认）
+name: agent
+description: 默认模式：只读自由，写操作请求确认
+allowed_tools: []
+denied_tools: []
+model_params:
+  temperature: 0.7
+  reasoning_effort: medium
+anti_patterns: []
+risk_level: medium
+approval_policy:
+  mutating: confirm
+  exec_write: confirm
+  network: confirm
+  desktop: confirm
+  fallback_timeout_sec: 60

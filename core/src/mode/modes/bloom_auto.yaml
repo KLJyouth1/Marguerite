@@ -1,0 +1,24 @@
+# mode/bloom_auto.yaml — Bloom 自主闭环子模式（bloom:auto）
+# 预算驱动：目标分解 → 执行 → QA → 自动修复（≤3 轮）→ 继续，直到 QA 全过或预算耗尽
+name: bloom_auto
+description: Bloom 自主闭环：Agent 自主推进直至 QA 全过（token/轮次预算驱动）
+allowed_tools: []
+denied_tools:
+  - control_desktop
+  - browser_control
+model_params:
+  temperature: 0.2
+  reasoning_effort: high
+anti_patterns: []
+risk_level: high
+bloom:
+  submode: auto
+  budget_tokens: 100000
+  max_iterations: 20
+  max_fixes: 3
+approval_policy:
+  mutating: allow
+  exec_write: allow
+  network: allow
+  desktop: allow
+  fallback_timeout_sec: 60

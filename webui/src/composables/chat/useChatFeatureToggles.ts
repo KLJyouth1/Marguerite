@@ -1,0 +1,403 @@
+import { computed, ref } from 'vue'
+import i18n from '@/i18n'
+import { useToasts } from '@/composables/useToasts'
+import type { ChatRouterTierConfig } from '@/types/chat'
+import type { BloomSubmode, ModelRoutingMode } from '@/types/modelRouting'
+import { normalizeBloomSubmode, normalizeModelRoutingMode } from '@/types/modelRouting'
+import { normalizeRouterTier, sortRouterTiers } from '@/utils/chat/routerTiers'
+import { encodeRouterShape, decodeRouterShape } from '@/utils/chat/routerShapeCache'
+import {
+  DEFAULT_ROUTER_VISUAL_MODE,
+  normalizeRouterVisualMode,
+} from '@/utils/chat/routerVisualMode'
+import { useRouterVisualEffectsPreference } from '@/composables/useRouterVisualEffectsPreference'
+import {
+  waitForSessionRpcConnection,
+} from '@/composables/chat/sessionBootstrapAdmission'
+import type { RpcCallOptions, RpcConnectionWaitOptions } from '@/lib/rpc'
+
+type RpcClient = {
+  waitForConnection: (
+    timeoutMs?: number,
+    signal?: AbortSignal,
+    actions?: RpcConnectionWaitOptions,
+  ) => Promise<void>
+  call: <T = unknown>(
+    method: string,
+    params?: Record<string, unknown>,
+    callOptions?: RpcCallOptions,
+  ) => Promise<T>
+  supportsMethod?: (method: string) => boolean
+  on?: (event: string, handler: (payload: unknown) => void) => () => void
+}
+
+export interface UseChatFeatureTogglesOptions {
+  rpc: RpcClient
+  readCallOptions?: RpcCallOptions
+  setGlobalElevatedMode: (mode: string) => void
+  loadCurrentSessionUsage: () => void | Promise<void>
+}
+
+interface ChatFeatureConfig {
+  squilla_router?: {
+    enabled?: boolean
+    rollout_phase?: string
+    visual_mode?: string
+    tiers?: Record<string, {
+      model?: string
+      supports_image?: boolean
+      supportsImage?: boolean
+      image_only?: boolean
+      imageOnly?: boolean
+    }>
+  }
+  permissions?: {
+    default_mode?: string
+  }
+  skills?: {
+    coding_mode?: boolean
+  }
+  llm_ensemble?: {
+    enabled?: boolean
+    selection_mode?: string
+    orchestration_mode?: string
+  }
+  bloom?: {
+    enabled?: boolean
+    parallel_enabled?: boolean
+    submode?: string
+  }
+}
+
+interface ModelRoutingSnapshot {
+  mode?: 'direct' | 'router' | 'ensemble' | 'bloom'
+  selection_mode?: string
+}
+
+const ROUTER_SHAPE_KEY = 'marguerite.router.shape'
+export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
+  const { pushToast } = useToasts()
+  const routerEnabled = ref(false)
+  const {
+    enabled: routerVisualEffectsEnabled,
+    setEnabled: setRouterVisualEffectsEnabled,
+  } = useRouterVisualEffectsPreference()
+  const routerVisualMode = ref(DEFAULT_ROUTER_VISUAL_MODE)
+  const routerSettingsBusy = ref(false)
+  const codingModeEnabled = ref(false)
+  const codingModeSettingsBusy = ref(false)
+  const llmEnsembleEnabled = ref(false)
+  const bloomEnsembleEnabled = ref(false)
+  const bloomSubmode = ref<BloomSubmode>('deep')
+  const llmEnsembleSelectionMode = ref('')
+  const llmEnsembleSettingsBusy = ref(false)
+  const bloomSubmodeSettingsBusy = ref(false)
+  const modelRoutingSettingsBusy = ref(false)
+  const routerSlots = ref<string[]>([])
+  const routerModels = ref<Record<string, string>>({})
+  const routerTierConfigs = ref<Record<string, ChatRouterTierConfig>>({})
+
+  const modelRoutingMode = computed<ModelRoutingMode>(() => {
+    if (bloomEnsembleEnabled.value) return 'bloom_ensemble'
+    if (llmEnsembleEnabled.value) return 'llm_ensemble'
+    return routerEnabled.value ? 'squilla_router' : 'off'
+  })
+
+  function applyModelRoutingSnapshot(snapshot: ModelRoutingSnapshot | undefined) {
+    const mode = snapshot?.mode
+    if (!mode) return false
+    bloomEnsembleEnabled.value = mode === 'bloom'
+    llmEnsembleEnabled.value = mode === 'ensemble' || mode === 'bloom'
+    // The product control remains one four-state selector. The existing
+    // routerEnabled ref means "routing feature active" to ChatView, so Ensemble
+    // remains active here even when its static selection mode bypasses the
+    // SquillaRouter implementation internally.
+    routerEnabled.value = mode !== 'direct'
+    if (typeof snapshot.selection_mode === 'string') {
+      llmEnsembleSelectionMode.value = snapshot.selection_mode
+    }
+    return true
+  }
+
+  // Seed the last-known router shape synchronously so the router-strip reserve
+  // twin can hold its slot on the first turn, before config.get resolves.
+  hydrateRouterShape()
+
+  async function applyFeatureConfig(cfg: ChatFeatureConfig | undefined, applyOptions: { refreshUsage?: boolean } = {}) {
+    const router = cfg?.squilla_router || {}
+    const ensembleEnabled = cfg?.llm_ensemble?.enabled === true
+
+    routerEnabled.value = ensembleEnabled || Boolean(router.enabled && router.rollout_phase !== 'observe')
+    codingModeEnabled.value = cfg?.skills?.coding_mode === true
+    llmEnsembleEnabled.value = ensembleEnabled
+    bloomEnsembleEnabled.value = ensembleEnabled && String(cfg?.llm_ensemble?.orchestration_mode) === 'auto'
+    const rawSubmode = String(cfg?.bloom?.submode || '')
+    if (rawSubmode) bloomSubmode.value = normalizeBloomSubmode(rawSubmode)
+    llmEnsembleSelectionMode.value = String(cfg?.llm_ensemble?.selection_mode || '')
+    routerVisualMode.value = normalizeRouterVisualMode(router.visual_mode)
+    const tiers = router.tiers
+    const tierKeys: string[] = []
+    const tierModels: Record<string, string> = {}
+    const tierConfigs: Record<string, ChatRouterTierConfig> = {}
+    if (tiers && typeof tiers === 'object') {
+      Object.keys(tiers).forEach((tier) => {
+        if (!tier) return
+        const lower = normalizeRouterTier(tier)
+        if (!lower) return
+        tierKeys.push(lower)
+        const rawTier = tiers[tier] || {}
+        const model = rawTier.model
+        if (typeof model === 'string' && model.trim()) {
+          tierModels[lower] = model.trim()
+        }
+        tierConfigs[lower] = {
+          model: typeof model === 'string' ? model.trim() : '',
+          supportsImage: (rawTier as Record<string, unknown>).supports_image === true || (rawTier as Record<string, unknown>).supportsImage === true,
+          imageOnly: (rawTier as Record<string, unknown>).image_only === true || (rawTier as Record<string, unknown>).imageOnly === true,
+        }
+      })
+    }
+
+    routerSlots.value = sortRouterTiers(tierKeys)
+    routerModels.value = tierModels
+    routerTierConfigs.value = tierConfigs
+    persistRouterShape()
+    options.setGlobalElevatedMode(cfg?.permissions?.default_mode || '')
+    if (applyOptions.refreshUsage) {
+      await options.loadCurrentSessionUsage()
+    }
+  }
+
+  async function loadFeatureToggles() {
+    try {
+      await waitForSessionRpcConnection(options.rpc, options.readCallOptions)
+      const cfg = options.readCallOptions
+        ? await options.rpc.call<ChatFeatureConfig>(
+            'config.get',
+            undefined,
+            options.readCallOptions,
+          )
+        : await options.rpc.call<ChatFeatureConfig>('config.get')
+      await applyFeatureConfig(cfg, { refreshUsage: true })
+      try {
+        const routing = options.readCallOptions
+          ? await options.rpc.call<ModelRoutingSnapshot>(
+              'models.routing.get',
+              undefined,
+              options.readCallOptions,
+            )
+          : await options.rpc.call<ModelRoutingSnapshot>('models.routing.get')
+        applyModelRoutingSnapshot(routing)
+      } catch {
+        // Older Gateways have no canonical routing RPC; the config projection
+        // applied above remains the read-only compatibility snapshot.
+      }
+      // Bloom 子模式由 Rust 引擎消费（`config.bloom.submode`）；侧车在线时
+      // config.get 走 Python 不返回该字段，故额外读 Rust-first 的 mode.get。
+      try {
+        const modeSnapshot = options.readCallOptions
+          ? await options.rpc.call<{ submode?: string }>(
+              'mode.get',
+              undefined,
+              options.readCallOptions,
+            )
+          : await options.rpc.call<{ submode?: string }>('mode.get')
+        if (typeof modeSnapshot?.submode === 'string' && modeSnapshot.submode) {
+          bloomSubmode.value = normalizeBloomSubmode(modeSnapshot.submode)
+        }
+      } catch {
+        // Older Gateways have no mode.get submode field; keep config projection.
+      }
+    } catch {
+      // Feature toggles are optional for older gateways.
+    }
+  }
+
+  // Hydrate the router shape from localStorage into the live refs. Synchronous
+  // and side-effect-free on failure so it is safe to call at composable init.
+  function hydrateRouterShape() {
+    try {
+      const cached = decodeRouterShape(localStorage.getItem(ROUTER_SHAPE_KEY))
+      if (!cached) return
+      routerEnabled.value = cached.enabled
+      routerSlots.value = cached.slots
+      routerModels.value = cached.models
+      routerTierConfigs.value = cached.configs
+    } catch {}
+  }
+
+  // Persist the just-loaded shape so the next page load can seed the reserve.
+  // Skip when there are no tier models — a degenerate shape would only seed a
+  // <=1-cell reserve, which the reserve gate rejects anyway.
+  function persistRouterShape() {
+    try {
+      if (Object.keys(routerModels.value).length === 0) return
+      localStorage.setItem(ROUTER_SHAPE_KEY, encodeRouterShape({
+        enabled: routerEnabled.value,
+        slots: routerSlots.value,
+        models: routerModels.value,
+        configs: routerTierConfigs.value,
+      }))
+    } catch {}
+  }
+
+  async function setRouterEnabled(enabled: boolean) {
+    await setModelRoutingMode(enabled ? 'squilla_router' : 'off')
+  }
+
+  async function setCodingModeEnabled(enabled: boolean): Promise<boolean> {
+    if (codingModeSettingsBusy.value) return false
+    const nextEnabled = Boolean(enabled)
+    const previous = codingModeEnabled.value
+    codingModeSettingsBusy.value = true
+    try {
+      await options.rpc.waitForConnection()
+      await options.rpc.call('config.patch.safe', {
+        patches: {
+          'skills.coding_mode': nextEnabled,
+        },
+      })
+      const cfg = await options.rpc.call<ChatFeatureConfig>('config.get')
+      await applyFeatureConfig(cfg)
+      return codingModeEnabled.value === nextEnabled
+    } catch (err) {
+      codingModeEnabled.value = previous
+      console.warn('Failed to update Coding mode:', err instanceof Error ? err.message : String(err))
+      return false
+    } finally {
+      codingModeSettingsBusy.value = false
+    }
+  }
+
+  async function setLlmEnsembleEnabled(enabled: boolean) {
+    await setModelRoutingMode(enabled ? 'llm_ensemble' : 'off')
+  }
+
+  async function setModelRoutingMode(mode: ModelRoutingMode) {
+    if (modelRoutingSettingsBusy.value) return
+    const nextMode = normalizeModelRoutingMode(mode)
+    const previousRouter = routerEnabled.value
+    const previousEnsemble = llmEnsembleEnabled.value
+    const previousBloom = bloomEnsembleEnabled.value
+    const nextEnsemble = nextMode === 'llm_ensemble' || nextMode === 'bloom_ensemble'
+
+    // This is only optimistic presentation. The Gateway owns the actual
+    // direct/router/ensemble/bloom transition (including ensemble dependency
+    // rules) and the post-write config refresh remains authoritative.
+    routerEnabled.value = nextMode !== 'off'
+    llmEnsembleEnabled.value = nextEnsemble
+    bloomEnsembleEnabled.value = nextMode === 'bloom_ensemble'
+    modelRoutingSettingsBusy.value = true
+    routerSettingsBusy.value = true
+    llmEnsembleSettingsBusy.value = true
+    try {
+      await options.rpc.waitForConnection()
+      await options.rpc.call('models.routing.set', {
+        mode: nextMode === 'off'
+          ? 'direct'
+          : nextMode === 'squilla_router' ? 'router'
+          : nextMode === 'bloom_ensemble' ? 'bloom' : 'ensemble',
+      })
+      // 后端运行时模式联动：bloom_ensemble → mode.switch{kind:'bloom'}（Bloom 并行
+      // 编排即刻生效，无需重启）；其余 → agent。best-effort，失败不阻断主流程。
+      const runtimeKind = nextMode === 'bloom_ensemble' ? 'bloom' : 'agent'
+      const modeSupported = options.rpc.supportsMethod?.('mode.switch')
+      if (modeSupported) {
+        try {
+          await options.rpc.call('mode.switch', { kind: runtimeKind })
+        } catch (modeErr) {
+          console.warn('Failed to sync runtime mode:', modeErr instanceof Error ? modeErr.message : String(modeErr))
+        }
+      }
+      await loadFeatureToggles()
+    } catch (err) {
+      routerEnabled.value = previousRouter
+      llmEnsembleEnabled.value = previousEnsemble
+      bloomEnsembleEnabled.value = previousBloom
+      console.warn('Failed to update model routing:', err instanceof Error ? err.message : String(err))
+      pushToast(i18n.global.t('chat.modelRouting.updateFailed'), { tone: 'danger' })
+    } finally {
+      modelRoutingSettingsBusy.value = false
+      routerSettingsBusy.value = false
+      llmEnsembleSettingsBusy.value = false
+    }
+  }
+
+  async function setBloomSubmode(submode: BloomSubmode) {
+    if (bloomSubmodeSettingsBusy.value) return
+    const next = normalizeBloomSubmode(submode)
+    const previous = bloomSubmode.value
+    if (next === previous) return
+    bloomSubmode.value = next
+    bloomSubmodeSettingsBusy.value = true
+    try {
+      await options.rpc.waitForConnection()
+      // Bloom 子模式由 Rust 引擎消费（`config.bloom.submode`，YAML）；kind 固定
+      // bloom，使子模式切换即刻生效（与当前 Bloom 运行时一致，无需重启）。
+      await options.rpc.call('mode.switch', { kind: 'bloom', submode: next })
+    } catch (err) {
+      bloomSubmode.value = previous
+      console.warn('Failed to update Bloom submode:', err instanceof Error ? err.message : String(err))
+      pushToast(i18n.global.t('chat.modelRouting.submodeUpdateFailed'), { tone: 'danger' })
+    } finally {
+      bloomSubmodeSettingsBusy.value = false
+    }
+  }
+
+  function bindFeatureRefresh(scheduleHistorySync?: () => void) {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const schedule = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        loadFeatureToggles().finally(() => scheduleHistorySync?.())
+      }, 120)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') schedule()
+    }
+    const onFocus = () => schedule()
+    const unbindRouting = options.rpc.on?.('models.routing.changed', (payload) => {
+      if (payload && typeof payload === 'object') {
+        applyModelRoutingSnapshot(payload as ModelRoutingSnapshot)
+        scheduleHistorySync?.()
+      }
+    })
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      if (timer) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onFocus)
+      unbindRouting?.()
+    }
+  }
+
+  return {
+    routerEnabled,
+    routerVisualEffectsEnabled,
+    routerVisualMode,
+    routerSettingsBusy,
+    modelRoutingMode,
+    modelRoutingSettingsBusy,
+    codingModeEnabled,
+    codingModeSettingsBusy,
+    llmEnsembleEnabled,
+    bloomEnsembleEnabled,
+    bloomSubmode,
+    bloomSubmodeSettingsBusy,
+    llmEnsembleSelectionMode,
+    llmEnsembleSettingsBusy,
+    routerSlots,
+    routerModels,
+    routerTierConfigs,
+    loadFeatureToggles,
+    setRouterEnabled,
+    setModelRoutingMode,
+    setBloomSubmode,
+    setCodingModeEnabled,
+    setLlmEnsembleEnabled,
+    setRouterVisualEffectsEnabled,
+    bindFeatureRefresh,
+  }
+}

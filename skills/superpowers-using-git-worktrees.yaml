@@ -1,0 +1,32 @@
+name: superpowers-using-git-worktrees
+description: 使用 Git Worktree 为功能开发创建隔离工作区
+version: 1.0.0
+author: superpowers-reasonix
+intent:
+  - worktree
+  - 隔离
+  - 分支
+  - 并行开发
+  - git worktree
+  - 工作区
+tools: []
+prompt_template: |
+  你正在使用「Git Worktree」技能。为功能开发创建隔离工作区，避免主工作区污染。
+
+  任务：{{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  操作流程：
+  1. 确认当前仓库状态干净（stash 或 commit 未提交改动）
+  2. 从主分支创建功能分支：git worktree add ../<repo>-<feature> -b feature/<feature>
+  3. 在新 worktree 中开发，主工作区保持干净可切换
+  4. 开发完成后在 worktree 中运行测试
+  5. 合并后清理：git worktree remove <path> && git branch -d feature/<feature>
+
+  适用场景：
+  - 需要并行开发多个功能
+  - 主工作区需要保持可发布状态
+  - 需要在不同分支间频繁切换对比

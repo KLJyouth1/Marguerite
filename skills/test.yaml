@@ -1,0 +1,25 @@
+name: test
+description: 生成单元测试和集成测试
+version: 1.0.0
+author: marguerite
+intent:
+  - test
+  - 测试
+  - 单元测试
+  - coverage
+tools: []
+prompt_template: |
+  请为以下代码生成测试：
+
+  {{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  测试要求：
+  1. 覆盖主要功能路径
+  2. 包含正常情况和边界情况
+  3. 使用合适的测试框架
+  4. 测试命名清晰，遵循项目规范
+  5. 提供 Mock 方案（如需要外部依赖）

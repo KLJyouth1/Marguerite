@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Codepage="936" Culture="en-us" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <!-- Codepage 936 (GBK / Chinese Simplified) is required so the MSI database
+       can store the non-ASCII (CJK + fullwidth) filenames present in the
+       bundled skills/ tree. All 429 such filenames are CJK Unified Ideographs
+       or fullwidth forms, which fit GBK 936 (verified: no JP-kana / Hangul /
+       other blocks). The default Tauri locale pins this to 1252, which makes
+       light.exe fail with LGHT0311 ("characters not available in the specified
+       database code page '1252'"). Note: UTF-8 (65001) is rejected by WiX for
+       the summary codepage (LGHT0349), so an ANSI codepage must be used. -->
+  <String Id="TauriLanguage">1033</String>
+  <String Id="TauriCodepage">936</String>
+  <String Id="LaunchApp">Launch Marguerite</String>
+  <String Id="DowngradeErrorMessage">A newer version of Marguerite is already installed.</String>
+  <String Id="PathEnvVarFeature">Add the install location of the Marguerite executable to the PATH system environment variable. This allows the Marguerite executable to be called from any location.</String>
+  <String Id="InstallAppFeature">Installs Marguerite.</String>
+</WixLocalization>

@@ -1,0 +1,10 @@
+=== my Request B related tests ===
+222:test agent::subagent::tests::test_subagent_publishes_spawn_event ... ok
+336:test chain::executor::tests::c8_chain_publishes_events ... ok
+337:test chain::executor::tests::c8_chain_publishes_failure_events ... ok
+400:test guard::gateway::tests::test_resolve_explicit_approved ... ok
+401:test guard::gateway::tests::test_resolve_explicit_denied ... ok
+403:test guard::gateway::tests::test_resolve_unknown_id_returns_false ... ok
+414:test guard::gateway::tests::test_resolve_timeout_overrides_outcome ... ok
+=== any of them FAILED? ===
+(empty above = none of mine failed)

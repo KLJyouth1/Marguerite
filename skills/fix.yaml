@@ -1,0 +1,26 @@
+name: fix
+description: 修复代码中的 Bug 和错误
+version: 1.0.0
+author: marguerite
+intent:
+  - fix
+  - 修复
+  - bug
+  - 错误
+  - broken
+  - not working
+tools: []
+prompt_template: |
+  请修复以下代码中的问题：
+
+  {{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}
+
+  请提供：
+  1. 问题分析（Bug 的根本原因）
+  2. 修复方案
+  3. 修复后的代码
+  4. 如何验证修复生效

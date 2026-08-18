@@ -1,0 +1,27 @@
+# mode/bloom_swarm.yaml — Bloom 双领队蜂群子模式（bloom:swarm）
+# 双领队：FlashSwarmLeader（≤11 蜂群智能体）/ ProExpertLeader（主专家 + ≤5 子专家）
+# generate_plan_with_pro → swarm_shards + expert_team + execution_steps
+name: bloom_swarm
+description: Bloom 双领队蜂群：FlashSwarm + ProExpert 编排蜂群/专家团队并行攻坚
+allowed_tools: []
+denied_tools:
+  - control_desktop
+  - browser_control
+model_params:
+  temperature: 0.25
+  reasoning_effort: high
+anti_patterns: []
+risk_level: high
+bloom:
+  submode: swarm
+  flash_swarm_leader: flash_swarm_leader
+  pro_expert_leader: pro_expert_leader
+  max_swarm_shards: 11
+  max_sub_experts: 5
+  emit_agent_team_status: true
+approval_policy:
+  mutating: allow
+  exec_write: allow
+  network: allow
+  desktop: allow
+  fallback_timeout_sec: 60
