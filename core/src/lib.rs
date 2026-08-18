@@ -6,6 +6,10 @@ pub mod agent;
 pub mod automation;
 pub mod browser;
 pub mod cache;
+/// Track E — 第三阶段研究主干（RAG/知识图谱/NLP/缓存命中率/记忆增强）纯逻辑切片：
+/// context_budget 四态、self-learning 提升/闸门策略、NLP 原语、KG 召回接口。
+/// 重 ML 推理（ONNX/lgbm 实际推理）与推背图（零来源）明确不落地，仅透明标注。
+pub mod e;
 pub mod chain;
 pub mod cli;
 pub mod codeintel;

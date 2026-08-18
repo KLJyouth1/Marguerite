@@ -356,6 +356,48 @@ pub struct MultiTierStats {
     pub saved_prompt_tokens: u64,
 }
 
+impl MultiTierStats {
+    /// 命中率 = (精确 + 规范化 + 语义命中) / 查询数。`lookups == 0` 时返回 0.0 避免除零；
+    /// 结果夹紧到 [0, 1] 以吸收任何计数异常。
+    #[must_use]
+    pub fn hit_rate(&self) -> f64 {
+        if self.lookups == 0 {
+            return 0.0;
+        }
+        let hits = self.total_hits();
+        let rate = hits as f64 / self.lookups as f64;
+        if rate > 1.0 {
+            1.0
+        } else {
+            rate
+        }
+    }
+
+    /// 三层命中总数（精确 + 规范化 + 语义）。
+    #[must_use]
+    pub fn total_hits(&self) -> u64 {
+        self.exact_hits + self.normalized_hits + self.semantic_hits
+    }
+
+    /// 省下 token 占比的保守估计 = 省下 prompt token / (省下 + 未命中)。
+    /// 缺失的"未命中 token 成本"以每次未命中至少 1 token 当量近似；分母为 0 时返回 0.0。
+    /// 生产环境应喂入真实未命中 token 计数以得到精确值。
+    #[must_use]
+    pub fn saved_tokens_ratio(&self) -> f64 {
+        let saved = self.saved_prompt_tokens as f64;
+        let denom = saved + self.misses as f64;
+        if denom <= 0.0 {
+            return 0.0;
+        }
+        let ratio = saved / denom;
+        if ratio > 1.0 {
+            1.0
+        } else {
+            ratio
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 struct MultiTierStatsInner {
     stats: MultiTierStats,
@@ -453,6 +495,12 @@ impl MultiTierCache {
     #[must_use]
     pub fn stats(&self) -> MultiTierStats {
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).stats
+    }
+
+    /// 便捷出口：直接取当前缓存命中率（等价于 `self.stats().hit_rate()`）。
+    #[must_use]
+    pub fn hit_rate(&self) -> f64 {
+        self.stats().hit_rate()
     }
 
     /// 语义层条目数（容量观测）。
@@ -670,5 +718,82 @@ mod tests {
         assert!(matches!(r.tier, HitTier::Semantic(_)));
         assert_eq!(r.content, "Paris");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- Track E: MultiTierStats 命中率导出（最小加性） ----
+
+    fn stats_with(
+        lookups: u64,
+        exact: u64,
+        normalized: u64,
+        semantic: u64,
+        misses: u64,
+        saved: u64,
+    ) -> MultiTierStats {
+        MultiTierStats {
+            lookups,
+            exact_hits: exact,
+            normalized_hits: normalized,
+            semantic_hits: semantic,
+            misses,
+            saved_prompt_tokens: saved,
+        }
+    }
+
+    #[test]
+    fn hit_rate_computed_correctly() {
+        // 3+2+1 = 6 命中 / 10 查询 -> 0.6
+        let s = stats_with(10, 3, 2, 1, 4, 100);
+        assert_eq!(s.total_hits(), 6);
+        assert!((s.hit_rate() - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hit_rate_zero_lookups_no_div_by_zero() {
+        let s = stats_with(0, 0, 0, 0, 0, 0);
+        assert_eq!(s.hit_rate(), 0.0);
+        assert_eq!(s.saved_tokens_ratio(), 0.0);
+    }
+
+    #[test]
+    fn hit_rate_in_range_zero_to_one() {
+        // 全命中：命中率恰为 1.0
+        let s = stats_with(10, 10, 0, 0, 0, 0);
+        assert_eq!(s.hit_rate(), 1.0);
+        // 全未命中：0.0
+        let s = stats_with(10, 0, 0, 0, 10, 0);
+        assert_eq!(s.hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn saved_tokens_ratio_estimate() {
+        // 省下 100 / (100 + 100 未命中) -> 0.5
+        let s = stats_with(10, 1, 1, 1, 100, 100);
+        assert!((s.saved_tokens_ratio() - 0.5).abs() < 1e-9);
+        // 零未命中且零省下 -> 0.0
+        let s = stats_with(5, 5, 0, 0, 0, 0);
+        assert_eq!(s.saved_tokens_ratio(), 0.0);
+    }
+
+    #[test]
+    fn cache_hit_rate_matches_stats() {
+        let cache = MultiTierCache::with_embedder(
+            64,
+            Box::new(LocalNgramEmbedder::default()),
+            0.5,
+        );
+        cache.put("hello world", "Hi there", 5, 1);
+        let _ = cache.get("hello world"); // 命中
+        let _ = cache.get("totally unrelated query xyz 98765"); // 未命中
+        assert!((cache.hit_rate() - cache.stats().hit_rate()).abs() < 1e-12);
+        assert_eq!(cache.stats().lookups, 2);
+    }
+
+    // 变异测试证伪橡皮章：若 `hit_rate` 分子被写死为 0（total_hits() 返回 0），
+    // 以下断言会 FAILED —— 证明测试真的在观测计算，而非空过。
+    #[test]
+    fn hit_rate_mutation_proof_numerator_not_hardcoded_zero() {
+        let s = stats_with(10, 3, 2, 1, 4, 100);
+        assert!(s.hit_rate() > 0.0, "命中率应 > 0；若被写死 0 则变异暴露");
     }
 }
