@@ -13,6 +13,7 @@ pub mod shortcut;
 pub mod slot;
 pub mod state;
 pub mod theme;
+pub mod palette_audit;
 pub mod workspace_watcher;
 
 use std::collections::hash_map::DefaultHasher;
@@ -1410,18 +1411,11 @@ mod tests {
 
     /// P0-2 紫粉渐变检测：返回命中的禁用色值（Indigo/SlateBlue/Violet/Magenta/Pink）。
     fn j5_forbidden_color_present(term: &Terminal<TestBackend>) -> Vec<(u8, u8, u8)> {
-        const FORBIDDEN: &[(u8, u8, u8)] = &[
-            (124, 58, 237), // #7C3AED Violet
-            (168, 85, 247), // #A855F7 Magenta
-            (236, 72, 153), // #EC4899 Pink
-            (99, 102, 241), // #6366F1 Indigo
-            (79, 70, 229),  // #4F46E5 SlateBlue
-        ];
         let mut hits = Vec::new();
         for c in term.backend().buffer().content().iter() {
             for col in [c.fg, c.bg] {
                 if let ratatui::style::Color::Rgb(r, g, b) = col {
-                    if FORBIDDEN.contains(&(r, g, b)) {
+                    if palette_audit::FORBIDDEN_VIOLET_PINK.contains(&(r, g, b)) {
                         hits.push((r, g, b));
                     }
                 }
@@ -1435,7 +1429,7 @@ mod tests {
         for c in term.backend().buffer().content().iter() {
             for col in [c.fg, c.bg] {
                 if let ratatui::style::Color::Rgb(r, g, b) = col {
-                    if (r, g, b) == (59, 130, 246) {
+                    if (r, g, b) == palette_audit::REQUIRED_BRAND_BLUE {
                         return true;
                     }
                 }
