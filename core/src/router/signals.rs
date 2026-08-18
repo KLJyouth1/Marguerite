@@ -21,6 +21,7 @@ pub fn classify_input_from_turn(text: &str, _session: &str, _config: &Config) ->
         prev_route_decisions: Vec::new(),
         context_tokens_est,
         runtime_available: true,
+        has_image: false,
     }
 }
 

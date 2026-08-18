@@ -16,6 +16,7 @@ pub mod classify;
 pub mod decision_log;
 pub mod persona;
 pub mod signals;
+pub mod vision_gate;
 
 pub use classify::{classify, classify_with};
 pub use decision_log::{DecisionLog, LogEntry, SCHEMA_VERSION};
@@ -120,6 +121,9 @@ pub struct ClassifyInput {
     pub context_tokens_est: usize,
     /// runtime（v4 运行时）是否可用；false → 降级默认档 + v4_unavailable 日志
     pub runtime_available: bool,
+    /// 本轮是否携带图片（视觉取证门 Track B 的输入信号；默认 false）。
+    /// true 时在 classify 中追加 vision_gate 可观测步骤（不改非图片轮路由）。
+    pub has_image: bool,
 }
 
 /// 路由器错误类型。

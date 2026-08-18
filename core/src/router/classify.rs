@@ -16,66 +16,88 @@ pub fn classify(input: &ClassifyInput) -> RouteDecision {
 /// 可注入 catalog 的分类（便于测试空名册 / 自定义名册）。
 pub fn classify_with(input: &ClassifyInput, catalog: &PersonaCatalog) -> RouteDecision {
     // —— 步骤 1：runtime 可用性闸门（opensquilla v4_unavailable 语义）——
-    if !input.runtime_available {
-        return default_decision(catalog, DecisionSource::RuntimeUnavailable, "v4_unavailable");
-    }
+    let mut decision = if !input.runtime_available {
+        default_decision(catalog, DecisionSource::RuntimeUnavailable, "v4_unavailable")
+    } else if catalog.personas.iter().filter(|p| p.enabled).count() == 0 {
+        // 启用中的 persona 为空 → 降级（classify 异常保护，不 panic）
+        default_decision(catalog, DecisionSource::Default, "classify_error")
+    } else {
+        // —— 步骤 2：对名册每个 persona 规则打分 ——
+        let mut scored: Vec<(PersonaTier, f64)> = catalog
+            .personas
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| (p.tier, score_persona(p, input)))
+            .collect();
 
-    // 启用中的 persona 为空 → 降级（classify 异常保护，不 panic）
-    if catalog.personas.iter().filter(|p| p.enabled).count() == 0 {
-        return default_decision(catalog, DecisionSource::Default, "classify_error");
-    }
+        // —— 步骤 3：选最高分档 ——
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let (best_tier, best_conf) = scored
+            .first()
+            .cloned()
+            .unwrap_or((PersonaTier::General, 0.0));
 
-    // —— 步骤 2：对名册每个 persona 规则打分 ——
-    let mut scored: Vec<(PersonaTier, f64)> = catalog
-        .personas
-        .iter()
-        .filter(|p| p.enabled)
-        .map(|p| (p.tier, score_persona(p, input)))
-        .collect();
-
-    // —— 步骤 3：选最高分档 ——
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let (best_tier, best_conf) = scored
-        .first()
-        .cloned()
-        .unwrap_or((PersonaTier::General, 0.0));
-
-    // —— 步骤 4：弱路由（confidence < 阈值，历史粘性）——
-    if best_conf < CONFIDENCE_THRESHOLD {
-        if let Some(prev) = input.prev_route_decisions.last() {
-            return decision_for(
-                catalog,
-                prev.tier,
-                best_conf,
-                DecisionSource::History,
-                "weak_confidence_stick_prev",
-            );
+        // —— 步骤 4：弱路由（confidence < 阈值，历史粘性）——
+        if best_conf < CONFIDENCE_THRESHOLD {
+            if let Some(prev) = input.prev_route_decisions.last() {
+                decision_for(
+                    catalog,
+                    prev.tier,
+                    best_conf,
+                    DecisionSource::History,
+                    "weak_confidence_stick_prev",
+                )
+            } else {
+                default_decision(
+                    catalog,
+                    DecisionSource::History,
+                    "weak_confidence_stick_default",
+                )
+            }
+        } else {
+            // —— 步骤 5：由档派生 thinking_mode / prompt_policy ——
+            let p = catalog
+                .lookup(best_tier)
+                .expect("best_tier 必在启用名册中（步骤 2 已保证）");
+            RouteDecision {
+                tier: best_tier,
+                confidence: best_conf,
+                thinking_mode: p.default_thinking_mode,
+                prompt_policy: p.default_prompt_policy,
+                source: DecisionSource::Rule,
+                fallback_reason: None,
+                steps: vec![PipelineStepRecord {
+                    step_name: "classify".to_string(),
+                    applied: true,
+                    routing_source: "rule".to_string(),
+                    fallback_reason: None,
+                }],
+            }
         }
-        return default_decision(
-            catalog,
-            DecisionSource::History,
-            "weak_confidence_stick_default",
+    };
+
+    // —— Track B 切片 1：视觉取证门（additive，不改非图片轮的路由）——
+    // 仅当本轮带图（has_image）时，追加一条 vision_gate 可观测步骤。决策逻辑留在
+    // `vision_gate` 模块；此处只记录其决策（routing_source），不影响 tier/thinking/policy。
+    if input.has_image {
+        let gate = crate::router::vision_gate::evaluate_vision_need(
+            &crate::router::vision_gate::VisionGateContext {
+                message: input.message.clone(),
+                // 本轮带图即视为存在可复用的近期图片上下文
+                has_recent_image: true,
+                recent_turn_id: None,
+                recent_turns: 0,
+            },
         );
+        decision.steps.push(PipelineStepRecord {
+            step_name: "vision_gate".to_string(),
+            applied: true,
+            routing_source: gate.as_str().to_string(),
+            fallback_reason: None,
+        });
     }
 
-    // —— 步骤 5：由档派生 thinking_mode / prompt_policy ——
-    let p = catalog
-        .lookup(best_tier)
-        .expect("best_tier 必在启用名册中（步骤 2 已保证）");
-    RouteDecision {
-        tier: best_tier,
-        confidence: best_conf,
-        thinking_mode: p.default_thinking_mode,
-        prompt_policy: p.default_prompt_policy,
-        source: DecisionSource::Rule,
-        fallback_reason: None,
-        steps: vec![PipelineStepRecord {
-            step_name: "classify".to_string(),
-            applied: true,
-            routing_source: "rule".to_string(),
-            fallback_reason: None,
-        }],
-    }
+    decision
 }
 
 /// 打分：消息命中 persona 的 match_rules 累加权重，归一化到 [0,1]；

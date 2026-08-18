@@ -17,6 +17,7 @@ fn input(msg: &str) -> ClassifyInput {
         prev_route_decisions: vec![],
         context_tokens_est: 0,
         runtime_available: true,
+        has_image: false,
     }
 }
 
