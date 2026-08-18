@@ -16,6 +16,7 @@ import { copyTextWithFallback } from '@/utils/browser'
 import { usePlatform } from '@/platform'
 import { requestBrowserWorkbenchOpen } from '@/workbench/browserItems'
 import { getIconSvg } from '@/utils/icons'
+import { decorateInkTypeset } from '@/utils/chat/inkTypeset'
 
 const props = withDefaults(
   defineProps<{
@@ -266,6 +267,9 @@ function decorate() {
   })
   decorateCodeBlocks()
   decorateBrowserLinks()
+  // Ink typography (Track F): CLReq CJK↔Latin spacing — no-op unless the active
+  // value theme is "ink"; runs after the sanitized body is in the tree.
+  decorateInkTypeset(root)
 }
 
 onMounted(decorate)

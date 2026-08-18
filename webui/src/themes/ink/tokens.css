@@ -1,0 +1,87 @@
+/* Theme: ink (value) — 水墨 / Chinese ink-wash on xuan paper.
+ *
+ * Light paper ground; a five-step ink ladder + a seal-red accent, tuned so the
+ * per-theme WCAG contrast guard passes on the paper ground. Every palette value
+ * is a token — no component may hardcode a colour. Required L1 roles from
+ * contract.json are all defined; the ink-ladder / paper / seal tokens are extra
+ * names the typeset + grain layers reference. */
+
+[data-theme="ink"] {
+  /* --- Paper ground (宣纸) --- */
+  --bg: #F7F4EB;
+  --bg-surface: #F2EEE2;
+  --bg-surface-2: #EAE3D2;
+  --bg-elevated: #FBF9F3;
+  --bg-hover: #E7E0CE;
+
+  /* --- Ink ladder (墨色五阶) --- */
+  --ink-jiao: #1a1a1a;   /* 焦墨 */
+  --ink-nong: #2b2b2b;   /* 浓墨 */
+  --ink-zhong: #4d4d4d;  /* 重墨 */
+  --ink-dan: #8a8a8a;    /* 淡墨 */
+  --ink-qing: #c8c8c8;   /* 清墨 */
+  --paper: #F7F4EB;       /* 宣纸 */
+  --paper-deep: #EAE3D2;
+  --seal: #b22222;        /* 印泥 */
+  --seal-deep: #8c1a1a;
+
+  /* Reading ink — 焦墨 text on 宣纸 clears WCAG AA with large margin. */
+  --text: #1a1a1a;
+  --text-muted: #4d4d4d;
+  --text-dim: #8a8a8a;
+
+  /* Ink borders — never pure black. */
+  --border: #D8D0BD;
+  --border-strong: #C2B89F;
+  --border-focus: #b22222;
+  --card: #F2EEE2;
+  --hairline: #E2DBC9;
+
+  /* --- Seal-red accent (印泥点缀) + ocher secondary (赭石) --- */
+  --accent: #b22222;
+  --accent-hover: #b3322a;
+  --accent-deep: #8c1a1a;
+  --accent-secondary: #8a4f26;
+  --accent-foreground: #F7F4EB;
+
+  /* Assistant bubble: a faint ink wash over the paper surface. */
+  --msg-bubble: color-mix(in srgb, var(--ink-jiao) 6%, var(--bg-surface));
+
+  /* --- Six-channel status, traditional pigments --- */
+  --ok: #2f6b4f;        /* 青绿 */
+  --warn: #7a5807;      /* 赭黄 */
+  --danger: #a52a2a;    /* 赭红 */
+  --info: #2f5d8a;      /* 黛蓝 */
+  --queued: #5f5f6b;    /* 黛灰 */
+
+  /* --- Syntax (chat code) on the rice-paper elevated surface --- */
+  --syntax-comment: #8a8a8a;
+  --syntax-keyword: #2f5d8a;
+  --syntax-string: #2f6b4f;
+  --syntax-literal: #9c5a2c;
+  --syntax-title: #2b2b2b;
+  --syntax-attr: #2f5d8a;
+}
+
+/* Structural identity — ink re-asserts the Source Han families (思源黑体 /
+   思源宋体) and the foundation radius ladder, so a nested [data-theme="ink"]
+   island escapes an active theme's structural remaps. */
+[data-theme="ink"] {
+  --font-sans: var(--font-ink-sans);
+  --font-display: var(--font-ink-serif);
+  --radius-control: var(--radius-md);
+  --radius-card: var(--radius-lg);
+  --radius-panel: var(--radius-xl);
+  --radius-modal: var(--radius-2xl);
+  --radius-pill: var(--radius-full);
+}
+
+/* Ink type families — referenced by --font-sans / --font-display above and by
+   ink-typeset.css. System fallbacks keep the look intact where the webfonts are
+   unavailable; tokenized so no component hardcodes a font stack. */
+[data-theme="ink"] {
+  --font-ink-sans: "Source Han Sans SC", "Noto Sans SC", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --font-ink-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC",
+    "SimSun", serif;
+}

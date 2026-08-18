@@ -12,6 +12,7 @@ import './themes/tokens' // eagerly bundles every value theme's token block
 import './styles/control-visual-system.css'
 import './styles/route-fx.css'
 import './styles/chat-markdown.css'
+import './styles/ink-typeset.css' // Track F: ink/CLReq typography layer (ink theme only)
 import './styles/chat-shared.css'
 import './styles/apple-modern.css'
 

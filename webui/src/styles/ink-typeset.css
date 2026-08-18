@@ -1,0 +1,37 @@
+/* Ink typography layer (Track F) — CLReq Chinese typesetting for assistant
+ * markdown under the "ink" value theme.
+ *
+ * This is the CSS half of the ink post-processor that sits on top of
+ * renderMarkdown()'s already-DOMPurify-sanitized output. The companion DOM
+ * decoration (src/utils/chat/inkTypeset.ts) injects the ≤1/4-em CJK↔Latin
+ * boundary gap that pure CSS cannot express; this file supplies the ink voice:
+ * the 思源 families, the 1.5× line grid (CLReq 行距), and the gap styling.
+ *
+ * No raw colours, radii, or motion — every value is a token from base.css or
+ * ink/tokens.css, so check-webui-colors / -radius / -motion stay green. */
+
+[data-theme="ink"] .msg-ai-text,
+[data-theme="ink"] .inspect-msg__text {
+  /* 思源黑体 for body reading; the ink tokens already carry 焦墨 text + 宣纸 bg. */
+  font-family: var(--font-ink-sans);
+  /* CLReq 行距 1.5×. (The scoped component default is 1.6, already ≥ the floor;
+     we pin 1.5 to honour the spec exactly.) */
+  line-height: 1.5;
+  /* Han spacing must not be disturbed by letter-spacing; keep it 0. Whitespace
+     between blocks (留白) comes from the existing margin rhythm. */
+  letter-spacing: 0;
+  text-rendering: optimizeLegibility;
+  /* Let full-width punctuation hang into the margin rather than indenting the
+     line — a CLReq nicety where supported. */
+  hanging-punctuation: allow-end;
+}
+
+/* CJK↔Latin-digit run boundary: a hairline gap (~1/4 em) injected by
+ * inkTypeset.ts. inline-block so the width is honoured; height 0 keeps the line
+ * box's baseline intact, and vertical-align: baseline avoids shifting the row. */
+[data-theme="ink"] .ink-cjk-gap {
+  display: inline-block;
+  width: 0.25em;
+  height: 0;
+  vertical-align: baseline;
+}

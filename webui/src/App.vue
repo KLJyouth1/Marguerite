@@ -301,6 +301,7 @@
         :modal-blocked="workbenchModalBlocked"
       />
       <ArtifactImageLightbox />
+      <PaperGrain v-if="appStore.theme === 'ink'" />
     </div>
   </div>
 
@@ -437,6 +438,7 @@ import { useAgentOptions } from './composables/useAgentOptions'
 import { useSessionListSubscription } from './composables/useSessionListSubscription'
 import { useSessionTaskAttention } from './composables/useSessionTaskAttention'
 import { useToasts } from './composables/useToasts'
+import PaperGrain from '@/components/ink/PaperGrain.vue'
 import { useConfirm } from './composables/useConfirm'
 import { useProjectWorkspaces } from './composables/useProjectWorkspaces'
 import { useFreshTaskDraft } from './composables/useFreshTaskDraft'
