@@ -16,6 +16,9 @@ pub mod deploy;
 pub mod domain;
 pub mod events;
 pub mod gateway;
+/// 生成式 UI 交互契约（Track C）：版本化 `Widget` 枚举、action 事件回模型、
+/// 沙箱 XSS 校验。渲染层只消费类型化 widget，且入渲染前必须过 `genui::validate`。
+pub mod genui;
 pub mod governance;
 pub mod guard;
 /// 原生 harness 层：子代理隔离运行时、生命周期钩子、动态模型路由、
