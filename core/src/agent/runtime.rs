@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::intent::classifier::{Classifier, IntentType as ClassifierIntent};
 use crate::model::router::{Complexity, IntentType, ModelRouter};
+use crate::router::RouteDecision;
 use crate::persistence::config::Config;
 pub use crate::types::Message;
 
@@ -123,6 +124,9 @@ pub struct AgentRuntime {
     /// 作为模型消息序列**最前端**的稳定前缀（先于 experience_hint），落进 P-7
     /// stable 半区，利于 KV-cache / 服务端 prompt caching 复用。默认 None（不注入）。
     stable_prefix: Option<Message>,
+    /// Track A 路由决策（思维模式档 + prompt 策略）：由 RealEngine/Gateway 注入，
+    /// 在系统消息装配点注入 P1 策略片段（不污染可见会话历史）。默认 None（不注入）。
+    route_decision: Option<RouteDecision>,
 }
 
 impl AgentRuntime {
@@ -141,6 +145,7 @@ impl AgentRuntime {
             event_session: None,
             experience_hint: None,
             stable_prefix: None,
+            route_decision: None,
         }
     }
 
@@ -163,6 +168,11 @@ impl AgentRuntime {
     /// 作为模型消息序列**最前端**的稳定前缀，落进 P-7 stable 半区，利于 KV-cache 复用。
     pub fn set_stable_prefix(&mut self, prefix: Message) {
         self.stable_prefix = Some(prefix);
+    }
+
+    /// 注入 Track A 路由决策（思维模式档 + prompt 策略）：作为系统消息前置 P1 策略片段。
+    pub fn set_route_decision(&mut self, d: RouteDecision) {
+        self.route_decision = Some(d);
     }
 
     /// 发布事件（若已注册事件总线）
@@ -267,6 +277,16 @@ impl AgentRuntime {
                 });
             }
         }
+        // Track A：P1 策略片段前置为系统消息（先于 history，不污染可见历史）
+        if let Some(dec) = &self.route_decision {
+            let frag = dec.prompt_policy.system_fragment();
+            if !frag.is_empty() {
+                model_messages.push(Message::System {
+                    content: frag,
+                    timestamp: Utc::now(),
+                });
+            }
+        }
         model_messages.extend(self.session.messages.iter().cloned());
 
         // 5. 调用 LLM 生成回复（注入经验后的消息序列）
@@ -364,6 +384,16 @@ impl AgentRuntime {
                 });
             }
         }
+        // Track A：P1 策略片段前置为系统消息
+        if let Some(dec) = &self.route_decision {
+            let frag = dec.prompt_policy.system_fragment();
+            if !frag.is_empty() {
+                model_messages.push(Message::System {
+                    content: frag,
+                    timestamp: Utc::now(),
+                });
+            }
+        }
         model_messages.extend(history.iter().cloned());
         self.model_router.chat_stream(&model_messages).await
     }
@@ -421,6 +451,16 @@ impl AgentRuntime {
                 if !hint.is_empty() {
                     model_messages.push(Message::System {
                         content: hint.clone(),
+                        timestamp: Utc::now(),
+                    });
+                }
+            }
+            // Track A：P1 策略片段前置为系统消息
+            if let Some(dec) = &self.route_decision {
+                let frag = dec.prompt_policy.system_fragment();
+                if !frag.is_empty() {
+                    model_messages.push(Message::System {
+                        content: frag,
                         timestamp: Utc::now(),
                     });
                 }
@@ -544,6 +584,16 @@ impl AgentRuntime {
                 if !h.is_empty() {
                     model_messages.push(Message::System {
                         content: h,
+                        timestamp: Utc::now(),
+                    });
+                }
+            }
+            // Track A：P1 策略片段前置为系统消息
+            if let Some(dec) = &self.route_decision {
+                let frag = dec.prompt_policy.system_fragment();
+                if !frag.is_empty() {
+                    model_messages.push(Message::System {
+                        content: frag,
                         timestamp: Utc::now(),
                     });
                 }

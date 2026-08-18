@@ -28,6 +28,7 @@ pub mod memory;
 pub mod mode;
 pub mod model;
 pub mod orchestration;
+pub mod router;
 pub mod persistence;
 pub mod plan;
 pub mod plugins;

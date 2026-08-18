@@ -272,6 +272,70 @@ impl ModelRouter {
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_stream(messages))).await
     }
 
+    /// 路由版聊天（Track A）：按决策档的 thinking_mode 注入思考预算后走故障转移链。
+    ///
+    /// 选中主模型失败按 `candidate_chain` 逐级切下一级；思考预算由 `decision.thinking_effort()`
+    /// 经 `LLMClient::with_thinking` 落到选中客户端（非工具路径此前恒为 Off，本方法修正）。
+    pub async fn chat_for_route(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        decision: &crate::router::RouteDecision,
+        messages: &[Message],
+    ) -> Result<LLMResponse> {
+        let effort = decision.thinking_effort();
+        let primary = Arc::new(
+            self.select_model(intent, complexity)
+                .as_ref()
+                .clone()
+                .with_thinking(effort),
+        );
+        let chain = self.candidate_chain(primary);
+        try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
+    }
+
+    /// 路由版流式聊天（Track A）。
+    pub async fn chat_stream_route(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        decision: &crate::router::RouteDecision,
+        messages: &[Message],
+    ) -> Result<StreamReceiver> {
+        let effort = decision.thinking_effort();
+        let primary = Arc::new(
+            self.select_model(intent, complexity)
+                .as_ref()
+                .clone()
+                .with_thinking(effort),
+        );
+        let chain = self.candidate_chain(primary);
+        try_failover_chain(&chain, |c| Box::pin(c.chat_complete_stream(messages))).await
+    }
+
+    /// 路由版带工具聊天（Track A）：以 route 决策覆盖自适应思考预算。
+    pub async fn chat_with_tools_route(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        decision: &crate::router::RouteDecision,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<LLMResponse> {
+        let effort = decision.thinking_effort();
+        let primary = Arc::new(
+            self.select_model(intent, complexity)
+                .as_ref()
+                .clone()
+                .with_thinking(effort),
+        );
+        let chain = self.candidate_chain(primary);
+        try_failover_chain(&chain, |c| {
+            Box::pin(c.chat_complete_with_tools_cached(messages, tools))
+        })
+        .await
+    }
+
     /// 带工具定义的**流式**聊天（P-10 真流式回路的上游）
     ///
     /// 与 `chat_with_tools` 同策略：走默认客户端、**不经故障转移链** ——

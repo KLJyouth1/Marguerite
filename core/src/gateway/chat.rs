@@ -28,6 +28,7 @@ use crate::memory::{
     SelfEvolution, SensoryMemory, ShortTermMemory,
 };
 use crate::persistence::config::Config;
+use crate::router::RouteDecision;
 use crate::tui::workbench::RealEngine;
 use crate::types::Message;
 
@@ -157,6 +158,12 @@ pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErro
     let model_name = ctx.config.model.model_name.clone();
     let sk = session_key.clone();
     let tid = task_id.clone();
+    // Track A 路由决策（纯规则，零 LLM 开销）：供富事件 router_decision 携带思维模式/策略。
+    let route_decision = crate::router::classify(&crate::router::signals::classify_input_from_turn(
+        &message,
+        &session_key,
+        &config,
+    ));
     let handle = tokio::spawn(async move {
         // 用量归会话：task-local 在 turn 内生效，跨 await 安全，并行会话互不串扰
         let sk_usage = sk.clone();
@@ -168,7 +175,13 @@ pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErro
                         // 融合路由决策：发布 router_decision（对齐 Web UI `session.event.router_decision`）
                         bus.publish(Envelope::new(
                             EventType::RouterDecision,
-                            router_decision_payload(&outcome, &model_name, &sk_inner, &tid),
+                            router_decision_payload(
+                                &outcome,
+                                &model_name,
+                                &sk_inner,
+                                &tid,
+                                &route_decision,
+                            ),
                             sk_inner.as_str(),
                         ));
                         // 富终端收据（Web UI 据此渲染最终答案并结束本轮）
@@ -629,6 +642,17 @@ async fn run_turn(
         }
     });
 
+    // ── Track A 规则版任务路由（思维模式 + persona 档 + 决策日志）──
+    // 纯规则、零 LLM 开销；先于自动拆解 / Bloom / 简单路径计算，决策流向后续各路径。
+    let route_input = crate::router::signals::classify_input_from_turn(&text, &session, &config);
+    let route_decision = crate::router::classify(&route_input);
+    crate::router::decision_log::DecisionLog::record(
+        &route_decision,
+        &session,
+        &task_id,
+        &config.model.model_name,
+    );
+
     // ── 复杂任务自动拆解（Bloom 长续航）：检测到复杂任务 → 计划驱动长执行 ──
     // 简单/中等任务保持原单轮路径（行为完全向后兼容）。
     if crate::plan::runner::should_auto_decompose(&config, &text) {
@@ -662,6 +686,8 @@ async fn run_turn(
         // 置为 Bloom 模式后走统一的 dispatch 入口：并行由模式路由保证，
         // 而非调用方各自绕开 dispatch 直呼内部方法。
         orch.set_mode(crate::mode::ModeKind::Bloom);
+        // Track A：路由决策（思考预算 + prompt 策略）注入 lead 运行时
+        orch.set_route_decision(route_decision.clone());
         // 跨会话记忆召回（W-6）：长期 + 短期 + 跨项目记忆合并为稳定前缀 System 消息，
         // 落进 lead 上下文最前端 + 智能体人设（经验提示）拆分注入，避免记忆被重复塞入。
         if let Some(prefix) = memory_stable_prefix(&text) {
@@ -688,7 +714,8 @@ async fn run_turn(
         .with_evolution(build_evolution())
         .with_cross_project_hint(agent_personality_hint(&session))
         .with_stable_prefix(memory_stable_prefix(&text))
-        .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from));
+        .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from))
+        .with_route_decision(Some(route_decision.clone()));
     let outcome = engine
         .run_turn_reply(text.clone(), session.clone(), private_bus)
         .await?;
@@ -706,11 +733,15 @@ async fn run_turn(
 }
 
 /// 融合路由决策负载（对齐 Web UI `RouterDecisionPayload`：strategy/model/routing_applied/decision）
+///
+/// 扩展：携带 Track A 路由决策的思维模式 / prompt 策略 / persona 档 / 置信度 / 来源
+/// （复用既有 `EventType::RouterDecision`，不新增事件类型）。
 fn router_decision_payload(
     outcome: &crate::orchestration::OrchestrationOutcome,
     model: &str,
     session: &str,
     task_id: &str,
+    route_decision: &RouteDecision,
 ) -> Value {
     let analysis = &outcome.analysis;
     json!({
@@ -720,6 +751,13 @@ fn router_decision_payload(
         "routed_model": model,
         "source": "orchestrator",
         "routing_applied": true,
+        // Track A 路由决策（思维模式 / prompt 策略 / persona 档）
+        "thinking_mode": format!("{:?}", route_decision.thinking_mode),
+        "prompt_policy": format!("{:?}", route_decision.prompt_policy),
+        "tier": format!("{:?}", route_decision.tier),
+        "confidence": route_decision.confidence,
+        "router_source": route_decision.source.as_str(),
+        "fallback_reason": route_decision.fallback_reason,
         "decision": {
             "intent": format!("{:?}", analysis.intent),
             "complexity": format!("{:?}", analysis.complexity),

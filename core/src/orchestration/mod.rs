@@ -434,6 +434,11 @@ impl Orchestrator {
         self.lead.set_stable_prefix(prefix);
     }
 
+    /// 注入 Track A 路由决策（透传到 lead 运行时）。
+    pub fn set_route_decision(&mut self, d: crate::router::RouteDecision) {
+        self.lead.set_route_decision(d);
+    }
+
     /// 注入会话历史消息（重启后上下文恢复）：把之前轮次的 user/assistant 消息
     /// 灌入 lead 会话上下文，使模型能看到历史对话而非每轮从零开始。
     pub fn load_history(&mut self, messages: Vec<Message>) {

@@ -58,6 +58,7 @@ use crate::tui::workbench::state::{
 };
 use crate::tui::workbench::theme::Theme;
 use crate::types::Message;
+use crate::router::RouteDecision;
 
 /// 引擎运行门面（屏蔽 ChainExecutor / AgentRuntime 借用差异；后端实现真实适配器）
 pub trait EngineRunner: Send + Sync {
@@ -126,6 +127,8 @@ pub struct RealEngine {
     /// 记忆召回稳定前缀（可选，W-6）：跨项目记忆召回后渲染成的固定格式 System 消息，
     /// 作为编排器对话最前端的稳定前缀（先于经验提示），利于 KV-cache 前缀复用。
     stable_prefix: Option<Message>,
+    /// Track A 路由决策（可选）：由网关/调用方注入，转发到编排器 lead 运行时。
+    route_decision: Option<RouteDecision>,
     /// 项目工作区根目录（可选）：设置后工具/终端/文件沙箱根随项目目录切换。
     workspace: Option<PathBuf>,
 }
@@ -138,6 +141,7 @@ impl RealEngine {
             evolution: None,
             cross_project_hint: None,
             stable_prefix: None,
+            route_decision: None,
             workspace: None,
         }
     }
@@ -164,6 +168,12 @@ impl RealEngine {
     /// 注入项目工作区根目录（工具/终端/文件沙箱根随之切换；None 用默认）
     pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Self {
         self.workspace = workspace;
+        self
+    }
+
+    /// 注入 Track A 路由决策（转发到编排器 lead 运行时，驱动思考预算 + prompt 策略注入）。
+    pub fn with_route_decision(mut self, decision: Option<RouteDecision>) -> Self {
+        self.route_decision = decision;
         self
     }
 
@@ -220,6 +230,10 @@ impl RealEngine {
         if let Some(p) = &self.stable_prefix {
             orch.set_stable_prefix(p.clone());
         }
+        // Track A：路由决策（思考预算 + prompt 策略）注入 lead 运行时
+        if let Some(rd) = &self.route_decision {
+            orch.set_route_decision(rd.clone());
+        }
         // 重启后上下文恢复：把本会话历史消息灌入 lead
         orch.load_history(crate::gateway::chat::session_history_messages(
             &session, &text,
@@ -249,6 +263,7 @@ impl EngineRunner for RealEngine {
                 evolution,
                 cross_project_hint: None,
                 stable_prefix: None,
+                route_decision: None,
                 workspace: None,
             }
             .execute_turn(text, session, bus)

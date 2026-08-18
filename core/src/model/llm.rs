@@ -286,6 +286,13 @@ impl LLMClient {
         self
     }
 
+    /// 设置思考预算档位（Track A 路由：thinking_mode T0/T1 → ThinkingEffort）。
+    /// 镜像 `with_adaptive_profile`，但仅覆盖思考预算，不改动 max_tokens / context_window。
+    pub fn with_thinking(mut self, effort: crate::model::thinking::ThinkingEffort) -> Self {
+        self.config.thinking = effort;
+        self
+    }
+
     /// 极限思考（HLE / Agents' Last Exam 等难推理）：开 Max 思考 + 大思考预算。
     pub fn with_max_thinking(mut self) -> Self {
         self.config.thinking = crate::model::thinking::ThinkingEffort::Max;
