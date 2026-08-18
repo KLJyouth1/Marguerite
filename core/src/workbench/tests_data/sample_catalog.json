@@ -1,0 +1,62 @@
+[
+  {
+    "id": "creator",
+    "name": "Creator",
+    "role": "创意内容",
+    "permission": "可用",
+    "source": "内置 persona",
+    "cluster": "reasoning",
+    "tags": ["persona", "marketing", "ui"],
+    "skills": ["growth-engine", "social-post-writer-seo"],
+    "tools": ["web_fetch", "search", "read", "plan"],
+    "description": "创意内容生成：营销文案、故事、社媒素材与视觉概念。",
+    "model": "default",
+    "readonly": false,
+    "navigable": true
+  },
+  {
+    "id": "office",
+    "name": "Office",
+    "role": "办公效率",
+    "permission": "可用",
+    "source": "内置 persona",
+    "cluster": "execution",
+    "tags": ["commercial", "seo", "api"],
+    "skills": ["commercial-forecaster", "rfp-responder"],
+    "tools": ["read", "edit", "write_code", "terminal", "grep", "glob"],
+    "description": "办公效率：文档、表格、邮件、日程与报告。",
+    "model": "default",
+    "readonly": false,
+    "navigable": true
+  },
+  {
+    "id": "architect",
+    "name": "Architect",
+    "role": "软件架构",
+    "permission": "可用",
+    "source": "内置 persona",
+    "cluster": "reasoning",
+    "tags": ["backend", "system", "design"],
+    "skills": ["system-design-reviewer", "api-contract-auditor"],
+    "tools": ["read", "grep", "glob", "terminal"],
+    "description": "软件架构：模块划分、接口契约与演进路线。",
+    "model": "default",
+    "readonly": false,
+    "navigable": true
+  },
+  {
+    "id": "researcher",
+    "name": "Researcher",
+    "role": "研究分析",
+    "permission": "可用",
+    "source": "内置 persona",
+    "cluster": "reasoning",
+    "tags": ["research", "survey", "data"],
+    "skills": ["literature-survey", "meta-analysis"],
+    "tools": ["web_fetch", "search", "read"],
+    "description": "研究分析：文献综述、数据归纳与假设推演。",
+    "model": "default",
+    "readonly": true,
+    "navigable": true
+  }
+]

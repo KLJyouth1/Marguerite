@@ -48,4 +48,8 @@ pub mod tools;
 pub mod tui;
 pub mod types;
 pub mod usage;
+/// 工作台领域/数据层（Track D，锚 DSH-better-sidebar）：面板注册表、AgentMeta 目录、
+/// 主题 token 表、用量仪表、鲸鱼娘状态机的纯逻辑主干。渲染层（Vue/TUI）须消费此 domain，
+/// 且任何进入渲染的文本须先过 `genui::validate` 类闸门防注入。
+pub mod workbench;
 pub mod vision;
