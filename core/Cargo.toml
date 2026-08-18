@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "6"
 async-trait = "0.1"
+yrs = "0.27"
 tokio-stream = "0.1"
 ratatui = "0.28"
 crossterm = "0.28"

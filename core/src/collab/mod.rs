@@ -5,7 +5,10 @@
 //! 网关与中心服务为可选增强，本模块提供零依赖、可单测的协作原语，供 CLI/TUI/GUI 共用。
 
 pub mod auth;
+pub mod collab_session;
 pub mod conflict;
+pub mod crdt;
 pub mod gateway;
+pub mod presence;
 pub mod session;
 pub mod workspace;

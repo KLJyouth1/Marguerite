@@ -14,6 +14,8 @@ pub enum Permission {
     RunAgent,
     /// 编辑项目文件
     EditFiles,
+    /// 编辑协同文档的「块」级区域（比 EditFiles 更细粒度的块级写权限）
+    EditBlock,
     /// 管理成员（增删 / 转让所有权）
     ManageMembers,
 }
@@ -36,10 +38,16 @@ impl Role {
             (Role::Owner, _) => true,
             (Role::Maintainer, Permission::RunAgent) => true,
             (Role::Maintainer, Permission::EditFiles) => true,
+            (Role::Maintainer, Permission::EditBlock) => true,
             (Role::Maintainer, Permission::ManageMembers) => false,
             (Role::Observer, _) => false,
         }
     }
+}
+
+/// 便捷方法：角色是否可对协同文档做块级编辑（Track G 引入的 `EditBlock` 权限）
+pub fn can_edit_block(role: Role) -> bool {
+    role.can(Permission::EditBlock)
 }
 
 /// 团队成员
@@ -200,6 +208,25 @@ mod tests {
     }
 
     #[test]
+    fn test_edit_block_permission() {
+        // 块级写权限：Owner 与 Maintainer 可编辑，Observer 仅可读。
+        assert!(Role::Owner.can(Permission::EditBlock));
+        assert!(Role::Maintainer.can(Permission::EditBlock));
+        assert!(!Role::Observer.can(Permission::EditBlock));
+
+        // 鉴权流：Observer 尝试 EditBlock 必须被拒绝。
+        let mut auth = CollabAuth::new("u1", "Alice");
+        auth.add_member("u2", "Bob", Role::Observer).unwrap();
+        assert!(auth.check("u1", Permission::EditBlock).is_ok());
+        let err = auth.check("u2", Permission::EditBlock).unwrap_err();
+        assert_eq!(err.to_string(), "成员 u2 无权限: EditBlock");
+
+        // Maintainer 通过。
+        auth.add_member("u3", "Carol", Role::Maintainer).unwrap();
+        assert!(auth.check("u3", Permission::EditBlock).is_ok());
+    }
+
+    #[test]
     fn test_remove_protects_last_owner() {
         let mut auth = CollabAuth::new("u1", "Alice");
         assert!(auth.remove_member("u1").is_err());
@@ -218,5 +245,18 @@ mod tests {
         assert_eq!(auth.role_of("u1"), Some(Role::Maintainer));
         // 非 owner 不能转让
         assert!(auth.transfer_ownership("u1", "u2").is_err());
+    }
+
+    #[test]
+    fn observer_cannot_edit_block() {
+        assert!(!Role::Observer.can(Permission::EditBlock));
+        assert!(!can_edit_block(Role::Observer));
+    }
+
+    #[test]
+    fn maintainer_can_edit_block() {
+        assert!(Role::Maintainer.can(Permission::EditBlock));
+        assert!(can_edit_block(Role::Maintainer));
+        assert!(can_edit_block(Role::Owner));
     }
 }
