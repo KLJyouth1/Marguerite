@@ -630,6 +630,9 @@
       :artifacts="sessionArtifacts"
       :changes="sidebarChanges"
       :diagnostics="sidebarDiagnostics"
+      :streaming="isStreaming"
+      :live-keys="liveKeys"
+      :stale-keys="staleKeys"
       @close="rightSidebarOpen = false"
       @open="rightSidebarOpen = true"
       @open-artifact="onSidebarOpenArtifact"
@@ -1127,18 +1130,36 @@ async function reloadSidebarArtifacts() {
 // 防抖 + 去重：单次保存可能触发多次事件（多分片写入），避免并发重拉打满网关。
 let artifactUpdatedTimer: ReturnType<typeof setTimeout> | null = null
 const artifactUpdatedKeys = new Set<string>()
-function onArtifactUpdated(payload: { session_key?: string; sessionKey?: string; key?: string }) {
+// 后端有更新版本、但侧边栏当前行仍指向旧内容时，暂存其 key 用于标 stale；
+// 重拉索引后再清除，让状态点回归「就绪」。
+const staleKeySet = new Set<string>()
+const staleKeys = computed<string[]>(() => Array.from(staleKeySet))
+function onArtifactUpdated(payload: { session_key?: string; sessionKey?: string; key?: string; id?: string | number }) {
   const evSession = payload?.session_key || payload?.sessionKey || ''
   if (evSession && evSession !== sessionKey.value) return
   const key = evSession || 'default'
   if (artifactUpdatedKeys.has(key)) return
   artifactUpdatedKeys.add(key)
+  // 事件命中侧边栏已有产物 → 先标记 stale，等待重拉。
+  const incomingId = payload?.id
+  if (incomingId != null && sessionArtifacts.value.some((a) => String(a.id) === String(incomingId))) {
+    staleKeySet.add(String(incomingId))
+  }
   if (artifactUpdatedTimer) clearTimeout(artifactUpdatedTimer)
   artifactUpdatedTimer = setTimeout(() => {
     artifactUpdatedKeys.clear()
+    staleKeySet.clear()
     void reloadSidebarArtifacts()
   }, 250)
 }
+
+// 流式期间经 session.event.artifact 出现的产物 key（仅在 isStreaming 时计入），
+// 用于驱动侧边栏状态点的「更新中」态。turn 结束后 isStreaming 翻 false，自动清空。
+const liveKeys = computed<string[]>(() =>
+  isStreaming.value
+    ? streamArtifacts.value.map((a) => String(a.id || a.download_url || `${a.path}|${a.name}`))
+    : [],
+)
 const sandboxSetupStore = useSandboxSetupStore()
 const {
   ensuring: sandboxSetupPending,
@@ -2998,6 +3019,7 @@ watch(isStreaming, (streaming, wasStreaming) => {
     // polling: it costs one `artifacts.list` per turn, and the composable
     // de-duplicates by artifact identity, so an already-listed file is a no-op.
     void reloadSidebarArtifacts()
+    staleKeySet.clear()
   }
 })
 

@@ -93,8 +93,9 @@
             <li v-for="a in artifacts" :key="artifactKey(a)" class="rs-artifact">
               <span
                 class="rs-artifact__type-dot"
-                :style="{ background: classify(a).colorVar }"
-                :aria-hidden="true"
+                :class="`rs-artifact__type-dot--${statusFor(a)}`"
+                :title="statusTitle(a)"
+                aria-hidden="true"
               />
               <Icon :name="classify(a).icon" :size="16" :style="{ color: classify(a).colorVar }" />
               <div class="rs-artifact__info">
@@ -120,6 +121,40 @@
               >
                 <Icon name="appWindow" :size="13" />
               </button>
+              <div class="rs-artifact__menu-wrap">
+                <button
+                  type="button"
+                  class="rs-artifact__btn"
+                  :title="'更多操作'"
+                  aria-haspopup="menu"
+                  :aria-expanded="openMenuKey === artifactKey(a)"
+                  @click.stop="toggleMenu(a)"
+                >
+                  <Icon name="moreHorizontal" :size="14" />
+                </button>
+                <ul v-if="openMenuKey === artifactKey(a)" class="rs-artifact__menu" role="menu">
+                  <li role="none">
+                    <button type="button" role="menuitem" @click="previewArtifact(a)">
+                      <Icon name="eye" :size="14" /><span>预览</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button type="button" role="menuitem" @click="editArtifact(a)">
+                      <Icon name="edit" :size="14" /><span>编辑</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button type="button" role="menuitem" @click="openArtifactSystemAction(a)">
+                      <Icon name="appWindow" :size="14" /><span>系统打开</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button type="button" role="menuitem" @click="copyArtifactPath(a)">
+                      <Icon name="copy" :size="14" /><span>复制路径</span>
+                    </button>
+                  </li>
+                </ul>
+              </div>
             </li>
           </ul>
         </div>
@@ -156,11 +191,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
 import type { ArtifactPayload } from '@/types/rpc'
 import { classifyArtifact, type ArtifactKindDescriptor } from '@/utils/artifactKind'
+import { useToasts } from '@/composables/useToasts'
 
 export interface RsTask {
   title: string
@@ -187,6 +223,12 @@ const props = defineProps<{
   changes: RsChange[]
   /** 诊断：有产物但未载入侧边栏（如重连后索引未就绪）。 */
   diagnostics?: string[]
+  /** 是否正在流式输出（当前 turn 实时写入产物）。 */
+  streaming?: boolean
+  /** 流式期间经 session.event.artifact 出现的产物 key 集合。 */
+  liveKeys?: string[]
+  /** 后端已有更新版本、侧边栏仍指向旧内容的产物 key 集合。 */
+  staleKeys?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -251,6 +293,82 @@ function changeIcon(c: RsChange): IconName {
   if (c.kind === 'created') return 'plus'
   if (c.kind === 'deleted') return 'trash'
   return 'edit'
+}
+
+const { pushToast } = useToasts()
+
+type ArtifactStatus = 'ready' | 'updating' | 'stale'
+
+// 用 Set 包裹父级传入的 key 集合，把每行状态查询降到 O(1)。
+const liveKeysSet = computed(() => new Set(props.liveKeys ?? []))
+const staleKeysSet = computed(() => new Set(props.staleKeys ?? []))
+
+/** 派生单行的状态点语义：更新中 > 已过期 > 就绪。 */
+function statusFor(a: RsArtifact): ArtifactStatus {
+  if (props.streaming && liveKeysSet.value.has(artifactKey(a))) return 'updating'
+  if (staleKeysSet.value.has(artifactKey(a))) return 'stale'
+  return 'ready'
+}
+
+const STATUS_TITLE: Record<ArtifactStatus, string> = {
+  ready: '就绪',
+  updating: '更新中',
+  stale: '已过期',
+}
+function statusTitle(a: RsArtifact): string {
+  return STATUS_TITLE[statusFor(a)]
+}
+
+// 「更多」菜单：同一时刻仅允许展开一行，点击外部或按 Escape 收起。
+const openMenuKey = ref<string | null>(null)
+function toggleMenu(a: RsArtifact) {
+  const key = artifactKey(a)
+  openMenuKey.value = openMenuKey.value === key ? null : key
+}
+function closeMenu() {
+  openMenuKey.value = null
+}
+function onDocumentClick(e: MouseEvent) {
+  // 点击落在某行菜单容器内时不关闭，交由各菜单项自行处理。
+  const target = e.target as HTMLElement | null
+  if (target && target.closest('.rs-artifact__menu-wrap')) return
+  closeMenu()
+}
+function onDocumentKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeMenu()
+}
+onMounted(() => {
+  document.addEventListener('click', onDocumentClick)
+  document.addEventListener('keydown', onDocumentKeydown)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
+  document.removeEventListener('keydown', onDocumentKeydown)
+})
+
+function previewArtifact(account: RsArtifact) {
+  emit('openArtifact', account)
+  closeMenu()
+}
+function editArtifact(account: RsArtifact) {
+  emit('openArtifact', account)
+  closeMenu()
+}
+function openArtifactSystemAction(account: RsArtifact) {
+  emit('openArtifactSystem', account)
+  closeMenu()
+}
+function copyArtifactPath(account: RsArtifact) {
+  const text = account.path || account.name || ''
+  if (!text) {
+    closeMenu()
+    return
+  }
+  navigator.clipboard.writeText(text).then(
+    () => pushToast('已复制产物路径', { tone: 'ok', duration: 1600 }),
+    () => pushToast('复制失败，请手动复制路径', { tone: 'danger', duration: 2000 }),
+  )
+  closeMenu()
 }
 </script>
 
@@ -428,7 +546,15 @@ function changeIcon(c: RsChange): IconName {
 .rs-artifact:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .rs-artifact__type-dot {
   width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ok);
+  transition: background var(--dur-fast, 120ms) var(--ease-standard);
 }
+.rs-artifact__type-dot--ready { background: var(--ok); }
+.rs-artifact__type-dot--updating {
+  background: var(--accent);
+  animation: rs-pulse 1.2s ease-in-out infinite;
+}
+.rs-artifact__type-dot--stale { background: var(--warn); }
 .rs-artifact__info { flex: 1; min-width: 0; }
 .rs-artifact__name { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rs-artifact__path { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -444,6 +570,24 @@ function changeIcon(c: RsChange): IconName {
 }
 .rs-artifact__btn:hover { background: var(--accent); color: var(--text); }
 .rs-artifact__btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.rs-artifact__menu-wrap { position: relative; flex-shrink: 0; }
+.rs-artifact__menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 10;
+  min-width: 150px; margin: 0; padding: 4px; list-style: none;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+.rs-artifact__menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 8px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); font-size: 12px; cursor: pointer;
+  transition: background var(--dur-fast, 120ms) var(--ease-standard);
+}
+.rs-artifact__menu button:hover { background: var(--bg-hover); }
+.rs-artifact__menu button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* Changes */
 .rs-change-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -461,6 +605,7 @@ function changeIcon(c: RsChange): IconName {
 
 @media (prefers-reduced-motion: reduce) {
   .rs-timeline__item--running .rs-timeline__dot { animation: none; }
+  .rs-artifact__type-dot--updating { animation: none; }
   .rs-slide-enter-active, .rs-slide-leave-active { transition: none; }
 }
 </style>
