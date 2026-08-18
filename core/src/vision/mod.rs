@@ -7,8 +7,10 @@
 
 pub mod binary_html;
 pub mod client;
+pub mod diff;
 pub mod evidence;
 pub mod grounding;
+pub mod stitch;
 pub mod metadata;
 
 pub use binary_html::{binary_to_html, binary_to_img_tag, image_metadata_to_prompt};
