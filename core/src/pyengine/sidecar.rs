@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -441,12 +440,6 @@ async fn spawn_once(
         "Python 侧车子进程已 spawn"
     );
     Ok(())
-}
-
-#[derive(Deserialize)]
-struct HealthResp {
-    #[allow(dead_code)]
-    status: Option<String>,
 }
 
 async fn check_health(cfg: &SidecarConfig, wait: Duration) -> bool {
