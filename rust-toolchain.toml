@@ -1,0 +1,4 @@
+# 工具链锁定：yrs 0.27.3 使用了直到 Rust 1.95.0 才稳定的 `if let` match-arm guard（RFC 2294）。
+# 项目因此硬要求 rustc >= 1.95.0；本文件使克隆/CI 自动拉取正确工具链，避免 yrs 编译报 E0658。
+[toolchain]
+channel = "1.95.0"
