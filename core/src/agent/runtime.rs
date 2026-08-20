@@ -175,6 +175,65 @@ impl AgentRuntime {
         self.route_decision = Some(d);
     }
 
+    /// 统一装配模型消息序列（`process_input` / `chat_stream` / `run_tool_loop` /
+    /// `run_tool_loop_stream` 四个入口共用，消除四份重复装配逻辑）。
+    ///
+    /// 顺序固定为：稳定前缀（W-6，最前端，最大化 P-7 stable 半区）→ 工具指引（可选）
+    /// → 经验提示 → Track A 路由策略片段 → 历史。各前缀段内容均不随轮次变化，
+    /// 保证工具回路多轮请求的 System 半区逐字节一致（KV-cache 前缀复用）。
+    fn build_model_messages(
+        &self,
+        history: &[Message],
+        tool_guide: Option<&str>,
+    ) -> Vec<Message> {
+        let extra = usize::from(tool_guide.is_some())
+            + usize::from(self.stable_prefix.is_some())
+            + usize::from(
+                self.experience_hint
+                    .as_ref()
+                    .map_or(false, |h| !h.is_empty()),
+            )
+            + usize::from(self.route_decision.is_some());
+        let mut model_messages: Vec<Message> = Vec::with_capacity(history.len() + extra);
+        if let Some(prefix) = &self.stable_prefix {
+            let content = match prefix {
+                Message::System { content, .. }
+                | Message::User { content, .. }
+                | Message::Assistant { content, .. } => content.clone(),
+                Message::Tool { output, .. } => output.clone(),
+            };
+            model_messages.push(Message::System {
+                content,
+                timestamp: Utc::now(),
+            });
+        }
+        if let Some(guide) = tool_guide {
+            model_messages.push(Message::System {
+                content: guide.to_string(),
+                timestamp: Utc::now(),
+            });
+        }
+        if let Some(hint) = &self.experience_hint {
+            if !hint.is_empty() {
+                model_messages.push(Message::System {
+                    content: hint.clone(),
+                    timestamp: Utc::now(),
+                });
+            }
+        }
+        if let Some(dec) = &self.route_decision {
+            let frag = dec.prompt_policy.system_fragment();
+            if !frag.is_empty() {
+                model_messages.push(Message::System {
+                    content: frag,
+                    timestamp: Utc::now(),
+                });
+            }
+        }
+        model_messages.extend(history.iter().cloned());
+        model_messages
+    }
+
     /// 发布事件（若已注册事件总线）
     fn emit(&self, env: Envelope) {
         if let Some(bus) = &self.events {
@@ -254,40 +313,9 @@ impl AgentRuntime {
             self.event_session.clone().unwrap_or_default(),
         ));
 
-        // 4. 构造模型消息序列：若有自进化经验提示，前置为系统消息（不污染可见会话历史）
-        let mut model_messages: Vec<Message> = Vec::with_capacity(self.session.messages.len() + 1);
-        // W-6：记忆召回稳定前缀（最前端，先于经验提示），落进 P-7 stable 半区
-        if let Some(prefix) = &self.stable_prefix {
-            let content = match prefix {
-                Message::System { content, .. } => content.clone(),
-                Message::User { content, .. } => content.clone(),
-                Message::Assistant { content, .. } => content.clone(),
-                Message::Tool { output, .. } => output.clone(),
-            };
-            model_messages.push(Message::System {
-                content,
-                timestamp: Utc::now(),
-            });
-        }
-        if let Some(hint) = &self.experience_hint {
-            if !hint.is_empty() {
-                model_messages.push(Message::System {
-                    content: hint.clone(),
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-        // Track A：P1 策略片段前置为系统消息（先于 history，不污染可见历史）
-        if let Some(dec) = &self.route_decision {
-            let frag = dec.prompt_policy.system_fragment();
-            if !frag.is_empty() {
-                model_messages.push(Message::System {
-                    content: frag,
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-        model_messages.extend(self.session.messages.iter().cloned());
+        // 4. 构造模型消息序列（统一装配：稳定前缀 → 经验提示 → 路由片段 → 历史，
+        //    不污染可见会话历史）
+        let model_messages = self.build_model_messages(&self.session.messages, None);
 
         // 5. 调用 LLM 生成回复（注入经验后的消息序列）
         let response = self
@@ -361,40 +389,7 @@ impl AgentRuntime {
     /// 供 CLI 直接模式（`-p`）与交互式 REPL 做逐 token 流式渲染。
     /// 不修改会话状态机（只读消费历史），调用方负责将本轮回复回写历史。
     pub async fn chat_stream(&self, history: &[Message]) -> Result<StreamReceiver> {
-        let mut model_messages: Vec<Message> = Vec::with_capacity(history.len() + 1);
-        // 前置经验提示为系统消息（与 process_input 行为一致，不污染可见历史）
-        // W-6：记忆召回稳定前缀（最前端，先于经验提示），落进 P-7 stable 半区
-        if let Some(prefix) = &self.stable_prefix {
-            let content = match prefix {
-                Message::System { content, .. } => content.clone(),
-                Message::User { content, .. } => content.clone(),
-                Message::Assistant { content, .. } => content.clone(),
-                Message::Tool { output, .. } => output.clone(),
-            };
-            model_messages.push(Message::System {
-                content,
-                timestamp: Utc::now(),
-            });
-        }
-        if let Some(hint) = &self.experience_hint {
-            if !hint.is_empty() {
-                model_messages.push(Message::System {
-                    content: hint.clone(),
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-        // Track A：P1 策略片段前置为系统消息
-        if let Some(dec) = &self.route_decision {
-            let frag = dec.prompt_policy.system_fragment();
-            if !frag.is_empty() {
-                model_messages.push(Message::System {
-                    content: frag,
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-        model_messages.extend(history.iter().cloned());
+        let model_messages = self.build_model_messages(history, None);
         self.model_router.chat_stream(&model_messages).await
     }
 
@@ -442,30 +437,9 @@ impl AgentRuntime {
         );
 
         for _ in 0..max_rounds {
-            let mut model_messages: Vec<Message> = Vec::with_capacity(history.len() + 2);
-            model_messages.push(Message::System {
-                content: tool_guide.clone(),
-                timestamp: Utc::now(),
-            });
-            if let Some(hint) = &self.experience_hint {
-                if !hint.is_empty() {
-                    model_messages.push(Message::System {
-                        content: hint.clone(),
-                        timestamp: Utc::now(),
-                    });
-                }
-            }
-            // Track A：P1 策略片段前置为系统消息
-            if let Some(dec) = &self.route_decision {
-                let frag = dec.prompt_policy.system_fragment();
-                if !frag.is_empty() {
-                    model_messages.push(Message::System {
-                        content: frag,
-                        timestamp: Utc::now(),
-                    });
-                }
-            }
-            model_messages.extend(history.iter().cloned());
+            // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
+            //（旧实现漏装配稳定前缀，与其余入口不一致，且工具指引非最前）
+            let model_messages = self.build_model_messages(history, Some(&tool_guide));
 
             let resp = self
                 .model_router
@@ -536,8 +510,6 @@ impl AgentRuntime {
         if tools.is_empty() {
             return Err(anyhow!("run_tool_loop_stream 需要非空 tools 定义"));
         }
-        let hint = self.experience_hint.clone();
-        let stable = self.stable_prefix.clone();
         let router = &self.model_router;
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         let tool_guide = format!(
@@ -563,42 +535,9 @@ impl AgentRuntime {
         run_tool_loop_streaming(history, registry, events, max_rounds, move |turn| {
             // 经验提示以系统消息前置（与 process_input / run_tool_loop 行为一致），
             // 同时天然落在 P-7 稳定前缀半区，利于 KV-cache 前缀复用。
-            let mut model_messages: Vec<Message> = Vec::with_capacity(turn.len() + 2);
-            model_messages.push(Message::System {
-                content: tool_guide.clone(),
-                timestamp: Utc::now(),
-            });
-            if let Some(prefix) = &stable {
-                let content = match prefix {
-                    Message::System { content, .. } => content.clone(),
-                    Message::User { content, .. } => content.clone(),
-                    Message::Assistant { content, .. } => content.clone(),
-                    Message::Tool { output, .. } => output.clone(),
-                };
-                model_messages.push(Message::System {
-                    content,
-                    timestamp: Utc::now(),
-                });
-            }
-            if let Some(h) = hint.clone() {
-                if !h.is_empty() {
-                    model_messages.push(Message::System {
-                        content: h,
-                        timestamp: Utc::now(),
-                    });
-                }
-            }
-            // Track A：P1 策略片段前置为系统消息
-            if let Some(dec) = &self.route_decision {
-                let frag = dec.prompt_policy.system_fragment();
-                if !frag.is_empty() {
-                    model_messages.push(Message::System {
-                        content: frag,
-                        timestamp: Utc::now(),
-                    });
-                }
-            }
-            model_messages.extend(turn);
+            // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
+            //（修正：旧实现工具指引排在稳定前缀之前，违背 W-6「最前端」契约）
+            let model_messages = self.build_model_messages(&turn, Some(&tool_guide));
             async move { router.chat_stream_with_tools(&model_messages, tools).await }
         })
         .await

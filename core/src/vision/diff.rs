@@ -128,7 +128,7 @@ mod tests {
         let a = solid(8, 8, 10, 20, 30, 255);
         let mut b = a.clone();
         // 翻转单个像素（第 0 行第 3 列）全部通道 → 差和 ≈ 765 > 阈值。
-        let idx = (0 * 8 + 3) * 4;
+        let idx = 3 * 4; // 第 0 行第 3 列的 RGBA 起始索引
         b[idx..idx + 4].copy_from_slice(&[200, 200, 200, 255]);
         let out = pixel_diff(&a, &b, 8, 8);
         assert_eq!(out.len(), 1, "单像素变化 → 恰好 1 个 DiffRegion");

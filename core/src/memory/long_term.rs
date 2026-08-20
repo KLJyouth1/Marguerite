@@ -6,6 +6,7 @@
 //! - 自动摘要与索引（后台异步维护）
 //! - 分层检索：感知 → 短期 → 长期（带置信度与降级）
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -119,6 +120,18 @@ fn hash_to(s: &str, seed: u64) -> usize {
 pub struct LongTermMemory {
     db_path: PathBuf,
     db: Option<Connection>,
+    /// 进程内向量索引（惰性加载）：`(PRAGMA data_version, 行向量)`。
+    /// 消除 search 每次全表扫描 + 逐行 split/parse 256 维向量的重复开销；
+    /// 本实例 store 时增量追加，其他连接提交后 data_version 变化触发重建。
+    index: RefCell<Option<(i64, Vec<IndexRow>)>>,
+}
+
+/// 索引行：与 long_term_memory 表一一对应（向量已解析为 f64）
+struct IndexRow {
+    content: String,
+    meta: String,
+    timestamp: String,
+    vec: Vec<f64>,
 }
 
 impl LongTermMemory {
@@ -127,6 +140,7 @@ impl LongTermMemory {
         Self {
             db_path: path.to_path_buf(),
             db: None,
+            index: RefCell::new(None),
         }
     }
 
@@ -162,47 +176,57 @@ impl LongTermMemory {
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        let now = Utc::now().to_rfc3339();
         db.execute(
             "INSERT INTO long_term_memory (content, meta, vector, timestamp) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![content, meta, vector, Utc::now().to_rfc3339()],
+            rusqlite::params![content, meta, vector, now],
         )?;
+        // 索引已加载时增量追加（复用刚算出的向量，零额外开销）；
+        // 未加载则无需动作：下次 search 看到 data_version 未变时会走全量加载路径
+        // 补齐本行（本连接自己的写不影响自身 PRAGMA data_version 视图）。
+        if let Ok(mut idx) = self.index.try_borrow_mut() {
+            if let Some((_, rows)) = idx.as_mut() {
+                rows.push(IndexRow {
+                    content: content.to_string(),
+                    meta: meta.to_string(),
+                    timestamp: now,
+                    vec,
+                });
+            }
+        }
         Ok(())
     }
 
     /// 语义检索：返回相似度排序的记忆
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryItem>> {
-        let db = self.db()?;
         let provider = EmbeddingProvider::global();
         let qvec = provider.embed(query);
-        let dim = provider.dim();
-        let mut stmt =
-            db.prepare("SELECT content, meta, vector, timestamp FROM long_term_memory")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
+        // 索引失效检测：data_version 变化（其他连接提交了写）→ 全量重建。
+        // 本连接自己的 store 已就地增量维护，无需重建。
+        let version = self.db_data_version().unwrap_or(-1);
+        let need_load = match self.index.borrow().as_ref() {
+            Some((v, _)) => *v != version,
+            None => true,
+        };
+        if need_load {
+            let rows = self.load_index_rows()?;
+            *self.index.borrow_mut() = Some((version, rows));
+        }
+        let index = self.index.borrow();
+        let rows = &index
+            .as_ref()
+            .expect("索引刚加载")
+            .1;
 
         let mut scored = Vec::new();
-        for row in rows.flatten() {
-            let vec: Vec<f64> = row
-                .2
-                .split(',')
-                .filter_map(|s| s.parse::<f64>().ok())
-                .collect();
-            // 维度不符的旧向量（如切换模型后端前写入）跳过，待 reindex_all 重建
-            if vec.len() != dim {
-                continue;
-            }
-            let score = provider.cosine(&qvec, &vec);
+        for row in rows {
+            // 维度不符的旧向量（如切换模型后端前写入）在加载时已跳过
+            let score = provider.cosine(&qvec, &row.vec);
             if score >= SIM_THRESHOLD {
                 scored.push(MemoryItem {
-                    content: row.0,
-                    meta: row.1,
-                    timestamp: row.3,
+                    content: row.content.clone(),
+                    meta: row.meta.clone(),
+                    timestamp: row.timestamp.clone(),
                     score,
                 });
             }
@@ -214,6 +238,46 @@ impl LongTermMemory {
         });
         scored.truncate(limit);
         Ok(scored)
+    }
+
+    /// 当前连接的 PRAGMA data_version：其他连接提交写时递增（本连接自己的写不增）。
+    fn db_data_version(&self) -> Result<i64> {
+        let db = self.db()?;
+        Ok(db.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
+    /// 从 DB 全量加载并解析索引行（维度不符的旧向量跳过，与旧逐行检索逻辑一致）。
+    fn load_index_rows(&self) -> Result<Vec<IndexRow>> {
+        let db = self.db()?;
+        let dim = EmbeddingProvider::global().dim();
+        let mut stmt =
+            db.prepare("SELECT content, meta, vector, timestamp FROM long_term_memory")?;
+        let iter = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut rows = Vec::new();
+        for item in iter.flatten() {
+            let vec: Vec<f64> = item
+                .2
+                .split(',')
+                .filter_map(|s| s.parse::<f64>().ok())
+                .collect();
+            if vec.len() != dim {
+                continue;
+            }
+            rows.push(IndexRow {
+                content: item.0,
+                meta: item.1,
+                timestamp: item.3,
+                vec,
+            });
+        }
+        Ok(rows)
     }
 
     /// 用当前嵌入后端重建全部向量（模型切换后调用，使旧维度向量对齐新后端）
@@ -242,6 +306,8 @@ impl LongTermMemory {
             )?;
             updated += 1;
         }
+        // 向量全部重写：进程内索引作废，下次 search 按新维度全量重建
+        *self.index.borrow_mut() = None;
         Ok(updated)
     }
 
@@ -437,6 +503,45 @@ mod tests {
         mem.store("第一条记忆内容", "m").unwrap();
         mem.store("第二条记忆内容", "m").unwrap();
         assert_eq!(mem.count().unwrap(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_index_incremental_after_store() {
+        // 索引加载后继续 store：必须增量可见（不依赖 data_version 重建）
+        let path = temp_db("index_incr");
+        let _ = std::fs::remove_file(&path);
+        let mut mem = LongTermMemory::new(&path);
+        mem.init().unwrap();
+        mem.store("Rust tokio timeout 网络超时防护", "s1").unwrap();
+        let hits = mem.search("tokio timeout", 5).unwrap(); // 触发索引加载
+        assert!(!hits.is_empty());
+        mem.store("索引缓存数据版本增量", "s2").unwrap();
+        let hits = mem.search("数据版本", 5).unwrap();
+        assert!(
+            hits.iter().any(|h| h.content.contains("索引缓存")),
+            "索引加载后的 store 应立即可检索"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_index_sees_writes_from_other_instance() {
+        // 跨实例新鲜度：另一连接提交写 → data_version 变化 → 本实例索引重建
+        let path = temp_db("index_cross");
+        let _ = std::fs::remove_file(&path);
+        let mut a = LongTermMemory::new(&path);
+        a.init().unwrap();
+        a.store("Rust tokio timeout 网络超时防护", "s1").unwrap();
+        assert!(!a.search("tokio timeout", 5).unwrap().is_empty());
+        let mut b = LongTermMemory::new(&path);
+        b.init().unwrap();
+        b.store("并发索引缓存数据版本", "s2").unwrap();
+        let hits = a.search("数据版本", 5).unwrap();
+        assert!(
+            hits.iter().any(|h| h.content.contains("并发索引缓存")),
+            "其他实例的写入应经 data_version 失效检测后可见"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -7,6 +7,7 @@
 //!
 //! 复用 `long_term::LocalEmbedding` 做语义检索（零外部依赖、确定性哈希）。
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -64,6 +65,24 @@ pub struct Experience {
 pub struct ExperienceLedger {
     db_path: PathBuf,
     db: Option<Connection>,
+    /// 进程内向量索引（惰性加载）：`(PRAGMA data_version, 行向量)`。
+    /// 消除 search 每次全表扫描 + 逐行 split/parse 向量的重复开销；
+    /// 本实例 record/mark_validated 就地增量维护，其他连接提交后 data_version
+    /// 变化触发全量重建。
+    index: RefCell<Option<(i64, Vec<ExpIndexRow>)>>,
+}
+
+/// 索引行：与 experience_ledger 表一一对应（向量已解析为 f64）
+struct ExpIndexRow {
+    id: i64,
+    kind: String,
+    title: String,
+    body: String,
+    tags: String,
+    signature: String,
+    validated: bool,
+    created_at: String,
+    vec: Vec<f64>,
 }
 
 impl ExperienceLedger {
@@ -71,6 +90,7 @@ impl ExperienceLedger {
         Self {
             db_path: path.to_path_buf(),
             db: None,
+            index: RefCell::new(None),
         }
     }
 
@@ -131,6 +151,19 @@ impl ExperienceLedger {
                     "UPDATE experience_ledger SET kind=?1, title=?2, body=?3, tags=?4, vector=?5, created_at=?6 WHERE id=?7",
                     rusqlite::params![kind.as_str(), title, body, tags_str, vector, now, existing],
                 )?;
+                // 索引已加载时原地替换该行（向量/正文已变）
+                if let Ok(mut idx) = self.index.try_borrow_mut() {
+                    if let Some((_, rows)) = idx.as_mut() {
+                        if let Some(row) = rows.iter_mut().find(|r| r.id == existing) {
+                            row.kind = kind.as_str().to_string();
+                            row.title = title.to_string();
+                            row.body = body.to_string();
+                            row.tags = tags_str.clone();
+                            row.created_at = now.clone();
+                            row.vec = vec;
+                        }
+                    }
+                }
                 return Ok(existing);
             }
         }
@@ -140,18 +173,87 @@ impl ExperienceLedger {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
             rusqlite::params![kind.as_str(), title, body, tags_str, signature, vector, now],
         )?;
-        Ok(db.last_insert_rowid())
+        let id = db.last_insert_rowid();
+        // 索引已加载时增量追加（复用刚算出的向量）
+        if let Ok(mut idx) = self.index.try_borrow_mut() {
+            if let Some((_, rows)) = idx.as_mut() {
+                rows.push(ExpIndexRow {
+                    id,
+                    kind: kind.as_str().to_string(),
+                    title: title.to_string(),
+                    body: body.to_string(),
+                    tags: tags_str.clone(),
+                    signature: signature.to_string(),
+                    validated: false,
+                    created_at: now,
+                    vec,
+                });
+            }
+        }
+        Ok(id)
     }
 
     /// 语义检索（低于阈值视为无相关）
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Experience>> {
         const SIM_THRESHOLD: f64 = 0.25;
+        let provider = EmbeddingProvider::global();
+        let qvec = provider.embed(query);
+        // 索引失效检测：data_version 变化（其他连接提交了写）→ 全量重建。
+        // 本实例自己的 record 已就地增量维护。
+        let version = self.db_data_version().unwrap_or(-1);
+        let need_load = match self.index.borrow().as_ref() {
+            Some((v, _)) => *v != version,
+            None => true,
+        };
+        if need_load {
+            let rows = self.load_index_rows()?;
+            *self.index.borrow_mut() = Some((version, rows));
+        }
+        let index = self.index.borrow();
+        let rows = &index.as_ref().expect("索引刚加载").1;
+
+        let mut scored = Vec::new();
+        for row in rows {
+            let score = provider.cosine(&qvec, &row.vec);
+            if score >= SIM_THRESHOLD {
+                scored.push((
+                    score,
+                    Experience {
+                        id: row.id,
+                        kind: ExperienceKind::from_kind_str(&row.kind),
+                        title: row.title.clone(),
+                        body: row.body.clone(),
+                        tags: if row.tags.is_empty() {
+                            Vec::new()
+                        } else {
+                            row.tags.split(',').map(|s| s.to_string()).collect()
+                        },
+                        signature: row.signature.clone(),
+                        validated: row.validated,
+                        created_at: row.created_at.clone(),
+                    },
+                ));
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, e)| e).collect())
+    }
+
+    /// 当前连接的 PRAGMA data_version：其他连接提交写时递增（本连接自己的写不增）。
+    fn db_data_version(&self) -> Result<i64> {
         let db = self.db()?;
-        let qvec = EmbeddingProvider::global().embed(query);
+        Ok(db.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
+    /// 从 DB 全量加载并解析索引行（维度不符的旧向量跳过，与旧逐行检索逻辑一致）。
+    fn load_index_rows(&self) -> Result<Vec<ExpIndexRow>> {
+        let db = self.db()?;
+        let dim = EmbeddingProvider::global().dim();
         let mut stmt = db.prepare(
             "SELECT id, kind, title, body, tags, vector, signature, validated, created_at FROM experience_ledger",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let iter = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -164,41 +266,29 @@ impl ExperienceLedger {
                 row.get::<_, String>(8)?,
             ))
         })?;
-
-        let mut scored = Vec::new();
-        for row in rows.flatten() {
-            let vec: Vec<f64> = row
+        let mut rows = Vec::new();
+        for item in iter.flatten() {
+            let vec: Vec<f64> = item
                 .5
                 .split(',')
                 .filter_map(|s| s.parse::<f64>().ok())
                 .collect();
-            if vec.len() != EmbeddingProvider::global().dim() {
+            if vec.len() != dim {
                 continue;
             }
-            let score = EmbeddingProvider::global().cosine(&qvec, &vec);
-            if score >= SIM_THRESHOLD {
-                scored.push((
-                    score,
-                    Experience {
-                        id: row.0,
-                        kind: ExperienceKind::from_kind_str(&row.1),
-                        title: row.2,
-                        body: row.3,
-                        tags: if row.4.is_empty() {
-                            Vec::new()
-                        } else {
-                            row.4.split(',').map(|s| s.to_string()).collect()
-                        },
-                        signature: row.6,
-                        validated: row.7 != 0,
-                        created_at: row.8,
-                    },
-                ));
-            }
+            rows.push(ExpIndexRow {
+                id: item.0,
+                kind: item.1,
+                title: item.2,
+                body: item.3,
+                tags: item.4,
+                signature: item.6,
+                validated: item.7 != 0,
+                created_at: item.8,
+                vec,
+            });
         }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, e)| e).collect())
+        Ok(rows)
     }
 
     /// 按类型列出（最新在前）
@@ -262,6 +352,8 @@ impl ExperienceLedger {
             "UPDATE experience_ledger SET validated = 1 WHERE id = ?1",
             rusqlite::params![id],
         )?;
+        // 低频管理动作：索引直接作废，下次 search 重建
+        *self.index.borrow_mut() = None;
         Ok(())
     }
 
@@ -486,6 +578,41 @@ mod tests {
         assert!(n >= 2, "应至少沉淀 2 条（用户+助手）");
         let recalled = evo.recall("Tauri 托盘 全局快捷键", 10).unwrap();
         assert!(!recalled.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_index_reflects_record_upsert() {
+        // 索引加载后按签名 upsert：必须原地替换（新正文可检索、旧正文不可见）
+        let tmp = std::env::temp_dir().join(format!("exp_idx_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let dbp = tmp.join("ledger.db");
+        let _ = std::fs::remove_file(&dbp);
+        let mut l = ExperienceLedger::new(&dbp);
+        l.init().unwrap();
+        l.record(
+            ExperienceKind::Pitfall,
+            "坑",
+            "旧内容：同步阻塞 tokio worker",
+            &[],
+            "sig-1",
+        )
+        .unwrap();
+        assert!(!l.search("tokio worker", 5).unwrap().is_empty()); // 触发索引加载
+        l.record(
+            ExperienceKind::Pitfall,
+            "坑",
+            "新内容：spawn_blocking 卸载阻塞调用",
+            &[],
+            "sig-1",
+        )
+        .unwrap();
+        let hits = l.search("spawn_blocking", 5).unwrap();
+        assert!(
+            hits.iter().any(|e| e.body.contains("新内容")),
+            "upsert 后索引应反映新正文"
+        );
+        assert!(hits.iter().all(|e| !e.body.contains("旧内容")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

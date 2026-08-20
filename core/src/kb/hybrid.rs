@@ -238,7 +238,7 @@ mod tests {
 
         let d = [1.0f64, 1.0, 0.0];
         let sim = cosine_sim_f64(&a, &d);
-        assert!((sim - 0.7071).abs() < 0.001);
+        assert!((sim - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.001);
     }
 
     #[test]
