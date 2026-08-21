@@ -41,8 +41,9 @@ pub use dispatch::{
     dispatch, dispatch_many, DispatchRequest, DispatchResult, DispatchTarget,
 };
 pub use dsh_bridge::{
-    default_bus, install_dsh_bridges, install_modlens_hook, install_usage_hook, DshPetBridge,
-    DshRouterBridge, PetState, RouterProfile, RouterProfileStore, UsageAggregator, UsageRecord,
+    default_bus, install_dsh_bridges, install_dsh_bridges_with_projection, install_modlens_hook,
+    install_usage_hook, install_usage_hook_with_projection, DshPetBridge, DshRouterBridge,
+    PetState, RouterProfile, RouterProfileStore, UsageAggregator, UsageRecord,
 };
 pub use evolve::{EvolutionRecord, EvolutionRunner};
 pub use hooks::{HookContext, HookDecision, HookFn, HookOutcome, HookPhase, HookRunner};

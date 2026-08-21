@@ -121,6 +121,14 @@ fn session_anchors() -> &'static SessionAnchors {
     A.get_or_init(SessionAnchors::new)
 }
 
+/// 网关级凭证台账（凭证缝接入，进程级缓存）：凭证台账优先解析 API Key，
+/// config/env 直读回退。进程内只加载一次（网关是只读消费方）。
+fn gateway_credentials() -> Arc<crate::credentials::CredentialsStore> {
+    static S: OnceLock<Arc<crate::credentials::CredentialsStore>> = OnceLock::new();
+    S.get_or_init(|| Arc::new(crate::credentials::CredentialsStore::open_default()))
+        .clone()
+}
+
 /// `chat.send`：接受一轮 Bloom 对话（后台执行，事件经总线回流）
 pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcError> {
     let message = params
@@ -864,7 +872,10 @@ async fn run_turn(
     let bloom_runtime = crate::mode::runtime_mode() == crate::mode::ModeKind::Bloom;
     if config.bloom.parallel_enabled || bloom_runtime {
         tracing::info!(session = %session, "Bloom 并行编排：Captain + Copilot 并行");
-        let mut orch = crate::orchestration::Orchestrator::new(config.clone());
+        let mut orch = crate::orchestration::Orchestrator::new_with_credentials(
+            config.clone(),
+            Some(gateway_credentials()),
+        );
         orch.set_event_bus(private_bus.clone(), session.clone());
         // 置为 Bloom 模式后走统一的 dispatch 入口：并行由模式路由保证，
         // 而非调用方各自绕开 dispatch 直呼内部方法。
@@ -911,7 +922,8 @@ async fn run_turn(
         .with_cross_project_hint(agent_personality_hint(&session))
         .with_stable_prefix(memory_stable_prefix(&text).await)
         .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from))
-        .with_route_decision(Some(route_decision.clone()));
+        .with_route_decision(Some(route_decision.clone()))
+        .with_credentials(Some(gateway_credentials()));
     let outcome = engine
         .run_turn_reply(text.clone(), session.clone(), private_bus)
         .await?;

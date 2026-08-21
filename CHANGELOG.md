@@ -1,6 +1,22 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v5 (凭证缝/投影接线)
+
+Added
+  credentials/mod.rs          → resolve_llm_key（provider 路由键 → 常见引用 → config 回退）
+  model/router.rs             → ModelRouter::new_with_credentials（台账覆盖 api_key，全客户端继承）
+  orchestration/mod.rs        → new_with_credentials / new_with_workspace_credentials（原构造器委托 None）
+  tui/workbench RealEngine     → with_credentials + execute_turn/run_turn 透传
+  gateway/chat.rs             → gateway_credentials（OnceLock 进程级缓存）+ Bloom/RealEngine 双路径接入
+  projection/mod.rs           → TokenUsageUnit（上游 tokenUsage fold：同一步替换 addReplacing、跨步累加、totals 视图）
+  harness/dsh_bridge.rs       → install_usage_hook_with_projection / install_dsh_bridges_with_projection
+                                （usage 样本折叠进会话 tokenUsage 投影，best-effort 不阻断记账）
+  docs/dsh-fusion-v5-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2007 → 2015（+8 新单测）
+Tests : 2015 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v4 (P1 机制移植)
 
 Added

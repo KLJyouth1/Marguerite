@@ -174,11 +174,25 @@ pub fn install_usage_hook(
     bus: Option<Arc<EventBus>>,
     session: impl Into<String>,
 ) -> Arc<Mutex<UsageAggregator>> {
+    install_usage_hook_with_projection(runner, bus, session, None)
+}
+
+/// 安装 Usage 记账钩子，并把每条 usage 样本**折叠进会话 token 用量投影**
+/// （DSH 融合 v5：`TokenUsageUnit` 同一步替换、跨步累加；上游 token-meter
+/// tokenUsage 单元语义）。`projections = None` 时等价 [`install_usage_hook`]。
+pub fn install_usage_hook_with_projection(
+    runner: &HookRunner,
+    bus: Option<Arc<EventBus>>,
+    session: impl Into<String>,
+    projections: Option<Arc<Mutex<crate::projection::ProjectionStore>>>,
+) -> Arc<Mutex<UsageAggregator>> {
     let agg = Arc::new(Mutex::new(UsageAggregator::new()));
     let session_post = session.into();
     let session_err = session_post.clone();
+    let session_proj = session_post.clone();
     let agg_for_hook = Arc::clone(&agg);
     let bus_for_hook = bus.clone();
+    let proj_for_hook = projections.clone();
 
     runner.register_fn(
         HookPhase::PostToolCall,
@@ -213,6 +227,26 @@ pub fn install_usage_hook(
                 &rec,
                 total,
             );
+            // 凭证/投影缝：把样本折叠进会话 tokenUsage 投影（best-effort，失败不阻断记账）
+            if let Some(proj) = proj_for_hook.as_ref() {
+                let event = json!({
+                    "kind": "usage.accumulated",
+                    "usage": {
+                        "tool_name": rec.tool_name,
+                        "tokens_in": rec.tokens_in,
+                        "tokens_out": rec.tokens_out,
+                        "ts_ms": rec.ts_ms,
+                    }
+                });
+                if let Ok(mut store) = proj.lock() {
+                    let _ = store.project(
+                        &crate::projection::TokenUsageUnit,
+                        &session_proj,
+                        &[event],
+                        0,
+                    );
+                }
+            }
             Ok(HookDecision::Continue)
         },
     );
@@ -537,8 +571,24 @@ pub fn install_dsh_bridges(
     Arc<DshPetBridge>,
     DshRouterBridge,
 ) {
+    install_dsh_bridges_with_projection(runner, bus, session, store, None)
+}
+
+/// 一次性安装：Modlens + Usage Hook（含会话 token 用量投影折叠）到同一个
+/// HookRunner；返回三件套 + 投影库句柄。
+pub fn install_dsh_bridges_with_projection(
+    runner: &HookRunner,
+    bus: Option<Arc<EventBus>>,
+    session: impl Into<String>,
+    store: RouterProfileStore,
+    projections: Option<Arc<Mutex<crate::projection::ProjectionStore>>>,
+) -> (
+    Arc<Mutex<UsageAggregator>>,
+    Arc<DshPetBridge>,
+    DshRouterBridge,
+) {
     install_modlens_hook(runner);
-    let agg = install_usage_hook(runner, bus, session);
+    let agg = install_usage_hook_with_projection(runner, bus, session, projections);
     let pet = Arc::new(DshPetBridge::new());
     let router = DshRouterBridge::new(store);
     (agg, pet, router)
@@ -626,6 +676,37 @@ mod tests {
             .filter(|e| e.payload["kind"] == "usage.accumulated")
             .collect();
         assert_eq!(usage_events.len(), 2, "总线应有 2 条 usage 事件");
+    }
+
+    // ---- v5: usage 钩子 → 会话 token 用量投影折叠（上游 tokenUsage 语义） ----
+    #[test]
+    fn hook_usage_folds_into_session_projection() {
+        let runner = HookRunner::new();
+        let projections = Arc::new(Mutex::new(
+            crate::projection::ProjectionStore::open(None).unwrap(),
+        ));
+        let agg = install_usage_hook_with_projection(&runner, None, "s1", Some(projections.clone()));
+
+        let ctx = HookContext::new(HookPhase::PostToolCall, temp_dir_marker())
+            .with_tool("run_code")
+            .with_arg("tokens_in", "100")
+            .with_arg("tokens_out", "50");
+        let _ = runner.run_tool_call(ctx, |_| Ok("ok1".to_string())).unwrap();
+        // 新一步（工具不同 → step_key 不同）
+        let ctx2 = HookContext::new(HookPhase::PostToolCall, temp_dir_marker())
+            .with_tool("web_search")
+            .with_arg("tokens_in", "30")
+            .with_arg("tokens_out", "10");
+        let _ = runner.run_tool_call(ctx2, |_| Ok("ok2".to_string())).unwrap();
+
+        let store = projections.lock().unwrap();
+        let view = store
+            .view_of(&crate::projection::TokenUsageUnit, "s1")
+            .expect("应有 tokenUsage 视图");
+        assert_eq!(view["tokens_in"], 130, "跨步累加");
+        assert_eq!(view["tokens_out"], 60);
+        assert_eq!(view["steps"], 2);
+        assert_eq!(agg.lock().unwrap().len(), 2, "聚合器仍逐条记录");
     }
 
     // ---- T-1.4 TR-R3: Notification → Pet 状态切换 ----

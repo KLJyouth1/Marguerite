@@ -136,6 +136,9 @@ pub struct RealEngine {
     /// 模式提示段（可选）：显式注入时优先于「按当前模式规格取 prompt_section」
     /// （Plan 模式的 DSH 规则段走此通道）。
     mode_section: Option<String>,
+    /// 凭证台账（可选，凭证缝接入）：Some = 模型路由器经凭证台账解析 API Key
+    /// （provider 路由键 → 常见引用 → config 回退）；None = 不启用。
+    credentials: Option<Arc<crate::credentials::CredentialsStore>>,
 }
 
 impl RealEngine {
@@ -149,6 +152,7 @@ impl RealEngine {
             route_decision: None,
             workspace: None,
             mode_section: None,
+            credentials: None,
         }
     }
 
@@ -186,6 +190,15 @@ impl RealEngine {
     /// 显式注入模式提示段（优先于按模式规格自动取 prompt_section）。
     pub fn with_mode_section(mut self, section: Option<String>) -> Self {
         self.mode_section = section.filter(|s| !s.is_empty());
+        self
+    }
+
+    /// 接入凭证台账（凭证缝：模型路由器经台账解析 API Key，config 直读回退）。
+    pub fn with_credentials(
+        mut self,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    ) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -228,8 +241,12 @@ impl RealEngine {
         // 自动编排器：每条输入由它离线分析并自动选定 Solo / MAX 双带队 / 专家团队 / 集群形态，
         // 用户（及本 TUI）不手动选择编排形态——形态只能由编排内核自动得出。
         let mut orch = match &self.workspace {
-            Some(ws) => Orchestrator::new_with_workspace(config, ws.clone()),
-            None => Orchestrator::new(config),
+            Some(ws) => Orchestrator::new_with_workspace_credentials(
+                config,
+                ws.clone(),
+                self.credentials.clone(),
+            ),
+            None => Orchestrator::new_with_credentials(config, self.credentials.clone()),
         };
         // 关键：把进程级运行时模式（前端 mode.switch 切换的 Plan/Agent/Bloom）
         // 应用到本次编排，否则模式切换形同虚设。
@@ -277,6 +294,7 @@ impl EngineRunner for RealEngine {
         let config = self.config.clone();
         let evolution = self.evolution.clone();
         let mode_section = self.mode_section.clone();
+        let credentials = self.credentials.clone();
         Box::pin(async move {
             Self {
                 config,
@@ -286,6 +304,7 @@ impl EngineRunner for RealEngine {
                 route_decision: None,
                 workspace: None,
                 mode_section,
+                credentials,
             }
             .execute_turn(text, session, bus)
             .await

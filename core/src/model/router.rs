@@ -98,6 +98,28 @@ impl ModelRouter {
         }
     }
 
+    /// 从配置创建模型路由器，并经凭证缝解析 API Key（凭证台账优先，config 回退）。
+    ///
+    /// 凭证缝接入（DSH 融合 v5）：`credentials` 为 Some 时以
+    /// [`crate::credentials::resolve_llm_key`] 覆盖 `config.model.api_key`
+    /// （provider 路由键 → 常见引用 → 回退），None 时等价 [`ModelRouter::new`]。
+    pub fn new_with_credentials(
+        config: &Config,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    ) -> Self {
+        let Some(store) = credentials else {
+            return Self::new(config);
+        };
+        let resolved = crate::credentials::resolve_llm_key(
+            &store,
+            &config.model.provider,
+            &config.model.api_key,
+        );
+        let mut overridden = config.clone();
+        overridden.model.api_key = resolved;
+        Self::new(&overridden)
+    }
+
     /// 设置回退客户端
     pub fn with_fallback(mut self, config: LLMConfig) -> Self {
         self.fallback_client =
@@ -593,6 +615,29 @@ mod tests {
         assert_eq!(client1.config.model, "deepseek-v4-pro");
         // 同一模型名应复用缓存客户端
         assert!(Arc::ptr_eq(&client1, &client2));
+    }
+
+    #[test]
+    fn test_router_new_with_credentials_overrides_api_key() {
+        // 凭证缝（DSH 融合 v5）：台账中的 provider 路由键优先于 config 直读值
+        let dir = std::env::temp_dir().join(format!("mgt_router_cred_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::credentials::CredentialsStore::load(
+            &dir.join("credentials.json"),
+        ));
+        store
+            .set_record(
+                &crate::credentials::CredentialKey::new("llm", "deepseek"),
+                crate::credentials::CredentialRecord::api_key("sk-from-store"),
+            )
+            .unwrap();
+        let mut config = Config::default();
+        config.model.api_key = "sk-from-config".to_string();
+        let router = ModelRouter::new_with_credentials(&config, Some(store));
+        assert_eq!(router.default_client.config.api_key, "sk-from-store");
+        // 未提供台账 → 等价 new（config 直读）
+        let router2 = ModelRouter::new_with_credentials(&config, None);
+        assert_eq!(router2.default_client.config.api_key, "sk-from-config");
     }
 
     #[test]

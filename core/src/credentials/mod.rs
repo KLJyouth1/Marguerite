@@ -249,6 +249,45 @@ impl CredentialsStore {
     }
 }
 
+/// 解析 LLM API Key（凭证缝优先，config 直读回退）：
+/// ① `CredentialKey("llm", provider)`（LLM 适配器以 provider route key 寻址）；
+/// ② 常见 `CredentialRef`（`MARGUERITE_API_KEY` / `DEEPSEEK_API_KEY` /
+///    `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`）；
+/// ③ 回退 `fallback`（config/env 直读值）。
+///
+/// 只有非空密钥才算命中（api-key 记录 `key: None` = 拥有者确认走自身环境发现，
+/// 不覆盖回退值）。provider 为空时跳过 ①。
+pub fn resolve_llm_key(store: &CredentialsStore, provider: &str, fallback: &str) -> String {
+    let key_hit = |record: Option<CredentialRecord>| -> Option<String> {
+        match record {
+            Some(CredentialRecord::ApiKey { key: Some(k), .. }) if !k.trim().is_empty() => {
+                Some(k)
+            }
+            _ => None,
+        }
+    };
+
+    // ① provider 路由键（最精确）
+    if !provider.trim().is_empty() {
+        if let Some(k) = key_hit(store.get_record(&CredentialKey::new("llm", provider))) {
+            return k;
+        }
+    }
+    // ② 常见引用（显式引用优先于裸回退）
+    for name in [
+        "MARGUERITE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ] {
+        if let Some(k) = key_hit(store.resolve_reference(&CredentialRef(name.into()))) {
+            return k;
+        }
+    }
+    // ③ 回退
+    fallback.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +387,70 @@ mod tests {
             Some(CredentialRecord::ApiKey { key: Some(k), .. }) => assert_eq!(k, "sk-persist"),
             other => panic!("重载后记录缺失/错误: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_llm_key_prefers_provider_route_key() {
+        let (store, _) = tmp_store("resolve_provider");
+        store
+            .set_record(
+                &CredentialKey::new("llm", "deepseek"),
+                CredentialRecord::api_key("sk-provider"),
+            )
+            .unwrap();
+        store
+            .set_record(
+                &CredentialKey::new("llm", "other"),
+                CredentialRecord::api_key("sk-other"),
+            )
+            .unwrap();
+        assert_eq!(
+            resolve_llm_key(&store, "deepseek", "sk-fallback"),
+            "sk-provider"
+        );
+        // 未登记 provider → 走引用/回退
+        assert_eq!(
+            resolve_llm_key(&store, "openai", "sk-fallback"),
+            "sk-fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_llm_key_falls_back_through_references() {
+        let (store, _) = tmp_store("resolve_ref");
+        let key = CredentialKey::new("llm", "deepseek");
+        store
+            .set_record(&key, CredentialRecord::api_key("sk-ref"))
+            .unwrap();
+        store
+            .set_reference(&CredentialRef("MARGUERITE_API_KEY".into()), &key)
+            .unwrap();
+        // provider 未直接登记，但引用命中
+        assert_eq!(
+            resolve_llm_key(&store, "unknown-provider", "sk-fallback"),
+            "sk-ref"
+        );
+    }
+
+    #[test]
+    fn resolve_llm_key_ignores_empty_and_missing() {
+        let (store, _) = tmp_store("resolve_empty");
+        // api-key 记录 key=None（拥有者确认走环境发现）→ 不覆盖回退
+        store
+            .set_record(
+                &CredentialKey::new("llm", "deepseek"),
+                CredentialRecord::ApiKey {
+                    key: None,
+                    env: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            resolve_llm_key(&store, "deepseek", "sk-fallback"),
+            "sk-fallback",
+            "空密钥记录不得覆盖回退值"
+        );
+        // 空 provider 跳过路由键查询
+        assert_eq!(resolve_llm_key(&store, "", "sk-fallback"), "sk-fallback");
     }
 }

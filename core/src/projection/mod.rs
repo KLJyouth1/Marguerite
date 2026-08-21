@@ -258,6 +258,109 @@ pub struct HostAuditState {
     pub last_event_type: Option<String>,
 }
 
+/// 会话 token 用量投影（移植上游 token-meter `tokenUsage` 单元语义）：
+/// 样本先到先计；**同一步（`tool@ts`）的重复样本替换旧值而非双计**
+/// （`addReplacing` 语义）；单槽 `last` 依赖「同一步的样本相邻」的日志不变量。
+///
+/// 事件形状（对齐 dsh_bridge `usage.accumulated` 载荷）：
+/// `{"kind":"usage.accumulated","usage":{"tool_name","tokens_in","tokens_out","ts_ms"}}`
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TokenUsageUnit;
+
+impl ProjectionUnit for TokenUsageUnit {
+    type State = TokenUsageState;
+
+    fn key(&self) -> &'static str {
+        "tokenUsage"
+    }
+
+    fn state_version(&self) -> u32 {
+        1
+    }
+
+    fn init(&self) -> Self::State {
+        TokenUsageState {
+            totals: TokenUsageTotals {
+                tokens_in: 0,
+                tokens_out: 0,
+                steps: 0,
+            },
+            last: None,
+        }
+    }
+
+    fn apply(&self, state: &Self::State, event: &Value) -> Self::State {
+        if event.get("kind").and_then(Value::as_str) != Some("usage.accumulated") {
+            return state.clone();
+        }
+        let Some(usage) = event.get("usage") else {
+            return state.clone();
+        };
+        let tool_name = usage
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let ts = usage.get("ts_ms").and_then(Value::as_i64).unwrap_or(0);
+        let tokens_in = usage.get("tokens_in").and_then(Value::as_u64).unwrap_or(0);
+        let tokens_out = usage.get("tokens_out").and_then(Value::as_u64).unwrap_or(0);
+        let step_key = format!("{tool_name}@{ts}");
+        // 同一步重复样本：替换旧值（-prev +next），否则累加
+        let is_repeat = state
+            .last
+            .as_ref()
+            .is_some_and(|l| l.step_key == step_key);
+        let (prev_in, prev_out, steps) = if is_repeat {
+            let l = state.last.as_ref().expect("is_repeat 必有 last");
+            (l.tokens_in, l.tokens_out, state.totals.steps)
+        } else {
+            (0, 0, state.totals.steps + 1)
+        };
+        TokenUsageState {
+            totals: TokenUsageTotals {
+                tokens_in: state.totals.tokens_in - prev_in + tokens_in,
+                tokens_out: state.totals.tokens_out - prev_out + tokens_out,
+                steps,
+            },
+            last: Some(LastUsageSample {
+                step_key,
+                tokens_in,
+                tokens_out,
+            }),
+        }
+    }
+
+    fn view(&self, state: &Self::State) -> Option<Value> {
+        Some(serde_json::json!({
+            "tokens_in": state.totals.tokens_in,
+            "tokens_out": state.totals.tokens_out,
+            "steps": state.totals.steps,
+        }))
+    }
+}
+
+/// token 用量汇总桶。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct TokenUsageTotals {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub steps: u64,
+}
+
+/// token 用量投影状态（totals + 单槽 last）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct TokenUsageState {
+    pub totals: TokenUsageTotals,
+    pub last: Option<LastUsageSample>,
+}
+
+/// 最近一次样本（同一步替换语义的基准）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct LastUsageSample {
+    pub step_key: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +481,77 @@ mod tests {
         assert_eq!(a["events"], 1);
         assert_eq!(b["events"], 2);
         assert!(store.view_of(&HostAuditUnit, "a").is_none());
+    }
+
+    fn usage_event(tool: &str, ts: i64, tokens_in: u64, tokens_out: u64) -> Value {
+        serde_json::json!({
+            "kind": "usage.accumulated",
+            "usage": {
+                "tool_name": tool,
+                "ts_ms": ts,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            }
+        })
+    }
+
+    #[test]
+    fn token_usage_fold_adds_across_steps_and_replaces_within_step() {
+        let events = vec![
+            usage_event("run_code", 1000, 100, 50),
+            usage_event("web_search", 2000, 30, 10),
+        ];
+        let state = ProjectionStore::replay(&TokenUsageUnit, &events);
+        assert_eq!(state.totals.tokens_in, 130);
+        assert_eq!(state.totals.tokens_out, 60);
+        assert_eq!(state.totals.steps, 2);
+        // 同一步（同 tool@ts）重复样本：替换旧值而非双计（addReplacing）
+        let replaced = ProjectionStore::replay(
+            &TokenUsageUnit,
+            &[usage_event("run_code", 1000, 100, 50), usage_event("run_code", 1000, 130, 70)],
+        );
+        assert_eq!(replaced.totals.tokens_in, 130, "同一步应替换");
+        assert_eq!(replaced.totals.tokens_out, 70);
+        assert_eq!(replaced.totals.steps, 1, "替换不新增步数");
+    }
+
+    #[test]
+    fn token_usage_ignores_foreign_events_and_views_totals() {
+        let state = ProjectionStore::replay(
+            &TokenUsageUnit,
+            &[
+                turn("user/message"), // 非 usage 事件：忽略
+                usage_event("run_code", 1, 40, 20),
+            ],
+        );
+        assert_eq!(state.totals.tokens_in, 40);
+        let view = TokenUsageUnit.view(&state).unwrap();
+        assert_eq!(
+            view,
+            serde_json::json!({ "tokens_in": 40, "tokens_out": 20, "steps": 1 })
+        );
+    }
+
+    #[test]
+    fn token_usage_store_roundtrip_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("mgt_projection_usage_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("projection.db");
+        {
+            let mut store = ProjectionStore::open(Some(db.clone())).unwrap();
+            store
+                .project(
+                    &TokenUsageUnit,
+                    "s1",
+                    &[usage_event("run_code", 1, 100, 50)],
+                    0,
+                )
+                .unwrap();
+        }
+        let store = ProjectionStore::open(Some(db)).unwrap();
+        assert_eq!(
+            store.view_of(&TokenUsageUnit, "s1"),
+            Some(serde_json::json!({ "tokens_in": 100, "tokens_out": 50, "steps": 1 }))
+        );
     }
 }

@@ -339,10 +339,28 @@ impl Orchestrator {
         Self::new_with_workspace(config, default_workspace())
     }
 
+    /// 从配置构建编排器，并经凭证缝解析 API Key（凭证台账优先，config 回退）。
+    pub fn new_with_credentials(
+        config: Config,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    ) -> Self {
+        Self::new_with_workspace_credentials(config, default_workspace(), credentials)
+    }
+
     /// 指定工作区根目录构建编排器（项目模式：工具/终端/文件沙箱根随项目目录切换）。
     pub fn new_with_workspace(config: Config, workspace: std::path::PathBuf) -> Self {
+        Self::new_with_workspace_credentials(config, workspace, None)
+    }
+
+    /// 指定工作区根 + 凭证台账构建编排器（凭证缝接入：模型路由器经
+    /// [`ModelRouter::new_with_credentials`] 构造，None = 不启用凭证解析）。
+    pub fn new_with_workspace_credentials(
+        config: Config,
+        workspace: std::path::PathBuf,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    ) -> Self {
         // 先基于 &config 构造模型路由器（借用立即结束），再 move config 进 lead。
-        let model_router = Arc::new(ModelRouter::new(&config));
+        let model_router = Arc::new(ModelRouter::new_with_credentials(&config, credentials));
         // D 期接入：把 20 个原生工具 + 命令护栏 + SSRF 防护注册进工具注册表，
         // 让自动编排（dispatch）下的 lead / 子 Agent 真正能调用工具（而非空注册）。
         let mut tool_registry = ToolRegistry::new();
