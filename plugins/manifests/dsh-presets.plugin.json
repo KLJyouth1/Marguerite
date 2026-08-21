@@ -1,14 +1,16 @@
 {
   "name": "dsh-presets",
-  "version": "0.1.0-rc8-mgr1",
-  "description": "DSH rc.8 agent preset 四档二创（minimal 极简双工具 / standard 标准 / code PTC / cordis 创造）+ 梁神锚定晋升桥接：首轮仅最小工具面与一行 persona、无运行时上下文注入，前缀门控（deepseek：含 we 且无 let me）+ 4 步兜底 + 无工具首轮自动晋升；晋升后单调扩展到 PTC(run_code) 再至全工具面，workspace 指令与技能目录延迟一步注入",
+  "version": "0.1.1-mgr1",
+  "description": "DSH 0.1.1-rc.1 agent preset 四档二创（minimal 极简双工具 / standard 标准 / code PTC / cordis 创造）+ 梁神锚定晋升桥接（v3 接线收尾）：首轮仅最小工具面与一行 persona、无运行时上下文注入，前缀门控（deepseek：含 we 且无 let me）+ 4 步兜底 + 无工具首轮自动晋升；晋升后单调扩展到 PTC(run_code) 再至全工具面；会话级锚定态跨轮持久（晋升一次不再重锚），message_sources 白名单过滤非 user/goal 轮次，bootstrap_max_tokens 首请求一次性注入后剥离，agent-instructions/skill-catalog 按 deferred_grace_steps 延迟注入",
   "author": "marguerite-dsh",
   "capabilities": [
     "dsh.preset.list",
     "dsh.preset.switch",
     "dsh.anchor.gate",
     "dsh.anchor.promote",
-    "dsh.anchor.bootstrap"
+    "dsh.anchor.bootstrap",
+    "dsh.anchor.session_persist",
+    "dsh.anchor.deferred_inject"
   ],
   "hooks": [
     {
@@ -18,7 +20,8 @@
         "minimal_tools": "bash_persistent,str_replace_editor",
         "message_sources": "user,goal",
         "max_bootstrap_steps": "4",
-        "bootstrap_max_tokens": "1024"
+        "bootstrap_max_tokens": "1024",
+        "promote_after_first_response": "true"
       }
     },
     {
@@ -26,7 +29,8 @@
       "handler": "anchor_promote",
       "params": {
         "promoted_presentation": "code",
-        "deferred_grace_steps": "1"
+        "deferred_grace_steps": "1",
+        "deferred_sources": "agent-instructions,skill-catalog"
       }
     }
   ],

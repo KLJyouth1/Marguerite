@@ -40,6 +40,11 @@ pub struct AnchorState {
     steps: u32,
     /// 规格：最小工具集 / PTC 工具 / 兜底步数 / 前缀门控家族
     spec: BloomAnchoringSpec,
+    /// 已推进的会话轮次（每轮 [`AnchorState::note_turn`] 一次；
+    /// 作为 deferred 延迟注入的计步基线）
+    turns: u32,
+    /// 晋升发生时所在的轮次（None = 尚未晋升）
+    promoted_at_turn: Option<u32>,
 }
 
 /// 四步兜底阈值（默认值；实际运行时优先读 spec.fallback_steps）
@@ -70,6 +75,8 @@ impl AnchorState {
             blocks: 0,
             steps: 0,
             spec,
+            turns: 0,
+            promoted_at_turn: None,
         }
     }
 
@@ -143,6 +150,38 @@ impl AnchorState {
         self.spec.deferred_grace_steps
     }
 
+    /// 会话轮次推进（每轮调用一次，作为 deferred 延迟注入的计步基线）。
+    pub fn note_turn(&mut self) {
+        self.turns = self.turns.saturating_add(1);
+    }
+
+    /// 已推进的会话轮次（deferred 计步基线；测试/诊断用）。
+    pub fn turns(&self) -> u32 {
+        self.turns
+    }
+
+    /// 某来源此刻是否允许注入（deferred 延迟注入语义，对齐梁神
+    /// `deferredSources` + `deferredGraceSteps`）：
+    /// - 锚定关闭或已到 Full：全放行；
+    /// - 来源不在 `deferred_sources`：放行；
+    /// - 仍在锚定期：扣住；
+    /// - 晋升后的前 `deferred_grace_steps` 步内：扣住；之后放行。
+    ///
+    /// 计步口径：`turns - promoted_at_turn > deferred_grace_steps` 即放行
+    /// （晋升当轮与晋升后第 1 步扣住，第 2 步起注入）。
+    pub fn deferred_allows(&self, source: &str) -> bool {
+        if !self.spec.enabled || self.stage == AnchorStage::Full {
+            return true;
+        }
+        if !self.spec.deferred_sources.iter().any(|s| s == source) {
+            return true;
+        }
+        match self.promoted_at_turn {
+            None => false,
+            Some(t) => self.turns.saturating_sub(t) > self.spec.deferred_grace_steps,
+        }
+    }
+
     /// 观察一个首块文本；返回本次观察后 Anchored → Ptc 是否发生晋升。
     ///
     /// 门控规则按前缀家族分派（dsh-forge 社区验证）：
@@ -208,6 +247,8 @@ impl AnchorState {
     fn promote_to_ptc(&mut self) {
         if self.stage == AnchorStage::Anchored {
             self.stage = AnchorStage::Ptc;
+            // 记录晋升轮次：deferred 延迟注入以此为计步起点
+            self.promoted_at_turn = Some(self.turns);
         }
     }
 }
@@ -481,5 +522,62 @@ mod tests {
         let a = AnchorState::with_spec(spec);
         assert_eq!(a.bootstrap_max_tokens(), Some(1024));
         assert_eq!(a.deferred_grace_steps(), 2);
+    }
+
+    #[test]
+    fn deferred_sources_held_until_grace_steps_pass() {
+        // 默认 grace=1：锚定期扣住 → 晋升当轮与晋升后第 1 步扣住 → 第 2 步放行
+        let mut a = AnchorState::new();
+        assert!(!a.deferred_allows("agent-instructions"), "锚定期扣住");
+        assert!(!a.deferred_allows("skill-catalog"), "锚定期扣住");
+        assert!(a.deferred_allows("memory"), "非 deferred 来源放行");
+        // 晋升（发生在轮 0）
+        a.observe_block("we proceed");
+        assert!(a.is_promoted());
+        assert!(!a.deferred_allows("skill-catalog"), "晋升当轮仍扣住");
+        a.note_turn(); // 轮 1
+        assert!(
+            !a.deferred_allows("skill-catalog"),
+            "晋升后第 1 步仍扣住（grace=1）"
+        );
+        a.note_turn(); // 轮 2
+        assert!(a.deferred_allows("skill-catalog"), "晋升后第 2 步放行");
+        // Full 后全放行
+        a.expand_to_full();
+        assert!(a.deferred_allows("skill-catalog"));
+        assert!(a.deferred_allows("agent-instructions"));
+    }
+
+    #[test]
+    fn deferred_grace_zero_injects_next_turn() {
+        let spec = BloomAnchoringSpec {
+            deferred_grace_steps: 0,
+            ..BloomAnchoringSpec::default()
+        };
+        let mut a = AnchorState::with_spec(spec);
+        a.observe_block("we go");
+        assert!(!a.deferred_allows("skill-catalog"), "晋升当轮扣住");
+        a.note_turn();
+        assert!(a.deferred_allows("skill-catalog"), "grace=0 时次轮放行");
+    }
+
+    #[test]
+    fn disabled_anchoring_allows_deferred_immediately() {
+        let spec = BloomAnchoringSpec {
+            enabled: false,
+            ..BloomAnchoringSpec::default()
+        };
+        let a = AnchorState::with_spec(spec);
+        assert!(a.deferred_allows("skill-catalog"));
+        assert!(a.deferred_allows("agent-instructions"));
+    }
+
+    #[test]
+    fn note_turn_advances_turn_counter() {
+        let mut a = AnchorState::new();
+        assert_eq!(a.turns(), 0);
+        a.note_turn();
+        a.note_turn();
+        assert_eq!(a.turns(), 2);
     }
 }

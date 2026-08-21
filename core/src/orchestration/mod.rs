@@ -39,6 +39,7 @@ use crate::intent::classifier::{Classifier, IntentType as ClassifierIntent};
 use crate::mcp::registry::ToolRegistry;
 use crate::mode::ModeKind;
 use crate::mode::anchoring::AnchorState;
+use crate::mode::spec::BloomAnchoringSpec;
 use crate::model::llm::{LLMClient, LLMConfig, LLMProvider, ToolDef};
 use crate::model::router::{Complexity, IntentType, ModelRouter};
 use crate::model::StreamReceiver;
@@ -198,6 +199,13 @@ pub struct Orchestrator {
     /// [`dispatch`] 按此路由：`Bloom` → Captain+Copilot 双模型并行编排；
     /// 其余模式维持既有「分析 → 选形态 → 执行 → 综合」链路，行为不变。
     mode: ModeKind,
+    /// 锚定规格（声明式 YAML 来源）；None = Bloom 回退内置 bloom.yaml 的 anchoring 段
+    anchoring_spec: Option<BloomAnchoringSpec>,
+    /// 会话级锚定状态（跨轮持久：网关注入 / [`Orchestrator::take_anchor`] 回收；
+    /// None = 本轮按规格自建）
+    anchor: Option<AnchorState>,
+    /// 本轮消息来源（user / goal / auto-round…；锚定消息源白名单据此过滤）
+    message_source: String,
 }
 
 /// 模型名是否具备视觉（多模态）能力（启发式关键词匹配）。
@@ -401,6 +409,9 @@ impl Orchestrator {
             events: None,
             session: None,
             mode: ModeKind::Agent,
+            anchoring_spec: None,
+            anchor: None,
+            message_source: "user".to_string(),
         }
     }
 
@@ -422,9 +433,76 @@ impl Orchestrator {
         self.mode
     }
 
+    /// 设置锚定规格（显式覆盖）；None = Bloom 回退内置 bloom.yaml 的 anchoring 段。
+    pub fn set_anchoring_spec(&mut self, spec: Option<BloomAnchoringSpec>) {
+        self.anchoring_spec = spec;
+    }
+
+    /// 注入会话级锚定状态（跨轮持久）；None = 本轮按规格自建。
+    pub fn set_anchor(&mut self, anchor: Option<AnchorState>) {
+        self.anchor = anchor;
+    }
+
+    /// 取回本轮推进后的锚定状态（供网关持久化回会话）。
+    pub fn take_anchor(&mut self) -> Option<AnchorState> {
+        self.anchor.take()
+    }
+
+    /// 设置本轮消息来源（锚定消息源白名单过滤用）。
+    pub fn set_message_source(&mut self, source: &str) {
+        self.message_source = source.to_string();
+    }
+
+    /// 当前生效的锚定规格：显式设置 > 内置 bloom.yaml anchoring 段 > 默认。
+    fn bloom_anchoring_spec(&self) -> BloomAnchoringSpec {
+        self.anchoring_spec.clone().unwrap_or_else(|| {
+            crate::mode::spec::builtin::bloom()
+                .bloom
+                .map(|b| b.anchoring)
+                .unwrap_or_default()
+        })
+    }
+
+    /// 本轮锚定态入口（`dispatch_bloom` 用）：恢复会话锚定态（或按规格新建）
+    /// → 计一轮 → 按消息源白名单门控首块观察（非白名单来源不触发晋升分支，
+    /// 对齐梁神 issue #578 的过滤语义）。
+    fn anchor_for_turn(&mut self, text: &str) -> AnchorState {
+        let mut anchor = self
+            .anchor
+            .take()
+            .unwrap_or_else(|| AnchorState::with_spec(self.bloom_anchoring_spec()));
+        anchor.note_turn();
+        if anchor.source_allowed(&self.message_source) {
+            anchor.observe_block(text);
+        }
+        anchor
+    }
+
+    /// 委托路径锚定态入口（`dispatch_bloom_swarm` / `dispatch_bloom_auto` 用）：
+    /// 已由 `dispatch_bloom` 处理并存回的锚定态直接复用（避免同轮重复计步 /
+    /// 重复观察）；直接调用（测试/旁路）时按规格新建并完整处理。
+    fn anchor_for_delegation(&mut self, text: &str) -> AnchorState {
+        match self.anchor.take() {
+            Some(a) => a,
+            None => {
+                let mut a = AnchorState::with_spec(self.bloom_anchoring_spec());
+                a.note_turn();
+                if a.source_allowed(&self.message_source) {
+                    a.observe_block(text);
+                }
+                a
+            }
+        }
+    }
+
     /// 注入自进化经验提示（透传到 lead 运行时）。
     pub fn set_experience_hint(&mut self, hint: String) {
         self.lead.set_experience_hint(hint);
+    }
+
+    /// 注入模式提示段（透传到 lead 运行时，如 plan 模式的 DSH 规则段）。
+    pub fn set_mode_section(&mut self, section: Option<String>) {
+        self.lead.set_mode_section(section);
     }
 
     /// 注入记忆召回稳定前缀（W-6）：透传到 lead 运行时，作为模型消息序列最前端的
@@ -762,11 +840,23 @@ impl Orchestrator {
             analysis.rationale
         ));
 
-        // 锚定冷启动（对齐 dsh-forge 首轮锚定 + 工具收窄）：Bloom 启动即进入锚定态，
-        // 首块门控命中（含 we 且无 let me）→ 直接晋升 PTC（run_code / 注册名 code）；
-        // 否则锚定 Minimal 双工具，四步兜底晋升。
-        let mut anchor = AnchorState::new();
-        anchor.observe_block(text);
+        // 锚定冷启动（对齐 dsh-forge 首轮锚定 + 工具收窄）：会话锚定态（跨轮持久）
+        // 或按规格新建；首块门控命中（含 we 且无 let me）→ 直接晋升 PTC
+        // （run_code / 注册名 code）；否则锚定 Minimal 双工具，四步兜底晋升。
+        // 消息源白名单：非白名单来源（如 auto-round）不触发晋升分支（梁神 issue #578）。
+        let anchor = self.anchor_for_turn(text);
+        // 锚定旋钮落地（本轮请求面）：首轮输出预算（晋升前一次性注入、之后剥离）
+        // + 技能目录延迟注入（deferred skill-catalog，晋升且越过 grace 步数前扣住）
+        let bootstrap_cap = if anchor.is_promoted() {
+            None
+        } else {
+            anchor.bootstrap_max_tokens()
+        };
+        self.lead.set_bootstrap_max_tokens(bootstrap_cap);
+        self.lead
+            .set_defer_skill_catalog(!anchor.deferred_allows("skill-catalog"));
+        // 存回会话锚定态：swarm/auto 委托路径与 take_anchor 复用同一状态
+        self.anchor = Some(anchor.clone());
         let tool_defs_all = self.tool_defs();
         let ptc_ready = tool_defs_all.iter().any(|d| d.name == "code");
         self.emit_thinking(&format!(
@@ -985,9 +1075,10 @@ impl Orchestrator {
             "> Bloom 蜂群子模式：FlashSwarm 蜂群分片 + ProExpert 专家团队，双领队并行。",
         );
         self.emit_ensemble(EnsembleProgress::proposer_start(0, "FlashSwarm"));
-        // 锚定冷启动：蜂群同样进入锚定态，降级回路按锚定态收窄首轮工具。
-        let mut anchor = AnchorState::new();
-        anchor.observe_block(text);
+        // 锚定冷启动：蜂群复用会话锚定态（dispatch_bloom 已观察；直接调用时按规格
+        // 新建并完整处理），降级回路按锚定态收窄首轮工具。
+        let anchor = self.anchor_for_delegation(text);
+        self.anchor = Some(anchor.clone());
         match self.run_bloom_swarm(text).await {
             Ok((reply, parts)) => {
                 // 蜂群整体无可用产出（子专家全部失败 / 超时）→ 降级为 lead 带工具的回路，
@@ -1035,9 +1126,9 @@ impl Orchestrator {
             "> Bloom 自主闭环子模式：执行 → QA 判定 → 自动修复，直至 QA 全过或预算耗尽。",
         );
         self.emit_ensemble(EnsembleProgress::proposer_start(0, "AutoLoop"));
-        // 锚定冷启动：自主闭环同样进入锚定态，首轮按锚定态收窄工具（晋升后仅 run_code / PTC）。
-        let mut anchor = AnchorState::new();
-        anchor.observe_block(text);
+        // 锚定冷启动：自主闭环复用会话锚定态，首轮按锚定态收窄工具（晋升后仅 run_code / PTC）。
+        let anchor = self.anchor_for_delegation(text);
+        self.anchor = Some(anchor.clone());
         let bloom_tools = bloom_anchor_tools(&anchor, &self.tool_defs());
         let reply = self.run_bloom_auto(text, &bloom_tools).await?;
         self.finish_dispatch(text, analysis, AgentMode::DualLeader, reply, vec![], None)
@@ -3218,6 +3309,79 @@ mod tests {
         // 空输入：回退仍为空（无可回退）
         let empty: Vec<ToolDef> = vec![];
         assert!(super::bloom_anchor_tools(&a, &empty).is_empty());
+    }
+
+    #[test]
+    fn test_bloom_anchoring_spec_wiring() {
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_mode(ModeKind::Bloom);
+        // 内置 bloom.yaml anchoring 段应生效（未显式设置时回退内置）
+        let spec = o.bloom_anchoring_spec();
+        assert!(spec.enabled);
+        assert!(spec.message_sources.iter().any(|s| s == "user"));
+        assert_eq!(spec.deferred_grace_steps, 1);
+        // 显式覆盖优先
+        let custom = BloomAnchoringSpec {
+            enabled: false,
+            ..BloomAnchoringSpec::default()
+        };
+        o.set_anchoring_spec(Some(custom.clone()));
+        assert!(!o.bloom_anchoring_spec().enabled);
+        assert_eq!(o.bloom_anchoring_spec().ptc_tool, custom.ptc_tool);
+    }
+
+    #[test]
+    fn test_anchor_for_turn_restores_session_state() {
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_mode(ModeKind::Bloom);
+        let mut a = AnchorState::new();
+        a.observe_block("we proceed");
+        assert!(a.is_promoted());
+        o.set_anchor(Some(a));
+        let t = o.anchor_for_turn("whatever");
+        assert!(t.is_promoted(), "会话锚定态应保持晋升（跨轮不重锚）");
+        assert!(!t.is_full());
+    }
+
+    #[test]
+    fn test_anchor_for_turn_source_filter_blocks_promotion() {
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_mode(ModeKind::Bloom);
+        o.set_message_source("auto-round");
+        let a = o.anchor_for_turn("we proceed");
+        assert!(
+            !a.is_promoted(),
+            "非白名单来源不得触发晋升分支（梁神 issue #578）"
+        );
+        // 白名单来源可晋升
+        o.set_message_source("user");
+        let b = o.anchor_for_turn("we proceed");
+        assert!(b.is_promoted(), "user 来源可晋升");
+    }
+
+    #[test]
+    fn test_anchor_delegation_reuses_processed_state() {
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_mode(ModeKind::Bloom);
+        // dispatch_bloom 处理后存回 → 委托路径不重复计轮 / 不重复观察
+        let processed = o.anchor_for_turn("we proceed");
+        let turns = processed.turns();
+        o.set_anchor(Some(processed));
+        let delegated = o.anchor_for_delegation("实现登录");
+        assert_eq!(delegated.turns(), turns, "委托路径不得重复计轮");
+        assert!(delegated.is_promoted());
+    }
+
+    #[test]
+    fn test_disabled_anchoring_spec_starts_full() {
+        let mut o = Orchestrator::new(offline_cfg());
+        let spec = BloomAnchoringSpec {
+            enabled: false,
+            ..BloomAnchoringSpec::default()
+        };
+        o.set_anchoring_spec(Some(spec));
+        let a = o.anchor_for_turn("anything");
+        assert!(a.is_full(), "enabled=false 应直接 Full");
     }
 
     #[test]

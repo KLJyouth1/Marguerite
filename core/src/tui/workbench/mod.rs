@@ -133,6 +133,9 @@ pub struct RealEngine {
     route_decision: Option<RouteDecision>,
     /// 项目工作区根目录（可选）：设置后工具/终端/文件沙箱根随项目目录切换。
     workspace: Option<PathBuf>,
+    /// 模式提示段（可选）：显式注入时优先于「按当前模式规格取 prompt_section」
+    /// （Plan 模式的 DSH 规则段走此通道）。
+    mode_section: Option<String>,
 }
 
 impl RealEngine {
@@ -145,6 +148,7 @@ impl RealEngine {
             stable_prefix: None,
             route_decision: None,
             workspace: None,
+            mode_section: None,
         }
     }
 
@@ -176,6 +180,12 @@ impl RealEngine {
     /// 注入 Track A 路由决策（转发到编排器 lead 运行时，驱动思考预算 + prompt 策略注入）。
     pub fn with_route_decision(mut self, decision: Option<RouteDecision>) -> Self {
         self.route_decision = decision;
+        self
+    }
+
+    /// 显式注入模式提示段（优先于按模式规格自动取 prompt_section）。
+    pub fn with_mode_section(mut self, section: Option<String>) -> Self {
+        self.mode_section = section.filter(|s| !s.is_empty());
         self
     }
 
@@ -224,6 +234,13 @@ impl RealEngine {
         // 关键：把进程级运行时模式（前端 mode.switch 切换的 Plan/Agent/Bloom）
         // 应用到本次编排，否则模式切换形同虚设。
         orch.set_mode(crate::mode::runtime_mode());
+        // 模式提示段（DSH 融合 v2 §4 接线收尾）：Plan 模式注入 plan.yaml 的规则段；
+        // 显式注入（with_mode_section）优先，否则按当前模式规格取 prompt_section。
+        let mode_section = self.mode_section.clone().or_else(|| {
+            let kind = crate::mode::runtime_mode();
+            crate::mode::ModeManager::new().spec(kind).prompt_section.clone()
+        });
+        orch.set_mode_section(mode_section);
         orch.set_event_bus(bus.clone(), session.clone());
         if !hint.is_empty() {
             orch.set_experience_hint(hint);
@@ -259,6 +276,7 @@ impl EngineRunner for RealEngine {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
         let config = self.config.clone();
         let evolution = self.evolution.clone();
+        let mode_section = self.mode_section.clone();
         Box::pin(async move {
             Self {
                 config,
@@ -267,6 +285,7 @@ impl EngineRunner for RealEngine {
                 stable_prefix: None,
                 route_decision: None,
                 workspace: None,
+                mode_section,
             }
             .execute_turn(text, session, bus)
             .await

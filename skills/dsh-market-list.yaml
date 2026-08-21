@@ -27,13 +27,13 @@ prompt_template: |
   | 6 | dsh-pet-whale | 1.0.0 | 鲸鱼娘桌宠：摸头 / 投喂 / 状态切换 |
   | 7 | dsh-minigames | 1.0.0 | 18 款离线小游戏（2048 / 井字棋 / 贪吃蛇锚点） |
   | 8 | dsh-router-standard | 0.2.0 | 路由器 3 模式：规划 / 执行 / 弱路由 |
-  | 9 | dsh-presets | 0.1.0 | 预设四档 minimal/standard/code/cordis + 梁神锚定晋升桥接 |
+  | 9 | dsh-presets | 0.1.1-mgr1 | 预设四档 minimal/standard/code/cordis + 梁神锚定晋升桥接（会话级持久 + bootstrap/deferred 已接线） |
   | 10 | dsh-compaction | 0.1.0 | 上下文压缩策略 + 工具结果修剪 + token-meter 压力 |
   | 11 | dsh-goal-round-driver | 0.1.0 | 同会话目标轮次驱动（race-fenced 预留/续跑） |
-  | 12 | dsh-plan-mode | 0.1.0 | 计划模式状态 + exit_plan_mode 审批式退出 |
+  | 12 | dsh-plan-mode | 0.1.0 | 计划模式状态 + exit_plan_mode 审批式退出（prompt_section 规则段已注入） |
   | 13 | dsh-schedule | 0.1.0 | 会话级持久提醒：after / at / every |
   | 14 | dsh-workflow-ralph | 0.1.0 | 模型编排脚本工作流 + ralph 全新代理循环 |
-  | 15 | dsh-session-projection | 0.1.0 | 会话事件投影表：注册 / 快照 / 变更订阅 |
+  | 15 | dsh-session-projection | 0.1.0 | 会话事件投影表：注册 / 快照 / 变更订阅（上游新增 stateSchema/viewSchema 拆分待移植） |
   | 16 | dsh-skill-registry | 0.1.0 | 技能注册表（分层）+ /skills 浏览与远程安装 |
 
   ### 用法提示：

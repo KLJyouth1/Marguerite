@@ -78,6 +78,49 @@ fn runtimes() -> &'static ChatRuntimes {
     R.get_or_init(ChatRuntimes::new)
 }
 
+// ── 会话级锚定台账（DSH 融合 v2 §5 接线收尾）──────────────────────────────
+// 梁神语义：锚定状态属于**会话**（晋升一次、之后保持），而非每轮重建。
+// 编排器按轮新建（dispatch 一次 = 一轮），因此晋升态在此跨轮持久：
+// 每轮开始时取出注入编排器，本轮结束后回收推进后的状态。
+
+/// 会话锚定台账（sessionKey → 锚定态；bounded，防无界增长）
+struct SessionAnchors {
+    map: Mutex<HashMap<String, crate::mode::anchoring::AnchorState>>,
+}
+
+impl SessionAnchors {
+    fn new() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn load(&self, session: &str) -> Option<crate::mode::anchoring::AnchorState> {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .cloned()
+    }
+
+    fn save(&self, session: &str, anchor: crate::mode::anchoring::AnchorState) {
+        const MAX: usize = 1024;
+        let mut guard = self
+            .map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.len() >= MAX && !guard.contains_key(session) {
+            guard.clear();
+        }
+        guard.insert(session.to_string(), anchor);
+    }
+}
+
+fn session_anchors() -> &'static SessionAnchors {
+    static A: OnceLock<SessionAnchors> = OnceLock::new();
+    A.get_or_init(SessionAnchors::new)
+}
+
 /// `chat.send`：接受一轮 Bloom 对话（后台执行，事件经总线回流）
 pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcError> {
     let message = params
@@ -826,6 +869,13 @@ async fn run_turn(
         // 置为 Bloom 模式后走统一的 dispatch 入口：并行由模式路由保证，
         // 而非调用方各自绕开 dispatch 直呼内部方法。
         orch.set_mode(crate::mode::ModeKind::Bloom);
+        // 会话级锚定态（跨轮持久）：取出注入编排器，本轮结束后回收推进后的状态；
+        // 消息源 = user（goal 自动轮接入后按其来源标记，锚定白名单据此过滤）
+        let session_anchor = session_anchors()
+            .load(&session)
+            .unwrap_or_default();
+        orch.set_anchor(Some(session_anchor.clone()));
+        orch.set_message_source("user");
         // Track A：路由决策（思考预算 + prompt 策略）注入 lead 运行时
         orch.set_route_decision(route_decision.clone());
         // 跨会话记忆召回（W-6）：长期 + 短期 + 跨项目记忆合并为稳定前缀 System 消息，
@@ -833,13 +883,19 @@ async fn run_turn(
         if let Some(prefix) = memory_stable_prefix(&text).await {
             orch.set_stable_prefix(prefix);
         }
+        // 智能体人设（agent-instructions，deferred 延迟注入）：锚定期与晋升后
+        // grace 步内扣住，越过才注入（对齐梁神 deferredSources + deferredGraceSteps）
         let persona = agent_personality_hint(&session);
-        if !persona.is_empty() {
+        if !persona.is_empty() && session_anchor.deferred_allows("agent-instructions") {
             orch.set_experience_hint(persona);
         }
         // 重启后上下文恢复：把本会话历史消息灌入 lead，避免每轮从零开始
         orch.load_history(session_history_messages(&session, &text));
         let outcome = orch.dispatch(&text).await?;
+        // 回收本轮推进后的锚定态，跨轮持久（晋升一次后不再重锚）
+        if let Some(advanced) = orch.take_anchor() {
+            session_anchors().save(&session, advanced);
+        }
         // 上下文台账：记录 assistant 回复并自动压缩
         crate::context::session::record_turn(&session, "assistant", &outcome.lead_reply);
         crate::memory::behavior::record_behavior(&session, "assistant_reply", &outcome.lead_reply);

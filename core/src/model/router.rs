@@ -236,6 +236,29 @@ impl ModelRouter {
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
 
+    /// 带输出预算上限的按意图/复杂度路由聊天（锚定 bootstrap 通道）：
+    /// `max_tokens` 为 Some 时仅在**选中主模型**上覆盖输出上限（故障转移链
+    /// 成员保持各自配置），None 时等价 [`ModelRouter::chat_for`]。
+    pub async fn chat_for_capped(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        messages: &[Message],
+        max_tokens: Option<u32>,
+    ) -> Result<LLMResponse> {
+        let primary = match max_tokens {
+            Some(cap) => Arc::new(
+                self.select_model(intent, complexity)
+                    .as_ref()
+                    .clone()
+                    .with_max_tokens(cap),
+            ),
+            None => self.select_model(intent, complexity),
+        };
+        let chain = self.candidate_chain(primary);
+        try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
+    }
+
     /// 非流式聊天
     ///
     /// 默认客户端失败后，按故障转移链（`candidate_chain`）逐级切下一级。
@@ -261,6 +284,28 @@ impl ModelRouter {
             .as_ref()
             .clone()
             .with_adaptive_profile(kind);
+        client.chat_complete_with_tools_cached(messages, tools).await
+    }
+
+    /// 带输出预算上限的工具聊天（锚定 bootstrap 通道）：`max_tokens` 为 Some 时
+    /// 在自适应档之上再覆盖输出上限（首个锚定请求用），None 时等价
+    /// [`ModelRouter::chat_with_tools`]。
+    pub async fn chat_with_tools_capped(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        max_tokens: Option<u32>,
+    ) -> Result<LLMResponse> {
+        let kind = classify_task(messages);
+        let base = self
+            .default_client
+            .as_ref()
+            .clone()
+            .with_adaptive_profile(kind);
+        let client = match max_tokens {
+            Some(cap) => base.with_max_tokens(cap),
+            None => base,
+        };
         client.chat_complete_with_tools_cached(messages, tools).await
     }
 

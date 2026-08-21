@@ -293,6 +293,13 @@ impl LLMClient {
         self
     }
 
+    /// 覆盖输出预算上限（锚定 bootstrap 通道：首个请求注入、之后剥离）。
+    /// 仅改 `max_tokens`，其余配置（thinking/context_window）保持原样。
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.config.max_tokens = max_tokens;
+        self
+    }
+
     /// 极限思考（HLE / Agents' Last Exam 等难推理）：开 Max 思考 + 大思考预算。
     pub fn with_max_thinking(mut self) -> Self {
         self.config.thinking = crate::model::thinking::ThinkingEffort::Max;

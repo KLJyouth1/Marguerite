@@ -101,7 +101,7 @@ impl SessionContext {
 }
 
 /// Agent 运行时
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AgentRuntime {
     /// 会话上下文
     session: SessionContext,
@@ -127,6 +127,46 @@ pub struct AgentRuntime {
     /// Track A 路由决策（思维模式档 + prompt 策略）：由 RealEngine/Gateway 注入，
     /// 在系统消息装配点注入 P1 策略片段（不污染可见会话历史）。默认 None（不注入）。
     route_decision: Option<RouteDecision>,
+    /// 锚定首轮输出预算（bootstrap，一次性）：Some = 首个 LLM 请求注入 `max_tokens`
+    /// 上限，请求发出后立即剥离（对齐梁神 bootstrapMaxTokens：晋升后绝不残留）。
+    /// `Mutex` 内部可变：`run_tool_loop` 等 `&self` 路径需一次性 take（保持 Sync）。
+    bootstrap_max_tokens: std::sync::Mutex<Option<u32>>,
+    /// 技能目录延迟注入开关（锚定 deferred skill-catalog）：true = 本轮工具回路
+    /// 扣住技能/工具指引 System 段（锚定期与晋升后 grace 步内由编排器置 true）。
+    defer_skill_catalog: std::sync::Mutex<bool>,
+    /// 模式提示段（DSH plan-mode 同款规则段）：作为稳定 System 前缀注入模型消息
+    /// 装配（仅追加、不重写历史——红线 #1）。None = 不注入。
+    mode_section: Option<String>,
+}
+
+impl Clone for AgentRuntime {
+    fn clone(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            config: self.config.clone(),
+            model_router: self.model_router.clone(),
+            interrupt_flag: self.interrupt_flag.clone(),
+            classifier: self.classifier.clone(),
+            events: self.events.clone(),
+            event_session: self.event_session.clone(),
+            experience_hint: self.experience_hint.clone(),
+            stable_prefix: self.stable_prefix.clone(),
+            route_decision: self.route_decision.clone(),
+            bootstrap_max_tokens: std::sync::Mutex::new(
+                *self
+                    .bootstrap_max_tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
+            defer_skill_catalog: std::sync::Mutex::new(
+                *self
+                    .defer_skill_catalog
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
+            mode_section: self.mode_section.clone(),
+        }
+    }
 }
 
 impl AgentRuntime {
@@ -146,6 +186,9 @@ impl AgentRuntime {
             experience_hint: None,
             stable_prefix: None,
             route_decision: None,
+            bootstrap_max_tokens: std::sync::Mutex::new(None),
+            defer_skill_catalog: std::sync::Mutex::new(false),
+            mode_section: None,
         }
     }
 
@@ -175,6 +218,45 @@ impl AgentRuntime {
         self.route_decision = Some(d);
     }
 
+    /// 锚定首轮输出预算（一次性）：Some = 首个 LLM 请求注入 `max_tokens` 上限，
+    /// 请求发出后剥离（晋升后绝不残留）。None = 不设限。
+    pub fn set_bootstrap_max_tokens(&mut self, cap: Option<u32>) {
+        *self
+            .bootstrap_max_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = cap;
+    }
+
+    /// 扣住/放行技能目录指引注入（deferred skill-catalog）。
+    pub fn set_defer_skill_catalog(&mut self, defer: bool) {
+        *self
+            .defer_skill_catalog
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = defer;
+    }
+
+    /// 一次性取走锚定首轮输出预算（首个 LLM 请求后剥离）。
+    fn take_bootstrap_max_tokens(&self) -> Option<u32> {
+        self.bootstrap_max_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// 技能目录指引当前是否被扣住（deferred skill-catalog）。
+    fn defer_skill_catalog(&self) -> bool {
+        *self
+            .defer_skill_catalog
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 注入模式提示段（如 plan 模式的 DSH 规则段）：作为稳定 System 前缀
+    /// 参与消息装配（仅追加，红线 #1 不重写历史）。
+    pub fn set_mode_section(&mut self, section: Option<String>) {
+        self.mode_section = section.filter(|s| !s.is_empty());
+    }
+
     /// 统一装配模型消息序列（`process_input` / `chat_stream` / `run_tool_loop` /
     /// `run_tool_loop_stream` 四个入口共用，消除四份重复装配逻辑）。
     ///
@@ -188,6 +270,7 @@ impl AgentRuntime {
     ) -> Vec<Message> {
         let extra = usize::from(tool_guide.is_some())
             + usize::from(self.stable_prefix.is_some())
+            + usize::from(self.mode_section.is_some())
             + usize::from(
                 self.experience_hint
                     .as_ref()
@@ -204,6 +287,14 @@ impl AgentRuntime {
             };
             model_messages.push(Message::System {
                 content,
+                timestamp: Utc::now(),
+            });
+        }
+        // 模式提示段（plan 等模式的静态规则段）：稳定前缀之后、工具指引之前，
+        // 内容不随轮次变化（KV-cache 前缀复用友好）
+        if let Some(section) = &self.mode_section {
+            model_messages.push(Message::System {
+                content: section.clone(),
                 timestamp: Utc::now(),
             });
         }
@@ -318,10 +409,18 @@ impl AgentRuntime {
         let model_messages = self.build_model_messages(&self.session.messages, None);
 
         // 5. 调用 LLM 生成回复（注入经验后的消息序列）
-        let response = self
-            .model_router
-            .chat_for(&intent, complexity, &model_messages)
-            .await;
+        // 锚定 bootstrap：首个请求注入 max_tokens 上限后立即剥离（一次性，
+        // 对齐梁神 bootstrapMaxTokens——晋升后绝不残留进后续请求）
+        let bootstrap_cap = self.take_bootstrap_max_tokens();
+        let response = if bootstrap_cap.is_some() {
+            self.model_router
+                .chat_for_capped(&intent, complexity, &model_messages, bootstrap_cap)
+                .await
+        } else {
+            self.model_router
+                .chat_for(&intent, complexity, &model_messages)
+                .await
+        };
 
         match response {
             Ok(resp) => {
@@ -414,37 +513,50 @@ impl AgentRuntime {
         let max_rounds: u32 = 20;
 
         // 构建工具使用指引系统提示：让模型知道自己有哪些工具、何时该用。
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        let tool_guide = format!(
-            "你是 Marguerite AI 助手，具备以下 {n} 个可调用工具：{names}。\n\
-             重要规则：\n\
-             1. 需要实时信息（新闻/天气/股价/最新文档）时，必须调用 web_search 或 web_research，不要凭记忆编造。\n\
-             2. 需要操作浏览器时，调用 browser 工具（open/click/type/screenshot/a11y/vision_click）。\n\
-             3. 需要操控电脑桌面时，调用 system_control 或 computer_use 工具。\n\
-             4. 需要读写文件/执行命令时，调用 read_file/write_file/edit_file/shell_exec 等工具。\n\
-             5. 需要专业能力时，先调用 list_skills 查看可用技能，再用 use_skill 加载。\n\
-             6. 可以用 create_skill 创建新的可复用技能，用 kb_search 检索本地知识库，用 kb_ingest 灌入文档。\n\
-             7. 主动调用工具完成任务，不要只描述你「会」怎么做——直接去做。工具调用后根据结果继续，直到任务完成。\n\
-             输出格式要求：\n\
-             - 使用 Markdown 格式化回复：标题用 ##，代码用代码块并标注语言，列表用 - 或编号。\n\
-             - 重要结论用**加粗**，关键数据用 `行内代码`。\n\
-             - 步骤类任务用编号列表，每步包含动作和预期结果。\n\
-             - 搜索结果必须标注来源链接。\n\
-             - 先给结论/答案，再给细节，最后给下一步建议。\n\
-             - 复杂任务先列出执行计划，逐步执行，每步报告进度。",
-            n = tool_names.len(),
-            names = tool_names.join(", ")
-        );
+        // 锚定 deferred skill-catalog：扣住时不注入技能目录指引（晋升 + grace 步数
+        // 越过前保持扣住，由编排器按会话锚定态置位）。
+        let tool_guide = if self.defer_skill_catalog() {
+            None
+        } else {
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            Some(format!(
+                "你是 Marguerite AI 助手，具备以下 {n} 个可调用工具：{names}。\n\
+                 重要规则：\n\
+                 1. 需要实时信息（新闻/天气/股价/最新文档）时，必须调用 web_search 或 web_research，不要凭记忆编造。\n\
+                 2. 需要操作浏览器时，调用 browser 工具（open/click/type/screenshot/a11y/vision_click）。\n\
+                 3. 需要操控电脑桌面时，调用 system_control 或 computer_use 工具。\n\
+                 4. 需要读写文件/执行命令时，调用 read_file/write_file/edit_file/shell_exec 等工具。\n\
+                 5. 需要专业能力时，先调用 list_skills 查看可用技能，再用 use_skill 加载。\n\
+                 6. 可以用 create_skill 创建新的可复用技能，用 kb_search 检索本地知识库，用 kb_ingest 灌入文档。\n\
+                 7. 主动调用工具完成任务，不要只描述你「会」怎么做——直接去做。工具调用后根据结果继续，直到任务完成。\n\
+                 输出格式要求：\n\
+                 - 使用 Markdown 格式化回复：标题用 ##，代码用代码块并标注语言，列表用 - 或编号。\n\
+                 - 重要结论用**加粗**，关键数据用 `行内代码`。\n\
+                 - 步骤类任务用编号列表，每步包含动作和预期结果。\n\
+                 - 搜索结果必须标注来源链接。\n\
+                 - 先给结论/答案，再给细节，最后给下一步建议。\n\
+                 - 复杂任务先列出执行计划，逐步执行，每步报告进度。",
+                n = tool_names.len(),
+                names = tool_names.join(", ")
+            ))
+        };
 
         for _ in 0..max_rounds {
             // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
             //（旧实现漏装配稳定前缀，与其余入口不一致，且工具指引非最前）
-            let model_messages = self.build_model_messages(history, Some(&tool_guide));
+            let model_messages = self.build_model_messages(history, tool_guide.as_deref());
 
-            let resp = self
-                .model_router
-                .chat_with_tools(&model_messages, tools)
-                .await?;
+            // 锚定 bootstrap：首个请求注入 max_tokens 上限后立即剥离（一次性）
+            let bootstrap_cap = self.take_bootstrap_max_tokens();
+            let resp = if bootstrap_cap.is_some() {
+                self.model_router
+                    .chat_with_tools_capped(&model_messages, tools, bootstrap_cap)
+                    .await?
+            } else {
+                self.model_router
+                    .chat_with_tools(&model_messages, tools)
+                    .await?
+            };
             if resp.tool_calls.is_empty() {
                 let text = resp.content.clone();
                 history.push(Message::Assistant {
@@ -511,33 +623,38 @@ impl AgentRuntime {
             return Err(anyhow!("run_tool_loop_stream 需要非空 tools 定义"));
         }
         let router = &self.model_router;
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        let tool_guide = format!(
-            "你是 Marguerite AI 助手，具备以下 {n} 个可调用工具：{names}。\n\
-             重要规则：\n\
-             1. 需要实时信息（新闻/天气/股价/最新文档）时，必须调用 web_search 或 web_research，不要凭记忆编造。\n\
-             2. 需要操作浏览器时，调用 browser 工具（open/click/type/screenshot/a11y/vision_click）。\n\
-             3. 需要操控电脑桌面时，调用 system_control 或 computer_use 工具。\n\
-             4. 需要读写文件/执行命令时，调用 read_file/write_file/edit_file/shell_exec 等工具。\n\
-             5. 需要专业能力时，先调用 list_skills 查看可用技能，再用 use_skill 加载。\n\
-             6. 可以用 create_skill 创建新的可复用技能，用 kb_search 检索本地知识库，用 kb_ingest 灌入文档。\n\
-             7. 主动调用工具完成任务，不要只描述你「会」怎么做——直接去做。工具调用后根据结果继续，直到任务完成。\n\
-             输出格式要求：\n\
-             - 使用 Markdown 格式化回复：标题用 ##，代码用代码块并标注语言，列表用 - 或编号。\n\
-             - 重要结论用**加粗**，关键数据用 `行内代码`。\n\
-             - 步骤类任务用编号列表，每步包含动作和预期结果。\n\
-             - 搜索结果必须标注来源链接。\n\
-             - 先给结论/答案，再给细节，最后给下一步建议。\n\
-             - 复杂任务先列出执行计划，逐步执行，每步报告进度。",
-            n = tool_names.len(),
-            names = tool_names.join(", ")
-        );
+        // 锚定 deferred skill-catalog：扣住时不注入技能目录指引
+        let tool_guide = if self.defer_skill_catalog() {
+            None
+        } else {
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+            Some(format!(
+                "你是 Marguerite AI 助手，具备以下 {n} 个可调用工具：{names}。\n\
+                 重要规则：\n\
+                 1. 需要实时信息（新闻/天气/股价/最新文档）时，必须调用 web_search 或 web_research，不要凭记忆编造。\n\
+                 2. 需要操作浏览器时，调用 browser 工具（open/click/type/screenshot/a11y/vision_click）。\n\
+                 3. 需要操控电脑桌面时，调用 system_control 或 computer_use 工具。\n\
+                 4. 需要读写文件/执行命令时，调用 read_file/write_file/edit_file/shell_exec 等工具。\n\
+                 5. 需要专业能力时，先调用 list_skills 查看可用技能，再用 use_skill 加载。\n\
+                 6. 可以用 create_skill 创建新的可复用技能，用 kb_search 检索本地知识库，用 kb_ingest 灌入文档。\n\
+                 7. 主动调用工具完成任务，不要只描述你「会」怎么做——直接去做。工具调用后根据结果继续，直到任务完成。\n\
+                 输出格式要求：\n\
+                 - 使用 Markdown 格式化回复：标题用 ##，代码用代码块并标注语言，列表用 - 或编号。\n\
+                 - 重要结论用**加粗**，关键数据用 `行内代码`。\n\
+                 - 步骤类任务用编号列表，每步包含动作和预期结果。\n\
+                 - 搜索结果必须标注来源链接。\n\
+                 - 先给结论/答案，再给细节，最后给下一步建议。\n\
+                 - 复杂任务先列出执行计划，逐步执行，每步报告进度。",
+                n = tool_names.len(),
+                names = tool_names.join(", ")
+            ))
+        };
         run_tool_loop_streaming(history, registry, events, max_rounds, move |turn| {
             // 经验提示以系统消息前置（与 process_input / run_tool_loop 行为一致），
             // 同时天然落在 P-7 稳定前缀半区，利于 KV-cache 前缀复用。
             // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
             //（修正：旧实现工具指引排在稳定前缀之前，违背 W-6「最前端」契约）
-            let model_messages = self.build_model_messages(&turn, Some(&tool_guide));
+            let model_messages = self.build_model_messages(&turn, tool_guide.as_deref());
             async move { router.chat_stream_with_tools(&model_messages, tools).await }
         })
         .await
