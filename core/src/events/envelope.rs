@@ -318,6 +318,21 @@ impl Envelope {
         )
     }
 
+    /// 模式切换事件（带权限预设溯源）：`permission_origin` 标注新模式的
+    /// 权限预设来源（default / selection / inferred，对齐上游 PR #2608）。
+    pub fn mode_changed_with_origin(session: &str, from: &str, to: &str, origin: &str) -> Self {
+        Envelope::new(
+            EventType::Status,
+            json!({
+                "kind": "mode.changed",
+                "from": from,
+                "to": to,
+                "permission_origin": origin
+            }),
+            session,
+        )
+    }
+
     /// 工具调用事件
     pub fn tool_call(session: &str, tool: &str, arg_keys: &[&str]) -> Self {
         Envelope::new(

@@ -15,6 +15,10 @@ pub mod cli;
 pub mod codeintel;
 pub mod collab;
 pub mod context;
+/// DSH 凭证缝（credentials/authorization 移植，上游 PR #2509）：CredentialKey
+/// `<scope>/<id>` 与 CredentialRef 双名义键空间、api-key/grant 记录、JSON 原子
+/// 落盘台账 + 授权流注册表（方法/通知/提示/结算）。
+pub mod credentials;
 pub mod desktop_automation;
 pub mod deploy;
 pub mod domain;
@@ -45,6 +49,10 @@ pub mod plugins;
 /// 德州扑克游戏引擎（Game Hall / 赌 Token）：纯逻辑、确定性 RNG、可序列化。
 /// 房间模型传输无关；跨机联机需 relay 服务（本切片落地本地多人对战 + AI 座位）。
 pub mod poker;
+/// DSH session-projection fold 契约移植（上游 PR #2730/#2702）：ProjectionUnit
+/// 纯 init/apply fold + 可选 wire.view（host-only 单元无视图）、
+/// SessionProjectionStateMap SQLite 状态表、stateOf/viewOf/replay。
+pub mod projection;
 pub mod pyengine;
 pub mod recovery;
 pub mod research;

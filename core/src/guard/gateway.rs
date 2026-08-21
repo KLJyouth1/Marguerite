@@ -27,6 +27,31 @@ impl Default for RiskLevel {
     }
 }
 
+/// 审批/权限预设的来源（对齐上游 PR #2608 `permission/preset` 的
+/// `origin: default | selection | inferred` 溯源语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalOrigin {
+    /// 内置默认预设（未经用户选择）
+    #[default]
+    Default,
+    /// 用户显式选择（模式切换 / 目录覆盖规格）
+    Selection,
+    /// 启发式推断
+    Inferred,
+}
+
+impl ApprovalOrigin {
+    /// 小写名（wire 值）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalOrigin::Default => "default",
+            ApprovalOrigin::Selection => "selection",
+            ApprovalOrigin::Inferred => "inferred",
+        }
+    }
+}
+
 /// 挂起中的审批
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
@@ -38,6 +63,8 @@ pub struct PendingApproval {
     pub args: String,
     /// 风险等级
     pub risk: RiskLevel,
+    /// 权限预设来源（default / selection / inferred）
+    pub origin: ApprovalOrigin,
     /// 挂起时间
     pub created_at: Instant,
 }
@@ -93,10 +120,23 @@ impl ApprovalGate {
         self.interactive.load(Ordering::SeqCst)
     }
 
-    /// 挂起一个审批请求
+    /// 挂起一个审批请求（权限预设来源 = [`ApprovalOrigin::Default`]）。
     ///
     /// 若已有挂起审批则返回 `None`（一次仅一个）。
     pub fn request(&self, tool: &str, args: String, risk: RiskLevel) -> Option<PendingApproval> {
+        self.request_with_origin(tool, args, risk, ApprovalOrigin::default())
+    }
+
+    /// 挂起一个审批请求，显式标注权限预设来源（上游 PR #2608 溯源语义）。
+    ///
+    /// 若已有挂起审批则返回 `None`（一次仅一个）。
+    pub fn request_with_origin(
+        &self,
+        tool: &str,
+        args: String,
+        risk: RiskLevel,
+        origin: ApprovalOrigin,
+    ) -> Option<PendingApproval> {
         let mut guard = self.pending.lock().unwrap();
         if guard.is_some() {
             return None;
@@ -106,6 +146,7 @@ impl ApprovalGate {
             tool: tool.to_string(),
             args,
             risk,
+            origin,
             created_at: Instant::now(),
         };
         *guard = Some(approval.clone());
@@ -288,6 +329,42 @@ mod tests {
             .unwrap();
         assert_eq!(gate.outcome(&p.id), ApprovalOutcome::Denied);
         assert!(gate.pending().is_none());
+    }
+
+    #[test]
+    fn test_request_defaults_to_default_origin() {
+        let gate = ApprovalGate::new(Duration::from_secs(60));
+        let p = gate
+            .request("edit_file", "{}".into(), RiskLevel::Medium)
+            .unwrap();
+        assert_eq!(p.origin, ApprovalOrigin::Default);
+    }
+
+    #[test]
+    fn test_request_with_origin_carries_selection() {
+        let gate = ApprovalGate::new(Duration::from_secs(60));
+        let p = gate
+            .request_with_origin(
+                "exec",
+                "[]".into(),
+                RiskLevel::High,
+                ApprovalOrigin::Selection,
+            )
+            .unwrap();
+        assert_eq!(p.origin, ApprovalOrigin::Selection);
+        assert!(gate.approve(&p.id));
+    }
+
+    #[test]
+    fn test_origin_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(ApprovalOrigin::Selection).unwrap(),
+            serde_json::json!("selection")
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalOrigin::Inferred).unwrap(),
+            serde_json::json!("inferred")
+        );
     }
 
     #[test]

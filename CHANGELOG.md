@@ -1,6 +1,27 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v4 (P1 机制移植)
+
+Added
+  credentials/mod.rs          → CredentialKey `<scope>/<id>` + CredentialRef 双名义键空间；
+                                 CredentialRecord（api-key | grant tagged）+ CredentialsStore
+                                 （data_dir/credentials.json 原子落盘 + ref 解析 + 损坏回退）
+  credentials/authorization.rs→ AuthorizationRegistry 授权流注册表（method/notice/prompt/status/
+                                 settlement/outcome/entry wire-safe 类型 + begin/settle/last_settlement）
+  projection/mod.rs           → ProjectionUnit 纯 init/apply fold + 可选 wire.view（host-only 无视图）+
+                                 ProjectionStore（SQLite session_projection_state 版本化状态表、
+                                 state_of/view_of/replay）+ TurnCounterUnit/HostAuditUnit 示例单元
+  guard/gateway.rs            → ApprovalOrigin（default|selection|inferred）+ PendingApproval.origin +
+                                 request_with_origin（request = Default，向后兼容）
+  mode/mod.rs                 → ModeManager.spec_origins + spec_origin（内置=Default、目录覆盖=Selection）
+  events/envelope.rs          → Envelope::mode_changed_with_origin（permission_origin 随 mode.changed 下发）
+  docs/dsh-fusion-v4-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 1985 → 2007（+22 新单测）
+  skills/dsh-market-list.yaml → dsh-session-projection 行更新（fold 契约已移植）
+Tests : 2007 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v3 (锚定接线收尾)
 
 Added

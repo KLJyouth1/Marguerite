@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 
 use crate::events::{Envelope, EventBus};
-use crate::guard::gateway::ApprovalGate;
+use crate::guard::gateway::{ApprovalGate, ApprovalOrigin};
 
 pub mod anchoring;
 pub mod ask;
@@ -139,6 +139,9 @@ impl std::fmt::Display for ModeSwitchError {
 pub struct ModeManager {
     current: ModeKind,
     specs: HashMap<ModeKind, ModeSpec>,
+    /// 各模式规格的权限预设来源（内置 = Default；目录覆盖/显式选择 = Selection；
+    /// 对齐上游 PR #2608 permission/preset origin 溯源）
+    spec_origins: HashMap<ModeKind, ApprovalOrigin>,
     gate: Arc<ApprovalGate>,
     /// 模式变更回调（事件总线接入点，A4 事件流上线后替换）
     mode_change_cb: Option<Arc<dyn Fn(ModeChange) + Send + Sync>>,
@@ -154,9 +157,19 @@ impl ModeManager {
         specs.insert(ModeKind::Agent, spec::builtin::agent());
         specs.insert(ModeKind::Ensemble, spec::builtin::bloom());
         specs.insert(ModeKind::Bloom, spec::builtin::bloom());
+        let spec_origins = [
+            ModeKind::Plan,
+            ModeKind::Agent,
+            ModeKind::Ensemble,
+            ModeKind::Bloom,
+        ]
+        .into_iter()
+        .map(|k| (k, ApprovalOrigin::Default))
+        .collect();
         Self {
             current: ModeKind::Agent,
             specs,
+            spec_origins,
             gate: Arc::new(ApprovalGate::default()),
             mode_change_cb: None,
             events: None,
@@ -165,7 +178,8 @@ impl ModeManager {
 
     /// 从目录加载覆盖规格（`~/.marguerite/modes/*.yaml`）
     ///
-    /// 目录不存在或文件缺失时回退内置规格。
+    /// 目录不存在或文件缺失时回退内置规格。覆盖成功的模式其权限预设来源
+    /// 标记为 `Selection`（用户显式提供）。
     pub fn from_dir(dir: &Path) -> Self {
         let mut mgr = Self::new();
         if !dir.exists() {
@@ -181,6 +195,7 @@ impl ModeManager {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(spec) = ModeSpec::from_yaml(&content) {
                     mgr.specs.insert(kind, spec);
+                    mgr.spec_origins.insert(kind, ApprovalOrigin::Selection);
                 }
             }
         }
@@ -189,9 +204,18 @@ impl ModeManager {
         if let Ok(content) = std::fs::read_to_string(&legacy) {
             if let Ok(spec) = ModeSpec::from_yaml(&content) {
                 mgr.specs.insert(ModeKind::Bloom, spec);
+                mgr.spec_origins.insert(ModeKind::Bloom, ApprovalOrigin::Selection);
             }
         }
         mgr
+    }
+
+    /// 某模式规格的权限预设来源（default / selection / inferred）。
+    pub fn spec_origin(&self, mode: ModeKind) -> ApprovalOrigin {
+        self.spec_origins
+            .get(&mode)
+            .copied()
+            .unwrap_or(ApprovalOrigin::Default)
     }
 
     /// 当前模式
@@ -216,12 +240,14 @@ impl ModeManager {
         self.current = to;
         // 作废挂起审批（切换模式后原审批上下文失效）
         self.gate.cancel_pending();
-        // A4 事件流埋点：发布 mode.changed（若已注册事件总线）
+        // A4 事件流埋点：发布 mode.changed + 权限预设溯源（若已注册事件总线）。
+        // origin 取**新模式**规格的来源（Selection = 用户显式选择/目录覆盖）。
         if let Some(bus) = &self.events {
-            bus.publish(Envelope::mode_changed(
+            bus.publish(Envelope::mode_changed_with_origin(
                 "core",
                 change.from.as_str(),
                 self.current.as_str(),
+                self.spec_origin(self.current).as_str(),
             ));
         }
         if let Some(cb) = &self.mode_change_cb {
@@ -600,5 +626,47 @@ mod tests {
         assert_eq!(replayed[0].payload["kind"], "mode.changed");
         assert_eq!(replayed[0].payload["from"], "agent");
         assert_eq!(replayed[0].payload["to"], "bloom");
+        // 权限预设溯源（上游 PR #2608）：内置规格 → default
+        assert_eq!(replayed[0].payload["permission_origin"], "default");
+    }
+
+    #[test]
+    fn test_spec_origin_builtin_default_and_dir_override_selection() {
+        let mgr = ModeManager::new();
+        assert_eq!(mgr.spec_origin(ModeKind::Agent), ApprovalOrigin::Default);
+        assert_eq!(mgr.spec_origin(ModeKind::Bloom), ApprovalOrigin::Default);
+
+        // 目录覆盖 → Selection
+        let dir = std::env::temp_dir().join(format!("mgt_modes_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bloom.yaml"),
+            "name: bloom\nbloom:\n  privileges:\n    auto_approve: true\n",
+        )
+        .unwrap();
+        let overridden = ModeManager::from_dir(&dir);
+        assert_eq!(
+            overridden.spec_origin(ModeKind::Bloom),
+            ApprovalOrigin::Selection,
+            "目录覆盖的规格来源应为 selection"
+        );
+        // 未覆盖的模式仍是默认
+        assert_eq!(overridden.spec_origin(ModeKind::Plan), ApprovalOrigin::Default);
+
+        // 切换事件携带 selection 溯源
+        let bus = Arc::new(EventBus::default());
+        let mut overridden = overridden;
+        overridden.set_event_bus(bus.clone());
+        let since = Instant::now();
+        overridden.switch(ModeKind::Bloom).unwrap();
+        let replayed = bus.history(since);
+        assert_eq!(replayed[0].payload["permission_origin"], "selection");
+    }
+
+    #[test]
+    fn test_approval_origin_as_str_wire_values() {
+        assert_eq!(ApprovalOrigin::Default.as_str(), "default");
+        assert_eq!(ApprovalOrigin::Selection.as_str(), "selection");
+        assert_eq!(ApprovalOrigin::Inferred.as_str(), "inferred");
     }
 }

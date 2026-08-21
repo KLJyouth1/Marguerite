@@ -33,7 +33,7 @@ prompt_template: |
   | 12 | dsh-plan-mode | 0.1.0 | 计划模式状态 + exit_plan_mode 审批式退出（prompt_section 规则段已注入） |
   | 13 | dsh-schedule | 0.1.0 | 会话级持久提醒：after / at / every |
   | 14 | dsh-workflow-ralph | 0.1.0 | 模型编排脚本工作流 + ralph 全新代理循环 |
-  | 15 | dsh-session-projection | 0.1.0 | 会话事件投影表：注册 / 快照 / 变更订阅（上游新增 stateSchema/viewSchema 拆分待移植） |
+  | 15 | dsh-session-projection | 0.1.0 | 会话事件投影表：注册 / 快照 / 变更订阅（fold 契约 + 状态表已移植 projection/） |
   | 16 | dsh-skill-registry | 0.1.0 | 技能注册表（分层）+ /skills 浏览与远程安装 |
 
   ### 用法提示：
