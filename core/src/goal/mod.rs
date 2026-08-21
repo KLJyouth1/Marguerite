@@ -11,7 +11,9 @@
 //! - update（edit/pause/resume/complete/blocked）：状态机迁移，每次 revision+1。
 //! - 会话恢复/fork 后目标自动 disarmed（armed 为会话级、不落库），
 //!   需人工 resume 重新 armed 后才继续自治续轮。
-//! - begin_round：续轮驱动——仅在 armed 且 active 且未达 max_goal_rounds 时放行一轮。
+//! - begin_round：续轮驱动——仅在 armed 且 active 且未达 max_goal_rounds 时放行一轮；
+//!   race-fenced 预留（`begin_round_at`）：持有修订号与当前一致才耗轮，预留成功
+//!   rounds_started+1 且 revision+1，stale 修订号不耗轮（对齐上游 goal-round-driver）。
 //!
 //! 持久化采用 SQLite（rusqlite bundled），路径默认 ~/.marguerite/goal.db，
 //! 测试可用 MARGUERITE_GOAL_DB 环境变量覆盖隔离。
@@ -220,16 +222,47 @@ impl GoalRegistry {
         }
     }
 
-    pub fn begin_round(&mut self) -> bool {
-        if !self.can_continue() { return false; }
+    /// 预留一轮续轮（race-fenced，对齐上游 goal-round-driver）：
+    ///
+    /// 仅当持有修订号 `expected_revision` 与当前目标一致时才消耗轮次——
+    /// 目标已被他人修改（stale 修订号）时不耗轮、返回 false。预留成功
+    /// 本身是一次状态变更：`rounds_started+1` 且 `revision+1`，因此两个
+    /// 驱动以同一修订号并发预留时只有一个成功（不双耗）。
+    pub fn begin_round_at(&mut self, expected_revision: u64) -> bool {
+        let Some(g) = &self.goal else { return false; };
+        if g.revision != expected_revision {
+            return false; // stale：目标已被他人修改
+        }
+        if !self.can_continue() {
+            return false;
+        }
         let g = self.goal.clone().unwrap();
         self.goal = Some(Goal {
             rounds_started: g.rounds_started + 1,
+            revision: g.revision + 1,
             updated_at_ms: Utc::now().timestamp_millis(),
             ..g
         });
         self.persist_quiet();
         true
+    }
+
+    /// 预留一轮续轮（以当前修订号；单驱动兼容入口）。
+    pub fn begin_round(&mut self) -> bool {
+        let Some(rev) = self.revision() else { return false; };
+        self.begin_round_at(rev)
+    }
+
+    /// 当前修订号（无目标返回 None）。
+    pub fn revision(&self) -> Option<u64> {
+        self.goal.as_ref().map(|g| g.revision)
+    }
+
+    /// 持有修订号是否已过期（目标被他人修改）。无目标时任何持有号都视为过期。
+    pub fn is_stale(&self, revision: u64) -> bool {
+        self.goal
+            .as_ref()
+            .is_none_or(|g| g.revision != revision)
     }
 }
 
@@ -493,6 +526,47 @@ mod tests {
         r.create("x", None).unwrap();
         r.pause().unwrap();
         assert!(!r.begin_round());
+    }
+
+    #[test]
+    fn begin_round_at_stale_revision_does_not_consume_round() {
+        let _g = lock_tests();
+        isolated_db("stale_round");
+        let mut r = GoalRegistry::new();
+        let g = r.create("x", None).unwrap();
+        let snapshot = g.revision; // 1
+        // 另一个驱动已消耗一轮（修订号推进）
+        assert!(r.begin_round());
+        // 本驱动仍持旧修订号：stale → 不耗轮（race-fenced 不双耗）
+        assert!(!r.begin_round_at(snapshot));
+        assert_eq!(r.get().unwrap().rounds_started, 1, "stale 预留不得双耗");
+        assert!(r.is_stale(snapshot), "旧修订号应判为过期");
+        // 持当前修订号：成功
+        let current = r.revision().unwrap();
+        assert!(r.begin_round_at(current));
+        assert_eq!(r.get().unwrap().rounds_started, 2);
+        assert!(!r.is_stale(r.revision().unwrap()));
+    }
+
+    #[test]
+    fn begin_round_bumps_revision_as_reservation() {
+        let _g = lock_tests();
+        isolated_db("rev_bump");
+        let mut r = GoalRegistry::new();
+        r.create("x", None).unwrap();
+        assert_eq!(r.revision(), Some(1));
+        assert!(r.begin_round());
+        assert_eq!(r.revision(), Some(2), "预留轮次 = 修订号 +1（race-fenced）");
+        assert_eq!(r.get().unwrap().rounds_started, 1);
+    }
+
+    #[test]
+    fn is_stale_without_goal() {
+        let _g = lock_tests();
+        isolated_db("stale_none");
+        let r = GoalRegistry::new();
+        assert!(r.is_stale(0), "无目标时任何持有号都过期");
+        assert_eq!(r.revision(), None);
     }
 
     #[test]

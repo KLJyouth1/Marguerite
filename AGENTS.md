@@ -31,7 +31,7 @@ npm run test:unit            # Vitest 单测（当前 3044 passed）
 npm run build                # typecheck + vite build + 产物校验（dist/）
 ```
 
-- **测试基线（2026-08-21 v5）**：`marguerite-core` lib **2015 passed + 14 ignored**（含 Bloom 三阶段单测 + dispatch 扇出 + subagent trellis 事件驱动 + DSH 融合 anchoring/deferred/编排器接线 + credentials/authorization + projection fold + 权限溯源 + 凭证缝 LLM 接线 + tokenUsage 投影共 39 项 DSH 融合新单测；测试基建加固见 §4.1）。任何改动后不得回退；若基线变化，同步更新本文件 §2。门禁运行前若 shell 带 `NO_COLOR=1` 需先移除（否则 2 个既有主题测试走单色回退失败，非代码缺陷）。
+- **测试基线（2026-08-21 v6）**：`marguerite-core` lib **2026 passed + 14 ignored**（含 Bloom 三阶段单测 + dispatch 扇出 + subagent trellis 事件驱动 + DSH 融合 anchoring/deferred/编排器接线 + credentials/authorization + projection fold + 权限溯源 + 凭证缝 LLM 接线 + tokenUsage 投影 + goal race-fenced 预留 + persona 组合渲染共 50 项 DSH 融合新单测；测试基建加固见 §4.1）。任何改动后不得回退；若基线变化，同步更新本文件 §2。门禁运行前若 shell 带 `NO_COLOR=1` 需先移除（否则 2 个既有主题测试走单色回退失败，非代码缺陷）。
 - **构建环境坑**：后台 shell 设置 `CARGO_TARGET_DIR` 可能不被采纳，二进制会落到默认 `target/debug/`；冒烟测试前请用默认 target 重新 `cargo build`。D 盘空间不足会导致 `ENOSPC` 写入失败，注意 target / 临时目录位置。
 
 ## 3. 架构不变量（invariants — 违反即缺陷）
@@ -72,7 +72,7 @@ npm run build                # typecheck + vite build + 产物校验（dist/）
 
 1. 改动前先读 `docs/cli-reference.md`（CLI 契约）与 `docs/mcp.md` / `docs/development.md`，确保理解现状。
 2. 改动 CLI 路由 / 子命令 → 同步更新 `argv.rs` 的 `SUBCOMMANDS`、`program.rs` 的路由注册与测试断言，并补 `docs/cli-reference.md` 对应小节。
-3. 改动后运行 `cargo test -p marguerite-core --lib`，保证 2015 基线不回退；必要时更新本文件 §2 基线数字。
+3. 改动后运行 `cargo test -p marguerite-core --lib`，保证 2026 基线不回退；必要时更新本文件 §2 基线数字。
 4. **文档与代码冲突时以代码为权威，回改文档**——不要为了文档去虚构 CLI 动词（如 `mcp connect` 未实现就不应写进手册）；也不要为“凑齐文档示例”去新增未经验证的实现。
 5. 改动 CLI 路由 / 文档示例后，运行 `python3 scripts/check-doc-cli-drift.py`，确保手册不再漂离代码（详见 §6）。
 

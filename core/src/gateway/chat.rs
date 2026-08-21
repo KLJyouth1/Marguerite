@@ -443,17 +443,27 @@ fn cross_project_hint(text: &str) -> String {
 /// 智能体人设/技能注入：会话为 `agent:{agentId}:...` 时，取该智能体的
 /// system_prompt + 技能组合 + 工具清单构造系统提示片段（非智能体会话返回空串）。
 /// 这是「自定义性格与技能组合智能体可与之对话」的真实落地：对话时其性格生效。
-fn agent_personality_hint(session: &str) -> String {
+///
+/// DSH persona 模板解析（v6）：`{{model}}` / `{{cwd}}` 在注入时替换为实际值，
+/// 未知变量替换为空串（对齐上游 persona `{{model}}`/`{{cwd}}` 语义）。
+fn agent_personality_hint(session: &str, model: &str, cwd: &str) -> String {
     let Some(id) = crate::agent::store::agent_id_from_session(session) else {
         return String::new();
     };
-    crate::agent::store::personality_for(id).unwrap_or_default()
+    let raw = crate::agent::store::personality_for(id).unwrap_or_default();
+    if raw.is_empty() {
+        return raw;
+    }
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert("model".to_string(), model.to_string());
+    vars.insert("cwd".to_string(), cwd.to_string());
+    crate::persona::resolve_template(&raw, &vars)
 }
 
 /// 合并跨项目记忆 + 智能体人设为一个注入片段（各段非空才拼接）。
-fn merged_turn_hint(text: &str, session: &str) -> String {
+fn merged_turn_hint(text: &str, session: &str, model: &str, cwd: &str) -> String {
     let cp = cross_project_hint(text);
-    let agent = agent_personality_hint(session);
+    let agent = agent_personality_hint(session, model, cwd);
     match (cp.is_empty(), agent.is_empty()) {
         (false, false) => format!("{cp}\n{agent}"),
         (false, true) => cp,
@@ -844,6 +854,10 @@ async fn run_turn(
         &config.model.model_name,
     );
 
+    // DSH persona 模板变量（v6）：{{model}}/{{cwd}} 注入值
+    let persona_model = config.model.model_name.clone();
+    let persona_cwd = resolve_session_project(&session).unwrap_or_default();
+
     // ── 复杂任务自动拆解（Bloom 长续航）：检测到复杂任务 → 计划驱动长执行 ──
     // 简单/中等任务保持原单轮路径（行为完全向后兼容）。
     if crate::plan::runner::should_auto_decompose(&config, &text) {
@@ -853,7 +867,7 @@ async fn run_turn(
             text.clone(),
             session.clone(),
             private_bus.clone(),
-            merged_turn_hint(&text, &session),
+            merged_turn_hint(&text, &session, &persona_model, &persona_cwd),
         )
         .await?;
         // 上下文台账：记录 assistant 回复（user 输入已在 send 接受时记账）
@@ -896,7 +910,7 @@ async fn run_turn(
         }
         // 智能体人设（agent-instructions，deferred 延迟注入）：锚定期与晋升后
         // grace 步内扣住，越过才注入（对齐梁神 deferredSources + deferredGraceSteps）
-        let persona = agent_personality_hint(&session);
+        let persona = agent_personality_hint(&session, &persona_model, &persona_cwd);
         if !persona.is_empty() && session_anchor.deferred_allows("agent-instructions") {
             orch.set_experience_hint(persona);
         }
@@ -919,7 +933,7 @@ async fn run_turn(
 
     let engine = RealEngine::from_config(config)
         .with_evolution(build_evolution())
-        .with_cross_project_hint(agent_personality_hint(&session))
+        .with_cross_project_hint(agent_personality_hint(&session, &persona_model, &persona_cwd))
         .with_stable_prefix(memory_stable_prefix(&text).await)
         .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from))
         .with_route_decision(Some(route_decision.clone()))

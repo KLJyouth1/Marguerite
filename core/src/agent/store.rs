@@ -368,23 +368,39 @@ pub fn get(id: &str) -> Option<Value> {
 }
 
 /// 按 id 求系统人设片段（对话注入用；业务无关，供 chat 层调用）。
+///
+/// DSH persona 组合语义（v6）：core 段文本含独立 `<!--persona-complete-->`
+/// 标记行时，标记剥除且该段 `complete=true`——其后技能/工具段被阻断不追加
+/// （对齐上游 persona「complete 阻断后续 prompt 追加」）。
 pub fn personality_for(id: &str) -> Option<String> {
     let guard = store().lock().unwrap_or_else(|e| e.into_inner());
     let record = guard.find(id)?;
     if !record.enabled {
         return None;
     }
-    let mut parts: Vec<String> = Vec::new();
+    let mut sections: Vec<crate::persona::PersonaSection> = Vec::new();
     if !record.system_prompt.trim().is_empty() {
-        parts.push(record.system_prompt.trim().to_string());
+        let (content, complete) = crate::persona::strip_complete_marker(record.system_prompt.trim());
+        sections.push(crate::persona::PersonaSection {
+            id: "core".into(),
+            content,
+            complete,
+        });
     }
     if !record.skills.is_empty() {
-        parts.push(format!("技能组合：{}。", record.skills.join("、")));
+        sections.push(crate::persona::PersonaSection::new(
+            "skills",
+            &format!("技能组合：{}。", record.skills.join("、")),
+        ));
     }
     if !record.tools.is_empty() {
-        parts.push(format!("可用工具：{}。", record.tools.join("、")));
+        sections.push(crate::persona::PersonaSection::new(
+            "tools",
+            &format!("可用工具：{}。", record.tools.join("、")),
+        ));
     }
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    let rendered = crate::persona::render_sections(&sections, &std::collections::BTreeMap::new());
+    (!rendered.trim().is_empty()).then_some(rendered)
 }
 
 /// 解析 create 参数中的可选 `history`，转换为抽取式画像所需的 `Vec<Message>`。
@@ -546,6 +562,27 @@ mod tests {
         let del = delete("roundtrip-polite-assistant").expect("delete 应成功");
         assert_eq!(del["deleted"], true);
         assert!(personality_for("roundtrip-polite-assistant").is_none());
+    }
+
+    #[test]
+    fn persona_complete_marker_blocks_skill_and_tool_sections() {
+        // DSH persona complete 语义：core 段含标记 → 技能/工具段被阻断
+        let _ = delete("persona-complete-agent");
+        let _prev = AgentStore::path();
+        create(&json!({
+            "id": "persona-complete-agent",
+            "name": "阻断测试",
+            "system_prompt": "只读我这一句。\n<!--persona-complete-->",
+            "skills": ["礼貌"],
+            "tools": ["web_search"],
+        }))
+        .expect("create 应成功");
+        let p = personality_for("persona-complete-agent").expect("应有人设");
+        assert!(p.contains("只读我这一句"), "core 段应保留: {p}");
+        assert!(!p.contains("<!--persona-complete-->"), "标记应剥除: {p}");
+        assert!(!p.contains("技能组合"), "complete 后技能段应被阻断: {p}");
+        assert!(!p.contains("可用工具"), "complete 后工具段应被阻断: {p}");
+        let _ = delete("persona-complete-agent");
     }
 
     #[test]

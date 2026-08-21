@@ -1,6 +1,19 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v6 (goal race-fence + persona)
+
+Added
+  goal/mod.rs                 → begin_round_at（race-fenced 预留：stale 修订号不耗轮）+ revision()/is_stale()
+                                （预留成功 rounds_started+1 且 revision+1，双驱动不双耗）
+  persona/mod.rs              → PersonaSection 组合渲染 + complete 阻断后续段 + {{model}}/{{cwd}} 模板解析
+  agent/store.rs              → personality_for 改段落化渲染（<!--persona-complete--> 标记剥除并阻断技能/工具段）
+  gateway/chat.rs             → agent_personality_hint(session, model, cwd) 三路径接入模板解析
+  docs/dsh-fusion-v6-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2015 → 2026（+11 新单测）
+Tests : 2026 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v5 (凭证缝/投影接线)
 
 Added
