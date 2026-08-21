@@ -165,6 +165,40 @@ pub fn open(params: &Value) -> Value {
     }
 }
 
+/// `workspaces.create`：新建项目工作区文件夹并注册（对齐 Tauri create_workspace_folder）。
+///
+/// params: `{ name: string }` → `{ workspace: {...} }`。目录落在 data_dir/workspaces/<name>。
+pub fn create(params: &Value) -> Value {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return json!({ "error": "name 不可为空" });
+    }
+    if name.contains("..") || name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
+        return json!({ "error": "目录名不可包含路径分隔符或 .." });
+    }
+    let base = Config::data_dir().join("workspaces");
+    let path = base.join(name);
+    if let Err(e) = std::fs::create_dir_all(&path) {
+        return json!({ "error": format!("创建工作区目录失败({}): {}", path.display(), e) });
+    }
+    let path_str = path.to_string_lossy().to_string();
+    let id = id_for_path(&path_str);
+    let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
+    let entry = WorkspaceEntry {
+        id,
+        name: name.to_string(),
+        path: path_str,
+        pinned: false,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    guard.upsert(entry.clone());
+    json!({ "workspace": view(&entry) })
+}
+
 /// `workspaces.update`：重命名工作区。params: `{ workspaceId, name }`
 pub fn update(params: &Value) -> Value {
     let id = params

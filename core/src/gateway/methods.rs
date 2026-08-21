@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -34,6 +35,25 @@ use crate::tools::builtin::register_builtin_tools;
 // 桌面自动化（Epic C）：启动 / 动作 / 录制 / 闸门。仅类型导入，COM 实现隔离在
 // `desktop_automation::com`（cfg(windows)），非 Windows 下 AppRegistry 不注册 WpsPpt。
 use crate::desktop_automation::{AppKind, AppRegistry, DesktopError, Policy, Recorder, UiAction};
+
+/// AI 最近一次活动时间戳（毫秒）：chat.send 时标记，供 `pet.status` 判定「工作中」态
+static LAST_AGENT_ACTIVITY_MS: AtomicI64 = AtomicI64::new(0);
+
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn mark_agent_active() {
+    LAST_AGENT_ACTIVITY_MS.store(now_ms_i64(), Ordering::Relaxed);
+}
+
+/// 最近 60 秒内是否有 AI 活动（桌宠据此切「工作中」态）
+fn agent_is_running() -> bool {
+    now_ms_i64() - LAST_AGENT_ACTIVITY_MS.load(Ordering::Relaxed) < 60_000
+}
 
 /// §5.2 Python 方法前缀（命中任一前缀，转发到 py_client 调用）
 static PY_ENGINE_PREFIXES: &[&str] = &[
@@ -127,6 +147,8 @@ pub(crate) const ASYNC_ONLY_METHODS: &[&str] = &[
     // 仅异步 dispatch 可达；dispatch_sync 无 async 能力，故归入 async-only，
     // 由 test_supported_methods_subset_of_dispatch 跳过同步校验（客户端走 WS 异步 RPC）。
     "computer_use.action",
+    // modlens 视觉取证为 async（await 视觉模型），仅异步 dispatch 可达
+    "modlens.analyze",
 ];
 
 /// Rust 实现优先的方法：即使命中 Python 前缀，也先走 Rust 实现。
@@ -200,6 +222,18 @@ const RUST_FIRST_METHODS: &[&str] = &[
     "artifacts.register",
     "artifacts.open_in_system",
     "artifacts.edit_inline",
+    // ── 原生功能（Game Hall / 知识图谱 / 鲸鱼娘 / 用量日聚合）──
+    "usage.daily",
+    "kb.graph.view",
+    "kb.graph.related",
+    "pet.status",
+    "pet.action",
+    "poker.create",
+    "poker.join",
+    "poker.start",
+    "poker.action",
+    "poker.state",
+    "poker.auto",
 ];
 
 /// 方法分派入口（异步）：按方法名路由到 Rust 实现或 Python 侧车代理
@@ -241,9 +275,14 @@ pub async fn dispatch(
     }
     // 异步方法族：需后台任务 / 网络，直接在异步上下文实现
     match method {
-        "chat.send" => return chat::send(ctx, &params).await,
+        "chat.send" => {
+            mark_agent_active();
+            return chat::send(ctx, &params).await;
+        }
         "chat.abort" => return chat::abort(ctx, &params).await,
         "skills.install" => return skills_install(ctx, &params).await,
+        // modlens 视觉取证（图片 base64 → 结构化 JSON；无视觉模型降级元数据兜底）
+        "modlens.analyze" => return Ok(modlens_analyze(&params).await),
         // 版本化策略更新：冲突需返回结构化 details，走 async 分支
         "sandbox.policy.update" => return sandbox_policy_update(&params).await,
         // 上下文压缩（B2）：LLM 语义摘要优先、确定性回退，走 async 分支
@@ -920,6 +959,26 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         // ── 用量（真实台账：每次 LLM 调用经 usage::record 落库，status/query 聚合返回）──
         "usage.status" => crate::usage::status(params),
         "usage.query" => crate::usage::query(params),
+        "usage.daily" => crate::usage::daily(params.get("days").and_then(Value::as_u64).unwrap_or(28) as u32),
+        // ── 知识图谱（kb.graph.*，全局图单例：实体-关系可视化）──
+        "kb.graph.view" => kb_graph_view(),
+        "kb.graph.related" => kb_graph_related(params),
+        // ── 鲸鱼娘桌宠（pet.*，持久化 data_dir/pet_state.json）──
+        "pet.status" => {
+            let mut v = crate::workbench::pet::status();
+            if agent_is_running() {
+                v.mood = "working".to_string();
+            }
+            serde_json::to_value(v).unwrap_or(json!({}))
+        }
+        "pet.action" => pet_action(params),
+        // ── 德州扑克游戏大厅（poker.*，全局大厅单例）──
+        "poker.state" => poker_state(params),
+        "poker.create" => poker_create(params),
+        "poker.join" => poker_join(params),
+        "poker.start" => poker_start(params),
+        "poker.action" => poker_do_action(params),
+        "poker.auto" => poker_auto(params),
         // ── 技能（SkillLoader 枚举本地技能目录，映射 WebUI Skill 契约）──
         "skills.list" => skills_list(ctx),
         "skills.get" => skills_get(ctx, params),
@@ -930,6 +989,7 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         // ── 项目工作区（新建任务引导打开/创建项目文件夹；会话绑定项目根目录）──
         "workspaces.list" => crate::gateway::workspaces::list(params),
         "workspaces.open" => crate::gateway::workspaces::open(params),
+        "workspaces.create" => crate::gateway::workspaces::create(params),
         // 文件变更台账（前端「文件更改卡片」数据源：Agent 最近真实改动）
         "workspace.file_changes.list" => file_changes_list(params),
         "artifacts.list" => artifacts_list(params),
@@ -1489,9 +1549,13 @@ pub fn dispatch_sync(
     if is_python_method(method) {
         return Err(RpcError::not_implemented(method));
     }
-    // 异步方法族（chat.* / 远程安装）仅由异步 dispatch 提供
+    // 异步方法族（chat.* / 远程安装 / 视觉取证 / 浏览器）仅由异步 dispatch 提供；
+    // sync 路径返回结构化 ASYNC_ONLY 错误（而非 NOT_IMPLEMENTED），避免客户端误判「功能缺失」。
     if ASYNC_ONLY_METHODS.contains(&method) {
-        return Err(RpcError::not_implemented(method));
+        return Err(RpcError::new(
+            "ASYNC_ONLY",
+            format!("方法 {method} 仅由异步 dispatch（WS RPC）提供，sync 路径不可用"),
+        ));
     }
     let v = dispatch_rust(ctx, method, params);
     if v.is_null() {
@@ -2137,7 +2201,6 @@ fn config_get(ctx: &GatewayContext) -> Value {
         // Bloom 并行编排开关（与 config_patch_local 写入对称）。
         "bloom": {
             "parallel_enabled": cfg.bloom.parallel_enabled,
-            "submode": cfg.bloom.submode,
         },
     })
 }
@@ -2246,6 +2309,36 @@ fn onboarding_provider_configure(ctx: &GatewayContext, params: &Value) -> Value 
     }
 }
 
+/// modlens.analyze：图片(base64) → 结构化 JSON 文档（文字/阅读顺序/语义/版面）。
+/// 无视觉模型时降级为元数据兜底（source=metadata-fallback），绝不静默失败。
+async fn modlens_analyze(params: &Value) -> Value {
+    use base64::Engine as _;
+    let b64 = params
+        .get("imageBase64")
+        .or_else(|| params.get("image_base64"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let hint = params.get("hint").and_then(Value::as_str).unwrap_or("");
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+        Ok(b) => b,
+        Err(e) => return json!({ "ok": false, "error": format!("图片 base64 解码失败: {e}") }),
+    };
+    if bytes.is_empty() {
+        return json!({ "ok": false, "error": "图片数据为空" });
+    }
+    let doc = vision_singleton().analyze_document(&bytes, hint).await;
+    match serde_json::from_str::<Value>(&doc.to_json()) {
+        Ok(document) => json!({ "ok": true, "document": document }),
+        Err(_) => json!({ "ok": false, "error": "视觉文档序列化失败" }),
+    }
+}
+
+/// 进程级视觉能力单例（离线默认；后续可注入真实视觉模型 transport）。
+fn vision_singleton() -> &'static crate::vision::VisionCapability {
+    static V: std::sync::OnceLock<crate::vision::VisionCapability> = std::sync::OnceLock::new();
+    V.get_or_init(crate::vision::VisionCapability::offline_default)
+}
+
 /// `onboarding.provider.probe`：验证 API Key 并尝试连接模型服务商。
 async fn onboarding_provider_probe(params: &Value) -> Value {
     let api_key = params
@@ -2345,12 +2438,16 @@ async fn onboarding_provider_probe(params: &Value) -> Value {
 /// - `squilla_router.self_learning.enabled`（启用时 linked 语义：同步打开 dream）
 /// - `model.provider` / `model.model_name` / `model.base_url` / `model.api_key`（BYOK）
 /// - `guard.syntax` / `guard.semantic` / `guard.fact` / `guard.contract`
-/// - `bloom.parallel_enabled` / `bloom.submode`
+/// - `bloom.parallel_enabled`
 /// - `log.level`
 ///
 /// 未知键静默忽略（保持向后兼容，不把不认识的内容写进 YAML）。
 fn config_patch_local(ctx: &GatewayContext, params: &Value) -> Value {
-    let mut cfg = ctx.config.clone();
+    // 保存前从磁盘重载：ctx.config 是启动快照 clone（mode.switch 改写磁盘但不回写
+    // ctx.config），若直接 clone 快照会因「值未变」误判 unchanged 而跳过落盘，导致
+    // config.get（读磁盘）读到旧值、开关「回弹」。与 mode_switch / models.routing.set /
+    // onboarding.router.configure 一致：保存前一律 Config::load() 取最新落盘态。
+    let mut cfg = Config::load().unwrap_or_else(|_| ctx.config.clone());
     let changed = Cell::new(false);
     let mut linked: Vec<String> = Vec::new();
     let mut restart_required = false;
@@ -2442,7 +2539,6 @@ fn config_patch_local(ctx: &GatewayContext, params: &Value) -> Value {
     // Bloom 并行编排开关（webui 模型策略/对话路由可见）。
     if let Some(bloom) = patches.get("bloom").and_then(Value::as_object) {
         apply_bool(bloom, "parallel_enabled", &mut cfg.bloom.parallel_enabled);
-        apply_str(bloom, "submode", &mut cfg.bloom.submode);
     }
     // 模型路由（webui 路由设置：direct/router/ensemble/bloom）。
     // 此前 config.patch 静默丢弃 model_routing.* → 经 config.patch 路径保存路由时「消失」。
@@ -2504,7 +2600,6 @@ fn config_patch_local(ctx: &GatewayContext, params: &Value) -> Value {
         "bloom.parallel_enabled",
         &mut cfg.bloom.parallel_enabled,
     );
-    apply_str(&patches, "bloom.submode", &mut cfg.bloom.submode);
     // dot-path 形态：模型路由
     apply_str(&patches, "model_routing.mode", &mut cfg.model_routing.mode);
     apply_str(&patches, "model_routing.fusionModel", &mut cfg.model_routing.fusion_model);
@@ -2575,21 +2670,9 @@ fn mode_get() -> Value {
             runtime.as_str()
         }
     };
-    // Bloom 子模式（deep/auto/swarm）：读 Rust config.yaml，空/非法回退 deep。
-    let submode = Config::load()
-        .map(|c| {
-            let s = c.bloom.submode.trim().to_lowercase();
-            if matches!(s.as_str(), "auto" | "swarm") {
-                s
-            } else {
-                "deep".to_string()
-            }
-        })
-        .unwrap_or_else(|_| "deep".to_string());
     json!({
         "kind": effective,
         "runtimeKind": runtime.as_str(),
-        "submode": submode,
         "available": ["plan", "agent", "bloom"],
     })
 }
@@ -2598,7 +2681,6 @@ fn mode_get() -> Value {
 ///
 /// 持久化：写 `config.yaml` 的 `bloom.parallel_enabled`（bloom=true / 其余=false），
 /// 保证重启后仍保持；同时更新进程级运行时模式（立即生效，本次会话即走 bias）。
-/// 可选 `submode`（deep/auto/swarm）仅校验合法值后写入 `bloom.submode`，非法值保持原值。
 /// 返回切换后有效模式与 `mode.get` 同构的快照。
 async fn mode_switch(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcError> {
     let kind = params
@@ -2613,17 +2695,8 @@ async fn mode_switch(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcE
     crate::mode::set_runtime_mode(target);
 
     // 2) 持久化到 config.yaml（bloom ↔ parallel_enabled），重启后仍保持。
-    // 从磁盘加载最新配置（而非启动快照），保证可选字段（submode）基于最新状态
-    // 持久化，避免陈旧内存快照覆盖磁盘上的最新子模式。
     let mut cfg = Config::load().unwrap_or_else(|_| ctx.config.clone());
     cfg.bloom.parallel_enabled = target == crate::mode::ModeKind::Bloom;
-    // 可选子模式：仅 deep/auto/swarm 合法，非法输入静默忽略（保持既有值）。
-    if let Some(submode) = params.get("submode").and_then(Value::as_str) {
-        let s = submode.trim().to_lowercase();
-        if matches!(s.as_str(), "deep" | "auto" | "swarm") {
-            cfg.bloom.submode = s;
-        }
-    }
     if let Err(e) = cfg.save() {
         tracing::warn!("mode.switch：配置持久化失败（运行时模式已生效，重启后可能回退）: {e}");
     }
@@ -2639,7 +2712,6 @@ async fn mode_switch(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcE
         "ok": true,
         "kind": target.as_str(),
         "runtimeKind": crate::mode::runtime_mode().as_str(),
-        "submode": cfg.bloom.submode,
     }))
 }
 
@@ -3534,6 +3606,237 @@ fn memory_list(params: &Value) -> Value {
     json!({ "items": items })
 }
 
+// ───────────────────────────── 原生功能 helper（Game Hall / 图谱 / 桌宠）─────────────────────────────
+
+/// 统一把 `Result<T, String>` 映射为 RPC 返回值：成功 `to_value`，失败 `{ok:false,error}`。
+fn ok_or_err<T: serde::Serialize>(res: Result<T, String>) -> Value {
+    match res {
+        Ok(v) => serde_json::to_value(v).unwrap_or(json!({ "ok": false, "error": "序列化失败" })),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+fn param_str<'a>(params: &'a Value, camel: &str, snake: &str, default: &'a str) -> &'a str {
+    params
+        .get(camel)
+        .or_else(|| params.get(snake))
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+}
+
+fn param_i64(params: &Value, camel: &str, snake: &str, default: i64) -> i64 {
+    params
+        .get(camel)
+        .or_else(|| params.get(snake))
+        .and_then(Value::as_i64)
+        .unwrap_or(default)
+}
+
+// ── 知识图谱 ──
+
+fn kb_graph_view() -> Value {
+    // 关系图谱自动化：从经验台账（历史记忆）自动抽取实体-关系索引进图，
+    // 使图谱反映历史记录/上下文/会话沉淀，而非仅手动灌入。
+    auto_index_experience_graph();
+
+    let graph = match crate::kb::graph::global_graph().lock() {
+        Ok(g) => g,
+        Err(_) => return json!({ "ok": false, "error": "图谱锁获取失败" }),
+    };
+    let mut degree: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in graph.edges() {
+        *degree.entry(e.from.clone()).or_insert(0) += 1;
+        *degree.entry(e.to.clone()).or_insert(0) += 1;
+    }
+    let nodes: Vec<Value> = graph
+        .entities()
+        .into_iter()
+        .map(|id| json!({ "id": id, "degree": degree.get(id).copied().unwrap_or(0) }))
+        .collect();
+    let edges: Vec<Value> = graph
+        .edges()
+        .iter()
+        .map(|e| json!({ "from": e.from, "to": e.to, "kind": e.kind.label(), "weight": e.weight }))
+        .collect();
+    json!({ "nodes": nodes, "edges": edges, "entity_count": graph.entity_count(), "edge_count": graph.edge_count() })
+}
+
+/// 把经验台账（历史记忆）的最近经验自动索引进全局图谱（幂等，按 doc_id 去重）。
+fn auto_index_experience_graph() {
+    let db_path = crate::persistence::config::Config::data_dir().join("marguerite_experience.db");
+    if !db_path.exists() {
+        return;
+    }
+    let mut ledger = crate::memory::experience::ExperienceLedger::new(&db_path);
+    if ledger.init().is_err() {
+        return;
+    }
+    let exps = match ledger.list_recent(100) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if let Ok(mut graph) = crate::kb::graph::global_graph().lock() {
+        for e in &exps {
+            let doc_id = format!("exp:{}", e.id);
+            if graph.entities_in_document(&doc_id).is_empty() {
+                let text = format!("{} {}", e.title, e.body);
+                graph.index_document(&doc_id, &text);
+            }
+        }
+    }
+}
+
+fn kb_graph_related(params: &Value) -> Value {
+    let entity = param_str(params, "entity", "entity", "");
+    let graph = match crate::kb::graph::global_graph().lock() {
+        Ok(g) => g,
+        Err(_) => return json!({ "ok": false, "error": "图谱锁获取失败" }),
+    };
+    json!({ "entity": entity, "related": graph.neighbors(entity) })
+}
+
+// ── 鲸鱼娘 ──
+
+fn pet_action(params: &Value) -> Value {
+    let action = param_str(params, "action", "action", "");
+    ok_or_err(crate::workbench::pet::interact(action))
+}
+
+// ── 德州扑克 ──
+
+fn poker_state(params: &Value) -> Value {
+    let room_id = param_str(params, "roomId", "room_id", "");
+    let hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    match hub.room(room_id) {
+        Some(r) => serde_json::to_value(r).unwrap_or(json!({ "ok": false, "error": "序列化失败" })),
+        None => json!({ "ok": false, "error": "房间不存在" }),
+    }
+}
+
+fn poker_create(params: &Value) -> Value {
+    let name = param_str(params, "name", "name", "牌局").to_string();
+    let sb = param_i64(params, "smallBlind", "small_blind", 5);
+    let bb = param_i64(params, "bigBlind", "big_blind", 10);
+    let mut hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    let id = hub.create_room(name, sb, bb);
+    json!({ "ok": true, "roomId": id })
+}
+
+fn poker_join(params: &Value) -> Value {
+    let room_id = param_str(params, "roomId", "room_id", "");
+    let name = param_str(params, "playerName", "player_name", "玩家").to_string();
+    let tokens = param_i64(params, "tokens", "tokens", 1000);
+    let is_human = params
+        .get("isHuman")
+        .or_else(|| params.get("is_human"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    ok_or_err(hub.join_room(room_id, name, tokens, is_human))
+}
+
+fn poker_start(params: &Value) -> Value {
+    let room_id = param_str(params, "roomId", "room_id", "");
+    let mut hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    ok_or_err(hub.start_room(room_id))
+}
+
+fn poker_do_action(params: &Value) -> Value {
+    use crate::poker::ActionKind;
+    let room_id = param_str(params, "roomId", "room_id", "");
+    let seat = params
+        .get("seat")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let action = param_str(params, "action", "action", "");
+    let amount = params
+        .get("amount")
+        .and_then(Value::as_i64);
+    let kind = match action {
+        "fold" => ActionKind::Fold,
+        "check" => ActionKind::Check,
+        "call" => ActionKind::Call,
+        "raise" => ActionKind::Raise,
+        "all_in" => ActionKind::AllIn,
+        other => return json!({ "ok": false, "error": format!("未知动作: {other}") }),
+    };
+    let mut hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    ok_or_err(hub.act(room_id, seat, kind, amount))
+}
+
+fn poker_auto(params: &Value) -> Value {
+    use crate::poker::{evaluate_7, ActionKind};
+    let room_id = param_str(params, "roomId", "room_id", "");
+    let mut hub = match crate::poker::global_hub().lock() {
+        Ok(h) => h,
+        Err(_) => return json!({ "ok": false, "error": "大厅锁获取失败" }),
+    };
+    for _ in 0..64 {
+        let (hand_over, cur, is_human, to_call, tokens, has_pair, street_high, min_raise) = {
+            let room = match hub.room(room_id) {
+                Some(r) => r,
+                None => return json!({ "ok": false, "error": "房间不存在" }),
+            };
+            let idx = room.current_seat as usize;
+            let p = &room.players[idx];
+            let has_pair = match (p.hole[0], p.hole[1]) {
+                (Some(a), Some(b)) => evaluate_7([a, b], &room.board).category >= 1,
+                _ => false,
+            };
+            (
+                room.hand_over,
+                room.current_seat,
+                p.is_human,
+                room.street_high - p.street_committed,
+                p.tokens,
+                has_pair,
+                room.street_high,
+                room.min_raise,
+            )
+        };
+        if hand_over {
+            return json!({ "ok": true });
+        }
+        if is_human {
+            return json!({ "ok": true });
+        }
+        let (action, amount) = if to_call <= 0 {
+            if has_pair && tokens > min_raise * 2 {
+                (ActionKind::Raise, Some(street_high + min_raise))
+            } else {
+                (ActionKind::Check, None)
+            }
+        } else if to_call >= tokens {
+            if has_pair {
+                (ActionKind::AllIn, None)
+            } else {
+                (ActionKind::Fold, None)
+            }
+        } else {
+            (ActionKind::Call, None)
+        };
+        if let Err(e) = hub.act(room_id, cur, action, amount) {
+            return json!({ "ok": false, "error": e });
+        }
+    }
+    json!({ "ok": true })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3626,9 +3929,9 @@ mod tests {
         assert!(dispatch_sync(&c, "channels.status", &Value::Null).is_ok());
         assert!(dispatch_sync(&c, "channels.pairings", &Value::Null).is_ok());
         assert!(dispatch_sync(&c, "memory.list", &json!({ "limit": 10 })).is_ok());
-        // 异步方法（chat.*）走 dispatch_sync 仍为 NOT_IMPLEMENTED（须走异步 dispatch）
+        // 异步方法（chat.*）走 dispatch_sync 返回结构化 ASYNC_ONLY 错误（须走异步 dispatch）
         let err = dispatch_sync(&c, "chat.send", &json!({})).unwrap_err();
-        assert_eq!(err.code, "NOT_IMPLEMENTED");
+        assert_eq!(err.code, "ASYNC_ONLY");
     }
 
     #[test]
@@ -3752,9 +4055,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_submode_mode_switch_and_config_roundtrip() {
-        // Bloom 子模式：mode.switch 写 `bloom.submode`（YAML），mode.get / config.get
-        // 对称读回；非法子模式被忽略，保持既有值。
+    fn test_bloom_mode_switch_and_config_roundtrip() {
+        // 统一 Bloom（无 submode）：mode.switch 写 `bloom.parallel_enabled`（YAML），
+        // mode.get / config.get 对称读回；非法模式被拒绝。
         let c = ctx();
         let _g = CONF_HOME_GUARD
             .get()
@@ -3764,49 +4067,40 @@ mod tests {
         let _ = crate::mode::set_runtime_mode(crate::mode::ModeKind::Agent);
         let mut cfg = c.config.clone();
         cfg.bloom.parallel_enabled = false;
-        cfg.bloom.submode = "deep".to_string();
         let _ = cfg.save();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        // 切到 bloom + swarm 子模式（异步分支）
+        // 切到 bloom（异步分支）
         let r = rt
-            .block_on(mode_switch(
-                &c,
-                &json!({ "kind": "bloom", "submode": "swarm" }),
-            ))
+            .block_on(mode_switch(&c, &json!({ "kind": "bloom" })))
             .unwrap();
-        assert_eq!(r["submode"], "swarm");
-        assert_eq!(Config::load().unwrap().bloom.submode, "swarm");
-        // mode.get 反映 submode
+        assert_eq!(r["kind"], "bloom");
+        assert_eq!(Config::load().unwrap().bloom.parallel_enabled, true);
+        // mode.get 反映 bloom
         let g = dispatch_sync(&c, "mode.get", &Value::Null).unwrap();
-        assert_eq!(g["submode"], "swarm");
-        // 非法子模式被忽略（保持 swarm）
-        let _ = rt
-            .block_on(mode_switch(
-                &c,
-                &json!({ "kind": "bloom", "submode": "bogus" }),
-            ))
-            .unwrap();
-        assert_eq!(Config::load().unwrap().bloom.submode, "swarm");
+        assert_eq!(g["kind"], "bloom");
 
-        // config.patch.safe 写 bloom.submode → config.get 对称读回
+        // config.patch.safe 写 bloom.parallel_enabled → config.get 对称读回
         let v = dispatch_sync(
             &c,
             "config.patch.safe",
             &json!({
-                "patches": { "bloom": { "submode": "auto" } }
+                "patches": { "bloom": { "parallel_enabled": false } }
             }),
         )
         .unwrap();
         assert_eq!(v["ok"], true);
-        assert_eq!(config_get(&c)["bloom"]["submode"], "auto");
+        assert_eq!(config_get(&c)["bloom"]["parallel_enabled"], false);
 
-        // 复位：agent + deep，避免污染共享 config.yaml
+        // 非法模式被拒绝
+        let err = rt
+            .block_on(mode_switch(&c, &json!({ "kind": "bogus" })))
+            .unwrap_err();
+        assert_eq!(err.code, "INVALID_REQUEST");
+
+        // 复位：agent，避免污染共享 config.yaml
         let _ = rt
-            .block_on(mode_switch(
-                &c,
-                &json!({ "kind": "agent", "submode": "deep" }),
-            ))
+            .block_on(mode_switch(&c, &json!({ "kind": "agent" })))
             .unwrap();
     }
 

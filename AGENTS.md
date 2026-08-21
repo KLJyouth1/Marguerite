@@ -31,7 +31,7 @@ npm run test:unit            # Vitest 单测（当前 3044 passed）
 npm run build                # typecheck + vite build + 产物校验（dist/）
 ```
 
-- **测试基线（2026-08-10）**：`marguerite-core` lib **1057 passed + 2 ignored**（含统一网关 gateway/ 40+ 测试）。任何改动后不得回退；若基线变化，同步更新本文件 §2 与 `docs/cli-tui-optimization-plan.md`。
+- **测试基线（2026-08-21）**：`marguerite-core` lib **1976 passed + 14 ignored**（含 Bloom 三阶段单测 + dispatch 扇出 + subagent trellis 事件驱动 + DSH 融合 anchoring 4 新单测；测试基建加固见 §4.1）。任何改动后不得回退；若基线变化，同步更新本文件 §2。
 - **构建环境坑**：后台 shell 设置 `CARGO_TARGET_DIR` 可能不被采纳，二进制会落到默认 `target/debug/`；冒烟测试前请用默认 target 重新 `cargo build`。D 盘空间不足会导致 `ENOSPC` 写入失败，注意 target / 临时目录位置。
 
 ## 3. 架构不变量（invariants — 违反即缺陷）
@@ -42,10 +42,25 @@ npm run build                # typecheck + vite build + 产物校验（dist/）
 4. **内部可变性范式**：跨 `await` 共享状态用 `Arc<Mutex<T>>`；克隆锁再跨 await，避免 `MutexGuard` 非 Send。
 5. **治理双闭环**：执行前 `PlanGate`（宪法 C1–C4）、产出后 `CompletionGate`（四检查 + 自报文件落盘核验）。
 6. **CLI 输出契约**：结构化错误走 stderr + 退出码；`--json` 输出 `{ok,data,meta}`；尊重 `NO_COLOR`；文本标记用 ASCII `[OK]/[FAIL]`，**禁止 emoji 图标**。
-7. **路由三处同步**：`cli/argv.rs` 的 `SUBCOMMANDS`、`program.rs` 的 `route_table.register(...)`、`test_program_*` 的路由计数断言必须一致。当前 **13 个路由**：`doctor` / `model` / `mcp` / `skills` / `session` / `exec` / `sandbox` / `subagent` / `browser` / `deploy` / `serve` / `chat` / `gateway`。
+7. **路由三处同步**：`cli/argv.rs` 的 `SUBCOMMANDS`、`program.rs` 的 `route_table.register(...)`、`test_program_*` 的路由计数断言必须一致。当前 **18 个路由**：`doctor` / `model` / `mcp` / `skills` / `session` / `exec` / `deploy` / `serve` / `sandbox` / `subagent` / `team` / `browser` / `chat` / `gateway` / `goal` / `capabilities` / `cache` / `dispatch`。
+
+### 3.1 Bloom 模式与插件系统的设计红线（anti-patterns；策划 §三 + bloom.yaml）
+
+> 以下两条来源于 dsh-forge 的反模式警告，已在 `core/src/mode/modes/bloom.yaml` 的 `anti_patterns` 字段声明，同时由代码侧**强制守卫**；任何绕过守卫的实现都视作缺陷。
+
+8. **红线 #1：禁止全上下文重注入**（dsh-forge："禁止全上下文重注入"）
+   - 会话内只允许**增量追加**消息；禁止替换 system 提示、禁止回滚或重置整段历史。
+   - 插件侧实现：`plugins/di.rs::PluginLoader::discover` 会扫描 `plugin.json` 是否包含 `system_prompt` / `full_context` 字段，并把插件名加入 `context_leak_suspects()`；上层启动时必须拒绝启用该列表中的插件（或至少显式告警 + require-ack）。
+   - 持久注册表 `PluginRegistryFile::entries` 的 schema 中**不得**出现以上字段；新增序列化字段时代码评审要对照本 invariant。
+
+9. **红线 #2：避免中途替换工具面**（dsh-forge："避免中途替换工具面"）
+   - 会话内工具/服务集合必须**单调扩展**；Bloom 三段锚定（`core/src/mode/anchoring.rs::AnchorStage::{Anchored→Ptc→Full}`）只加工具不撤回；PTC 阶段不得回退到锚定工具集；不得随机重置已提供的服务。
+   - 插件侧实现：`plugins/di.rs::PluginLoader::guarded_provide::<T>` 在 `T` 的 `TypeId` 已出现于 `applied_service_types` 时**返回 Err 并指明红线违规**；只有 `reload_plugin()` 作为显式管理动作会清空该集合并允许替换。
+   - 任何直接 `ServiceContainer::provide`（无 guard 包装）替换了同一 TypeId 的代码，在 CI lint 中应被标注为「潜在红线违规」。
 
 ## 4. 已知坑（gotchas）
 
+- **系统代理劫持 loopback（测试隐雷）**：本机常开 Windows 系统代理（Clash 127.0.0.1:7890），reqwest 会把部分 127.0.0.1 请求也走代理——「关闭端口必被拒」等网络假设会失效（被代答 502，而 502 是可重试错误）。测试一律用「本地 mock 监听器回明确状态码」（400 不可重试 / 404 非可达），禁止用连接拒绝作为确定性失败源；单次 accept 的 mock 必须循环应答（对话流程含经验抽取等第 2 次请求，单发 mock 会让流程挂死）。公共基建见 `core/src/tests/mock_http.rs`（完整读请求后再应答，防分段读半截）。
 - **D 盘写满 ENOSPC**：构建产物目录若落在 D 盘且空间不足会失败。
 - **tokio::test TCP 端到端**：客户端必须用 `tokio::net::TcpStream`（异步），**绝不**用同步 `std::net::TcpStream`——后者阻塞 runtime worker，单核环境致 accept 饿死、连接超时（错误码 10060）。
 - **`rm` 被 safe-delete 钩子拦截且 fail-closed**：本环境 `rm` 经 genie-trash 包装，相对路径会被拒、且失败时**拒绝删除（文件保留）**。确需删除请用绝对路径，或直接用托管 Python `os.remove()` 真删；脚本/CI 删除不可用裸 `rm`。
@@ -57,7 +72,7 @@ npm run build                # typecheck + vite build + 产物校验（dist/）
 
 1. 改动前先读 `docs/cli-reference.md`（CLI 契约）与 `docs/mcp.md` / `docs/development.md`，确保理解现状。
 2. 改动 CLI 路由 / 子命令 → 同步更新 `argv.rs` 的 `SUBCOMMANDS`、`program.rs` 的路由注册与测试断言，并补 `docs/cli-reference.md` 对应小节。
-3. 改动后运行 `cargo test -p marguerite-core --lib`，保证 928 基线不回退；必要时更新本文件 §2 基线数字。
+3. 改动后运行 `cargo test -p marguerite-core --lib`，保证 1976 基线不回退；必要时更新本文件 §2 基线数字。
 4. **文档与代码冲突时以代码为权威，回改文档**——不要为了文档去虚构 CLI 动词（如 `mcp connect` 未实现就不应写进手册）；也不要为“凑齐文档示例”去新增未经验证的实现。
 5. 改动 CLI 路由 / 文档示例后，运行 `python3 scripts/check-doc-cli-drift.py`，确保手册不再漂离代码（详见 §6）。
 

@@ -126,6 +126,13 @@ pub struct PluginManifest {
     /// 分层 bundle 依赖（按 `topo_order` 有序加载），声明本插件依赖的其它插件名。
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// 本插件声明会订阅或发布的事件路由键名（DSH 二创扩展）。
+    ///
+    /// 与 `EventBus` 主题模式一致，可用通配（`*` / `**`）；仅用于文档 / 对账 / 订阅自动注册。
+    ///
+    /// 例：`["vision.recognized", "slash.**", "agent.*", "usage.daily"]`
+    #[serde(default)]
+    pub events: Vec<String>,
     /// 能力级模型路由：能力名 → 模型偏好（如 "opus"/"sonnet"/"inherit"），
     /// 供 `agent::multi_strategy` 的 fleet 路由消费（每能力指定目标模型）。
     #[serde(default)]
@@ -138,7 +145,7 @@ impl PluginManifest {
         serde_json::from_str(s).map_err(Into::into)
     }
 
-    /// 推导能力名集合（显式 capabilities + 各子结构自动登记键）。
+    /// 推导能力名集合（显式 capabilities + 各子结构自动登记键 + events 派生订阅能力）。
     fn derived_capabilities(&self) -> Vec<String> {
         let mut caps: Vec<String> = self.capabilities.clone();
         for h in &self.hooks {
@@ -156,6 +163,14 @@ impl PluginManifest {
         if !self.skills.is_empty() {
             caps.push("skill.invoke".to_string());
         }
+        // DSH 二创扩展：每条事件订阅路由登记为 `event.<pattern>` 能力，
+        // 以便 `PluginRegistry` 可按事件模式反向查询感兴趣的插件。
+        for e in &self.events {
+            let key = format!("event.{}", e);
+            if !caps.contains(&key) {
+                caps.push(key);
+            }
+        }
         caps
     }
 
@@ -170,6 +185,13 @@ impl PluginManifest {
     /// 取得分层 bundle 依赖列表（按 `topo_order` 有序加载）。
     pub fn dependencies(&self) -> &[String] {
         &self.dependencies
+    }
+
+    /// 取得本插件声明的事件路由键列表（DSH 二创扩展）。
+    ///
+    /// 与 `EventBus` 主题模式一致，可用通配；用于订阅自动注册与能力对账。
+    pub fn events(&self) -> &[String] {
+        &self.events
     }
 }
 
@@ -628,5 +650,137 @@ mod tests {
         )
         .unwrap();
         assert!(topo_order(&[a, b]).is_err(), "a<->b 环应被拒绝");
+    }
+
+    // ---- DSH 二创扩展：events 字段测试 ----
+
+    const DSH_MODLENS: &str = r#"{
+        "name": "dsh-modlens",
+        "version": "0.1.0-dsh",
+        "description": "DSH Modlens 二创：纯文本模型识图能力",
+        "author": "marguerite-dsh",
+        "capabilities": ["dsh.vision.img2txt", "dsh.vision.extract_json"],
+        "events": ["vision.recognized", "slash.recognize", "agent.paste"],
+        "hooks": [
+            {"event": "PreToolUse", "handler": "modlens_prepare", "params": {"step": "ocr"}}
+        ],
+        "slash_commands": [
+            {"name": "/recognize", "description": "识别剪贴板/附件图片", "arguments": ["format"]}
+        ]
+    }"#;
+
+    #[test]
+    fn dsh_events_field_parses_and_getter_works() {
+        let m = PluginManifest::from_json(DSH_MODLENS).unwrap();
+        assert_eq!(m.name, "dsh-modlens");
+        assert_eq!(
+            m.events(),
+            &[
+                "vision.recognized".to_string(),
+                "slash.recognize".to_string(),
+                "agent.paste".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dsh_events_derived_as_event_capabilities() {
+        let m = PluginManifest::from_json(DSH_MODLENS).unwrap();
+        let caps = m.derived_capabilities();
+        // 显式能力
+        assert!(caps.contains(&"dsh.vision.img2txt".to_string()));
+        assert!(caps.contains(&"dsh.vision.extract_json".to_string()));
+        // events → event.<pattern> 派生能力
+        assert!(caps.contains(&"event.vision.recognized".to_string()));
+        assert!(caps.contains(&"event.slash.recognize".to_string()));
+        assert!(caps.contains(&"event.agent.paste".to_string()));
+        // hooks + slash 派生能力不应缺失
+        assert!(caps.contains(&"hook.modlens_prepare".to_string()));
+        assert!(caps.contains(&"slash.commands".to_string()));
+    }
+
+    // ---- T-1.2：8 份 DSH manifest 实装验证 ----
+
+    /// 从工作区 manifests 目录加载全部 DSH manifest（允许环境变量覆盖路径）。
+    fn load_dsh_manifests_from_disk() -> Vec<(std::path::PathBuf, PluginManifest)> {
+        let base = std::env::var("DSH_MANIFEST_DIR")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                // 相对当前 cargo manifest dir：core → workspace root → plugins/manifests
+                let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("..")
+                    .join("plugins")
+                    .join("manifests");
+                root
+            });
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("dsh-") && n.ends_with(".plugin.json"))
+                    .unwrap_or(false)
+                {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        if let Ok(m) = PluginManifest::from_json(&text) {
+                            out.push((path, m));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[test]
+    fn load_all_8_dsh_manifests_success() {
+        let list = load_dsh_manifests_from_disk();
+        // 如果运行环境里找不到 manifests 目录（例如 CI 只编译 core），则跳过而非失败。
+        if list.is_empty() {
+            eprintln!(
+                "skip: no dsh-*.plugin.json found under DSH_MANIFEST_DIR or default path"
+            );
+            return;
+        }
+        assert_eq!(
+            list.len(),
+            8,
+            "应找到 8 份 DSH 二创 manifest，实际 {} 份：{:?}",
+            list.len(),
+            list.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>()
+        );
+        for (path, m) in &list {
+            // 8 字段齐全：name/version/description/capabilities/hooks/slash_commands/subagents/skills
+            assert!(!m.name.is_empty(), "name empty @ {}", path.display());
+            assert!(!m.version.is_empty(), "version empty @ {}", path.display());
+            assert!(!m.description.is_empty(), "description empty @ {}", path.display());
+            // capabilities / hooks / slash_commands / subagents / skills 字段必须存在
+            // （结构上均为 Vec，空也视为"存在"；此处用 manifest 结构本身保证）
+            let has_ext = !m.dependencies.is_empty() || !m.events.is_empty();
+            assert!(
+                has_ext,
+                "manifest {} 至少应包含 dependencies 或 events 其中一个扩展字段",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn at_least_6_manifests_have_ext_fields_populated() {
+        let list = load_dsh_manifests_from_disk();
+        if list.is_empty() {
+            eprintln!("skip: no manifests on disk");
+            return;
+        }
+        let n = list
+            .iter()
+            .filter(|(_, m)| !m.dependencies.is_empty() || !m.events.is_empty())
+            .count();
+        assert!(n >= 6, "至少 6 份 manifest 实装了扩展字段，实际 {n}");
     }
 }

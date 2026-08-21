@@ -174,6 +174,48 @@
             </li>
           </ul>
         </div>
+
+        <!-- 文件树 -->
+        <div v-if="activeTab === 'tree'" class="rs-section">
+          <div class="rs-tree-toolbar">
+            <button type="button" class="rs-icon-btn" title="上级目录" :disabled="treeStack.length === 0" @click="goUpTree">
+              <Icon name="chevronLeft" :size="14" />
+            </button>
+            <span class="rs-tree-path" :title="treePath">{{ treePath || '工作区根目录' }}</span>
+            <button type="button" class="rs-icon-btn" title="刷新" @click="loadTree(treePath)">
+              <Icon name="refresh" :size="14" />
+            </button>
+          </div>
+          <div v-if="treeError" class="rs-diagnostic">
+            <Icon name="alertTriangle" :size="14" />
+            <span>{{ treeError }}</span>
+          </div>
+          <div v-if="treeLoading" class="rs-empty">
+            <p>加载中…</p>
+          </div>
+          <ul v-else-if="treeEntries.length > 0" class="rs-tree-list">
+            <li v-for="e in treeEntries" :key="e.path" class="rs-tree-item">
+              <button
+                type="button"
+                class="rs-tree-row"
+                :class="{ 'rs-tree-row--file': e.kind === 'file' }"
+                :title="e.path"
+                @click="enterTree(e)"
+              >
+                <Icon
+                  :name="e.kind === 'directory' ? 'folder' : 'fileText'"
+                  :size="14"
+                  :style="{ color: e.kind === 'directory' ? 'var(--accent)' : 'var(--text-muted)' }"
+                />
+                <span class="rs-tree-name">{{ e.name }}</span>
+              </button>
+            </li>
+          </ul>
+          <div v-else-if="!treeLoading" class="rs-empty">
+            <Icon name="folder" :size="28" :opacity="0.3" />
+            <p>（空目录）</p>
+          </div>
+        </div>
       </div>
     </aside>
   </Transition>
@@ -194,9 +236,10 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
-import type { ArtifactPayload } from '@/types/rpc'
+import type { ArtifactPayload, SandboxPathEntry } from '@/types/rpc'
 import { classifyArtifact, type ArtifactKindDescriptor } from '@/utils/artifactKind'
 import { useToasts } from '@/composables/useToasts'
+import { useRpcStore } from '@/stores/rpc'
 
 export interface RsTask {
   title: string
@@ -240,7 +283,7 @@ const emit = defineEmits<{
   compose: []
 }>()
 
-const activeTab = ref<'tasks' | 'artifacts' | 'changes'>('tasks')
+const activeTab = ref<'tasks' | 'artifacts' | 'changes' | 'tree'>('tasks')
 // Persist width across mounts so navigating away and back keeps the chosen
 // layout instead of resetting to the narrow column.
 const RIGHT_SIDEBAR_WIDE_KEY = 'marguerite.chat.rightSidebarWide'
@@ -253,7 +296,50 @@ const tabs = computed(() => [
   { id: 'tasks' as const, label: '任务', icon: 'listChecks' as IconName, count: props.tasks.filter(t => t.status === 'running').length },
   { id: 'artifacts' as const, label: '产物', icon: 'fileText' as IconName, count: props.artifacts.length },
   { id: 'changes' as const, label: '更改', icon: 'fork' as IconName, count: props.changes.length },
+  { id: 'tree' as const, label: '树', icon: 'listTree' as IconName, count: 0 },
 ])
+
+// ── 文件树（工作区目录浏览，数据源 sandbox.path.list）──
+const rpc = useRpcStore()
+const treePath = ref('')
+const treeEntries = ref<SandboxPathEntry[]>([])
+const treeLoading = ref(false)
+const treeError = ref('')
+const treeStack = ref<string[]>([])
+
+async function loadTree(path: string) {
+  treeLoading.value = true
+  treeError.value = ''
+  try {
+    const res = await rpc.call<{ entries: SandboxPathEntry[] }>('sandbox.path.list', { path })
+    treeEntries.value = (res.entries || []).filter((e) => !e.hidden)
+    treePath.value = path
+  } catch (e) {
+    treeError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    treeLoading.value = false
+  }
+}
+
+function enterTree(entry: SandboxPathEntry) {
+  if (entry.kind !== 'directory') return
+  treeStack.value.push(treePath.value)
+  void loadTree(entry.path)
+}
+
+function goUpTree() {
+  const parent = treeStack.value.pop()
+  void loadTree(parent ?? '')
+}
+
+watch(
+  () => activeTab.value,
+  (tab) => {
+    if (tab === 'tree' && treeEntries.value.length === 0 && !treeLoading.value) {
+      void loadTree('')
+    }
+  },
+)
 
 /** Stable key: prefer id, then download_url, then path+name. */
 function artifactKey(a: RsArtifact): string {
@@ -599,6 +685,21 @@ function copyArtifactPath(account: RsArtifact) {
 .rs-change__path { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono, monospace); font-size: 11px; }
 .rs-change__add { color: var(--ok); font-size: 11px; font-weight: 600; font-family: var(--font-mono, monospace); }
 .rs-change__del { color: var(--danger); font-size: 11px; font-weight: 600; font-family: var(--font-mono, monospace); }
+
+/* File tree */
+.rs-tree-toolbar { display: flex; align-items: center; gap: 6px; padding: 4px 6px; }
+.rs-tree-path { flex: 1; font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono, monospace); }
+.rs-tree-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.rs-tree-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 8px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); font-size: 12px; cursor: pointer; text-align: left;
+  transition: background var(--dur-fast, 120ms) var(--ease-standard);
+}
+.rs-tree-row:hover { background: var(--bg-hover); }
+.rs-tree-row--file { cursor: default; }
+.rs-tree-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rs-icon-btn:disabled { opacity: 0.4; cursor: default; }
 
 .rs-slide-enter-active, .rs-slide-leave-active { transition: transform var(--dur-normal, 200ms) var(--ease-standard); }
 .rs-slide-enter-from, .rs-slide-leave-to { transform: translateX(100%); }

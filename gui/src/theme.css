@@ -93,3 +93,66 @@ button {
 }
 
 a { color: var(--accent-primary); text-decoration: none; }
+
+/* ─────────────────────────────────────────────────────────────
+ * 中国水墨主题（剑侠江湖 · 泼墨风）— data-theme="ink"
+ * 宣纸底 / 浓淡墨文本 / 朱砂红主色 / 竹青强调，无紫粉渐变（P0-2 合规）。
+ * 全部经 CSS Token 引用，无硬编码颜色值（P0-3 合规）。
+ * ───────────────────────────────────────────────────────────── */
+:root[data-theme="ink"] {
+  /* 朱砂红（印章主色） */
+  --accent-primary: #B23A2E;
+  --accent-primary-50: #FBF1EE;
+  --accent-primary-100: #F3DCD5;
+  --accent-primary-200: #D9A79B;
+  --accent-primary-300: #C87667;
+  --accent-primary-700: #8E2A20;
+  --accent-primary-900: #5C1B15;
+  --accent-primary-on: #FFFFFF;
+
+  /* 竹青（山水强调色） */
+  --accent-secondary: #2F5D50;
+  --accent-secondary-50: #EEF5F1;
+  --accent-secondary-100: #D8E8E0;
+  --accent-secondary-200: #9CC0B3;
+  --accent-secondary-300: #6FA394;
+  --accent-secondary-700: #1F453A;
+  --accent-secondary-on: #FFFFFF;
+
+  /* 宣纸与墨色表面 */
+  --surface-bg: #F4F0E6;
+  --surface-card: #FCFAF3;
+  --surface-sidebar: #F7F3EA;
+  --surface-toolbar: #F7F3EA;
+  --surface-hover: #EDE7D9;
+  --surface-border: #DCD3BF;
+  --surface-divider: #DCD3BF;
+
+  /* 浓墨 / 淡墨 / 烟墨 */
+  --text-primary: #23282D;
+  --text-secondary: #6E655A;
+  --text-tertiary: #9B9184;
+  --text-on-primary: #FFFFFF;
+  --text-on-secondary: #FFFFFF;
+
+  /* 松烟 / 秋香 / 朱砂 / 黛青 语义色 */
+  --status-success: #3E7C59;
+  --status-warning: #C08A3E;
+  --status-error: #B23A2E;
+  --status-info: #2F5D50;
+
+  /* 水墨标题字体（楷体系） */
+  --font-display: "STKaiti", "KaiTi", "楷体", "FangSong", "STFangsong", serif;
+  /* 标题字距（卷轴标题感） */
+  --title-letter-spacing: 0.06em;
+}
+
+/* 宣纸晕染底（仅水墨主题） */
+:root[data-theme="ink"] body {
+  background:
+    radial-gradient(ellipse at 10% 6%, color-mix(in srgb, var(--accent-primary) 7%, transparent), transparent 46%),
+    radial-gradient(ellipse at 90% 94%, color-mix(in srgb, var(--accent-secondary) 9%, transparent), transparent 48%),
+    var(--surface-bg);
+  background-attachment: fixed;
+}
+

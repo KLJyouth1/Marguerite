@@ -16,7 +16,7 @@
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::model::bloom::ChatBackend;
+use crate::model::ensemble::ChatBackend;
 use crate::types::Message;
 
 /// 四阶段深度推理编排器（泛型后端，零成本抽象；用 `ChatBackend` 便于注入 FakeBackend 单测）

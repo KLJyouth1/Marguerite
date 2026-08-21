@@ -1,0 +1,29 @@
+{
+  "name": "dsh-minigames",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "DSH Mini Games 小游戏合集二创（锚点 3 款）：TUI 原生 2048、井字棋 TicTacToe、贪吃蛇 Snake；等待 AI 输出的间隙休闲娱乐",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.games.list",
+    "dsh.games.play",
+    "dsh.games.2048",
+    "dsh.games.tictactoe",
+    "dsh.games.snake"
+  ],
+  "hooks": [],
+  "slash_commands": [
+    {
+      "name": "/games",
+      "description": "小游戏：/games list 列出可用游戏 /games play 2048|tictactoe|snake 开始游戏",
+      "arguments": ["subcmd", "game_id"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "games.started",
+    "games.finished",
+    "slash.games"
+  ]
+}

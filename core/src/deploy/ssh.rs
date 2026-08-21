@@ -8,6 +8,7 @@
 //! （密钥免密，禁止密码交互）；`RecordingTransport` 用于单测与 `--dry-run` 演练。
 
 use std::cell::RefCell;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
@@ -98,6 +99,8 @@ pub trait SshTransport {
     fn exec(&self, cmd: &str) -> Result<String>;
     /// 上传本地文件到远端路径
     fn upload(&self, local: &Path, remote: &Path) -> Result<()>;
+    /// 下载远端文件到本地路径
+    fn download(&self, remote: &Path, local: &Path) -> Result<()>;
 }
 
 /// 真实传输：经系统 `ssh`/`scp`，密钥免密（BatchMode 禁止密码交互）
@@ -116,6 +119,7 @@ impl SystemSshTransport {
 impl SshTransport for SystemSshTransport {
     fn exec(&self, cmd: &str) -> Result<String> {
         let mut c = std::process::Command::new("ssh");
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
         c.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -141,6 +145,7 @@ impl SshTransport for SystemSshTransport {
 
     fn upload(&self, local: &Path, remote: &Path) -> Result<()> {
         let mut c = std::process::Command::new("scp");
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
         c.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -168,6 +173,37 @@ impl SshTransport for SystemSshTransport {
         }
         Ok(())
     }
+
+    fn download(&self, remote: &Path, local: &Path) -> Result<()> {
+        let mut c = std::process::Command::new("scp");
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
+        c.arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new");
+        if let Some(id) = &self.target.identity {
+            c.arg("-i").arg(id);
+        }
+        c.arg("-P").arg(self.target.port.to_string());
+        c.arg(format!(
+            "{}@{}:{}",
+            self.target.user,
+            self.target.host,
+            remote.display()
+        ));
+        c.arg(local);
+        let out = c
+            .output()
+            .map_err(|e| anyhow!("scp 执行失败（请确认 scp 客户端可用且已配置密钥）: {e}"))?;
+        if !out.status.success() {
+            bail!(
+                "scp 下载失败 ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// 记录型传输：纯记录调用、不实际执行，可注入失败（用于单测与 --dry-run）
@@ -179,6 +215,7 @@ pub struct RecordingTransport {
 struct RecordingInner {
     execs: Vec<String>,
     uploads: Vec<(PathBuf, String)>,
+    downloads: Vec<(String, PathBuf)>,
 }
 
 impl Default for RecordingTransport {
@@ -193,6 +230,7 @@ impl RecordingTransport {
             inner: RefCell::new(RecordingInner {
                 execs: Vec::new(),
                 uploads: Vec::new(),
+                downloads: Vec::new(),
             }),
             fail_on: None,
         }
@@ -210,6 +248,10 @@ impl RecordingTransport {
 
     pub fn upload_calls(&self) -> Vec<(PathBuf, String)> {
         self.inner.borrow().uploads.clone()
+    }
+
+    pub fn download_calls(&self) -> Vec<(String, PathBuf)> {
+        self.inner.borrow().downloads.clone()
     }
 }
 
@@ -229,6 +271,14 @@ impl SshTransport for RecordingTransport {
             .borrow_mut()
             .uploads
             .push((local.to_path_buf(), remote.to_string_lossy().to_string()));
+        Ok(())
+    }
+
+    fn download(&self, remote: &Path, local: &Path) -> Result<()> {
+        self.inner
+            .borrow_mut()
+            .downloads
+            .push((remote.to_string_lossy().to_string(), local.to_path_buf()));
         Ok(())
     }
 }
@@ -384,6 +434,186 @@ impl SshDeployer {
     }
 }
 
+/// 集群主机（alias + 连接目标）
+#[derive(Clone, Debug)]
+pub struct ClusterHost {
+    pub alias: String,
+    pub target: SshTarget,
+}
+
+/// 集群单机执行结果
+#[derive(Debug, Clone)]
+pub struct ClusterResult {
+    pub alias: String,
+    pub ok: bool,
+    pub stdout: String,
+    pub error: Option<String>,
+}
+
+/// 多主机并发执行（ssh_cluster 二开，Track 4）。
+///
+/// 顺序执行、确定性可测；真实并发（线程池/异步）留作后续增量。
+/// exec 闭包注入实际传输（真实 SystemSshTransport 或 mock）。
+#[derive(Default)]
+pub struct SshCluster {
+    hosts: Vec<ClusterHost>,
+}
+
+impl SshCluster {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, alias: &str, target: SshTarget) {
+        self.hosts.push(ClusterHost {
+            alias: alias.to_string(),
+            target,
+        });
+    }
+
+    pub fn len(&self) -> usize {
+        self.hosts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hosts.is_empty()
+    }
+
+    pub fn aliases(&self) -> Vec<String> {
+        self.hosts.iter().map(|h| h.alias.clone()).collect()
+    }
+
+    /// 逐主机执行命令；exec 闭包负责真实传输（或 mock）。
+    pub fn run<F>(&self, cmd: &str, mut exec: F) -> Vec<ClusterResult>
+    where
+        F: FnMut(&ClusterHost, &str) -> Result<String>,
+    {
+        self.hosts
+            .iter()
+            .map(|h| match exec(h, cmd) {
+                Ok(stdout) => ClusterResult {
+                    alias: h.alias.clone(),
+                    ok: true,
+                    stdout,
+                    error: None,
+                },
+                Err(e) => ClusterResult {
+                    alias: h.alias.clone(),
+                    ok: false,
+                    stdout: String::new(),
+                    error: Some(e.to_string()),
+                },
+            })
+            .collect()
+    }
+}
+
+/// 隧道状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelState {
+    Connecting,
+    Forwarding,
+    Failed,
+}
+
+impl TunnelState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TunnelState::Connecting => "connecting",
+            TunnelState::Forwarding => "forwarding",
+            TunnelState::Failed => "failed",
+        }
+    }
+}
+
+/// 本地端口转发隧道（对齐 DSH ssh_tunnel）
+#[derive(Debug, Clone)]
+pub struct SshTunnel {
+    pub id: String,
+    pub alias: String,
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub state: TunnelState,
+    pub error: Option<String>,
+}
+
+/// 隧道注册表（start / list / stop / stop-all；实际端口转发由运行时接入，
+/// 本模块为纯逻辑、离线可测的状态与端口管理）。
+#[derive(Default)]
+pub struct SshTunnelRegistry {
+    tunnels: Vec<SshTunnel>,
+    seq: u64,
+}
+
+impl SshTunnelRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 启动一条隧道；local_port 为 None 时自动分配（自 20000 递增、去重）。
+    pub fn start(
+        &mut self,
+        alias: &str,
+        remote_host: &str,
+        remote_port: u16,
+        local_port: Option<u16>,
+    ) -> SshTunnel {
+        self.seq += 1;
+        let id = format!("tun-{}", self.seq);
+        let local = local_port.unwrap_or_else(|| self.alloc_port());
+        let t = SshTunnel {
+            id,
+            alias: alias.to_string(),
+            local_port: local,
+            remote_host: remote_host.to_string(),
+            remote_port,
+            state: TunnelState::Forwarding,
+            error: None,
+        };
+        self.tunnels.push(t.clone());
+        t
+    }
+
+    fn alloc_port(&self) -> u16 {
+        let mut p = 20000u16;
+        while self.tunnels.iter().any(|t| t.local_port == p) {
+            p += 1;
+        }
+        p
+    }
+
+    pub fn list(&self) -> &[SshTunnel] {
+        &self.tunnels
+    }
+
+    pub fn get(&self, id: &str) -> Option<&SshTunnel> {
+        self.tunnels.iter().find(|t| t.id == id)
+    }
+
+    /// 停止单条隧道；返回是否命中。
+    pub fn stop(&mut self, id: &str) -> bool {
+        let before = self.tunnels.len();
+        self.tunnels.retain(|t| t.id != id);
+        self.tunnels.len() != before
+    }
+
+    /// 停止全部隧道；返回停止数量。
+    pub fn stop_all(&mut self) -> usize {
+        let n = self.tunnels.len();
+        self.tunnels.clear();
+        n
+    }
+
+    pub fn len(&self) -> usize {
+        self.tunnels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tunnels.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +725,82 @@ mod tests {
         assert!(joined.contains("systemctl is-active")); // 无 health_url 时 systemd 探活
         assert!(!joined.contains("curl"));
         let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn test_recording_download_records() {
+        let t = RecordingTransport::new();
+        t.download(Path::new("/remote/log.txt"), Path::new("local.txt"))
+            .unwrap();
+        assert_eq!(
+            t.download_calls(),
+            vec![("/remote/log.txt".to_string(), PathBuf::from("local.txt"))]
+        );
+    }
+
+    #[test]
+    fn test_cluster_run_collects_per_host() {
+        let mut c = SshCluster::new();
+        c.add("a", SshTarget::from_url("ssh://host-a").unwrap());
+        c.add("b", SshTarget::from_url("ssh://host-b").unwrap());
+        c.add("c", SshTarget::from_url("ssh://host-c").unwrap());
+        let results = c.run("uptime", |h, _cmd| {
+            if h.alias == "b" {
+                Err(anyhow!("boom"))
+            } else {
+                Ok(format!("{}:ok", h.alias))
+            }
+        });
+        assert_eq!(results.len(), 3);
+        assert!(results[0].ok);
+        assert_eq!(results[0].stdout, "a:ok");
+        assert!(!results[1].ok);
+        assert_eq!(results[1].error.as_deref(), Some("boom"));
+        assert!(results[2].ok);
+        assert_eq!(results[2].stdout, "c:ok");
+    }
+
+    #[test]
+    fn test_cluster_empty_and_aliases() {
+        let c = SshCluster::new();
+        assert!(c.is_empty());
+        assert!(c.run("x", |_, _| Ok("y".into())).is_empty());
+        let mut c2 = SshCluster::new();
+        c2.add("web", SshTarget::from_url("ssh://h").unwrap());
+        assert_eq!(c2.aliases(), vec!["web".to_string()]);
+        assert_eq!(c2.len(), 1);
+    }
+
+    #[test]
+    fn test_tunnel_start_auto_assign_port() {
+        let mut r = SshTunnelRegistry::new();
+        let a = r.start("db", "127.0.0.1", 3306, None);
+        let b = r.start("cache", "127.0.0.1", 6379, None);
+        assert_eq!(a.local_port, 20000);
+        assert_eq!(b.local_port, 20001);
+        assert_eq!(a.state, TunnelState::Forwarding);
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn test_tunnel_explicit_port_and_stop() {
+        let mut r = SshTunnelRegistry::new();
+        let t = r.start("web", "127.0.0.1", 8080, Some(9000));
+        assert_eq!(t.local_port, 9000);
+        assert!(r.get(&t.id).is_some());
+        assert!(r.stop(&t.id));
+        assert!(!r.stop(&t.id), "重复 stop 应返回 false");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn test_tunnel_stop_all() {
+        let mut r = SshTunnelRegistry::new();
+        r.start("a", "127.0.0.1", 1, None);
+        r.start("b", "127.0.0.1", 2, None);
+        r.start("c", "127.0.0.1", 3, None);
+        assert_eq!(r.stop_all(), 3);
+        assert!(r.is_empty());
+        assert_eq!(r.stop_all(), 0);
     }
 }

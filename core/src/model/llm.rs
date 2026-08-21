@@ -1682,23 +1682,30 @@ mod tests {
         body: &str,
         captured: Arc<std::sync::Mutex<Option<String>>>,
     ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 16384];
-                let n = socket.read(&mut buf).await.unwrap_or(0);
-                *captured.lock().unwrap() = Some(String::from_utf8_lossy(&buf[..n]).to_string());
-                let reason = if status >= 500 { "Server Error" } else { "OK" };
-                let header = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-                let _ = socket.flush().await;
+            let mut first = true;
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let data = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    // 只捕获首请求（真实对话请求；后续经验抽取等次要请求不覆盖断言目标）
+                    if first {
+                        first = false;
+                        *captured.lock().unwrap() =
+                            Some(String::from_utf8_lossy(&data).to_string());
+                    }
+                    let reason = if status >= 500 { "Server Error" } else { "OK" };
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
             }
         });
         format!("http://{addr}")
@@ -1791,14 +1798,15 @@ mod tests {
 
     /// 简易 mock HTTP 服务器：依次返回给定响应
     async fn mock_server(responses: Vec<(u16, String)>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
+            // 响应耗尽后复用末条（流程可能追加经验抽取等次要请求，绝不挂死）
+            let last = responses.last().cloned();
             for (status, body) in responses {
                 if let Ok((mut socket, _)) = listener.accept().await {
-                    let mut buf = [0u8; 4096];
-                    let _ = socket.read(&mut buf).await;
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
                     let reason = if status >= 500 { "Server Error" } else { "OK" };
                     let header = format!(
                         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1807,6 +1815,21 @@ mod tests {
                     let _ = socket.write_all(header.as_bytes()).await;
                     let _ = socket.write_all(body.as_bytes()).await;
                     let _ = socket.flush().await;
+                }
+            }
+            if let Some((status, body)) = last {
+                loop {
+                    if let Ok((mut socket, _)) = listener.accept().await {
+                        let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                        let reason = if status >= 500 { "Server Error" } else { "OK" };
+                        let header = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    }
                 }
             }
         });

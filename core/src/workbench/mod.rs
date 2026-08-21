@@ -16,6 +16,8 @@
 pub mod agent;
 pub mod panel;
 pub mod pet;
+/// PetV2 6 帧状态机（T-2.3 / FR-B3 增强版：affinity/pets/feeds + DshAgentEvent + ASCII 精灵）。
+pub mod pet_v2;
 pub mod theme;
 pub mod usage;
 

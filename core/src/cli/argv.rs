@@ -96,8 +96,10 @@ pub const SUBCOMMANDS: &[&str] = &[
     "browser",
     "chat",
     "gateway",
+    "goal",
     "capabilities",
     "cache",
+    "dispatch",
 ];
 
 /// 解析命令行参数

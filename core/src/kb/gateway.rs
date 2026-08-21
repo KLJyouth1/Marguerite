@@ -102,6 +102,10 @@ pub fn ingest(params: &Value) -> Value {
     }
     let mut kb = kb().lock().unwrap_or_else(|e| e.into_inner());
     kb.add_document(title, text);
+    // 同步索引进全局知识图谱（kb.graph.view 的可视化数据源）
+    if let Ok(mut graph) = crate::kb::graph::global_graph().lock() {
+        graph.index_document(title, text);
+    }
     json!({
         "ok": true,
         "documents": kb.document_count(),

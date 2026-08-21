@@ -1,0 +1,59 @@
+{
+  "name": "dsh-presets",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH rc.8 agent preset 四档二创（minimal 极简双工具 / standard 标准 / code PTC / cordis 创造）+ 梁神锚定晋升桥接：首轮仅最小工具面与一行 persona、无运行时上下文注入，前缀门控（deepseek：含 we 且无 let me）+ 4 步兜底 + 无工具首轮自动晋升；晋升后单调扩展到 PTC(run_code) 再至全工具面，workspace 指令与技能目录延迟一步注入",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.preset.list",
+    "dsh.preset.switch",
+    "dsh.anchor.gate",
+    "dsh.anchor.promote",
+    "dsh.anchor.bootstrap"
+  ],
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "handler": "anchor_bootstrap",
+      "params": {
+        "minimal_tools": "bash_persistent,str_replace_editor",
+        "message_sources": "user,goal",
+        "max_bootstrap_steps": "4",
+        "bootstrap_max_tokens": "1024"
+      }
+    },
+    {
+      "event": "Notification",
+      "handler": "anchor_promote",
+      "params": {
+        "promoted_presentation": "code",
+        "deferred_grace_steps": "1"
+      }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/presets",
+      "description": "预设管理：/presets list 列出 minimal/standard/code/cordis 四档；/presets set <name> 切换预设（锚定状态随会话单调前进）",
+      "arguments": [
+        "subcmd",
+        "name"
+      ]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "preset.switched",
+    "anchor.gated",
+    "anchor.promoted",
+    "anchor.turn_end_release",
+    "slash.presets"
+  ],
+  "capability_models": {
+    "dsh.preset.switch": "inherit",
+    "dsh.anchor.gate": "inherit"
+  }
+}

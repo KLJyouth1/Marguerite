@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+pub mod di;
 pub mod manifest;
 pub mod slot;
 

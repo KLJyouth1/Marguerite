@@ -1,0 +1,40 @@
+# mode/ensemble.yaml — Ensemble 受控强编排模式（MAX+YOLO 融合二次升级版）
+# 对齐 MAX 模式（4 阶段推理 + 特权模型）+ TUI 工作台 YOLO（免确认 + 沙箱分层 + 快照安全网）
+name: ensemble
+description: Ensemble 融合模式：MAX 四阶段推理（生成→自批判→改进→验证）+ YOLO 免确认全自动（受沙箱白名单约束）
+allowed_tools: []
+# 系统级/桌面控制（system_control/control_desktop/browser_control）不再恒禁：
+# 改由 Ensemble 特权模型门控（skip_permissions 全开 → 免确认；否则人工确认）。
+denied_tools: []
+model_params:
+  temperature: 0.1
+  reasoning_effort: max
+anti_patterns: []
+risk_level: high
+ensemble:
+  privileges:
+    auto_approve: true
+    skip_permissions: false
+    allowed_tools: "*"
+    max_concurrent_tools: 20
+    auto_retry_failures: 5
+    unrestricted_filesystem: false
+    allow_network_all: true
+    allow_shell_all: true
+sandbox:
+  type: workspace-write
+  network_access: true
+thinking_depth: 3
+verification_passes: 3
+reasoning_effort: max
+temperature: 0.1
+snapshot_enabled: true
+auto_revert_max: 2
+max_swarm_shards: 11
+auto_retry_failures: 5
+approval_policy:
+  mutating: allow
+  exec_write: allow
+  network: allow
+  desktop: allow
+  fallback_timeout_sec: 60

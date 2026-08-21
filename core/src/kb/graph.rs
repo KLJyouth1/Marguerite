@@ -305,6 +305,17 @@ impl KnowledgeGraph {
     }
 }
 
+// ───────────────────────────── 全局图谱 ─────────────────────────────
+
+use std::sync::{Arc, Mutex, OnceLock};
+
+static GLOBAL_GRAPH: OnceLock<Arc<Mutex<KnowledgeGraph>>> = OnceLock::new();
+
+/// 进程级全局知识图谱：供网关 RPC（`kb.graph.*`）与 GUI 共享同一实例。
+pub fn global_graph() -> &'static Arc<Mutex<KnowledgeGraph>> {
+    GLOBAL_GRAPH.get_or_init(|| Arc::new(Mutex::new(KnowledgeGraph::new())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

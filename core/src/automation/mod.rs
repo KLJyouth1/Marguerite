@@ -7,6 +7,7 @@ pub mod audit;
 pub mod autofix;
 pub mod builtin;
 pub mod cron;
+pub mod host_board;
 pub mod ledger;
 pub mod long_running;
 

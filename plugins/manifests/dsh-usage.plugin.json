@@ -1,0 +1,40 @@
+{
+  "name": "dsh-usage",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "Daily Usage 消费统计二创：每日 TOKEN 消耗热力图、模型分布、月度开销累计、余额占位；B 阶段升级为 Rust 原生 + SQLite 持久化",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.usage.query_day",
+    "dsh.usage.query_week",
+    "dsh.usage.query_month",
+    "dsh.usage.balance",
+    "dsh.usage.heatmap",
+    "dsh.usage.accumulate"
+  ],
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "handler": "usage_accumulate",
+      "params": { "aggregate": "memory", "kind": "ok|err" }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/usage",
+      "description": "消费统计：/usage [day|week|month] 查看区间 /usage balance 查看余额 /usage heatmap 热力图",
+      "arguments": ["scope"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "usage.accumulated",
+    "usage.daily.updated",
+    "usage.budget.warn",
+    "slash.usage"
+  ],
+  "capability_models": {
+    "dsh.usage.query_month": "inherit"
+  }
+}

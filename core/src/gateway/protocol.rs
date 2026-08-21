@@ -179,6 +179,20 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "evolve.history",
     // 插件槽位
     "plugins.list",
+    // ── 原生功能（Game Hall / 知识图谱 / 鲸鱼娘 / 用量日聚合）──
+    "usage.daily",
+    "kb.graph.view",
+    "kb.graph.related",
+    "pet.status",
+    "pet.action",
+    "poker.create",
+    "poker.join",
+    "poker.start",
+    "poker.action",
+    "poker.state",
+    "poker.auto",
+    "workspaces.create",
+    "modlens.analyze",
 ];
 
 /// 支持的事件名清单（HelloOk `features.events`，一期为系统/会话事件）

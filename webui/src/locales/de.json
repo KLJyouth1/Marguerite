@@ -234,7 +234,10 @@
     "fleet": "Flotte",
     "computer-use": "Computersteuerung",
     "evolve": "Weiterentwicklung",
-    "plugins": "Plugins"
+    "plugins": "Plugins",
+    "graph": "Graph",
+    "poker": "Poker",
+    "pet": "Haustier"
   },
   "notFound": {
     "title": "Seite nicht gefunden",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "Ensemble-Routing-Trace anzeigen",
       "ensembleTraceTitle": "Kandidatentrace",
       "bloomInspectorTitle": "Bloom · KI-Orchestrierung {strategy}",
-      "bloomSubmode_deep": "Tief",
-      "bloomSubmode_auto": "Auto",
-      "bloomSubmode_swarm": "Schwarm",
       "ensemblePlanMeta": "Ensemble-Plan · Pool {count}",
       "ensembleTelemetryPendingMeta": "Ensemble-Plan · Telemetrie ausstehend",
       "ensembleFallbackNone": "kein Fallback",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "AI koordiniert mehrere Modelle, um die Leistungsfähigkeit bei komplexen Aufgaben zu erhöhen.",
       "modelRoutingBloomEnsemble": "Bloom-Fusionsrouting",
       "modelRoutingBloomEnsembleDesc": "Fusionsrouting + automatische KI-Orchestrierung (Solo Agent / MAX Dual-Leader / Expert Team) für komplexe Aufgaben.",
-      "bloomSubmode": "Bloom-Submodus",
-      "bloomSubmodeDeep": "Tief",
-      "bloomSubmodeDeepDesc": "Vierstufiges tiefes Reasoning für Qualität und Stabilität.",
-      "bloomSubmodeAuto": "Auto",
-      "bloomSubmodeAutoDesc": "Autonome Schleife mit automatischer QA und Reparatur.",
-      "bloomSubmodeSwarm": "Schwarm",
-      "bloomSubmodeSwarmDesc": "Dual-Leader-Schwarm greift Aufgaben parallel an.",
       "runMode": "Ausführungsmodus",
       "runModeSafe": "Sicher",
       "runModeSafeDesc": "Verwendet die Sandbox und Ihre Datei-, Befehls- und Netzwerkregeln.",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "Ensemble-Modelle"
     },
     "modelRouting": {
-      "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Prüfen Sie die Gateway-Verbindung und versuchen Sie es erneut.",
-      "submodeUpdateFailed": "Bloom-Submodus konnte nicht aktualisiert werden – zurückgesetzt. Prüfen Sie die Verbindung und versuchen Sie es erneut."
+      "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Prüfen Sie die Gateway-Verbindung und versuchen Sie es erneut."
     },
     "routeFeedback": {
       "up": "Richtige Modellwahl für diesen Zug",

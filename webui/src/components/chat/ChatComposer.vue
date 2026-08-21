@@ -177,11 +177,9 @@
               <ChatComposerModelRouting
                 v-if="modelRoutingOpen"
                 :model-routing-mode="modelRoutingMode"
-                :bloom-submode="bloomSubmode"
                 :busy="modelRoutingSettingsBusy"
                 @close="modelRoutingOpen = false"
                 @set-model-routing-mode="emit('setModelRoutingMode', $event)"
-                @set-bloom-submode="emit('setBloomSubmode', $event)"
               />
             </div>
             <div ref="runModeAnchorEl" class="chat-settings-anchor chat-run-mode-anchor">
@@ -361,7 +359,7 @@ import ChatComposerModelRouting from '@/components/chat/ChatComposerModelRouting
 import ChatComposerPlanMode from '@/components/chat/ChatComposerPlanMode.vue'
 import ChatComposerRunMode from '@/components/chat/ChatComposerRunMode.vue'
 import type { Attachment } from '@/types/chat'
-import type { ModelRoutingMode, BloomSubmode } from '@/types/modelRouting'
+import type { ModelRoutingMode } from '@/types/modelRouting'
 import type { SandboxRunMode } from '@/types/sandbox'
 import type { CollaborationMode } from '@/types/plans'
 import type { PromptCacheKeepaliveStatus } from '@/types/promptCacheKeepalive'
@@ -393,8 +391,6 @@ const props = withDefaults(defineProps<{
   runModeLocked: boolean
   runModeLockMessage: string
   modelRoutingMode: ModelRoutingMode
-  bloomSubmode: BloomSubmode
-  bloomSubmodeSettingsBusy: boolean
   modelRoutingSettingsBusy: boolean
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
@@ -441,7 +437,6 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setModelRoutingMode: [mode: ModelRoutingMode]
-  setBloomSubmode: [submode: BloomSubmode]
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
   cancelReplan: []

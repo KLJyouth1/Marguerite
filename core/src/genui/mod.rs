@@ -1,35 +1,65 @@
-//! 生成式 UI 交互契约（Track C，对齐上游 `omdsh-dev/dsh-genui`）。
+//! 生成式 UI 交互契约（Track C，对齐上游 `omdsh-dev/dsh-genui`） + DSH GenUI 二创
 //!
-//! 把「模型产出可交互界面」这件事收敛为**版本化、强类型、可校验**的 Rust 原生契约：
-//! - [`widget`]：`Widget` 枚举（Layout / Chart / Form / Quiz / Mermaid / Scene3D），
-//!   每个变体持有具名结构体而非裸 `serde_json::Value`，字段错配在反序列化即暴露；
-//! - [`contract`]：[`GenUiDocument`] 顶层版本化文档 + JSON 编解码；
-//! - [`action`]：action event loop —— 界面交互事件经 [`ActionSink`] 回传模型；
-//! - [`validate`]：沙箱校验（防 XSS），拒绝模型手写的 `<script>` / `<iframe>` /
-//!   事件处理器属性 / `javascript:` 伪协议。
+//! 本模块分两层：
+//! 1. **Track C / C2** 原有的版本化文档（`GenUiDocument` + Layout/Chart/... 强类型）
+//!    见 [`widget`] / [`validate`] / [`action`]。
+//! 2. **FR-B2 / T-2.2 DSH GenUI 二创的轻量交互卡片**：Widget/Card/Button/
+//!    ProgressBar/Form 枚举，见 [`contract`]；对应 Ratatui 渲染见 [`render`]。
 //!
-//! 安全纪律（P0）：上游 dsh-genui 的已知缺口是「模型手写 HTML/JS = XSS 面」。
-//! 本模块的对策是**结构化优先**——渲染层只消费类型化 widget，且任何进入渲染层的
-//! 文本必须先过 [`validate`]。渲染前未过 `validate` 的文档视为不可信。
+//! 安全纪律（P0）：任何进入渲染层的文本必须先过 [`validate`]。未 validate 的文档
+//! 视为不可信。
 
+use serde::{Deserialize, Serialize};
+
+// ── 原有子模块（Track C） ──
 pub mod action;
-pub mod contract;
 pub mod validate;
 pub mod widget;
 
+// ── T-2.2 DSH GenUI 二创模块（按任务要求保留 + 新增） ──
+pub mod contract;
+pub mod render;
+
+// ── 重新导出：DSH GenUI 二创在顶层可见 ──
+// （任务要求：必须存在 pub use contract::*）
+pub use contract::*;
+// render 顶层常用工具函数导出
+pub use render::{click_dispatch, render_button_hover, render_widget, SteeringEvent};
+
+// ── Track C 原有导出（无冲突部分保留） ──
 pub use action::{route_action, ActionEvent, ActionSink, VecActionSink};
-pub use contract::GenUiDocument;
 pub use validate::validate;
+// 注意：`widget::Widget`、`widget::FormField` 与 `contract::Widget/FormField` 同名，
+// 此处不 re-export widget 枚举，需要使用时显式写 `widget::Widget` 前缀。
 pub use widget::{
-    Block, ChartWidget, FormField, FormWidget, LayoutWidget, MermaidWidget, QuizWidget,
-    Scene3DWidget, Series, Widget,
+    Block, ChartWidget, FormWidget, LayoutWidget, MermaidWidget, QuizWidget, Scene3DWidget, Series,
 };
 
-/// 当前生成式 UI 契约版本。
-///
-/// 消费方遇到 `version` 高于此常量的文档必须拒绝（而非尽力解析），
-/// 避免新语义被旧引擎静默降级误渲染。
+/// 当前生成式 UI 契约版本（Track C2 顶层文档 schema）。
 pub const GENUI_SCHEMA_VERSION: u32 = 1;
+
+/// 版本化 GenUI 文档：一组 `widget::Widget` + schema version。
+///
+/// validate.rs 消费此结构；未定义会导致 `use super::GenUiDocument` 失败。
+/// 这里与 Track C2 注释对齐、避免同名冲突（不 re-export widget::Widget 顶层），
+/// 文档使用时显式写 `widget::Widget` 枚举而非 contract::Widget。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenUiDocument {
+    /// schema version（validate 时若超过 [`GENUI_SCHEMA_VERSION`] 即拒）。
+    pub version: u32,
+    /// 按绘制顺序的 widget 列表（Layout 首元素通常作根）。
+    pub widgets: Vec<crate::genui::widget::Widget>,
+}
+
+impl GenUiDocument {
+    /// 便捷构造：写入当前引擎支持的 schema 版本。
+    pub fn new(widgets: Vec<crate::genui::widget::Widget>) -> Self {
+        Self {
+            version: GENUI_SCHEMA_VERSION,
+            widgets,
+        }
+    }
+}
 
 /// 生成式 UI 契约错误（解析 / 版本 / 沙箱校验）。
 #[derive(Debug, thiserror::Error)]

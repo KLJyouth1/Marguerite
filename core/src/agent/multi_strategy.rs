@@ -18,7 +18,7 @@ use chrono::Utc;
 use crate::agent::runtime::parse_tool_args;
 use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
 use crate::mcp::registry::ToolRegistry;
-use crate::model::bloom::ChatBackend;
+use crate::model::ensemble::ChatBackend;
 use crate::model::llm::{LLMResponse, TokenUsage, ToolDef};
 use crate::model::router::ModelRouter;
 use crate::plugins::manifest::PluginManifest;

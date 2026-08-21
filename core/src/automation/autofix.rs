@@ -190,14 +190,14 @@ mod tests {
 
     /// 简易 mock HTTP 服务器：依次返回给定响应
     async fn mock_server(responses: Vec<(u16, String)>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
+            let last = responses.last().cloned();
             for (status, body) in responses {
                 if let Ok((mut socket, _)) = listener.accept().await {
-                    let mut buf = [0u8; 4096];
-                    let _ = socket.read(&mut buf).await;
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
                     let reason = if status >= 500 { "Server Error" } else { "OK" };
                     let header = format!(
                         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -206,6 +206,21 @@ mod tests {
                     let _ = socket.write_all(header.as_bytes()).await;
                     let _ = socket.write_all(body.as_bytes()).await;
                     let _ = socket.flush().await;
+                }
+            }
+            if let Some((status, body)) = last {
+                loop {
+                    if let Ok((mut socket, _)) = listener.accept().await {
+                        let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                        let reason = if status >= 500 { "Server Error" } else { "OK" };
+                        let header = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    }
                 }
             }
         });

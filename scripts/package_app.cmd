@@ -1,4 +1,6 @@
 @echo off
+chcp 65001 >nul
+REM ^ switch console to UTF-8 so the Chinese comments below parse correctly (GBK default mangles them).
 REM ============================================================================
 REM Marguerite 桌面端打包脚本（Windows / MSI + NSIS）
 REM
@@ -20,6 +22,7 @@ setlocal
 REM ---- 0. 路径 ----
 set "REPO_ROOT=%~dp0.."
 set "TAURI_DIR=%REPO_ROOT%\gui\src-tauri"
+REM 前端源码根 = 仓库根 webui/（Vue Web 控制台，用户指定的 UI）。
 set "WEBUI_SRC=%REPO_ROOT%\webui\dist"
 set "WEBUI_DST=%TAURI_DIR%\webui\dist"
 set "TARGET_DIR=C:\marg_build_target"

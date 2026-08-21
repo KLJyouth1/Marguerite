@@ -1,0 +1,44 @@
+{
+  "name": "dsh-goal-round-driver",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH goal-round-driver 二创：同会话目标轮次驱动（race-fenced 预留 roundsStarted+1，stale 预留不消耗轮次；仅真正的 user/message 进入才计轮）；复用 Marguerite goal/ 状态机与自动化延续轮",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.goal.create",
+    "dsh.goal.update",
+    "dsh.goal.round_reserve"
+  ],
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "handler": "goal_round_reserve",
+      "params": {
+        "claim_verify": "before_and_after"
+      }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/goal",
+      "description": "同会话目标：/goal 查看当前目标；/goal rounds <n> 设置最大轮数",
+      "arguments": [
+        "subcmd",
+        "n"
+      ]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "goal.round.reserved",
+    "goal.round.started",
+    "goal.completed",
+    "goal.blocked"
+  ],
+  "capability_models": {
+    "dsh.goal.create": "inherit"
+  }
+}

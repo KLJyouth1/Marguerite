@@ -1,0 +1,26 @@
+{
+  "name": "dsh-session-projection",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH session-projection 二创：会话事件投影表（register 注册纯计算单元 / snapshot 一致性快照 / onChanged 变更订阅，带 schema 校验与 stateVersion 版本控制）；复用 Marguerite events/bus 有界订阅信道与 gateway context_status 台账",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.projection.register",
+    "dsh.projection.snapshot",
+    "dsh.projection.subscribe"
+  ],
+  "hooks": [],
+  "slash_commands": [],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "projection.changed",
+    "projection.registered",
+    "projection.removed"
+  ],
+  "capability_models": {
+    "dsh.projection.snapshot": "inherit"
+  }
+}

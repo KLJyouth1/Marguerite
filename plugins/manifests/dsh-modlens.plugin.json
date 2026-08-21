@@ -1,0 +1,41 @@
+{
+  "name": "dsh-modlens",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "Modlens 视觉插件二创：为纯文本模型注入识图能力，支持图片附件自动识别、文字 OCR、版面分析与 JSON 结构化抽取；复用 Marguerite 原生 vision/modlens 模块",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.vision.img2txt",
+    "dsh.vision.ocr",
+    "dsh.vision.layout",
+    "dsh.vision.extract_json"
+  ],
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "handler": "modlens_prepare",
+      "params": { "step": "ocr", "scope": "image_attachment" }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/modlens",
+      "description": "识别图片：/modlens <path> 从本地图片识别；/modlens paste 识别剪贴板；/modlens json <path> 输出结构化 JSON",
+      "arguments": ["mode", "path"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "vision.recognized",
+    "vision.ocr.done",
+    "vision.json.extracted",
+    "slash.modlens",
+    "agent.paste",
+    "agent.attachment.image"
+  ],
+  "capability_models": {
+    "dsh.vision.img2txt": "sonnet",
+    "dsh.vision.extract_json": "opus"
+  }
+}

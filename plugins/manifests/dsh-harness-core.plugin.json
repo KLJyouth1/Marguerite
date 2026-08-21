@@ -1,0 +1,32 @@
+{
+  "name": "dsh-harness-core",
+  "version": "0.1.0-rc.7-mgr1",
+  "description": "DSH Harness 核心能力二创封装：版本查询、运行时探测、插件 bundle 拓扑加载入口（Marguerite 单一事实源锚点）",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.runtime.version",
+    "dsh.runtime.ping",
+    "dsh.runtime.list_plugins",
+    "dsh.bundle.topo_order"
+  ],
+  "hooks": [],
+  "slash_commands": [
+    {
+      "name": "/dsh",
+      "description": "查询 DSH 二创集成版本与已加载插件清单",
+      "arguments": ["mode"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [],
+  "events": [
+    "dsh.runtime.ready",
+    "dsh.bundle.loaded",
+    "dsh.bundle.error"
+  ],
+  "capability_models": {
+    "dsh.runtime.version": "inherit",
+    "dsh.runtime.ping": "inherit"
+  }
+}

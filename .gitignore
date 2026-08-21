@@ -50,3 +50,11 @@ __pycache__/
 .venv/
 venv/
 _tak*/
+
+# 本机打包输出目录（体积大，非源码）
+/marguerite_build_target
+
+# 桌面端打包资源（模型权重等二进制，体积大，非源码）
+/gui/src-tauri/resources
+# 写入工具的原子写 tmpdir 残留
+**/.dsh-*.tmpdir

@@ -234,7 +234,10 @@
     "fleet": "フリート",
     "computer-use": "コンピュータ操作",
     "evolve": "進化",
-    "plugins": "プラグイン"
+    "plugins": "プラグイン",
+    "graph": "グラフ",
+    "poker": "ポーカー",
+    "pet": "ペット"
   },
   "notFound": {
     "title": "ページが見つかりません",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "集約ルートの trace を表示",
       "ensembleTraceTitle": "候補 trace",
       "bloomInspectorTitle": "Bloom · AI オーケストレーション {strategy}",
-      "bloomSubmode_deep": "ディープ",
-      "bloomSubmode_auto": "オート",
-      "bloomSubmode_swarm": "スウォーム",
       "ensemblePlanMeta": "ensemble plan · pool {count}",
       "ensembleTelemetryPendingMeta": "ensemble plan · telemetry pending",
       "ensembleFallbackNone": "fallback なし",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "AI が複数のモデルを連携させ、複雑なタスクでの能力向上を優先します。",
       "modelRoutingBloomEnsemble": "Bloom 融合ルーティング",
       "modelRoutingBloomEnsembleDesc": "融合ルーティング + AI 自動オーケストレーション（Solo Agent / MAX Dual-Leader / Expert Team）で複雑なタスクを優先。",
-      "bloomSubmode": "Bloom サブモード",
-      "bloomSubmodeDeep": "ディープ",
-      "bloomSubmodeDeepDesc": "品質と安定性のための4段階の深い推論。",
-      "bloomSubmodeAuto": "オート",
-      "bloomSubmodeAutoDesc": "自動QAと修復を伴う自律ループ。",
-      "bloomSubmodeSwarm": "スウォーム",
-      "bloomSubmodeSwarmDesc": "デュアルリーダーのスウォームが並列でタスクに取り組む。",
       "runMode": "実行モード",
       "runModeSafe": "安全モード",
       "runModeSafeDesc": "サンドボックスと設定したファイル、コマンド、ネットワーク規則を使用します。",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "アンサンブルモデル"
     },
     "modelRouting": {
-      "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。",
-      "submodeUpdateFailed": "Bloom サブモードを更新できませんでした。元に戻しました。接続を確認して再試行してください。"
+      "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。"
     },
     "routeFeedback": {
       "up": "このターンのモデル選択は適切だった",

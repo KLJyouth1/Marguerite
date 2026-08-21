@@ -1,0 +1,28 @@
+{
+  "name": "dsh-better-sidebar",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "Better Sidebar 侧边栏工作台二创：文件树、浏览器、编辑器三合一左栏视图，支持槽位 pin 与实时刷新",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.sidebar.list",
+    "dsh.sidebar.pin_slot",
+    "dsh.sidebar.refresh",
+    "dsh.sidebar.open_path"
+  ],
+  "hooks": [],
+  "slash_commands": [
+    {
+      "name": "/sidebar",
+      "description": "侧边栏：list 列举内容 / pin <slotId> 固定槽位 / refresh 刷新工作区 / open <path>",
+      "arguments": ["subcmd", "target"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "dsh.sidebar.pinned",
+    "dsh.sidebar.opened",
+    "fs.workspace.changed"
+  ]
+}

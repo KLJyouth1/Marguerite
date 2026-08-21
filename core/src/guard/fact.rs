@@ -243,14 +243,13 @@ mod tests {
 
     /// 启动一个按请求方法返回不同 JSON-RPC 响应的 mock MCP 服务器
     async fn mock_mcp_server(list_has_lookup: bool, call_error: bool) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let req = String::from_utf8_lossy(&buf);
+                let data = crate::tests::mock_http::read_request_full(&mut socket).await;
+                let req = String::from_utf8_lossy(&data);
                 let body = if req.contains("tools/list") {
                     let tools = if list_has_lookup {
                         serde_json::json!([{"name": "lookup_api", "description": "d", "input_schema": {}}])

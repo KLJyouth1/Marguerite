@@ -1,0 +1,56 @@
+{
+  "name": "dsh-skill-registry",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH skill 二创：技能提供方注册表（registry 分层：全局层 + 预设层，就近层同名覆盖）+ 文件系统提供方扫描 + tool-skill 加载工具 + /skills 浏览器；复用 Marguerite skills/engine + loader + 5 份 JIT 工程纪律技能",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.skill.register_provider",
+    "dsh.skill.snapshot",
+    "dsh.skill.load"
+  ],
+  "hooks": [],
+  "slash_commands": [
+    {
+      "name": "/skills",
+      "description": "技能浏览：/skills list 列出全部技能（bundled/project/user/custom/runtime 分层）；/skills install <yaml-url> 远程安装",
+      "arguments": [
+        "subcmd",
+        "url"
+      ]
+    }
+  ],
+  "subagents": [],
+  "skills": [
+    {
+      "name": "engineering-discipline",
+      "from": "third_party/skills"
+    },
+    {
+      "name": "tdd",
+      "from": "third_party/skills"
+    },
+    {
+      "name": "systematic-debugging",
+      "from": "third_party/skills"
+    },
+    {
+      "name": "verification-before-completion",
+      "from": "third_party/skills"
+    },
+    {
+      "name": "write-plan-first",
+      "from": "third_party/skills"
+    }
+  ],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "skill.loaded",
+    "skill.provider.registered",
+    "slash.skills"
+  ],
+  "capability_models": {
+    "dsh.skill.load": "inherit"
+  }
+}

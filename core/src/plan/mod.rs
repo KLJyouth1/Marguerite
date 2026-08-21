@@ -24,6 +24,9 @@ use crate::persistence::config::Config;
 /// 复杂任务计划驱动长执行（自动拆解 + 分步长续航）
 pub mod runner;
 
+/// Plan-mode 审批闭环（DSH plan-mode 二开，Track 4）
+pub mod approval;
+
 /// 重规划差异阈值：当前步骤与执行观测的向量余弦低于该值判定「偏离计划」
 const REPLAN_THRESHOLD: f64 = 0.15;
 

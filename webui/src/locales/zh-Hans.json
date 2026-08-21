@@ -234,7 +234,10 @@
     "fleet": "舰队",
     "computer-use": "电脑操控",
     "evolve": "自进化",
-    "plugins": "插件"
+    "plugins": "插件",
+    "graph": "关系图谱",
+    "poker": "德州扑克",
+    "pet": "鲸鱼娘"
   },
   "notFound": {
     "title": "页面未找到",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "查看融合路由详情",
       "ensembleTraceTitle": "候选详情",
       "bloomInspectorTitle": "Bloom · AI 编排 {strategy}",
-      "bloomSubmode_deep": "深度",
-      "bloomSubmode_auto": "自动",
-      "bloomSubmode_swarm": "蜂群",
       "ensemblePlanMeta": "融合方案 · 候选池 {count}",
       "ensembleTelemetryPendingMeta": "融合方案 · telemetry 待更新",
       "ensembleFallbackNone": "未使用降级",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "由 AI 协调多个模型协同生成，优先提升复杂任务能力。",
       "modelRoutingBloomEnsemble": "Bloom 融合路由",
       "modelRoutingBloomEnsembleDesc": "融合路由 + AI 自动编排形态（Solo Agent / MAX 双带队 / 专家团队），优先提升复杂任务能力。",
-      "bloomSubmode": "Bloom 子模式",
-      "bloomSubmodeDeep": "深度",
-      "bloomSubmodeDeepDesc": "四阶段深度推理，兼顾质量与稳定。",
-      "bloomSubmodeAuto": "自动",
-      "bloomSubmodeAutoDesc": "自主闭环，自动 QA 与修复。",
-      "bloomSubmodeSwarm": "蜂群",
-      "bloomSubmodeSwarmDesc": "双领队蜂群并行攻坚。",
       "runMode": "执行模式",
       "runModeSafe": "安全模式",
       "runModeSafeDesc": "在沙箱中运行，并遵循你的安全规则。",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "参与融合的模型"
     },
     "modelRouting": {
-      "updateFailed": "切换模型路由失败，已恢复原设置。请检查网关连接后重试。",
-      "submodeUpdateFailed": "更新 Bloom 子模式失败，已恢复原设置。请检查网关连接后重试。"
+      "updateFailed": "切换模型路由失败，已恢复原设置。请检查网关连接后重试。"
     },
     "routeFeedback": {
       "up": "这次路由选对了",

@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-core"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 description = "Marguerite CLI Workbench - Core Engine"
 
@@ -20,6 +20,8 @@ futures-util = "0.3.7"
 tokio = { version = "1.44.2", features = ["full"] }
 chrono = { version = "0.4.20", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+# 自包含 SQLite：本机已确认装有 MSVC BuildTools 2022（cl.exe + vcruntime.h），
+# 可正常编译 bundled sqlite3.c，无需外部分发 sqlite3.dll。
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "6"
 async-trait = "0.1"

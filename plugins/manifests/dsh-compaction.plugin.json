@@ -1,0 +1,51 @@
+{
+  "name": "dsh-compaction",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH compaction 二创：token-meter 驱动的上下文压缩策略 + 模型无关的 tool-result 修剪（阈值 8192 字符，头 4096 / 尾 1024，保留完整事件日志可回放）+ /compact 显式压缩；复用 Marguerite context/session 四层渐进压缩与 context/cache 摘要缓存",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.compaction.trigger",
+    "dsh.compaction.prune",
+    "dsh.compaction.budget",
+    "dsh.token.meter"
+  ],
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "handler": "token_pressure_check",
+      "params": {
+        "threshold_chars": "8192",
+        "head_chars": "4096",
+        "tail_chars": "1024"
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "handler": "surface_prune",
+      "params": {
+        "replay_safe": "true"
+      }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/compact",
+      "description": "显式触发上下文压缩：/compact 立即压缩并返回压缩率",
+      "arguments": []
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "compaction.triggered",
+    "compaction.completed",
+    "token.pressure.warning",
+    "slash.compact"
+  ],
+  "capability_models": {
+    "dsh.compaction.trigger": "inherit"
+  }
+}

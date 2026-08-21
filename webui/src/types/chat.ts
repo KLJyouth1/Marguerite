@@ -552,8 +552,6 @@ export interface ChatRenderedMessage {
   routerMode?: import('./modelRouting').ModelRoutingMode
   /** Bloom 融合路由的 AI 自动编排形态（Solo Agent / MAX Dual-Leader / Expert Team / Cluster）。 */
   routerStrategy?: string
-  /** Bloom 子模式（deep / auto / swarm），来自 router_decision 事件的 submode 字段。 */
-  routerSubmode?: string
   ensemble?: ChatEnsembleMeta
   gridCells?: ChatRouterCell[]
   winnerIdx?: number

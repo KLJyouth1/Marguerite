@@ -234,7 +234,10 @@
     "fleet": "Flotte",
     "computer-use": "Contrôle de l’ordinateur",
     "evolve": "Faire évoluer",
-    "plugins": "Plugins"
+    "plugins": "Plugins",
+    "graph": "Graphe",
+    "poker": "Poker",
+    "pet": "Mascotte"
   },
   "notFound": {
     "title": "Page introuvable",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "Afficher la trace du routage agrégé",
       "ensembleTraceTitle": "Trace des candidats",
       "bloomInspectorTitle": "Bloom · Orchestration IA {strategy}",
-      "bloomSubmode_deep": "Profond",
-      "bloomSubmode_auto": "Auto",
-      "bloomSubmode_swarm": "Essaim",
       "ensemblePlanMeta": "plan ensemble · pool {count}",
       "ensembleTelemetryPendingMeta": "plan ensemble · télémétrie en attente",
       "ensembleFallbackNone": "aucun fallback",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "L'IA coordonne plusieurs modèles pour améliorer les capacités sur les tâches complexes.",
       "modelRoutingBloomEnsemble": "Routage fusion Bloom",
       "modelRoutingBloomEnsembleDesc": "Routage fusion + orchestration IA automatique (Solo Agent / MAX Dual-Leader / Expert Team) pour les tâches complexes.",
-      "bloomSubmode": "Sous-mode Bloom",
-      "bloomSubmodeDeep": "Profond",
-      "bloomSubmodeDeepDesc": "Raisonnement profond en quatre étapes pour la qualité et la stabilité.",
-      "bloomSubmodeAuto": "Auto",
-      "bloomSubmodeAutoDesc": "Boucle autonome avec QA et réparation automatiques.",
-      "bloomSubmodeSwarm": "Essaim",
-      "bloomSubmodeSwarmDesc": "Essaim à double leader attaquant les tâches en parallèle.",
       "runMode": "Mode d'exécution",
       "runModeSafe": "Sûr",
       "runModeSafeDesc": "Utilise le bac à sable et vos règles de fichiers, commandes et réseau.",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "Modèles de l'ensemble"
     },
     "modelRouting": {
-      "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez.",
-      "submodeUpdateFailed": "Impossible de mettre à jour le sous-mode Bloom — annulé. Vérifiez la connexion et réessayez."
+      "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez."
     },
     "routeFeedback": {
       "up": "Bon choix de modèle pour ce tour",

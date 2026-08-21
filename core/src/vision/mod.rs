@@ -10,6 +10,7 @@ pub mod client;
 pub mod diff;
 pub mod evidence;
 pub mod grounding;
+pub mod modlens;
 pub mod stitch;
 pub mod metadata;
 
@@ -20,6 +21,7 @@ pub use client::{
 };
 pub use metadata::image_metadata;
 pub use metadata::ImageMeta;
+pub use modlens::{BBox, BlockKind, ModLens, VisionBlock, VisionDocument, VisionLayout};
 
 use std::sync::{Arc, Mutex};
 
@@ -94,6 +96,16 @@ impl VisionCapability {
         } else {
             (false, crate::vision::binary_html::binary_to_html(data))
         }
+    }
+
+    /// 结构化取证（modlens）：图片 → 结构化 JSON 文档（文字/阅读顺序/语义/版面）。
+    ///
+    /// 优先走视觉模型结构化提取；无能力 / 失败降级为元数据兜底（与 [`describe_image`] 同源）。
+    /// 锁策略同 [`describe_image`](VisionCapability::describe_image)：克隆 Arc 后立即释放，锁不跨 `.await`。
+    pub async fn analyze_document(&self, data: &[u8], hint: &str) -> VisionDocument {
+        let resolver = self.resolver.lock().unwrap().clone();
+        let transport = self.transport.lock().unwrap().clone();
+        ModLens::analyze(&*resolver, &*transport, data, hint).await
     }
 }
 

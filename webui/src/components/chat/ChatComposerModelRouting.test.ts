@@ -3,10 +3,10 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
 import { createApp } from 'vue'
 import i18n from '@/i18n'
-import type { BloomSubmode, ModelRoutingMode } from '@/types/modelRouting'
+import type { ModelRoutingMode } from '@/types/modelRouting'
 import ChatComposerModelRouting from './ChatComposerModelRouting.vue'
 
-async function mountRouting(options: { modelRoutingMode: ModelRoutingMode; bloomSubmode?: BloomSubmode; busy?: boolean }) {
+async function mountRouting(options: { modelRoutingMode: ModelRoutingMode; busy?: boolean }) {
   const el = document.createElement('div')
   document.body.appendChild(el)
   const emitted = ref<string[]>([])
@@ -14,7 +14,6 @@ async function mountRouting(options: { modelRoutingMode: ModelRoutingMode; bloom
     setup() {
       return () => h(ChatComposerModelRouting, {
         modelRoutingMode: options.modelRoutingMode,
-        bloomSubmode: options.bloomSubmode ?? 'deep',
         busy: options.busy ?? false,
         onSetModelRoutingMode: (mode: string) => emitted.value.push(mode),
       })

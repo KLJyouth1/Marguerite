@@ -359,6 +359,10 @@ pub struct WorkbenchState {
     pub deploy_panel: DeployPanelView,
     /// 协作事件流视图（Phase I4，FR-15）
     pub collab: CollabView,
+    /// 鲸鱼娘桌宠 PetV2 共享状态（Review Advisory-B：解决 PetWhaleSlot 硬编码 None，
+    /// 让 affinity / energy / 6 帧 ASCII 精灵真正参与到工作台渲染闭环）。
+    /// None 时 Slot 自动回退 PetState / idle 默认值。
+    pub pet_v2: Option<crate::workbench::pet_v2::PetV2>,
 }
 
 impl WorkbenchState {
@@ -398,6 +402,9 @@ impl WorkbenchState {
             palette_open: false,
             deploy_panel: DeployPanelView::default(),
             collab: CollabView::default(),
+            // 桌宠 PetV2 默认初始化：idle、affinity=0、energy=80（与 Slot 原 fallback 一致）。
+            // 后续若接入 /pet save/load 持久化，则在 state reduce 里替换为磁盘加载值。
+            pet_v2: Some(crate::workbench::pet_v2::PetV2::default()),
         }
     }
 

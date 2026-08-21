@@ -14,6 +14,9 @@ const ComputerUseView = () => import('@/views/ComputerUseView.vue')
 const FleetView = () => import('@/views/FleetView.vue')
 const EvolveView = () => import('@/views/EvolveView.vue')
 const PluginsView = () => import('@/views/PluginsView.vue')
+const GraphView = () => import('@/views/GraphView.vue')
+const PetView = () => import('@/views/PetView.vue')
+const PokerView = () => import('@/views/PokerView.vue')
 
 export function defaultRootRedirect(): string {
   if (detectPlatformId() === 'desktop') return '/chat'
@@ -73,4 +76,10 @@ export const sharedRoutes: RouteRecordRaw[] = [
   { path: '/evolve', name: 'evolve', component: EvolveView, meta: { title: 'Evolve', group: 'Work', icon: 'sparkles', nav: 'primary', navOrder: 65, platforms: ['web', 'desktop'] } },
   // ── 插件市场 ──
   { path: '/plugins', name: 'plugins', component: PluginsView, meta: { title: 'Plugins', group: 'Work', icon: 'blocks', nav: 'primary', navOrder: 70, platforms: ['web', 'desktop'] } },
+  // ── 关系图谱（KB 2.0 知识图谱可视化）──
+  { path: '/graph', name: 'graph', component: GraphView, meta: { title: 'Graph', group: 'Work', icon: 'gitBranch', nav: 'primary', navOrder: 75, platforms: ['web', 'desktop'] } },
+  // ── 德州扑克（游戏大厅 · 赌 Token）──
+  { path: '/poker', name: 'poker', component: PokerView, meta: { title: 'Poker', group: 'Work', icon: 'coins', nav: 'primary', navOrder: 80, platforms: ['web', 'desktop'] } },
+  // ── 鲸鱼娘桌宠 ──
+  { path: '/pet', name: 'pet', component: PetView, meta: { title: 'Pet', group: 'Work', icon: 'sparkles', nav: 'primary', navOrder: 85, platforms: ['web', 'desktop'] } },
 ]

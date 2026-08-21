@@ -255,9 +255,6 @@ pub struct BloomConfig {
     /// 是否启用 Captain+Copilot 双模型并行推理（对话路径走 BloomOrchestrator）
     #[serde(default)]
     pub parallel_enabled: bool,
-    /// Bloom 子模式：deep（四阶段）/ auto（自主闭环）/ swarm（双领队蜂群）
-    #[serde(default = "default_bloom_submode")]
-    pub submode: String,
     /// 候选模型选择策略
     #[serde(default)]
     pub selection_mode: String,
@@ -271,10 +268,6 @@ pub struct BloomConfig {
 
 fn default_all_failed_policy() -> String {
     "fallback_single".to_string()
-}
-
-fn default_bloom_submode() -> String {
-    "deep".to_string()
 }
 
 /// 记忆 Dream 配置（设置页 › 高级 › 记忆与自学习组）

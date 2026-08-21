@@ -594,9 +594,43 @@ mod tests {
         })
     }
 
+    /// 本地 400 mock：让 chat.send 确定性快速失败（400 不可重试），
+    /// 与宿主系统代理/真实 API Key 无关，e2e 错误路径稳定可测。
+    async fn fail_400_server() -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    let body = r#"{"error":{"message":"bad request"}}"#;
+                    let header = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
     /// 启动真实回环网关（OS 分配随机端口），返回 ws 地址与 http 地址
     async fn spawn_gateway() -> (SocketAddr, Arc<GatewayState>) {
-        let state = e2e_state();
+        spawn_gateway_with(|_| {}).await
+    }
+
+    /// 启动前允许改写 GatewayState（在 router 构造前，Arc 独占期安全 mutate）
+    async fn spawn_gateway_with(
+        mutate: impl FnOnce(&mut GatewayState),
+    ) -> (SocketAddr, Arc<GatewayState>) {
+        let mut state = e2e_state();
+        if let Some(s) = Arc::get_mut(&mut state) {
+            mutate(s);
+        }
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -757,11 +791,13 @@ mod tests {
     #[tokio::test]
     async fn e2e_fusion_methods_over_ws() {
         use std::time::Duration;
-        // 自建网关：配置注入「连接立即拒绝」的 LLM 端点（127.0.0.1:1），
+        // 自建网关：配置注入「本地 400 mock」的 LLM 端点（400 不可重试），
         // 使 chat.send 后台引擎快速失败 → Error 事件确定回流，不依赖外部网络。
+        // 不用「127.0.0.1:1 连接拒绝」——宿主开系统代理时该端口会被代答 502
+        // （可重试），错误事件可能 15s 内等不到。
         let mut config = Config::default();
         config.model.api_key = "e2e-key".to_string();
-        config.model.base_url = "http://127.0.0.1:1".to_string();
+        config.model.base_url = fail_400_server().await;
         let state = Arc::new(GatewayState {
             config,
             bus: EventBus::default(),
@@ -839,7 +875,7 @@ mod tests {
             .as_str()
             .is_some_and(|r| !r.is_empty()));
 
-        // chat.send：接受后引擎失败 → Error 事件回流
+        // chat.send：接受后引擎失败 → Error 事件回流。
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
             r#"{"type":"req","id":"13","method":"chat.send","params":{"message":"hi","sessionKey":"ws.e2e1","clientRequestId":"cr-e2e"}}"#.into(),
         ))

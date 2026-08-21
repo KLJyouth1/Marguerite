@@ -1,14 +1,14 @@
-//! Bloom 编排内核（Phase G）
+//! Ensemble 编排内核（Phase G）
 //!
 //! 吸收 MAX 模式 双模型 + 双领队 + 蜂群，Rust 化改进（不搬迁）：
 //! - 并行双模型（Captain 主 + Copilot 审校），默认 `tokio::join!` 预取降低延迟（D-04 决议）
 //!
 //! 已移除的伪实现 / 死代码（诚实清理 2026-08-13）：
-//! - `bloom:auto` 自主闭环（`BloomOrchestrator::run_autonomous`）：与 `plan::runner::run_autonomous`
+//! - `ensemble:auto` 自主闭环（`EnsembleOrchestrator::run_autonomous`）：与 `plan::runner::run_autonomous`
 //!   真闭环重复，且其 `execute()` 仅让 LLM 生成文本、未真正执行工具/代码，属伪执行，已删除。
-//! - `bloom:deep` 四阶段推理（`ReasoningRunner`）：仅有单测可达、生产从不调用，已删除。
-//!
-//! 安全：Bloom 不直接放宽沙箱；并行/多轮仅是推理层优化，工具调用仍过 sandbox 白名单。
+//! - `ensemble:deep` 四阶段推理（`ReasoningRunner`）：仅有单测可达、生产从不调用，已删除。
+//! -
+//! 安全：Ensemble 不直接放宽沙箱；并行/多轮仅是推理层优化，工具调用仍过 sandbox 白名单。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,7 +18,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::agent::{BloomDecisionCache, SemanticIntentCache};
+use crate::agent::{BloomDecisionCache as EnsembleDecisionCache, SemanticIntentCache};
 use crate::events::{EnsembleProgress, Envelope, EventBus};
 use crate::model::llm::{LLMClient, LLMResponse};
 use crate::types::Message;
@@ -96,8 +96,8 @@ fn merge(primary: &LLMResponse, critique: &LLMResponse) -> String {
     format!("{}\n\n---\n审校补充（Copilot）：\n{}", primary.content, c)
 }
 
-/// Bloom 单次运行结果
-pub struct BloomResult {
+/// Ensemble 单次运行结果
+pub struct EnsembleResult {
     /// 主模型输出
     pub primary: LLMResponse,
     /// 副模型审校（无 copilot 时为 None）
@@ -106,8 +106,11 @@ pub struct BloomResult {
     pub merged: String,
 }
 
-/// Bloom 编排器（泛型后端，零成本抽象）
-pub struct BloomOrchestrator<B: ChatBackend> {
+/// Bloom/Bloom 兼容命名别名（策划 §二：统一 Bloom 模式命名）
+pub type BloomResult = EnsembleResult;
+
+/// Ensemble 编排器（泛型后端，零成本抽象）
+pub struct EnsembleOrchestrator<B: ChatBackend> {
     /// 主模型（Captain）
     pub captain: B,
     /// 副模型（Copilot / Critic），可空
@@ -115,17 +118,12 @@ pub struct BloomOrchestrator<B: ChatBackend> {
     /// 并行预取（默认 true，D-04 决议）
     pub prefetch: bool,
     /// 四阶段深度推理管线（EvoMaster Solve→Critique→Rewrite→Select）。
-    /// 开启后 `run` 走 [`crate::model::bloom_deep::DeepReasoning`]，以 Captain 作
-    /// solver、Copilot 作 critic 打磨答案；默认关（既有单测/调用方行为不变）。
+    /// 开启后 `run` 走 DeepReasoning，以 Captain 作 solver、Copilot 作 critic；
+    /// 默认关（既有单测/调用方行为不变）。
     pub deep: bool,
-    /// 并行进度事件下发通道（事件总线 + 会话键）。
-    ///
-    /// 未注入时静默不发（CLI / 单测默认形态）；注入后 Captain / Copilot 的
-    /// 起止与聚合阶段经 `session.event.ensemble_progress` 回流对话流，
-    /// 使「双模型并行」在 UI 上可见而不只是后台事实。
     events: Option<(Arc<EventBus>, String)>,
     /// 决策缓存（KV-Cache「重算变复用」在调度层）：注入后相同意图命中即跳过双模型编排。
-    decision_cache: Option<Arc<BloomDecisionCache>>,
+    decision_cache: Option<Arc<EnsembleDecisionCache>>,
     /// 语义意图缓存（W-7a）：精确决策缓存 miss 后，高置信语义候选可复用决策。
     semantic_cache: Option<Arc<SemanticIntentCache>>,
     /// Captain 模型名（用于 ensemble_progress 事件，前端显示）
@@ -134,7 +132,10 @@ pub struct BloomOrchestrator<B: ChatBackend> {
     copilot_model: String,
 }
 
-impl<B: ChatBackend + Sync> BloomOrchestrator<B> {
+/// Bloom/Bloom 兼容命名别名（策划 §二）
+pub type BloomOrchestrator<B> = EnsembleOrchestrator<B>;
+
+impl<B: ChatBackend + Sync> EnsembleOrchestrator<B> {
     /// 单模型编排（无 copilot）
     pub fn new(captain: B) -> Self {
         Self {
@@ -196,9 +197,9 @@ impl<B: ChatBackend + Sync> BloomOrchestrator<B> {
 
     /// 注入决策缓存：相同意图命中即复用既有决策，跳过昂贵的双模型编排。
     ///
-    /// 命中语义由 [`BloomDecisionCache`] 保证：意图逐字节一致且未过期才命中，
+    /// 命中语义由 [`EnsembleDecisionCache`] 保证：意图逐字节一致且未过期才命中，
     /// 绝不冒充语义命中。未注入时行为与旧版一致（每次都真编排），向后兼容。
-    pub fn with_decision_cache(mut self, cache: Arc<BloomDecisionCache>) -> Self {
+    pub fn with_decision_cache(mut self, cache: Arc<EnsembleDecisionCache>) -> Self {
         self.decision_cache = Some(cache);
         self
     }
@@ -319,7 +320,7 @@ impl<B: ChatBackend + Sync> BloomOrchestrator<B> {
                         &self.copilot_model,
                         "deepseek",
                     ));
-                    let dr = crate::model::bloom_deep::DeepReasoning::dual(&self.captain, cop);
+                    let dr = crate::model::ensemble_deep::DeepReasoning::dual(&self.captain, cop);
                     match dr.run(prompt).await {
                         Ok(deep) => {
                             let spent = elapsed_ms(t0);
@@ -850,7 +851,7 @@ mod tests {
     #[tokio::test]
     async fn test_decision_cache_hit_short_circuits_model_call() {
         let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let cache = Arc::new(BloomDecisionCache::with_default_policy());
+        let cache = Arc::new(EnsembleDecisionCache::with_default_policy());
         let orch = BloomOrchestrator::with_copilot(
             CountingBackend {
                 reply: "主答案".into(),

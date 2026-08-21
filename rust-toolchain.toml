@@ -1,4 +1,9 @@
 # 工具链锁定：yrs 0.27.3 使用了直到 Rust 1.95.0 才稳定的 `if let` match-arm guard（RFC 2294）。
 # 项目因此硬要求 rustc >= 1.95.0；本文件使克隆/CI 自动拉取正确工具链，避免 yrs 编译报 E0658。
+#
+# ⚠ 显式锁定完整 msvc 工具链名（非裸版本号）：
+# 本机 rustup 默认 host 为 x86_64-pc-windows-gnu，若只写 "1.95.0" 会解析到 gnu 工具链，
+# 而 gnu 无 MinGW-w64 头文件（C 依赖 tree-sitter 编译缺 stdio.h），且 gnu 工具链内无 msvc std。
+# 锁 msvc 后：host=msvc → 默认 target=msvc → Rust std 齐全 + 用 MSVC BuildTools 的 cl.exe 编 C。
 [toolchain]
-channel = "1.95.0"
+channel = "1.95.0-x86_64-pc-windows-msvc"

@@ -900,6 +900,7 @@ mod tests {
             source: SkillSource::Builtin,
             rating: 0.0,
             uses: 0,
+            rank: 300,
         }
     }
 

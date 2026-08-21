@@ -16,6 +16,8 @@
 
 pub mod checkpoint;
 pub mod distill;
+pub mod dispatch;
+pub mod dsh_bridge;
 pub mod evolve;
 pub mod hooks;
 pub mod registry;
@@ -35,6 +37,13 @@ use crate::mcp::registry::ToolRegistry;
 use crate::model::router::{Complexity, IntentType, ModelRouter};
 
 pub use checkpoint::{Checkpoint, CheckpointId, GitCheckpoints};
+pub use dispatch::{
+    dispatch, dispatch_many, DispatchRequest, DispatchResult, DispatchTarget,
+};
+pub use dsh_bridge::{
+    default_bus, install_dsh_bridges, install_modlens_hook, install_usage_hook, DshPetBridge,
+    DshRouterBridge, PetState, RouterProfile, RouterProfileStore, UsageAggregator, UsageRecord,
+};
 pub use evolve::{EvolutionRecord, EvolutionRunner};
 pub use hooks::{HookContext, HookDecision, HookFn, HookOutcome, HookPhase, HookRunner};
 pub use registry::{CapabilityInfo, CapabilityRegistry, Maturity, NativeCapability};

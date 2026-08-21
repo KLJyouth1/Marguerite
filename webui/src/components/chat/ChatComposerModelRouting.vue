@@ -37,31 +37,6 @@
         <span class="composer-model-routing__option-desc">{{ option.description }}</span>
       </button>
     </div>
-
-    <div
-      v-if="selectedMode === 'bloom_ensemble'"
-      class="composer-model-routing__submodes"
-      role="radiogroup"
-      :aria-label="t('chat.composer.bloomSubmode')"
-    >
-      <span class="composer-model-routing__submode-label">{{ t('chat.composer.bloomSubmode') }}</span>
-      <div class="composer-model-routing__submode-list">
-        <button
-          v-for="submode in bloomSubmodeOptions"
-          :key="submode.value"
-          type="button"
-          class="composer-model-routing__submode-option"
-          :class="{ 'is-active': selectedSubmode === submode.value }"
-          :disabled="busy"
-          role="radio"
-          :aria-checked="selectedSubmode === submode.value ? 'true' : 'false'"
-          @click="selectSubmode(submode.value)"
-        >
-          <span class="composer-model-routing__submode-title">{{ submode.label }}</span>
-          <span class="composer-model-routing__submode-desc">{{ submode.description }}</span>
-        </button>
-      </div>
-    </div>
   </section>
 </template>
 
@@ -69,21 +44,19 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
-import type { BloomSubmode, ModelRoutingMode } from '@/types/modelRouting'
-import { normalizeBloomSubmode, normalizeModelRoutingMode } from '@/types/modelRouting'
+import type { ModelRoutingMode } from '@/types/modelRouting'
+import { normalizeModelRoutingMode } from '@/types/modelRouting'
 
 const { t } = useI18n()
 
 const props = defineProps<{
   modelRoutingMode: ModelRoutingMode
-  bloomSubmode: BloomSubmode
   busy: boolean
 }>()
 
 const emit = defineEmits<{
   close: []
   setModelRoutingMode: [mode: ModelRoutingMode]
-  setBloomSubmode: [submode: BloomSubmode]
 }>()
 
 const modelRoutingOptions = computed(() => [
@@ -111,35 +84,10 @@ const modelRoutingOptions = computed(() => [
 
 const selectedMode = computed(() => normalizeModelRoutingMode(props.modelRoutingMode))
 
-const bloomSubmodeOptions = computed(() => [
-  {
-    value: 'deep',
-    label: t('chat.composer.bloomSubmodeDeep'),
-    description: t('chat.composer.bloomSubmodeDeepDesc'),
-  },
-  {
-    value: 'auto',
-    label: t('chat.composer.bloomSubmodeAuto'),
-    description: t('chat.composer.bloomSubmodeAutoDesc'),
-  },
-  {
-    value: 'swarm',
-    label: t('chat.composer.bloomSubmodeSwarm'),
-    description: t('chat.composer.bloomSubmodeSwarmDesc'),
-  },
-] satisfies Array<{ value: BloomSubmode; label: string; description: string }>)
-
-const selectedSubmode = computed(() => normalizeBloomSubmode(props.bloomSubmode))
-
 function selectMode(mode: ModelRoutingMode) {
   if (props.busy) return
   emit('setModelRoutingMode', mode)
   emit('close')
-}
-
-function selectSubmode(submode: BloomSubmode) {
-  if (props.busy) return
-  emit('setBloomSubmode', submode)
 }
 
 const rootRef = ref<HTMLElement | null>(null)
@@ -378,67 +326,6 @@ onMounted(() => rootRef.value?.focus())
   color: var(--text-muted);
   font-size: 0.75rem;
   line-height: 1.35;
-}
-
-.composer-model-routing__submodes {
-  margin-top: 0.625rem;
-  padding-top: 0.625rem;
-  border-top: 1px solid var(--hairline);
-}
-
-.composer-model-routing__submode-label {
-  display: block;
-  margin-bottom: 0.375rem;
-  color: var(--text-muted);
-  font-size: 0.6875rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.composer-model-routing__submode-list {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.375rem;
-}
-
-.composer-model-routing__submode-option {
-  display: grid;
-  gap: 0.1875rem;
-  min-width: 0;
-  padding: 0.5rem 0.375rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.composer-model-routing__submode-option:hover {
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
-  background: color-mix(in srgb, var(--accent) 3%, var(--bg-surface));
-}
-
-.composer-model-routing__submode-option.is-active {
-  border-color: color-mix(in srgb, var(--bloom-accent) 38%, var(--border));
-  background: color-mix(in srgb, var(--bloom-accent) 6%, var(--bg-surface));
-}
-
-.composer-model-routing__submode-option:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-
-.composer-model-routing__submode-title {
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.composer-model-routing__submode-desc {
-  color: var(--text-muted);
-  font-size: 0.65625rem;
-  line-height: 1.3;
 }
 
 @media (max-width: 520px) {

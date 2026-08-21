@@ -4,6 +4,7 @@
 //! 复用已锁定的 ratatui 0.28 / crossterm 0.28，不升级、不引入新依赖。
 
 pub mod command;
+pub mod dsh_slots;
 pub mod history;
 pub mod input;
 pub mod layout;
@@ -1117,22 +1118,23 @@ mod tests {
 
     /// 简易 mock LLM HTTP 服务器：单次响应
     async fn mock_llm_server(status: u16, body: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let reason = if status >= 500 { "Server Error" } else { "OK" };
-                let header = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-                let _ = socket.flush().await;
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    let reason = if status >= 500 { "Server Error" } else { "OK" };
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
             }
         });
         format!("http://{addr}")

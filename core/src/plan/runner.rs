@@ -304,7 +304,6 @@ pub async fn run_autonomous(
         analysis,
         completion_verdict: crate::governance::completion_gate::CompletionVerdict::allowed(),
         reflect_verdict: None,
-        bloom_submode: None,
     })
 }
 

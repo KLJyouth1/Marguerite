@@ -1,9 +1,9 @@
 //! 模式系统（v2 工作台）
 //!
-//! 三档模式（plan/agent/bloom）控制工具可用性与审批行为：
+//! 三档模式（plan/agent/ensemble）控制工具可用性与审批行为：
 //! - plan：只读探索，修改类操作一律拒绝
 //! - agent：写操作请求确认（交互审批）
-//! - bloom：受控强编排（原 yolo 升级，仍受沙箱白名单约束）；`yolo` 为已弃用别名
+//! - ensemble：受控强编排（原 bloom 升级，仍受沙箱白名单约束）；`bloom` 为已弃用别名
 //!
 //! 规格声明式（YAML，见 `spec.rs` 与 `modes/*.yaml`），新增模式零代码。
 
@@ -16,10 +16,12 @@ use serde::{Deserialize, Serialize};
 use crate::events::{Envelope, EventBus};
 use crate::guard::gateway::ApprovalGate;
 
+pub mod anchoring;
+pub mod ask;
 pub mod privileges;
 pub mod spec;
 
-pub use privileges::BloomPrivileges;
+pub use privileges::EnsemblePrivileges;
 pub use spec::{ApprovalAction, ApprovalPolicy, BloomSpec, ModeSpec, ModelParams};
 
 /// 进程级运行时模式（`mode.switch` RPC 可改；优先于静态 `config.bloom.parallel_enabled`）。
@@ -56,7 +58,11 @@ pub enum ModeKind {
     Plan,
     /// 交互审批，写操作需确认
     Agent,
-    /// 受控强编排（原 yolo 升级）：全自动执行，仍受沙箱白名单约束
+    /// 受控强编排（原 bloom 升级）：全自动执行，仍受沙箱白名单约束
+    Ensemble,
+    /// Bloom 模式：统一整合锚定/PTC/YOLO/MAX/AUTO/SWARM/DEEP（策划 §二升级）。
+    /// 与 Ensemble 并列：Bloom = 带 anchoring+ptc 三阶段晋升 + 统一配置的
+    /// 声明式强编排；Ensemble 保留为兼容老配置的扁平编排。
     Bloom,
 }
 
@@ -66,6 +72,7 @@ impl ModeKind {
         match self {
             ModeKind::Plan => "plan",
             ModeKind::Agent => "agent",
+            ModeKind::Ensemble => "ensemble",
             ModeKind::Bloom => "bloom",
         }
     }
@@ -75,9 +82,10 @@ impl ModeKind {
         match s {
             "plan" => Some(ModeKind::Plan),
             "agent" => Some(ModeKind::Agent),
+            "ensemble" => Some(ModeKind::Ensemble),
             "bloom" => Some(ModeKind::Bloom),
-            // 已弃用别名：过渡期内仍映射到 Bloom
-            "yolo" => Some(ModeKind::Bloom),
+            // 已弃用别名：映射到 Bloom（原 bloom 升级后不再走 Ensemble 别名）
+            "yolo" | "max" | "auto" | "swarm" | "deep" | "ptc" => Some(ModeKind::Bloom),
             _ => None,
         }
     }
@@ -144,6 +152,7 @@ impl ModeManager {
         let mut specs = HashMap::new();
         specs.insert(ModeKind::Plan, spec::builtin::plan());
         specs.insert(ModeKind::Agent, spec::builtin::agent());
+        specs.insert(ModeKind::Ensemble, spec::builtin::bloom());
         specs.insert(ModeKind::Bloom, spec::builtin::bloom());
         Self {
             current: ModeKind::Agent,
@@ -162,7 +171,12 @@ impl ModeManager {
         if !dir.exists() {
             return mgr;
         }
-        for kind in [ModeKind::Plan, ModeKind::Agent, ModeKind::Bloom] {
+        for kind in [
+            ModeKind::Plan,
+            ModeKind::Agent,
+            ModeKind::Ensemble,
+            ModeKind::Bloom,
+        ] {
             let path = dir.join(format!("{}.yaml", kind.as_str()));
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(spec) = ModeSpec::from_yaml(&content) {
@@ -245,7 +259,7 @@ impl ModeManager {
                 network_access: false,
                 exclude_tmpdir: false,
             },
-            ModeKind::Bloom => self.bloom_spec().sandbox,
+            ModeKind::Ensemble | ModeKind::Bloom => self.bloom_spec().sandbox,
         }
     }
 
@@ -273,14 +287,18 @@ impl ModeManager {
 
         let class = classify_tool(tool);
         match self.current {
-            ModeKind::Bloom => {
+            ModeKind::Ensemble | ModeKind::Bloom => {
                 // MAX+YOLO 融合语义：特权驱动审批。
-                // - 系统级/桌面控制（system_control/control_desktop 等）属 Bloom 内含能力：
-                //   skip_permissions（dangerously-skip-permissions，MAX 全开）→ 免确认放行；
-                //   否则人工确认（尊重沙箱白名单之上的边界）。
+                // - 系统级/桌面控制（system_control/control_desktop 等）属 Bloom/Ensemble
+                //   内含能力：skip_permissions（dangerously-skip-permissions，MAX 全开）
+                //   → 免确认放行；否则人工确认（尊重沙箱白名单之上的边界）。
                 // - auto_approve（enable-auto-mode）+ allowed_tools（--allowedTools）
                 //   决定其余工具是否免确认放行；auto_approve 关闭时退化为 agent 式审批
-                let privs = self.spec(ModeKind::Bloom).bloom.clone().unwrap_or_default();
+                let privs = self
+                    .spec(self.current)
+                    .bloom
+                    .clone()
+                    .unwrap_or_default();
                 match class {
                     ToolClass::Desktop => {
                         if privs.privileges.skip_permissions && privs.privileges.tool_allowed(tool)

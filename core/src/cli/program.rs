@@ -71,12 +71,18 @@ impl Program {
         route_table.register("serve", serve_handler, "ACP 服务（回环）");
         route_table.register("chat", chat_handler, "对话（流式 REPL / 单发）");
         route_table.register("gateway", gateway_handler, "统一网关（回环 Web 控制台）");
+        route_table.register("goal", goal_handler, "目标循环（自治续轮 + blocked 门控）");
         route_table.register(
             "capabilities",
             capabilities_handler,
             "能力自检（真实落地状态）",
         );
         route_table.register("cache", cache_handler, "KV 缓存命中率与可缓存比");
+        route_table.register(
+            "dispatch",
+            dispatch_handler,
+            "无头分发任务到 11 个外部 agent CLI（meta-agent 调度一体内置）",
+        );
 
         Self {
             route_table,
@@ -313,6 +319,8 @@ pub fn print_top_help() {
     println!("  chat      对话（chat 进流式 REPL；chat \"问题\" 单发流式）");
     println!("  gateway   统一网关（gateway --health | gateway [--port N]，回环 Web 控制台）");
     println!("  cache     KV 缓存命中率与可缓存比（cache stats / cache ratio）");
+    println!("  goal      目标循环（goal create/get/update：自治续轮与 blocked 门控）");
+    println!("  dispatch  无头分发任务到 11 个外部 agent CLI（meta-agent 一体内置，list / run / many）");
     println!();
     println!("示例:");
     println!("  marguerite -p \"解释当前目录的 main.rs\"");
@@ -380,15 +388,62 @@ Marguerite mcp — MCP 工具服务器管理
         }
         "skills" => {
             "\
-Marguerite skills — 技能管理
+Marguerite skills — 技能管理（支持等级 rank / 批量注册，3.8 分级注入）
 
 用法:
-  marguerite skills list           列出已安装技能
-  marguerite skills install <url>  从 YAML URL 安装技能
+  marguerite skills list                     列出已安装技能（显示 rank 等级）
+  marguerite skills install <yaml-url>       从 YAML URL 安装单个技能
+  marguerite skills register-batch <dir>     按 rank 拓扑排序批量注册目录下技能文件（*.yaml）
+  marguerite skills ranks                    显示五个等级：SYSTEM / PROJECT / DEFAULT / USER / COMMUNITY
+
+说明:
+  register-batch 遵循技能分级（3.8 分层注入）：低 rank（高优先级）先注册，
+  依赖自动按拓扑排序，重复技能幂等跳过。
 
 示例:
   marguerite skills list
+  marguerite skills ranks
   marguerite skills install https://example.com/skill.yaml
+  marguerite skills register-batch ./skills
+"
+        }
+        "dispatch" => {
+            r#"Marguerite dispatch — 无头分发任务到 11 个外部 agent CLI（一体内置，3.4 meta-agent 调度）
+
+用法:
+  marguerite dispatch list                                   列出 11 个目标（Codex / MCP-Codex / Sweep ...）
+  marguerite dispatch run <target> "<task>" [工作目录]      单目标无头运行（统一超时 + 结构化结果）
+  marguerite dispatch many "<task>" [工作目录]              11 路并发扇出（默认并发 11，可 --parallel N）
+  marguerite dispatch run <target> "<task>" --timeout 60    单目标自定义超时（秒）
+
+说明:
+  把策划 §3.4「11 路无头外部 agent CLI」变为 marguerite 自身体内的能力：
+  命令统一构造、环境变量隔离、CI+NO_COLOR 无头、超时 kill、输出 stdout/stderr 合并、
+  dispatch_start / dispatch_end 事件经由 EventBus 发布（与 trellis / 编排器事件回路一致）。
+
+示例:
+  marguerite dispatch list
+  marguerite dispatch run codex "为项目生成一个登录页" ./my-app
+  marguerite dispatch run opencode "列出文件" . --timeout 30 --json
+  marguerite dispatch many "为我的 README.md 提出三条改进" ./my-repo --parallel 6
+"#
+        }
+        "subagent" => {
+            "\
+Marguerite subagent — 子代理团队 DAG 编排（trellis 事件驱动等待可选开启）
+
+用法:
+  marguerite subagent team \"<目标描述>\" [--reflect] [--trellis]
+
+说明:
+  走 DAG 分层编排（调研→规划→实现→审校），子代理真实执行。
+  --reflect    启用分阶段反思（s2_5）：实现后插入自检再交付。
+  --trellis    以事件驱动的 trellis_wait 代替忙轮询：订阅 EventBus 的
+               subagent_end 事件流，按 id 集合收敛；默认关闭（向后兼容）。
+
+示例:
+  marguerite subagent team \"实现登录+JWT\" --trellis
+  marguerite subagent team \"设计数据库 schema\" --reflect --trellis
 "
         }
         "capabilities" => {
@@ -420,6 +475,24 @@ Marguerite cache — KV 缓存命中率与可缓存比
   marguerite cache ratio
   marguerite cache ratio <session-id>
 "
+        }
+        "goal" => {
+            r#"Marguerite goal — 目标循环（自治续轮 + blocked 门控）
+
+用法:
+  marguerite goal create <目标描述>            登记唯一进行中的完成目标（armed）
+  marguerite goal get                         读取当前目标与激活态
+  marguerite goal update edit <新目标>         编辑目标描述（revision+1）
+  marguerite goal update pause                暂停
+  marguerite goal update resume               恢复并重新 armed
+  marguerite goal update complete             标记完成
+  marguerite goal update blocked <原因>        报告阻塞（需先经过 3 轮续轮才置为 blocked）
+
+示例:
+  marguerite goal create 重构部署流水线
+  marguerite goal get --json
+  marguerite goal update complete
+"#
         }
         "session" => {
             "\
@@ -1118,8 +1191,9 @@ fn mcp_handler(args: &Args, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// skills — 技能管理
+/// skills — 技能管理（一体内置：rank 暴露 + register-batch 按拓扑批量注册）
 fn skills_handler(args: &Args, config: &Config) -> Result<()> {
+    use crate::skills::registry::{ranks, SkillRegistry};
     let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
     let loader = SkillLoader::new(Path::new(&config.skills.skills_dir));
     match sub {
@@ -1129,15 +1203,33 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
             }
             Ok(skills) => {
                 println!("已安装技能 ({}):", skills.len());
-                for skill in &skills {
+                // 按 rank 升序（高优先级在前）展示
+                let mut sorted: Vec<_> = skills.iter().collect();
+                sorted.sort_by_key(|s| s.rank);
+                for skill in &sorted {
+                    let bucket = match skill.rank {
+                        r if r <= ranks::SYSTEM => "SYSTEM",
+                        r if r <= ranks::PROJECT => "PROJECT",
+                        r if r <= ranks::DEFAULT => "DEFAULT",
+                        r if r <= ranks::USER => "USER",
+                        _ => "COMMUNITY",
+                    };
                     println!(
-                        "  {} v{} — {}",
-                        skill.name, skill.version, skill.description
+                        "  [{bucket:<8} rank={:>3}] {} v{} — {}",
+                        skill.rank, skill.name, skill.version, skill.description
                     );
                 }
             }
             Err(e) => eprintln!("加载技能失败: {e}"),
         },
+        "ranks" => {
+            println!("技能等级（rank 越小优先级越高；register-batch 按此拓扑排序注入）：");
+            println!("  SYSTEM    = {r:>3}  内置核心（锚定、冷启动、Bloom 编排）", r = ranks::SYSTEM);
+            println!("  PROJECT   = {r:>3}  项目级（工程脚手架、团队约定）", r = ranks::PROJECT);
+            println!("  DEFAULT   = {r:>3}  通用社区默认（不打标时）", r = ranks::DEFAULT);
+            println!("  USER      = {r:>3}  用户级（个人偏好、快捷键）", r = ranks::USER);
+            println!("  COMMUNITY = {r:>3}  第三方市场（低优先级覆写受保护前缀）", r = ranks::COMMUNITY);
+        }
         "install" => {
             let url = args.sub_args.get(1).map(String::as_str).unwrap_or("");
             if url.is_empty() {
@@ -1148,9 +1240,56 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             match rt.block_on(loader.download_and_register(url)) {
                 Ok(skill) => {
-                    println!("技能已安装: {} v{}", skill.name, skill.version);
+                    println!("技能已安装: {} v{} (rank={})", skill.name, skill.version, skill.rank);
                 }
                 Err(e) => eprintln!("安装失败: {e}"),
+            }
+        }
+        "register-batch" => {
+            let dir = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            let target = if dir.is_empty() {
+                Path::new(&config.skills.skills_dir).to_path_buf()
+            } else {
+                PathBuf::from(dir)
+            };
+            if !target.exists() {
+                eprintln!("目录不存在: {}", target.display());
+                std::process::exit(2);
+            }
+            // 收集目录下 *.yaml
+            let mut yamls: Vec<PathBuf> = Vec::new();
+            if let Ok(read) = std::fs::read_dir(&target) {
+                for entry in read.flatten() {
+                    let p = entry.path();
+                    if p.extension().map(|e| e == "yaml").unwrap_or(false) {
+                        yamls.push(p);
+                    }
+                }
+            }
+            // 每个用 loader 解析
+            let mut batch = Vec::with_capacity(yamls.len());
+            for y in &yamls {
+                match loader.load_single(y) {
+                    Ok(s) => batch.push(s),
+                    Err(e) => eprintln!("警告: 跳过 {} ({e})", y.display()),
+                }
+            }
+            // 拓扑排序 + 批量注册（幂等）
+            let mut registry = SkillRegistry::new();
+            let registered = registry.register_batch_ranked(batch)?;
+            println!(
+                "register-batch 完成：目录 {}，扫描 {} 个 YAML，幂等注册 {} 个",
+                target.display(),
+                yamls.len(),
+                registered.len()
+            );
+            if args.json {
+                let out = serde_json::json!({
+                    "dir": target.display().to_string(),
+                    "scanned": yamls.len(),
+                    "registered": registered,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
             }
         }
         _ => {
@@ -1322,6 +1461,117 @@ fn session_handler(args: &Args, _config: &Config) -> Result<()> {
         _ => {
             print_subcommand_help("session");
         }
+    }
+    Ok(())
+}
+
+/// goal — 目标循环（自治续轮 + blocked 门控，Track 1）
+///
+/// 单一持久化完成目标：goal create 登记（armed）；goal update 做
+/// edit/pause/resume/complete/blocked 状态机迁移；blocked 需同一阻塞条件连续
+/// MIN_BLOCKED_ROUNDS 轮才成立。持久化于 ~/.marguerite/goal.db（跨进程可见）。
+fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
+    let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
+    let mut reg = crate::goal::global()
+        .lock()
+        .map_err(|e| anyhow!("目标注册表锁中毒: {e}"))?;
+
+    match sub {
+        "create" => {
+            let objective = args.sub_args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+            if objective.trim().is_empty() {
+                eprintln!("用法: marguerite goal create <目标描述>");
+                return Ok(());
+            }
+            match reg.create(&objective, None) {
+                Ok(g) => {
+                    if args.json {
+                        print_json_ok(crate::goal::goal_view(&g, true));
+                    } else {
+                        println!("目标已创建 [{}] revision={} phase={} activation=armed", g.id, g.revision, g.phase.as_str());
+                        println!("  {}", g.objective);
+                    }
+                }
+                Err(e) => {
+                    if args.json {
+                        print_json_err(ExitCode::Conflict, &e.to_string(), None, false);
+                    } else {
+                        eprintln!("创建失败: {e}");
+                    }
+                }
+            }
+        }
+        "get" => {
+            match reg.get() {
+                Some(g) => {
+                    let armed = reg.is_armed();
+                    if args.json {
+                        print_json_ok(crate::goal::goal_view(g, armed));
+                    } else {
+                        let cap = g.max_goal_rounds.map(|v| v.to_string()).unwrap_or_else(|| "不限".to_string());
+                        println!("目标 [{}] revision={}", g.id, g.revision);
+                        println!("  phase: {}  activation: {}", g.phase.as_str(), if armed { "armed" } else { "disarmed" });
+                        println!("  rounds: {} / {}", g.rounds_started, cap);
+                        println!("  objective: {}", g.objective);
+                        if let Some(r) = &g.blocked_reason {
+                            println!("  blocked_reason: {r}");
+                        }
+                    }
+                }
+                None => {
+                    if args.json {
+                        print_json_ok(serde_json::Value::Null);
+                    } else {
+                        println!("尚无目标。用 marguerite goal create <目标> 创建。");
+                    }
+                }
+            }
+        }
+        "update" => {
+            let action = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            let result = match action {
+                "edit" => {
+                    let objective = args.sub_args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+                    if objective.trim().is_empty() {
+                        eprintln!("用法: marguerite goal update edit <新目标>");
+                        return Ok(());
+                    }
+                    reg.edit(&objective)
+                }
+                "pause" => reg.pause(),
+                "resume" => reg.resume(),
+                "complete" => reg.complete(),
+                "blocked" => {
+                    let reason = args.sub_args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+                    if reason.trim().is_empty() {
+                        eprintln!("用法: marguerite goal update blocked <原因>");
+                        return Ok(());
+                    }
+                    reg.block(&reason)
+                }
+                _ => {
+                    print_subcommand_help("goal");
+                    return Ok(());
+                }
+            };
+            match result {
+                Ok(g) => {
+                    if args.json {
+                        print_json_ok(crate::goal::goal_view(&g, reg.is_armed()));
+                    } else {
+                        println!("目标 [{}] revision={} phase={} activation={}", g.id, g.revision, g.phase.as_str(), if reg.is_armed() { "armed" } else { "disarmed" });
+                    }
+                }
+                Err(e) => {
+                    if args.json {
+                        print_json_err(ExitCode::Conflict, &e.to_string(), None, false);
+                    } else {
+                        eprintln!("更新失败: {e}");
+                    }
+                }
+            }
+        }
+        _ => print_subcommand_help("goal"),
     }
     Ok(())
 }
@@ -1555,6 +1805,10 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
         .sub_args
         .iter()
         .any(|s| s == "--reflect" || s == "--agentic");
+    let use_trellis = args
+        .sub_args
+        .iter()
+        .any(|s| s == "--trellis");
     // 目标取 "team" 之后的第一个非旗标参数
     let goal = args
         .sub_args
@@ -1565,10 +1819,13 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     if sub != "team" || goal.is_empty() {
-        println!("用法: marguerite subagent team \"<目标描述>\" [--reflect]");
+        println!("用法: marguerite subagent team \"<目标描述>\" [--reflect] [--trellis]");
         println!("说明: 走 DAG 分层编排（调研→规划→实现→审校），子代理真实执行。");
         println!(
             "      --reflect  启用 分阶段智能体 分阶段反思（s2_5）：实现后插入反思自检再交付。"
+        );
+        println!(
+            "      --trellis  以事件驱动 trellis_wait（订阅 EventBus 的 subagent_end）收敛替代忙轮询。"
         );
         return Ok(());
     }
@@ -1585,8 +1842,39 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
         );
     }
     let mut orch = crate::orchestration::Orchestrator::new(cfg);
-    println!("[subagent] 分解任务 DAG（Build 形态）…");
-    rt.block_on(async {
+    println!(
+        "[subagent] 分解任务 DAG（Build 形态）… trellis={}",
+        if use_trellis { "事件驱动" } else { "默认（兼容忙轮询）" }
+    );
+
+    rt.block_on(async move {
+        // --trellis：创建 EventBus + 订阅 subagent_end，打印每帧收敛
+        let bus = if use_trellis {
+            let b = Arc::new(crate::events::EventBus::new(4096));
+            let session_id = format!("cli-subagent-{}", uuid::Uuid::new_v4());
+            orch.set_event_bus(b.clone(), session_id);
+            // 订阅：把收到的 end 事件以 [subagent] trellis: <id> ok? 形式打印
+            let mut rx = b.subscribe("session.event.subagent_end");
+            tokio::spawn(async move {
+                while let Some(env) = rx.recv().await {
+                    let id = env
+                        .payload
+                        .get("subagent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    let ok = env
+                        .payload
+                        .get("ok")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    println!("[subagent][trellis] end: id={id} ok={ok}");
+                }
+            });
+            Some(b)
+        } else {
+            None
+        };
+
         let kind = if reflect {
             crate::orchestration::dag::DagKind::Reflect
         } else {
@@ -1619,6 +1907,8 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
                 }
                 println!("\n[subagent] lead 综合:");
                 println!("{}", outcome.lead_reply);
+                // 若总线存在：显式 drop，关闭订阅通道
+                drop(bus);
             }
             Err(e) => {
                 eprintln!("[subagent] 编排失败: {e}");
@@ -2211,6 +2501,235 @@ fn chat_handler(args: &Args, _config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// dispatch — 无头分发任务到 11 个外部 agent CLI（一体内置）
+///
+/// 对外三个叶子动作：
+/// - list     ：打印 11 个目标名称 + 描述 + 可用性探测（未配置的显示 unavailable_reason）
+/// - run      ：单个目标无头执行，结构化输出 OK/失败、exit code、超时
+/// - many     ：全部 11 个（可过滤 --targets a,b,c）并发扇出
+fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
+    use crate::harness::dispatch::{
+        available_targets, dispatch, dispatch_many, DispatchRequest, DispatchTarget,
+    };
+    use std::str::FromStr;
+
+    let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
+    if matches!(sub, "" | "--help" | "-h") {
+        print_subcommand_help("dispatch");
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    match sub {
+        "list" => {
+            let items = available_targets();
+            println!("11 路外部 agent CLI 目标（一体内置）：");
+            for t in DispatchTarget::all() {
+                let avail = items.get(&t).cloned().flatten();
+                let status = match &avail {
+                    Some(ok) => format!("就绪 · {}", ok.bin_path.display()),
+                    None => {
+                        let probe = t.probe();
+                        match probe {
+                            Ok(_) => "就绪（无模板覆盖）".to_string(),
+                            Err(e) => format!("未就绪 · {e}"),
+                        }
+                    }
+                };
+                println!(
+                    "  - {:<18} {:<10}  {}",
+                    t.as_str(),
+                    if avail.is_some() { "OK" } else { "INFO" },
+                    status
+                );
+            }
+            if args.json {
+                let rows: Vec<serde_json::Value> = DispatchTarget::all()
+                    .iter()
+                    .map(|t| {
+                        let avail = t.probe();
+                        serde_json::json!({
+                            "target": t.as_str(),
+                            "description": t.description(),
+                            "ok": avail.is_ok(),
+                            "detail": avail.map_err(|e| e.to_string()).err()
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "items": rows }))?
+                );
+            }
+        }
+        "run" => {
+            // 参数：<target> "<task>" [workspace] [--timeout N]
+            let target_s = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            let task = args.sub_args.get(2).map(String::as_str).unwrap_or("");
+            let workspace = args
+                .sub_args
+                .get(3)
+                .filter(|s| !s.starts_with("--"))
+                .map(String::as_str)
+                .unwrap_or(".");
+            let timeout_secs = args
+                .sub_args
+                .iter()
+                .position(|s| s == "--timeout")
+                .and_then(|i| args.sub_args.get(i + 1)?.parse::<u64>().ok())
+                .unwrap_or(600);
+            if target_s.is_empty() || task.is_empty() {
+                print_subcommand_help("dispatch");
+                return Ok(());
+            }
+            let target = DispatchTarget::from_str(target_s).map_err(|e| {
+                anyhow::anyhow!("未知目标 '{target_s}'：{e}（可用 `marguerite dispatch list` 查看）")
+            })?;
+            let mut req = DispatchRequest::new(target, task, workspace).with_timeout(timeout_secs);
+            // 可选注入环境（透传 --env K=V）
+            let mut i = 0;
+            while i < args.sub_args.len() {
+                if args.sub_args[i] == "--env" {
+                    if let Some(nv) = args.sub_args.get(i + 1) {
+                        if let Some((k, v)) = nv.split_once('=') {
+                            req = req.with_env(k, v);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let result = rt.block_on(dispatch(req))?;
+            render_dispatch_result(&result, args.json);
+            if !result.ok {
+                std::process::exit(result.exit_code.unwrap_or(1).max(1).try_into().unwrap_or(1));
+            }
+        }
+        "many" => {
+            // "<task>" [workspace] [--parallel N] [--targets a,b,c] [--timeout N]
+            let task = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            if task.is_empty() {
+                print_subcommand_help("dispatch");
+                return Ok(());
+            }
+            let workspace = args
+                .sub_args
+                .get(2)
+                .filter(|s| !s.starts_with("--"))
+                .map(String::as_str)
+                .unwrap_or(".");
+            let parallel = args
+                .sub_args
+                .iter()
+                .position(|s| s == "--parallel")
+                .and_then(|i| args.sub_args.get(i + 1)?.parse::<usize>().ok());
+            let timeout_secs = args
+                .sub_args
+                .iter()
+                .position(|s| s == "--timeout")
+                .and_then(|i| args.sub_args.get(i + 1)?.parse::<u64>().ok())
+                .unwrap_or(600);
+            let targets: Vec<DispatchTarget> = args
+                .sub_args
+                .iter()
+                .position(|s| s == "--targets")
+                .and_then(|i| {
+                    let spec = args.sub_args.get(i + 1)?;
+                    Some(
+                        spec.split(',')
+                            .filter_map(|s| DispatchTarget::from_str(s.trim()).ok())
+                            .collect(),
+                    )
+                })
+                .unwrap_or_else(|| DispatchTarget::all().to_vec());
+            if targets.is_empty() {
+                eprintln!("错误: --targets 未匹配到任何目标");
+                std::process::exit(2);
+            }
+            println!(
+                "[dispatch] many：目标 {} 个，并发={}，任务：{task}",
+                targets.len(),
+                parallel.unwrap_or(targets.len().clamp(1, 32))
+            );
+            let results = rt.block_on(dispatch_many(
+                &targets,
+                task,
+                workspace,
+                timeout_secs,
+                parallel,
+            ));
+            let mut ok_n = 0usize;
+            for (i, r) in results.iter().enumerate() {
+                match r {
+                    Ok(r) => {
+                        println!("\n=== [{}/{}] {} (ok={}, {}ms) ===",
+                            i + 1,
+                            results.len(),
+                            r.target.as_str(),
+                            r.ok,
+                            r.elapsed_ms
+                        );
+                        render_dispatch_result(r, args.json);
+                        if r.ok {
+                            ok_n += 1;
+                        }
+                    }
+                    Err(e) => eprintln!("[dispatch] 内部错误（未启动）: {e}"),
+                }
+            }
+            println!(
+                "\n[dispatch] 汇总：{ok_n}/{} 目标成功",
+                results.len()
+            );
+            if ok_n != results.len() {
+                std::process::exit(3);
+            }
+        }
+        other => {
+            eprintln!("错误: dispatch 未知动作 '{other}'");
+            print_subcommand_help("dispatch");
+            std::process::exit(2);
+        }
+    }
+    Ok(())
+}
+
+/// 渲染单条 DispatchResult（text / --json 两种视图）
+fn render_dispatch_result(r: &crate::harness::dispatch::DispatchResult, json: bool) {
+    if json {
+        match serde_json::to_string_pretty(&r) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("JSON 序列化失败: {e}"),
+        }
+        return;
+    }
+    println!("target   : {}", r.target.as_str());
+    println!("run_id   : {}", r.run_id);
+    println!("ok       : {}", r.ok);
+    println!(
+        "exit     : {}",
+        r.exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".into())
+    );
+    println!("elapsed  : {}ms", r.elapsed_ms);
+    println!("timeout  : {}", r.timeout_killed);
+    if let Some(reason) = &r.unavailable_reason {
+        println!("unavail  : {reason}");
+    }
+    let show_out = if r.output.len() <= 6000 {
+        r.output.as_str()
+    } else {
+        &r.output[..6000]
+    };
+    println!("----- output -----");
+    println!("{show_out}");
+    if r.output.len() > 6000 {
+        println!("...（已截断到 6000 字节，共 {} 字节）", r.output.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2242,8 +2761,10 @@ mod tests {
                 "serve",
                 "chat",
                 "gateway",
+                "goal",
                 "capabilities",
-                "cache"
+                "cache",
+                "dispatch"
             ]
         );
     }
@@ -2375,7 +2896,7 @@ mod tests {
     #[test]
     fn test_program_default() {
         let program = Program::default();
-        assert_eq!(program.route_table().routes().len(), 16);
+        assert_eq!(program.route_table().routes().len(), 18);
     }
 
     #[test]

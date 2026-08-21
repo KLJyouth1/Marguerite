@@ -234,7 +234,10 @@
     "fleet": "Flota",
     "computer-use": "Control del equipo",
     "evolve": "Evolucionar",
-    "plugins": "Complementos"
+    "plugins": "Complementos",
+    "graph": "Grafo",
+    "poker": "Poker",
+    "pet": "Mascota"
   },
   "notFound": {
     "title": "Página no encontrada",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "Mostrar traza del enrutamiento agregado",
       "ensembleTraceTitle": "Traza de candidatos",
       "bloomInspectorTitle": "Bloom · Orquestación IA {strategy}",
-      "bloomSubmode_deep": "Profundo",
-      "bloomSubmode_auto": "Auto",
-      "bloomSubmode_swarm": "Enjambre",
       "ensemblePlanMeta": "plan de conjunto · pool {count}",
       "ensembleTelemetryPendingMeta": "plan de conjunto · telemetría pendiente",
       "ensembleFallbackNone": "sin fallback",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "La IA coordina varios modelos para mejorar la capacidad en tareas complejas.",
       "modelRoutingBloomEnsemble": "Enrutamiento de fusión Bloom",
       "modelRoutingBloomEnsembleDesc": "Enrutamiento de fusión + orquestación automática con IA (Solo Agent / MAX Dual-Leader / Expert Team) para tareas complejas.",
-      "bloomSubmode": "Submodo Bloom",
-      "bloomSubmodeDeep": "Profundo",
-      "bloomSubmodeDeepDesc": "Razonamiento profundo en cuatro etapas para calidad y estabilidad.",
-      "bloomSubmodeAuto": "Auto",
-      "bloomSubmodeAutoDesc": "Bucle autónomo con QA y reparación automáticas.",
-      "bloomSubmodeSwarm": "Enjambre",
-      "bloomSubmodeSwarmDesc": "Enjambre de doble líder atacando tareas en paralelo.",
       "runMode": "Modo de ejecución",
       "runModeSafe": "Seguro",
       "runModeSafeDesc": "Usa el sandbox y tus reglas de archivos, comandos y red.",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "Modelos del conjunto"
     },
     "modelRouting": {
-      "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo.",
-      "submodeUpdateFailed": "No se pudo actualizar el submodo Bloom — revertido. Comprueba la conexión e inténtalo de nuevo."
+      "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo."
     },
     "routeFeedback": {
       "up": "Buena elección de modelo para este turno",

@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-gui"
-version = "0.1.0"
+version = "0.1.4"
 description = "Marguerite CLI Workbench - Tauri GUI Shell"
 edition = "2021"
 
@@ -20,5 +20,6 @@ tauri-plugin-single-instance = "2"
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 rand = "0.8"
 marguerite-core = { path = "../../core" }

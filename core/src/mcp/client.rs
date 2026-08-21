@@ -376,16 +376,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_mcp_client_connect_invalid_host() {
-        // 用本地"已关闭端口"构造确定性的连接失败场景，替代依赖 DNS 解析 bogus 主机名
-        // 的旧写法——沙箱 DNS 偶发把无效主机名解析成功，导致 send() 返回 Ok 而偶发误判通过。
-        // 连接一个无人监听的本地端口必然被拒（ConnectionRefused），与网络环境无关。
+        // 用「本机监听器回 404」构造确定性的连接失败场景：connect() 只把
+        // 2xx/5xx 视为可达，404 必须报错。不用「关闭端口必被拒」——宿主若开
+        // 系统代理（如 Clash），任意 loopback 端口都可能被代答 502 而误判可达。
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener); // 关闭后该端口无人监听 → 后续连接必被拒
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    use tokio::io::AsyncWriteExt;
+                    let body = "not found";
+                    let header = format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            }
+        });
 
         let mut client = McpClient::new(&format!("http://{addr}"));
         let result = client.connect().await;
-        assert!(result.is_err(), "连接已关闭端口应确定性失败: {:?}", result);
+        assert!(result.is_err(), "非 2xx/5xx 状态应确定性失败: {:?}", result);
         assert!(!client.is_connected());
     }
 
@@ -424,14 +439,14 @@ mod tests {
 
     /// 简易 mock HTTP 服务器：依次返回给定响应
     async fn mock_server(responses: Vec<(u16, String)>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
+            let last = responses.last().cloned();
             for (status, body) in responses {
                 if let Ok((mut socket, _)) = listener.accept().await {
-                    let mut buf = [0u8; 4096];
-                    let _ = socket.read(&mut buf).await;
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
                     let reason = if status >= 500 { "Server Error" } else { "OK" };
                     let header = format!(
                         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -440,6 +455,21 @@ mod tests {
                     let _ = socket.write_all(header.as_bytes()).await;
                     let _ = socket.write_all(body.as_bytes()).await;
                     let _ = socket.flush().await;
+                }
+            }
+            if let Some((status, body)) = last {
+                loop {
+                    if let Ok((mut socket, _)) = listener.accept().await {
+                        let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                        let reason = if status >= 500 { "Server Error" } else { "OK" };
+                        let header = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    }
                 }
             }
         });

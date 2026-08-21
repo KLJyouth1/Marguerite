@@ -633,8 +633,6 @@ export interface RouterDecisionPayload extends SessionEventPayload {
   routing_applied?: boolean
   /** Bloom 融合路由的 AI 自动编排形态（Solo Agent / MAX Dual-Leader / Expert Team / Cluster）。 */
   strategy?: string
-  /** Bloom 子模式（deep / auto / swarm）。 */
-  submode?: string
   decision?: unknown
 }
 

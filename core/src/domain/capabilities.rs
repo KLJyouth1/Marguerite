@@ -223,6 +223,70 @@ fn build_capabilities() -> Vec<Capability> {
         cap!("mem.project", "项目记忆", CapabilityGroup::Memory, CapabilityTier::Exclusive, "项目级长期约定", Real, "nexustar project_memory"),
         cap!("mem.evolutionary", "自进化记忆", CapabilityGroup::Memory, CapabilityTier::Exclusive, "从经验中沉淀可复用策略", Partial, "hermes evolutionary"),
         cap!("mem.persistent", "跨会话记忆持久化", CapabilityGroup::Memory, CapabilityTier::Enhanced, "User/Feedback/Auto 三类记忆 JSON 落盘，跨会话沉淀", Real, "claude-mem cross-session"),
+
+        // ── DSH 二创融合能力（插件清单 SSOT 对账：8 份 manifests × capabilities 合计 35 条，NFR1 强制登记）──
+        // | 来源插件               | 条数 |
+        // |---|---|
+        // | dsh-harness-core       |  4   |
+        // | dsh-modlens            |  4   |
+        // | dsh-market             |  4   |
+        // | dsh-better-sidebar     |  4   |
+        // | dsh-router-standard    |  3   |
+        // | dsh-usage              |  6   |
+        // | dsh-pet-whale          |  5   |
+        // | dsh-minigames          |  5   |
+        // | 合计                   | 35   |
+
+        // ··· harness-core 锚点（4）
+        cap!("dsh.runtime.version",  "DSH 版本查询",        CapabilityGroup::Governance, CapabilityTier::Enhanced, "查询 Marguerite 集成的 DSH 二创版本号（对应 upstream 0.1.0-rc.7）", Real, "DeepSeek Harness core"),
+        cap!("dsh.runtime.ping",     "DSH 运行时探测",      CapabilityGroup::Governance, CapabilityTier::Enhanced, "探测 DSH Bridge 是否就绪及 bundle 加载状态", Real, "DeepSeek Harness core"),
+        cap!("dsh.runtime.list_plugins","DSH 插件清单枚举", CapabilityGroup::Governance, CapabilityTier::Enhanced, "枚举已加载的 manifest 化 DSH 插件（topo_order 排序）", Real, "DeepSeek Harness core"),
+        cap!("dsh.bundle.topo_order","DSH Bundle 拓扑加载", CapabilityGroup::Orchestration, CapabilityTier::Enhanced, "依据 dependencies 做 Kahn 拓扑排序，保证弱依赖插件先于强依赖注册", Partial, "DeepSeek Harness core"),
+
+        // ··· Modlens 视觉（4）
+        cap!("dsh.vision.img2txt",     "Modlens 图文问答",    CapabilityGroup::Multimodal, CapabilityTier::Enhanced, "图片→自然语言描述；复用 Marguerite vision/modlens，PreToolUse 钩子自动注入", Real, "DSH plugin: modlens (image-to-text)"),
+        cap!("dsh.vision.ocr",         "Modlens 文字 OCR",    CapabilityGroup::Multimodal, CapabilityTier::Enhanced, "图片文字识别（中英混排、版面顺序保留），输出纯文本", Real, "DSH plugin: modlens (OCR)"),
+        cap!("dsh.vision.layout",      "Modlens 版面分析",    CapabilityGroup::Multimodal, CapabilityTier::Enhanced, "图片版面分割：标题/段落/表格/代码块/插图分区；供下游 extract_json 消费", Partial, "DSH plugin: modlens (layout)"),
+        cap!("dsh.vision.extract_json","Modlens JSON 抽取",   CapabilityGroup::Multimodal, CapabilityTier::Exclusive,"基于版面 + OCR 产出结构化 JSON：键值表、列表、表格行；偏好模型 opus", Real, "DSH plugin: modlens (extract JSON)"),
+
+        // ··· Market 插件市场（4）
+        cap!("dsh.market.list",    "Market 插件浏览",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "本地 manifest 目录浏览已安装 DSH 插件及其版本、capabilities", Real, "DSH plugin: market (list)"),
+        cap!("dsh.market.search",  "Market 关键词搜索",  CapabilityGroup::Tooling, CapabilityTier::Enhanced, "在本地 manifests 与内置 catalog.json 中按关键词模糊搜索", Real, "DSH plugin: market (search)"),
+        cap!("dsh.market.install", "Market 插件安装",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "按名称安装 manifest（纯离线，不访问外网 npm）；含 SKILL_SCAN 二次签名校验", Partial, "DSH plugin: market (install)"),
+        cap!("dsh.market.upgrade", "Market 插件升级",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "同插件新版本 manifest 替换 + 缓存清理，原子切换", Partial, "DSH plugin: market (upgrade)"),
+
+        // ··· Better Sidebar 工作台（4）
+        cap!("dsh.sidebar.list",      "Better Sidebar 列举",   CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "侧边栏三栏（文件树/浏览器/编辑器）内容列举与切换", Real, "DSH plugin: better-sidebar"),
+        cap!("dsh.sidebar.pin_slot",  "Better Sidebar 固定槽", CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "按 SlotId 把某面板 pin 到侧边栏；支持 runtime 切换", Real, "DSH plugin: better-sidebar"),
+        cap!("dsh.sidebar.refresh",   "Better Sidebar 刷新",   CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "刷新工作区视图：文件树重新枚举 + FS watcher merge", Real, "DSH plugin: better-sidebar"),
+        cap!("dsh.sidebar.open_path", "Better Sidebar 打开路径",CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "在侧边栏聚焦并展开指定 path 的节点", Partial, "DSH plugin: better-sidebar"),
+
+        // ··· Router 路由套件（3）
+        cap!("dsh.router.set_mode",   "Router 切换模式",   CapabilityGroup::Orchestration, CapabilityTier::Enhanced, "在 plan/execute/weak 三个 profile 间切换 FleetRouter 的默认路由", Real, "DSH plugin: dsh-routing-suite"),
+        cap!("dsh.router.query",      "Router 查询模式",   CapabilityGroup::Orchestration, CapabilityTier::Enhanced, "查询当前活动的思维模式 profile 及子代理路由详情", Real, "DSH plugin: dsh-routing-suite"),
+        cap!("dsh.router.auto_route", "Router 自动路由",   CapabilityGroup::Orchestration, CapabilityTier::Exclusive,"基于任务复杂度启发式选 plan/execute/weak profile（P3 启发式，Partial）", Partial, "DSH plugin: dsh-routing-suite"),
+
+        // ··· Daily Usage 消费统计（6）
+        cap!("dsh.usage.query_day",   "Usage 日维度统计",  CapabilityGroup::Governance, CapabilityTier::Enhanced, "按日聚合 TOKEN 消耗（prompt/cache_write/cache_read/completion 分项）+ SQLite 持久化", Real, "DSH plugin: dsh-daily-usage"),
+        cap!("dsh.usage.query_week",  "Usage 周维度统计",  CapabilityGroup::Governance, CapabilityTier::Enhanced, "最近 7 天聚合；含模型分布 breakdown", Real, "DSH plugin: dsh-daily-usage"),
+        cap!("dsh.usage.query_month", "Usage 月维度统计",  CapabilityGroup::Governance, CapabilityTier::Enhanced, "月度开销累计 + 日均 + 预估月末；支持 budget ratio 计算", Real, "DSH plugin: dsh-daily-usage"),
+        cap!("dsh.usage.balance",     "Usage 余额查询",    CapabilityGroup::Governance, CapabilityTier::Enhanced, "账户余额占位（需接入上游账户系统时替换实现）", Partial, "DSH plugin: dsh-daily-usage"),
+        cap!("dsh.usage.heatmap",     "Usage 热力图渲染",  CapabilityGroup::Governance, CapabilityTier::Enhanced, "日 TOKEN 密度字符热力图（周×日矩阵，4 级灰度）；供 TUI Slot 直接渲染", Real, "DSH plugin: dsh-daily-usage"),
+        cap!("dsh.usage.accumulate",  "Usage 累计钩子",    CapabilityGroup::Governance, CapabilityTier::Enhanced, "PostToolUse 自动累计 token 用量 + budget 阈值告警（WARN 事件）", Real, "DSH plugin: dsh-daily-usage"),
+
+        // ··· 鲸鱼娘桌宠（5）
+        cap!("dsh.pet.status", "Pet 当前状态查询",       CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "查询桌宠当前 6 态（idle/thinking/running/sleeping/eating/petted）+ ASCII 精灵", Real, "DSH plugin: dsh-harness-pet"),
+        cap!("dsh.pet.pet",    "Pet 摸头互动",          CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "触发摸头动作：状态 petted +15s，affinity +2（溢出 clamp 100）", Real, "DSH plugin: dsh-harness-pet"),
+        cap!("dsh.pet.feed",   "Pet 投喂小鱼干",        CapabilityGroup::CoreLoop, CapabilityTier::Enhanced, "投喂小鱼干：eating 态 +10s，affinity +5，饱食度上限避免爆饲", Real, "DSH plugin: dsh-harness-pet"),
+        cap!("dsh.pet.save",   "Pet 状态持久化保存",    CapabilityGroup::Memory,   CapabilityTier::Enhanced, "保存 PetV2 (affinity, mood, last_state, last_fed_at) 到会话配置目录 JSON", Real, "DSH plugin: dsh-harness-pet"),
+        cap!("dsh.pet.load",   "Pet 状态持久化加载",    CapabilityGroup::Memory,   CapabilityTier::Enhanced, "从 JSON 还原 PetV2 状态（首次启动自动创建默认 id=0,affinity=0, mood=Happy）", Real, "DSH plugin: dsh-harness-pet"),
+
+        // ··· Mini Games 小游戏（5）
+        cap!("dsh.games.list",      "Games 列表",           CapabilityGroup::CoreLoop, CapabilityTier::Baseline, "列出可用游戏（锚点 3 款：2048/TicTacToe/Snake；其余 15 款 P3 待补）", Real, "DSH plugin: mini-games"),
+        cap!("dsh.games.play",      "Games 启动入口",       CapabilityGroup::CoreLoop, CapabilityTier::Baseline, "按 game_id 启动对应游戏的 TUI 面板；ESC 返回工作台", Partial, "DSH plugin: mini-games"),
+        cap!("dsh.games.2048",      "2048 数字合成",        CapabilityGroup::CoreLoop, CapabilityTier::Baseline, "TUI 原生 4×4 2048：方向键移动、合并、计分、胜利/失败判定", Narrative, "DSH plugin: mini-games (2048)"),
+        cap!("dsh.games.tictactoe", "井字棋 TicTacToe",     CapabilityGroup::CoreLoop, CapabilityTier::Baseline, "双人井字棋：落子、胜负判定、悔棋一步", Narrative, "DSH plugin: mini-games (tictactoe)"),
+        cap!("dsh.games.snake",     "贪吃蛇 Snake",         CapabilityGroup::CoreLoop, CapabilityTier::Baseline, "TUI 原生贪吃蛇：蛇身移动、食物、碰撞、计分", Narrative, "DSH plugin: mini-games (snake)"),
     ]
 }
 

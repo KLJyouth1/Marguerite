@@ -41,6 +41,8 @@ struct SkillData {
     rating: f64,
     #[serde(default)]
     uses: u32,
+    #[serde(default)]
+    rank: Option<u32>,
 }
 
 impl SkillLoader {
@@ -99,6 +101,17 @@ impl SkillLoader {
         self.load_from_path(&path)
     }
 
+    /// 从绝对/相对路径加载单个技能文件（供 register-batch 等 CLI 场景做单文件解析）。
+    ///
+    /// 与 `load(name)` 等价：会基于文件位置打上 Builtin / Local 标记，并自动推断 rank
+    /// （未显式指定 rank 时按 source 落入 SYSTEM/USER/COMMUNITY 等级）。
+    pub fn load_single(&self, path: &Path) -> Result<Skill> {
+        if !path.exists() {
+            bail!("技能文件不存在: {}", path.display());
+        }
+        self.load_from_path(path)
+    }
+
     /// 从 URL 加载技能（远程安装）
     ///
     /// 注意：当前实现仅设置 Remote 标记，不执行实际 HTTP 请求。
@@ -124,6 +137,7 @@ impl SkillLoader {
             },
             rating: 0.0,
             uses: 0,
+            rank: super::registry::ranks::COMMUNITY,
         };
 
         Ok(skill)
@@ -200,6 +214,7 @@ impl SkillLoader {
             source: SkillSource::Local { path: dest },
             rating: data.rating,
             uses: data.uses,
+            rank: data.rank.unwrap_or(super::registry::ranks::USER),
         };
         info!("技能已安装并通过安全扫描: {name}");
         Ok(skill)
@@ -259,6 +274,12 @@ impl SkillLoader {
             }
         };
 
+        let rank = data.rank.unwrap_or(match &source {
+            SkillSource::Builtin => super::registry::ranks::SYSTEM,
+            SkillSource::Local { .. } => super::registry::ranks::USER,
+            SkillSource::Remote { .. } => super::registry::ranks::COMMUNITY,
+        });
+
         let skill = Skill {
             name: data.name,
             description: data.description,
@@ -271,6 +292,7 @@ impl SkillLoader {
             source,
             rating: data.rating,
             uses: data.uses,
+            rank,
         };
 
         Ok(skill)
@@ -385,6 +407,7 @@ prompt_template: "模板: {{text}}"
             source: SkillSource::Builtin,
             rating: 0.0,
             uses: 0,
+            rank: 300,
         };
         assert!(loader.verify_signature(&skill));
     }
@@ -411,6 +434,7 @@ prompt_template: "模板: {{text}}"
             },
             rating: 0.0,
             uses: 0,
+            rank: 300,
         };
         assert!(loader.verify_signature(&skill));
 
@@ -445,6 +469,7 @@ prompt_template: "模板: {{text}}"
             },
             rating: 0.0,
             uses: 0,
+            rank: 300,
         };
         assert!(loader.verify_signature(&skill));
 
@@ -472,22 +497,23 @@ prompt_template: "模板: {{text}}"
 
     /// 简易 mock HTTP 服务器：单次响应
     async fn mock_http_server(status: u16, body: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let reason = if status >= 500 { "Server Error" } else { "OK" };
-                let header = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/x-yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-                let _ = socket.flush().await;
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    let reason = if status >= 500 { "Server Error" } else { "OK" };
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/x-yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
             }
         });
         format!("http://{addr}")

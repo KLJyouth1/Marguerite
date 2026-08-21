@@ -1,0 +1,27 @@
+{
+  "name": "dsh-schedule",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH schedule 二创：会话级持久提醒（after_seconds / at 绝对时刻 / every_seconds 固定间隔，最短 5 分钟）；状态由会话事件日志持有，定时器与提醒是可弃投影；复用 Marguerite automation/cron 与 task-board 账本",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.schedule.after",
+    "dsh.schedule.at",
+    "dsh.schedule.every"
+  ],
+  "hooks": [],
+  "slash_commands": [],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "schedule.created",
+    "schedule.due",
+    "reminder.fired",
+    "schedule.cancelled"
+  ],
+  "capability_models": {
+    "dsh.schedule.after": "inherit"
+  }
+}

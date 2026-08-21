@@ -1,0 +1,33 @@
+{
+  "name": "dsh-market",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "DSH Market 插件市场二创：本地插件清单浏览、关键词搜索、manifest 安装与版本升级（纯离线，不访问外网 npm）",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.market.list",
+    "dsh.market.search",
+    "dsh.market.install",
+    "dsh.market.upgrade"
+  ],
+  "hooks": [],
+  "slash_commands": [
+    {
+      "name": "/market",
+      "description": "插件市场：list 浏览 / search 关键词 / install 安装 / upgrade 升级",
+      "arguments": ["subcmd", "name"]
+    }
+  ],
+  "subagents": [],
+  "skills": [
+    { "name": "dsh-market-list", "from": "plugins/manifests" },
+    { "name": "dsh-market-search", "from": "plugins/manifests" },
+    { "name": "dsh-market-install", "from": "plugins/manifests" },
+    { "name": "dsh-market-upgrade", "from": "plugins/manifests" }
+  ],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "dsh.market.installed",
+    "dsh.market.upgraded",
+    "dsh.market.error"
+  ]
+}

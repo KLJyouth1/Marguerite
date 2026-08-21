@@ -21,6 +21,7 @@ pub fn render_topbar(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
         ModeKind::Bloom => "Bloom",
         ModeKind::Agent => "Agent",
         ModeKind::Plan => "Plan",
+        ModeKind::Ensemble => "Ensemble",
     };
 
     let mut spans = Vec::new();

@@ -103,6 +103,15 @@ export function useProjectWorkspaces() {
     return normalizeWorkspace(response?.workspace)
   }
 
+  async function createWorkspace(name: string): Promise<ProjectWorkspaceItem | null> {
+    requireOwnerMethod('workspaces.create')
+    const response = await rpc.call<{ workspace?: unknown }>('workspaces.create', {
+      name,
+    })
+    await loadWorkspaces()
+    return normalizeWorkspace(response?.workspace)
+  }
+
   async function deleteWorkspaceHistory(
     workspaceId: string,
   ): Promise<Required<ProjectWorkspaceHistoryDeleteResponse>> {
@@ -174,6 +183,7 @@ export function useProjectWorkspaces() {
     resetWorkspaces,
     loadWorkspaces,
     openWorkspace,
+    createWorkspace,
     renameWorkspace: (workspaceId: string, name: string) =>
       mutate('workspaces.update', { workspaceId, name }),
     setPinned: (workspaceId: string, pinned: boolean) =>

@@ -1,13 +1,92 @@
 //! 模式规格（声明式 YAML）
 //!
 //! 每种模式一份 YAML：工具白/黑名单、模型参数、反模式、审批策略。
-//! 内置（plan/agent/bloom/bloom_auto/bloom_swarm），可通过 `~/.marguerite/modes/*.yaml` 覆盖。
+//! 内置（plan/agent/bloom），可通过 `~/.marguerite/modes/*.yaml` 覆盖。
 
 use serde::{Deserialize, Serialize};
 
 use crate::guard::gateway::RiskLevel;
 use crate::mode::privileges::BloomPrivileges;
 use crate::sandbox::policy::SandboxPolicy;
+
+/// Bloom 锚定冷启动规格（dsh-forge 社区验证版 + PTC 合并）
+///
+/// 首轮走「锚定」：仅暴露 2 个最小工具（bash_persistent +
+/// str_replace_editor）；首块文本经 `prefix_gate` 门控（deepseek 系
+/// "we" 且无 "let me" → 晋升；四步兜底；无工具首轮自动晋升）。
+/// 晋升后进入 PTC 阶段：单一 `ptc_tool`（run_code）；之后再按需
+/// 单调扩展到 Bloom 全工具面（中途不回退、不替换）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BloomAnchoringSpec {
+    /// 是否启用锚定冷启动（统一 Bloom 默认开启）
+    pub enabled: bool,
+    /// 前缀门控家族（当前支持 "deepseek"；其他家族走通用门控）
+    pub prefix_gate: String,
+    /// 锚定期最小工具集（默认 bash_persistent + str_replace_editor）
+    pub minimal_tools: Vec<String>,
+    /// PTC 阶段工具（默认 run_code）
+    pub ptc_tool: String,
+    /// 兜底晋升步数（默认 4，对齐 FALLBACK_STEPS）
+    pub fallback_steps: u32,
+    /// 锚定期消息源白名单（默认 user + goal）：非白名单来源不进模型
+    /// （对齐梁神 issue #578：过滤后的 /goal 自动轮不得触发晋升分支）
+    #[serde(default = "default_message_sources")]
+    pub message_sources: Vec<String>,
+    /// 首轮请求输出预算（token；None = 不设限）。梁神用 1024 压住「We need」
+    /// 触发窗口，晋升后由装配层剥离，绝不残留进后续请求。
+    #[serde(default)]
+    pub bootstrap_max_tokens: Option<u32>,
+    /// 晋升后延迟注入的来源（默认 agent-instructions + skill-catalog）：
+    /// workspace 指令与技能目录晚一步注入，先让 PTC 单工具轨迹稳定。
+    #[serde(default = "default_deferred_sources")]
+    pub deferred_sources: Vec<String>,
+    /// 晋升后延迟步数（默认 1）
+    #[serde(default = "default_deferred_grace_steps")]
+    pub deferred_grace_steps: u32,
+    /// 无工具首轮自动晋升（默认 true，向后兼容既有行为）
+    #[serde(default = "default_promote_after_first_response")]
+    pub promote_after_first_response: bool,
+}
+
+fn default_message_sources() -> Vec<String> {
+    vec!["user".to_string(), "goal".to_string()]
+}
+
+fn default_deferred_sources() -> Vec<String> {
+    vec![
+        "agent-instructions".to_string(),
+        "skill-catalog".to_string(),
+    ]
+}
+
+fn default_deferred_grace_steps() -> u32 {
+    1
+}
+
+fn default_promote_after_first_response() -> bool {
+    true
+}
+
+impl Default for BloomAnchoringSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix_gate: "deepseek".to_string(),
+            minimal_tools: vec![
+                "bash_persistent".to_string(),
+                "str_replace_editor".to_string(),
+            ],
+            ptc_tool: "run_code".to_string(),
+            fallback_steps: 4,
+            message_sources: default_message_sources(),
+            bootstrap_max_tokens: None,
+            deferred_sources: default_deferred_sources(),
+            deferred_grace_steps: default_deferred_grace_steps(),
+            promote_after_first_response: default_promote_after_first_response(),
+        }
+    }
+}
 
 /// 审批动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,17 +192,22 @@ pub struct ModeSpec {
     /// 审批策略
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
+    /// 模式提示段（可选）：作为该模式的静态前缀段注入模型消息装配
+    /// （仅追加、不重写历史——红线 #1）。plan 模式携带 DSH plan-mode 同款规则段。
+    #[serde(default)]
+    pub prompt_section: Option<String>,
     /// Bloom 增强段（`bloom:` YAML 键）：MAX+YOLO 融合配置，仅 Bloom 系列模式使用
     #[serde(default)]
     pub bloom: Option<BloomSpec>,
 }
 
-/// Bloom 增强规格（二次升级）：MAX（4 阶段推理 + 特权）+ YOLO（沙箱分层 + 快照安全网）融合配置
+/// Bloom 增强规格（二次升级）：MAX（4 阶段推理 + 特权）+ YOLO（沙箱分层 + 快照安全网）融合配置。
+///
+/// 统一 Bloom 模式（不再有 submode 子模式开关）：deep 双模型并行、auto 自主闭环、
+/// swarm 双领队蜂群、PTC 程序化工具调用、锚定冷启动全部内建，按任务分析自动选用。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BloomSpec {
-    /// 子模式标识：deep（4 阶段推理）/ auto（自主闭环）/ swarm（双领队蜂群）
-    pub submode: String,
     /// 特权（对齐 MaxModePrivileges）
     pub privileges: BloomPrivileges,
     /// 沙箱策略（对齐 TUI 工作台 SandboxPolicy）
@@ -140,22 +224,25 @@ pub struct BloomSpec {
     pub snapshot_enabled: bool,
     /// 失败后自动回退轮数上限
     pub auto_revert_max: usize,
-    /// 蜂群分片上限（submode=swarm 时生效）
+    /// 蜂群分片上限（统一 Bloom 内并行攻坚时生效）
     pub max_swarm_shards: usize,
-    /// 专家团队子专家上限（submode=swarm 时生效）
+    /// 专家团队子专家上限（统一 Bloom 内并行攻坚时生效）
     #[serde(default = "default_max_sub_experts")]
     pub max_sub_experts: usize,
     /// 自动重试失败工具上限
     pub auto_retry_failures: usize,
-    /// 自主闭环 token 预算（submode=auto）
+    /// 自主闭环 token 预算（统一 Bloom 自主闭环生效）
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
-    /// 自主闭环最大迭代轮数（submode=auto）
+    /// 自主闭环最大迭代轮数（统一 Bloom 自主闭环生效）
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
-    /// 自主闭环自动修复上限（submode=auto）
+    /// 自主闭环自动修复上限（统一 Bloom 自主闭环生效）
     #[serde(default = "default_max_fixes")]
     pub max_fixes: usize,
+    /// 锚定冷启动规格：首轮锚定 + 工具收窄 → 晋升到 PTC。统一 Bloom 默认开启。
+    #[serde(default)]
+    pub anchoring: BloomAnchoringSpec,
 }
 
 fn default_max_sub_experts() -> usize {
@@ -177,7 +264,6 @@ fn default_max_fixes() -> usize {
 impl Default for BloomSpec {
     fn default() -> Self {
         Self {
-            submode: "deep".to_string(),
             privileges: BloomPrivileges::default(),
             sandbox: SandboxPolicy::workspace_with_network(),
             thinking_depth: 3,
@@ -192,6 +278,7 @@ impl Default for BloomSpec {
             budget_tokens: 100_000,
             max_iterations: 20,
             max_fixes: 3,
+            anchoring: BloomAnchoringSpec::default(),
         }
     }
 }
@@ -217,18 +304,6 @@ pub mod builtin {
 
     pub fn bloom() -> ModeSpec {
         ModeSpec::from_yaml(include_str!("modes/bloom.yaml")).expect("内置 bloom.yaml 必须合法")
-    }
-
-    /// Bloom 自主闭环子模式（bloom:auto）：预算驱动，QA 全过才停
-    pub fn bloom_auto() -> ModeSpec {
-        ModeSpec::from_yaml(include_str!("modes/bloom_auto.yaml"))
-            .expect("内置 bloom_auto.yaml 必须合法")
-    }
-
-    /// Bloom 双领队蜂群子模式（bloom:swarm）：FlashSwarm + ProExpert + 蜂群/专家团队
-    pub fn bloom_swarm() -> ModeSpec {
-        ModeSpec::from_yaml(include_str!("modes/bloom_swarm.yaml"))
-            .expect("内置 bloom_swarm.yaml 必须合法")
     }
 }
 
@@ -290,7 +365,6 @@ approval_policy: { mutating: allow, exec_write: allow, network: allow, desktop: 
         // bloom.yaml 的 bloom: 段（MAX+YOLO 融合配置）应完整解析
         let spec = builtin::bloom();
         let b = spec.bloom.as_ref().expect("bloom.yaml 必须含 bloom: 段");
-        assert_eq!(b.submode, "deep");
         assert!(b.privileges.is_auto_approve());
         assert!(b.privileges.tool_allowed("exec"));
         assert_eq!(b.privileges.max_concurrent_tools, 20);
@@ -306,11 +380,11 @@ approval_policy: { mutating: allow, exec_write: allow, network: allow, desktop: 
         // 最小 bloom: 段 → 其余字段走默认
         let yaml = r#"name: bloom
 bloom:
-  submode: deep
+  privileges:
+    auto_approve: true
 "#;
         let spec = ModeSpec::from_yaml(yaml).unwrap();
         let b = spec.bloom.unwrap();
-        assert_eq!(b.submode, "deep");
         assert!(b.privileges.is_auto_approve());
         assert!(b.sandbox.has_network_access());
         assert_eq!(b.thinking_depth, 3);
@@ -333,36 +407,12 @@ bloom:
     }
 
     #[test]
-    fn test_bloom_swarm_spec_parses_swarm_fields() {
-        let spec = builtin::bloom_swarm();
-        let b = spec
-            .bloom
-            .as_ref()
-            .expect("bloom_swarm.yaml 必须含 bloom: 段");
-        assert_eq!(b.submode, "swarm");
-        assert_eq!(b.max_swarm_shards, 11);
-        assert_eq!(b.max_sub_experts, 5);
-    }
-
-    #[test]
-    fn test_bloom_auto_spec_parses_auto_fields() {
-        let spec = builtin::bloom_auto();
-        let b = spec
-            .bloom
-            .as_ref()
-            .expect("bloom_auto.yaml 必须含 bloom: 段");
-        assert_eq!(b.submode, "auto");
-        assert_eq!(b.budget_tokens, 100_000);
-        assert_eq!(b.max_iterations, 20);
-        assert_eq!(b.max_fixes, 3);
-    }
-
-    #[test]
     fn test_bloom_spec_auto_swarm_fields_default() {
         // 最小 bloom: 段 → auto/swarm 专属字段走默认值
         let yaml = r#"name: bloom
 bloom:
-  submode: deep
+  privileges:
+    auto_approve: true
 "#;
         let spec = ModeSpec::from_yaml(yaml).unwrap();
         let b = spec.bloom.unwrap();
@@ -370,5 +420,58 @@ bloom:
         assert_eq!(b.budget_tokens, 100_000);
         assert_eq!(b.max_iterations, 20);
         assert_eq!(b.max_fixes, 3);
+    }
+
+    #[test]
+    fn test_bloom_anchoring_defaults_enable_deepseek_prefix_gate() {
+        // 最小 bloom: 段 → anchoring 默认开启、前缀门控为 deepseek、最小工具 2 件
+        let yaml = r#"name: bloom
+bloom:
+  privileges:
+    auto_approve: true
+"#;
+        let spec = ModeSpec::from_yaml(yaml).unwrap();
+        let b = spec.bloom.unwrap();
+        assert!(b.anchoring.enabled);
+        assert_eq!(b.anchoring.prefix_gate, "deepseek");
+        assert_eq!(b.anchoring.minimal_tools.len(), 2);
+        assert!(b.anchoring
+            .minimal_tools
+            .iter()
+            .any(|t| t == "bash_persistent"));
+        assert!(b.anchoring
+            .minimal_tools
+            .iter()
+            .any(|t| t == "str_replace_editor"));
+        assert_eq!(b.anchoring.ptc_tool, "run_code");
+        assert_eq!(b.anchoring.fallback_steps, 4);
+    }
+
+    #[test]
+    fn test_bloom_anchoring_roundtrip_overrides() {
+        let yaml = r#"name: bloom
+bloom:
+  privileges:
+    auto_approve: true
+  anchoring:
+    enabled: true
+    prefix_gate: deepseek
+    minimal_tools: [a, b]
+    ptc_tool: c
+    fallback_steps: 5
+"#;
+        let spec = ModeSpec::from_yaml(yaml).unwrap();
+        let b = spec.bloom.unwrap();
+        assert_eq!(b.anchoring.minimal_tools, vec!["a", "b"]);
+        assert_eq!(b.anchoring.ptc_tool, "c");
+        assert_eq!(b.anchoring.fallback_steps, 5);
+    }
+
+    #[test]
+    fn test_bloom_deep_dual_model_flag() {
+        // 内置 bloom.yaml：deep_dual_model=true（DEEP 内化）
+        let spec = builtin::bloom();
+        let b = spec.bloom.as_ref().unwrap();
+        assert!(b.privileges.deep_dual_model);
     }
 }

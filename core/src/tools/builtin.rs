@@ -2086,7 +2086,7 @@ fn web_search_tool() -> Box<dyn ToolExecutor> {
 }
 
 /// 联网检索升级：search → 自动抓取前 N 条正文 → 汇总摘要（一次调用完成「检索+深读」）。
-/// 对齐主流工作台（Codex/Claude 的 search-then-read）能力，弥补单一搜索只有标题/摘要的不足。
+/// 对齐主流工作台（上游工作台的 search-then-read）能力，弥补单一搜索只有标题/摘要的不足。
 fn web_research_tool(ssrf: Arc<SsrfGuard>) -> Box<dyn ToolExecutor> {
     boxed(
         "web_research",
@@ -2372,14 +2372,14 @@ fn read_env_tool() -> Box<dyn ToolExecutor> {
 }
 
 // ---------------------------------------------------------------------------
-// Codex 等价工具（二开）：apply_patch / glob_file_search / todo_write
+// 上游等价工具（二开）：apply_patch / glob_file_search / todo_write
 //
-// 对齐 OpenAI Codex CLI 核心工具面中本工作台此前缺失的三件套：
-// - `apply_patch`：统一 diff 补丁应用（Codex 的「major lever」，比单串替换
+// 对齐上游 CLI 核心工具面中本工作台此前缺失的三件套：
+// - `apply_patch`：统一 diff 补丁应用（上游的「major lever」，比单串替换
 //   `edit_file` 更强：一个补丁可精确改动多处、支持新增/删除整行块）。
 // - `glob_file_search`：glob 模式文件检索（`find_files` 只做名字子串，glob 支持
 //   `**`/`*`/`?` 通配，更贴近「按模式定位」的真实检索需求）。
-// - `todo_write`：结构化任务清单（对齐 Codex todo_write/update_plan，让 Agent
+// - `todo_write`：结构化任务清单（对齐上游 todo_write/update_plan，让 Agent
 //   在长任务中自报进度，落盘 .marguerite/todos.json 可跨轮读取）。
 // ---------------------------------------------------------------------------
 
@@ -2524,7 +2524,7 @@ fn apply_patch_tool(
 ) -> Box<dyn ToolExecutor> {
     boxed(
         "apply_patch",
-        "应用 unified diff 补丁到工作区文件（对齐 Codex apply_patch）。patch 为包含 @@ hunk 头的补丁文本，可含 +++ b/path 头；若省略头则需显式 path。参数: patch(必填), path(可选，补丁含 +++ 头时可省略)",
+        "应用 unified diff 补丁到工作区文件（对齐上游 apply_patch）。patch 为包含 @@ hunk 头的补丁文本，可含 +++ b/path 头；若省略头则需显式 path。参数: patch(必填), path(可选，补丁含 +++ 头时可省略)",
         json!({"type":"object","properties":{
             "patch":{"type":"string"},
             "path":{"type":"string"}

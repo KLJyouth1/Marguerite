@@ -1,0 +1,49 @@
+{
+  "name": "dsh-workflow-ralph",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH workflow + ralph 二创：模型编写 JavaScript 编排脚本 → worker-thread 引擎扇出子代理（pipeline 无阶段屏障 / parallel 汇合）；ralph 循环每轮开全新子代理、共享工作区为持久记忆、仅传递有界结构化报告；复用 Marguerite orchestration 扇出与 subagent trellis 事件驱动",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.workflow.run",
+    "dsh.workflow.pipeline",
+    "dsh.ralph.loop"
+  ],
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "handler": "workflow_report",
+      "params": {
+        "structured": "true"
+      }
+    }
+  ],
+  "slash_commands": [],
+  "subagents": [
+    {
+      "name": "workflow-worker",
+      "description": "执行模型编排脚本的工作线程子代理，逐项扇出独立子任务",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "search"
+      ],
+      "model": "inherit"
+    }
+  ],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "workflow.started",
+    "workflow.stage.done",
+    "workflow.finished",
+    "ralph.round.started",
+    "ralph.round.reported"
+  ],
+  "capability_models": {
+    "dsh.workflow.run": "inherit"
+  }
+}

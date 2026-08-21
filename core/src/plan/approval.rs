@@ -1,0 +1,171 @@
+//! Plan-mode 审批闭环（上游 plan-mode 二开落地，Track 4）。
+//!
+//! 对齐 DeepSeek Harness 的 plan-mode 交互闭环：
+//! 拟定计划（Draft）→ exit_plan_mode 提交审批（PendingApproval）→
+//! 用户批准（Approved，离开计划模式、开始执行）或驳回（Rejected，返回修订）。
+//!
+//! 纯逻辑状态机，离线可测；与 plan/mod.rs 的 PlanRun 状态机（queued→running）互补——
+//! 本模块是「执行前的人工审批闸门」，PlanRun 是「审批通过后的执行推进」。
+
+use anyhow::{anyhow, Result};
+
+/// 审批状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanApprovalState {
+    /// 拟定中（计划模式内）
+    Draft,
+    /// 已提交，等待用户审批
+    PendingApproval,
+    /// 已批准（离开计划模式，可执行）
+    Approved,
+    /// 已驳回（需修订）
+    Rejected,
+}
+
+impl PlanApprovalState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanApprovalState::Draft => "draft",
+            PlanApprovalState::PendingApproval => "pending_approval",
+            PlanApprovalState::Approved => "approved",
+            PlanApprovalState::Rejected => "rejected",
+        }
+    }
+}
+
+/// 计划审批状态机
+#[derive(Debug, Clone)]
+pub struct PlanApproval {
+    state: PlanApprovalState,
+    feedback: Option<String>,
+}
+
+impl Default for PlanApproval {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlanApproval {
+    pub fn new() -> Self {
+        Self {
+            state: PlanApprovalState::Draft,
+            feedback: None,
+        }
+    }
+
+    pub fn state(&self) -> PlanApprovalState {
+        self.state
+    }
+
+    pub fn is_approved(&self) -> bool {
+        self.state == PlanApprovalState::Approved
+    }
+
+    pub fn feedback(&self) -> Option<&str> {
+        self.feedback.as_deref()
+    }
+
+    /// 提交审批（Draft → PendingApproval）；即 exit_plan_mode 的落点。
+    pub fn submit(&mut self) -> Result<()> {
+        if self.state != PlanApprovalState::Draft {
+            return Err(anyhow!("仅 draft 状态可提交审批，当前为 {}", self.state.as_str()));
+        }
+        self.state = PlanApprovalState::PendingApproval;
+        self.feedback = None;
+        Ok(())
+    }
+
+    /// 批准（PendingApproval → Approved）；批准后离开计划模式。
+    pub fn approve(&mut self) -> Result<()> {
+        if self.state != PlanApprovalState::PendingApproval {
+            return Err(anyhow!("仅 pending_approval 状态可批准，当前为 {}", self.state.as_str()));
+        }
+        self.state = PlanApprovalState::Approved;
+        self.feedback = None;
+        Ok(())
+    }
+
+    /// 驳回（PendingApproval → Rejected），记录反馈理由。
+    pub fn reject(&mut self, feedback: &str) -> Result<()> {
+        if self.state != PlanApprovalState::PendingApproval {
+            return Err(anyhow!("仅 pending_approval 状态可驳回，当前为 {}", self.state.as_str()));
+        }
+        let f = feedback.trim();
+        if f.is_empty() {
+            return Err(anyhow!("驳回理由不可为空"));
+        }
+        self.state = PlanApprovalState::Rejected;
+        self.feedback = Some(f.to_string());
+        Ok(())
+    }
+
+    /// 修订（Rejected → Draft），清空反馈、返回计划模式继续拟定。
+    pub fn revise(&mut self) -> Result<()> {
+        if self.state != PlanApprovalState::Rejected {
+            return Err(anyhow!("仅 rejected 状态可修订，当前为 {}", self.state.as_str()));
+        }
+        self.state = PlanApprovalState::Draft;
+        self.feedback = None;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn happy_path_submit_approve() {
+        let mut a = PlanApproval::new();
+        assert_eq!(a.state(), PlanApprovalState::Draft);
+        a.submit().unwrap();
+        assert_eq!(a.state(), PlanApprovalState::PendingApproval);
+        a.approve().unwrap();
+        assert_eq!(a.state(), PlanApprovalState::Approved);
+        assert!(a.is_approved());
+    }
+
+    #[test]
+    fn reject_then_revise_loop() {
+        let mut a = PlanApproval::new();
+        a.submit().unwrap();
+        a.reject("范围太大").unwrap();
+        assert_eq!(a.state(), PlanApprovalState::Rejected);
+        assert_eq!(a.feedback(), Some("范围太大"));
+        a.revise().unwrap();
+        assert_eq!(a.state(), PlanApprovalState::Draft);
+        assert_eq!(a.feedback(), None);
+        // 重新提交并批准
+        a.submit().unwrap();
+        a.approve().unwrap();
+        assert!(a.is_approved());
+    }
+
+    #[test]
+    fn submit_only_from_draft() {
+        let mut a = PlanApproval::new();
+        a.submit().unwrap();
+        assert!(a.submit().is_err(), "已提交不能重复提交");
+    }
+
+    #[test]
+    fn approve_only_from_pending() {
+        let mut a = PlanApproval::new();
+        assert!(a.approve().is_err(), "draft 不能直接批准");
+    }
+
+    #[test]
+    fn reject_requires_feedback() {
+        let mut a = PlanApproval::new();
+        a.submit().unwrap();
+        assert!(a.reject("  ").is_err());
+        assert_eq!(a.state(), PlanApprovalState::PendingApproval);
+    }
+
+    #[test]
+    fn revise_only_from_rejected() {
+        let mut a = PlanApproval::new();
+        assert!(a.revise().is_err(), "draft 不能修订");
+    }
+}

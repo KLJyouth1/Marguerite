@@ -584,6 +584,7 @@ mod tests {
             source: SkillSource::Builtin,
             rating: 0.0,
             uses: 0,
+            rank: 300,
         }
     }
 
@@ -689,6 +690,7 @@ mod tests {
             source: SkillSource::Builtin,
             rating: 4.5,
             uses: 0,
+            rank: 300,
         };
         registry.register(skill).unwrap();
 

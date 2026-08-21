@@ -1,122 +1,184 @@
-//! 顶层版本化契约 [`GenUiDocument`]（Track C2）。
+//! GenUI 契约 v1：DSH GenUI 二创的 Rust 原生 Widget 枚举（spec FR-B2 / T-2.2）。
 //!
-//! 上游 dsh-genui 的缺口之一是「30+ 组件无版本化 schema」——消费方无从判断
-//! 自己是否看得懂这份界面描述。此处以显式 `version` 字段封顶：解析时不校验版本
-//! （保留原样以便观测与报错），**渲染前必须过
-//! [`validate`](crate::genui::validate)** 才能确认版本可承载。
+//! 本文件为 DSH GenUI 二创定义的一组**轻量、面向卡片交互面板**的契约类型：
+//! - [`Widget`]：枚举调度（Card / Button / ProgressBar / Form）
+//! - [`Card`]：标题 + 正文行 + 操作按钮组
+//! - [`Button`]：可点击按钮（含 enabled 开关）
+//! - [`ProgressBar`]：进度条（0..=1 夹紧）
+//! - [`Form`] / [`FormField`]：表单（文本 / 下拉）
+//!
+//! 所有类型都实现 `Serialize + Deserialize + PartialEq + Clone + Debug`，
+//! 可直接作为 RPC / 事件总线载荷，满足 Steering 事件 roundtrip 要求。
 
 use serde::{Deserialize, Serialize};
 
-use super::{GenUiError, Widget, GENUI_SCHEMA_VERSION};
-
-/// 一份完整的生成式 UI 文档（版本 + widget 列表）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GenUiDocument {
-    /// 契约版本；`> GENUI_SCHEMA_VERSION` 时 [`validate`](crate::genui::validate) 拒绝
-    pub version: u32,
-    /// widget 列表（按序渲染）
-    pub widgets: Vec<Widget>,
+/// GenUI 顶层组件枚举。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Widget {
+    /// 卡片组件（标题 + 正文 + 底部按钮栏）。
+    Card(Card),
+    /// 独立按钮。
+    Button(Button),
+    /// 进度条。
+    ProgressBar(ProgressBar),
+    /// 表单。
+    Form(Form),
 }
 
-impl GenUiDocument {
-    /// 以当前引擎契约版本（[`GENUI_SCHEMA_VERSION`]）构造文档。
-    pub fn new(widgets: Vec<Widget>) -> Self {
+impl Widget {
+    /// 方便 match 调试时返回类型标签。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Widget::Card(_) => "card",
+            Widget::Button(_) => "button",
+            Widget::ProgressBar(_) => "progress_bar",
+            Widget::Form(_) => "form",
+        }
+    }
+}
+
+/// 卡片：标题 + 若干正文行 + 底部操作按钮。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Card {
+    /// 卡片标题。
+    pub title: String,
+    /// 正文行（每一行字符串，渲染时左对齐截断）。
+    pub body: Vec<String>,
+    /// 底部动作按钮（横向排列）。
+    pub actions: Vec<Button>,
+}
+
+/// 按钮组件。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Button {
+    /// 事件 id（click 派发时回传）。
+    pub id: String,
+    /// 显示文本。
+    pub label: String,
+    /// 是否启用；false 时渲染为灰色。
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Button {
+    /// 便捷构造：默认 enabled=true。
+    pub fn new<S: Into<String>>(id: S, label: S) -> Self {
         Self {
-            version: GENUI_SCHEMA_VERSION,
-            widgets,
+            id: id.into(),
+            label: label.into(),
+            enabled: true,
         }
     }
 
-    /// 从 JSON 解析文档。
-    ///
-    /// 仅做结构解析：未知 widget 类型 / 字段错配 → [`GenUiError::Json`]。
-    /// 版本与注入校验属于 [`validate`](crate::genui::validate) 的职责，
-    /// 二者分离以便调用方对「解析失败」与「校验拒绝」分别观测。
-    pub fn from_json(s: &str) -> Result<GenUiDocument, GenUiError> {
-        Ok(serde_json::from_str(s)?)
+    /// 禁用按钮（链式）。
+    pub fn disabled(mut self) -> Self {
+        self.enabled = false;
+        self
     }
+}
 
-    /// 序列化为 JSON 字符串。
-    ///
-    /// 本类型图仅含字符串键、数值与数组，序列化不可能失败（非有限浮点由
-    /// `serde_json` 记为 `null`），故此处以 `expect` 断言而非上抛 `Result`。
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("GenUiDocument 序列化不应失败")
+/// 进度条组件。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProgressBar {
+    /// 组件 id。
+    pub id: String,
+    /// 进度百分比，范围 0..=1；渲染端必须夹紧到 0..=1。
+    pub percent: f32,
+}
+
+impl ProgressBar {
+    /// 夹紧后的百分比（0..=1）。
+    pub fn clamped_percent(&self) -> f32 {
+        self.percent.clamp(0.0, 1.0)
     }
+}
+
+/// 表单组件：由若干字段纵向组成。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Form {
+    /// 表单 id。
+    pub id: String,
+    /// 字段列表。
+    pub fields: Vec<FormField>,
+}
+
+/// 表单字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FormField {
+    /// 文本输入框。
+    Text {
+        /// 字段 id。
+        id: String,
+        /// 左侧标签。
+        label: String,
+        /// 占位提示（默认空串）。
+        #[serde(default)]
+        placeholder: String,
+    },
+    /// 下拉选择框。
+    Select {
+        /// 字段 id。
+        id: String,
+        /// 左侧标签。
+        label: String,
+        /// 可选项（字符串数组）。
+        options: Vec<String>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genui::widget::{
-        Block, ChartWidget, LayoutWidget, MermaidWidget, Series,
-    };
 
     #[test]
-    fn valid_json_parses_and_roundtrips() {
-        let src = r#"{
-            "version": 1,
-            "widgets": [
-                {"type":"layout","id":"root","blocks":[
-                    {"kind":"heading","text":"月报"},
-                    {"kind":"card","title":"结论","body":"稳中向好"}
-                ]},
-                {"type":"chart","id":"c1","chart_type":"bar",
-                 "series":[{"name":"GMV","points":[[0.0,1.0],[1.0,2.0]]}]},
-                {"type":"mermaid","id":"m1","source":"graph LR; A-->B;"}
-            ]
-        }"#;
-        let doc = GenUiDocument::from_json(src).expect("合法文档应解析成功");
-        assert_eq!(doc.version, 1);
-        assert_eq!(doc.widgets.len(), 3);
-
-        // to_json → 再次解析应与首次解析结果完全相等（serde round-trip）
-        let again = GenUiDocument::from_json(&doc.to_json()).expect("往返应可再解析");
-        assert_eq!(doc, again, "JSON 往返应一致");
+    fn widget_serialize_roundtrip() {
+        let w = Widget::Card(Card {
+            title: "t".into(),
+            body: vec!["b1".into(), "b2".into()],
+            actions: vec![Button::new("ok", "OK")],
+        });
+        let json = serde_json::to_string(&w).expect("序列化");
+        let back: Widget = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(w, back);
     }
 
     #[test]
-    fn new_uses_current_schema_version() {
-        let doc = GenUiDocument::new(vec![]);
-        assert_eq!(doc.version, GENUI_SCHEMA_VERSION);
+    fn button_default_enabled_false_via_serde_default() {
+        // 注：#[serde(default)] 对 bool 的默认值是 false，与 Button::new 手工 true 不同
+        let json = r#"{"id":"a","label":"B"}"#;
+        let b: Button = serde_json::from_str(json).unwrap();
+        assert_eq!(b.id, "a");
+        assert_eq!(b.label, "B");
+        assert!(!b.enabled, "JSON 缺失 enabled 时 #[serde(default)] 应走 false");
+        // 而构造器默认 true
+        let c = Button::new("x", "Y");
+        assert!(c.enabled, "Button::new 默认应为 enabled=true");
+        // disabled 链式
+        let d = Button::new("x", "Y").disabled();
+        assert!(!d.enabled, "disabled() 应把 enabled 转为 false");
     }
 
     #[test]
-    fn typed_fields_survive_roundtrip_not_degraded_to_value() {
-        let doc = GenUiDocument::new(vec![
-            Widget::Layout(LayoutWidget {
-                id: "root".into(),
-                blocks: vec![Block::Text { text: "正文".into() }],
-            }),
-            Widget::Chart(ChartWidget {
-                id: "c1".into(),
-                chart_type: "line".into(),
-                series: vec![Series {
-                    name: "s".into(),
-                    points: vec![(1.0, 2.0)],
-                }],
-            }),
-            Widget::Mermaid(MermaidWidget {
-                id: "m1".into(),
-                source: "graph TD; X-->Y;".into(),
-            }),
-        ]);
-        let back = GenUiDocument::from_json(&doc.to_json()).expect("往返");
-        assert_eq!(doc, back);
-        // 强类型断言：解析结果仍是具名结构，而非退化的 Value
-        match &back.widgets[1] {
-            Widget::Chart(c) => {
-                assert_eq!(c.chart_type, "line");
-                assert_eq!(c.series[0].points[0], (1.0, 2.0));
+    fn progress_bar_clamps() {
+        let p = ProgressBar { id: "p".into(), percent: 1.5 };
+        assert!((p.clamped_percent() - 1.0).abs() < f32::EPSILON);
+        let n = ProgressBar { id: "p".into(), percent: -0.5 };
+        assert!((n.clamped_percent() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn form_field_text_default_placeholder() {
+        let json = r#"{"kind":"text","id":"f1","label":"Name"}"#;
+        let f: FormField = serde_json::from_str(json).unwrap();
+        match f {
+            FormField::Text { id, label, placeholder } => {
+                assert_eq!(id, "f1");
+                assert_eq!(label, "Name");
+                assert_eq!(placeholder, "");
             }
-            other => panic!("应为 Chart 变体，实为 {}", other.kind()),
+            _ => panic!("应为 Text 变体"),
         }
-    }
-
-    #[test]
-    fn malformed_json_returns_err() {
-        assert!(GenUiDocument::from_json("{ not json").is_err());
-        // 字段类型错配（version 应为数字）也须报错，而非静默为 0
-        assert!(GenUiDocument::from_json(r#"{"version":"1","widgets":[]}"#).is_err());
     }
 }

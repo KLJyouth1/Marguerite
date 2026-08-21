@@ -33,6 +33,7 @@ fn builtin_skill(name: &str, description: &str) -> Skill {
         source: SkillSource::Builtin,
         rating: 0.0,
         uses: 0,
+        rank: crate::skills::registry::ranks::SYSTEM,
     }
 }
 

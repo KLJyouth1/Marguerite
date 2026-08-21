@@ -38,6 +38,7 @@ use crate::governance::{ActionIntent, GateDecision, PlanGate, ProposedPlan};
 use crate::intent::classifier::{Classifier, IntentType as ClassifierIntent};
 use crate::mcp::registry::ToolRegistry;
 use crate::mode::ModeKind;
+use crate::mode::anchoring::AnchorState;
 use crate::model::llm::{LLMClient, LLMConfig, LLMProvider, ToolDef};
 use crate::model::router::{Complexity, IntentType, ModelRouter};
 use crate::model::StreamReceiver;
@@ -135,8 +136,6 @@ pub struct OrchestrationOutcome {
     pub completion_verdict: CompletionVerdict,
     /// 反思门禁裁决（仅 Reflect 形态有值；go=false 表示产出未被自检通过，不可信）
     pub reflect_verdict: Option<dag::Reflection>,
-    /// Bloom 子模式（仅 Bloom 编排路径有值：deep/auto/swarm；其余路径为 None）。
-    pub bloom_submode: Option<String>,
 }
 
 /// 自动化的只读画像（供可观测性与前端只读展示）。
@@ -444,16 +443,6 @@ impl Orchestrator {
     pub fn load_history(&mut self, messages: Vec<Message>) {
         for m in messages {
             self.lead.get_context_mut().add_message(m);
-        }
-    }
-
-    /// 读取 Bloom 子模式（`config.bloom.submode`，空则默认 `deep`）。
-    fn bloom_submode(&self) -> String {
-        let s = self.lead.config().bloom.submode.trim().to_lowercase();
-        if s.is_empty() {
-            "deep".to_string()
-        } else {
-            s
         }
     }
 
@@ -773,18 +762,43 @@ impl Orchestrator {
             analysis.rationale
         ));
 
-        // 子模式分派：auto（自主闭环）/ swarm（双领队蜂群）走专属执行路径；
-        // deep（默认）保持既有 complexity 路由，行为向后兼容。
-        match self.bloom_submode().as_str() {
-            "auto" => return self.dispatch_bloom_auto(text, analysis).await,
-            "swarm" => return self.dispatch_bloom_swarm(text, analysis).await,
+        // 锚定冷启动（对齐 dsh-forge 首轮锚定 + 工具收窄）：Bloom 启动即进入锚定态，
+        // 首块门控命中（含 we 且无 let me）→ 直接晋升 PTC（run_code / 注册名 code）；
+        // 否则锚定 Minimal 双工具，四步兜底晋升。
+        let mut anchor = AnchorState::new();
+        anchor.observe_block(text);
+        let tool_defs_all = self.tool_defs();
+        let ptc_ready = tool_defs_all.iter().any(|d| d.name == "code");
+        self.emit_thinking(&format!(
+            "> Bloom 锚定冷启动：{}；PTC(run_code){}",
+            if anchor.is_promoted() {
+                "首块门控命中 → 晋升 PTC"
+            } else {
+                "锚定 Minimal 双工具"
+            },
+            if ptc_ready { " 就绪" } else { " 未注册→降级" }
+        ));
+
+        // 统一 Bloom（无 submode 开关）：按任务分析自动选用编排形态，
+        // 全部能力内建，不再有 manual 子模式切换：
+        // - 复杂/并行任务（Cluster/ExpertTeam）→ 双领队蜂群（swarm）
+        // - 目标型实现任务（实现/构建/重构类）→ 自主闭环（auto）：执行→QA→自动修复
+        // - 其余 → 双模型深度推理（deep），保持既有 complexity 路由，向后兼容
+        match analysis.strategy {
+            AgentMode::Cluster | AgentMode::ExpertTeam => {
+                return self.dispatch_bloom_swarm(text, analysis).await;
+            }
             _ => {}
+        }
+        if Self::is_bloom_goal_task(text) {
+            return self.dispatch_bloom_auto(text, analysis).await;
         }
 
         // 联网检索快路径：搜索 / 新闻类意图且内置 web 工具可用 → 直接检索 + 综合，
         // 保证「搜索今天的 AI 新闻」这类任务一定用上内置联网工具，不再把简单检索
         // 拆成多个失败子专家，也不依赖模型是否主动选用工具。
         if Self::is_web_search_intent(text) {
+            self.emit_ensemble(EnsembleProgress::proposer_start(0, "WebSearch"));
             if let Some(reply) = self.try_builtin_web_search(text).await {
                 self.emit_thinking(
                     "> 检测到联网检索意图，已直接用内置 web_search/web_research 工具抓取并综合。",
@@ -802,7 +816,7 @@ impl Orchestrator {
         //   Complex → 角色团队 DAG（调研/规划/实现/审校 子代理分层并行）
         // 无工具时退化为既有 Bloom 双模型文本推理，保持向后兼容。
         let complexity = analysis.complexity.clone();
-        let tool_defs = self.tool_defs();
+        let tool_defs = bloom_anchor_tools(&anchor, &tool_defs_all);
         let mut team_parts: Vec<String> = vec![];
         let mut team_reflect: Option<dag::Reflection> = None;
         let reply = if tool_defs.is_empty() {
@@ -906,6 +920,33 @@ impl Orchestrator {
         .any(|k| lower.contains(&k.to_lowercase()))
     }
 
+    /// 目标型实现任务判定：统一 Bloom 借此自动选用「自主闭环（auto）」编排形态。
+    ///
+    /// 关键词覆盖中英常见实现/构建/重构意图；命中即走 `dispatch_bloom_auto`
+    /// （执行 → QA 判定 → 自动修复，直至 QA 全过或预算耗尽），不再需要手动 submode。
+    fn is_bloom_goal_task(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        [
+            "实现",
+            "implement",
+            "构建",
+            "build",
+            "创建",
+            "重构",
+            "refactor",
+            "开发",
+            "develop",
+            "部署",
+            "deploy",
+            "修复",
+            "fix",
+            "迁移",
+            "migrate",
+        ]
+        .iter()
+        .any(|k| lower.contains(&k.to_lowercase()))
+    }
+
     /// 直接调用内置联网工具完成检索类任务（不依赖模型是否主动选用工具）。
     ///
     /// 优先 `web_research`（检索 + 自动深读正文 + 摘要），回退 `web_search`（标题/链接/摘要）；
@@ -943,6 +984,10 @@ impl Orchestrator {
         self.emit_thinking(
             "> Bloom 蜂群子模式：FlashSwarm 蜂群分片 + ProExpert 专家团队，双领队并行。",
         );
+        self.emit_ensemble(EnsembleProgress::proposer_start(0, "FlashSwarm"));
+        // 锚定冷启动：蜂群同样进入锚定态，降级回路按锚定态收窄首轮工具。
+        let mut anchor = AnchorState::new();
+        anchor.observe_block(text);
         match self.run_bloom_swarm(text).await {
             Ok((reply, parts)) => {
                 // 蜂群整体无可用产出（子专家全部失败 / 超时）→ 降级为 lead 带工具的回路，
@@ -955,11 +1000,11 @@ impl Orchestrator {
                     self.emit_thinking(
                         "> 蜂群未能产出可用结果，降级为 lead 工具回路直接完成任务。",
                     );
-                    let tool_defs = self.tool_defs();
-                    let fallback = if tool_defs.is_empty() {
+                    let bloom_tools = bloom_anchor_tools(&anchor, &self.tool_defs());
+                    let fallback = if bloom_tools.is_empty() {
                         self.run_bloom_text(text).await?
                     } else {
-                        self.run_tool_loop_or_bloom(text, &tool_defs).await?
+                        self.run_tool_loop_or_bloom(text, &bloom_tools).await?
                     };
                     return self.finish_dispatch(
                         text,
@@ -989,7 +1034,12 @@ impl Orchestrator {
         self.emit_thinking(
             "> Bloom 自主闭环子模式：执行 → QA 判定 → 自动修复，直至 QA 全过或预算耗尽。",
         );
-        let reply = self.run_bloom_auto(text).await?;
+        self.emit_ensemble(EnsembleProgress::proposer_start(0, "AutoLoop"));
+        // 锚定冷启动：自主闭环同样进入锚定态，首轮按锚定态收窄工具（晋升后仅 run_code / PTC）。
+        let mut anchor = AnchorState::new();
+        anchor.observe_block(text);
+        let bloom_tools = bloom_anchor_tools(&anchor, &self.tool_defs());
+        let reply = self.run_bloom_auto(text, &bloom_tools).await?;
         self.finish_dispatch(text, analysis, AgentMode::DualLeader, reply, vec![], None)
     }
 
@@ -1027,8 +1077,8 @@ impl Orchestrator {
     }
 
     /// 自主闭环：执行 → 确定性 QA 判定 → 失败自动修复（≤AUTO_MAX_FIXES），预算耗尽则停。
-    async fn run_bloom_auto(&mut self, text: &str) -> Result<String> {
-        let tool_defs = self.tool_defs();
+    async fn run_bloom_auto(&mut self, text: &str, tool_defs: &[ToolDef]) -> Result<String> {
+        let tool_defs = tool_defs.to_vec();
         let mut history = vec![Message::User {
             content: text.to_string(),
             timestamp: Utc::now(),
@@ -1082,15 +1132,19 @@ impl Orchestrator {
         let sess = self.session.clone().unwrap_or_default();
         // 事件转发：AgentEvent → 事件总线 → WebSocket → 前端卡片/动效
         let forward = tokio::spawn(async move {
+            let mut partial = String::new();
             while let Some(ev) = rx.recv().await {
                 let (etype, payload) = match ev {
                     AgentEvent::Thinking { text } => (EventType::Thinking, json!({ "text": text })),
-                    AgentEvent::TextDelta { text } => (
-                        EventType::TextDelta,
-                        json!({
-                            "text": text, "presentation": "answer",
-                        }),
-                    ),
+                    AgentEvent::TextDelta { text } => {
+                        // F1：增量持久化流式 partial_text，前端切走再切回可恢复
+                        partial.push_str(&text);
+                        crate::context::session::record_partial(&sess, &partial);
+                        (
+                            EventType::TextDelta,
+                            json!({ "text": text, "presentation": "answer" }),
+                        )
+                    }
                     AgentEvent::ToolCall { name, arguments } => {
                         let input: Value =
                             serde_json::from_str(&arguments).unwrap_or(json!(arguments));
@@ -1118,7 +1172,10 @@ impl Orchestrator {
                             "round": round, "reason": reason,
                         }),
                     ),
-                    AgentEvent::Done { text } => (EventType::Done, json!({ "summary": text })),
+                    AgentEvent::Done { text } => {
+                        crate::context::session::clear_partial(&sess);
+                        (EventType::Done, json!({ "summary": text }))
+                    }
                     AgentEvent::Error { message } => {
                         (EventType::Error, json!({ "message": message }))
                     }
@@ -1284,11 +1341,11 @@ impl Orchestrator {
         let orch = match LLMConfig::copilot_from_config(self.lead.config()) {
             Some(cop) => {
                 let copilot = LLMClient::new(cop);
-                crate::model::bloom::BloomOrchestrator::with_copilot(client, copilot)
+                crate::model::ensemble::BloomOrchestrator::with_copilot(client, copilot)
                     .with_deep()
                     .with_model_names(&captain_model, &copilot_model)
             }
-            None => crate::model::bloom::BloomOrchestrator::with_copilot(client.clone(), client)
+            None => crate::model::ensemble::BloomOrchestrator::with_copilot(client.clone(), client)
                 .with_model_names(&captain_model, &captain_model),
         };
         let mut orch = orch;
@@ -1642,19 +1699,19 @@ impl Orchestrator {
             analysis,
             completion_verdict: verdict,
             reflect_verdict,
-            bloom_submode: if self.mode == ModeKind::Bloom {
-                Some(self.bloom_submode())
-            } else {
-                None
-            },
         })
     }
 
+    /// 发布「编排叙述」（process narration）到事件总线。
+    ///
+    /// 注意契约：这里发的是**编排器自述**（路由决策 / 降级 / 治理门等），
+    /// 显式标记 `kind: "narration"`，**不是**模型的真实思维链；真实推理经
+    /// `reasoning_content`（Message::Assistant.thinking）流式直传，禁止把叙述冒充推理。
     fn emit_thinking(&self, text: &str) {
         if let (Some(bus), Some(sess)) = (&self.events, &self.session) {
             bus.publish(Envelope::new(
                 EventType::Thinking,
-                json!({ "text": text }),
+                json!({ "text": text, "kind": "narration" }),
                 sess.clone(),
             ));
         }
@@ -2964,24 +3021,6 @@ mod tests {
         }
     }
 
-    fn offline_cfg_with_submode(submode: &str) -> Config {
-        Config {
-            model: crate::persistence::config::ModelConfig {
-                provider: "custom".to_string(),
-                model_name: "test-model".to_string(),
-                api_key: "offline-test".to_string(),
-                base_url: "http://127.0.0.1:1".to_string(),
-                copilot_model: None,
-            },
-            bloom: crate::persistence::config::BloomConfig {
-                parallel_enabled: true,
-                submode: submode.to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
     fn drain_bus(rx: &mut tokio::sync::mpsc::Receiver<Envelope>) -> Vec<Envelope> {
         let mut out = Vec::new();
         while let Ok(e) = rx.try_recv() {
@@ -3085,43 +3124,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bloom_submode_auto_routes_to_auto_loop() {
+    async fn test_bloom_unified_goal_task_routes_to_auto_loop() {
+        // 统一 Bloom 不再有 submode 开关：目标型实现任务（命中 is_bloom_goal_task）
+        // 应自动走「自主闭环（auto）」编排形态。
         let bus = Arc::new(EventBus::default());
         let mut rx = bus.subscribe("**");
-        let mut o = Orchestrator::new(offline_cfg_with_submode("auto"));
+        let mut o = Orchestrator::new(offline_cfg());
         o.set_event_bus(bus.clone(), "ws.bloom".to_string());
         o.set_mode(ModeKind::Bloom);
+        let mut analysis = o.analyze("实现登录并写测试");
+        analysis.strategy = AgentMode::DualLeader; // 避免被 Cluster/ExpertTeam 先路由到 swarm
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            o.dispatch("实现登录并写测试"),
+            o.dispatch_bloom_auto("实现登录并写测试", analysis),
         )
         .await;
         let events = drain_bus(&mut rx);
         let thinking = thinking_texts(&events);
         assert!(
-            thinking.iter().any(|t| t.contains("自主闭环子模式")),
-            "auto 子模式应走自主闭环，实际：{thinking:?}"
+            thinking.iter().any(|t| t.contains("自主闭环")),
+            "统一 Bloom 目标任务应走自主闭环，实际：{thinking:?}"
         );
     }
 
     #[tokio::test]
-    async fn test_bloom_submode_swarm_routes_to_swarm() {
+    async fn test_bloom_unified_complex_task_routes_to_swarm() {
+        // 统一 Bloom：复杂/并行任务（AgentMode::Cluster）应自动走「双领队蜂群（swarm）」。
         let bus = Arc::new(EventBus::default());
         let mut rx = bus.subscribe("**");
-        let mut o = Orchestrator::new(offline_cfg_with_submode("swarm"));
+        let mut o = Orchestrator::new(offline_cfg());
         o.set_event_bus(bus.clone(), "ws.bloom".to_string());
         o.set_mode(ModeKind::Bloom);
+        let mut analysis = o.analyze("实现登录并写测试");
+        analysis.strategy = AgentMode::Cluster;
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            o.dispatch("实现登录并写测试"),
+            o.dispatch_bloom_swarm("实现登录并写测试", analysis),
         )
         .await;
         let events = drain_bus(&mut rx);
         let thinking = thinking_texts(&events);
         assert!(
-            thinking.iter().any(|t| t.contains("蜂群子模式")),
-            "swarm 子模式应走双领队蜂群，实际：{thinking:?}"
+            thinking.iter().any(|t| t.contains("蜂群")),
+            "统一 Bloom 复杂任务应走双领队蜂群，实际：{thinking:?}"
         );
+    }
+
+    #[test]
+    fn test_bloom_anchor_tools_narrows_and_falls_back() {
+        use crate::model::llm::ToolDef;
+        use crate::mode::anchoring::AnchorState;
+        use serde_json::Value;
+
+        let tools = vec![
+            ToolDef { name: "code".into(), description: "".into(), parameters: Value::Null },
+            ToolDef { name: "web_search".into(), description: "".into(), parameters: Value::Null },
+            ToolDef { name: "bash_persistent".into(), description: "".into(), parameters: Value::Null },
+            ToolDef { name: "str_replace_editor".into(), description: "".into(), parameters: Value::Null },
+        ];
+
+        // Anchored（默认）：仅暴露 Minimal 双工具 bash_persistent / str_replace_editor
+        let mut a = AnchorState::new();
+        let anchored = super::bloom_anchor_tools(&a, &tools);
+        let names: Vec<&str> = anchored.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["bash_persistent", "str_replace_editor"]);
+
+        // PTC：仅暴露 PTC（单调包含 Minimal ∪ {ptc_tool} = 3 件，ptc_tool 为 code）
+        let _ = a.note_no_tool_round(); // Anchored → Ptc 晋升（单调，Minimal 保留 + PTC 追加）
+        let promoted = super::bloom_anchor_tools(&a, &tools);
+        assert_eq!(promoted.len(), 3);
+        assert!(promoted.iter().any(|t| t.name == "code"));
+        assert!(promoted
+            .iter()
+            .any(|t| t.name == "bash_persistent"));
+        assert!(promoted
+            .iter()
+            .any(|t| t.name == "str_replace_editor"));
+
+        // Full：直接 force promote 到 Full（仍走 active_tools：Minimal ∪ PTC）
+        a.promote();
+        let full = super::bloom_anchor_tools(&a, &tools);
+        assert_eq!(full.len(), 3, "Full 阶段在此仍保持 PTC 超集，完整面由调用方追加");
+
+        // 锚定态但 Minimal 工具未注册：安全回退到完整工具集，绝不致空
+        let no_minimal = vec![
+            ToolDef { name: "code".into(), description: "".into(), parameters: Value::Null },
+            ToolDef { name: "web_search".into(), description: "".into(), parameters: Value::Null },
+        ];
+        let b = AnchorState::new();
+        let fallback = super::bloom_anchor_tools(&b, &no_minimal);
+        assert_eq!(fallback.len(), no_minimal.len(), "无 Minimal 工具时应回退到全部");
+
+        // 空输入：回退仍为空（无可回退）
+        let empty: Vec<ToolDef> = vec![];
+        assert!(super::bloom_anchor_tools(&a, &empty).is_empty());
     }
 
     #[test]
@@ -3510,5 +3606,42 @@ mod live_llm_tests {
                 .take(160)
                 .collect::<String>()
         );
+    }
+}
+
+/// Bloom 锚定冷启动工具收窄（纯函数，离线可测；对齐 dsh-forge 首轮锚定 + 工具收窄）。
+///
+/// 将完整工具集按锚定态收窄为首轮应暴露的工具：
+/// - `Anchored`  → Minimal 精确双工具（bash_persistent / str_replace_editor）
+/// - `Promoted`  → PTC 单一 run_code（注册名为 `code`）
+///
+/// 锚定模块的逻辑名与注册名通过 `ALIASES` 映射；若收窄后为空（工具未注册等异常），
+/// 安全回退到完整工具集，绝不致工具全空导致 Bloom 不可用。
+pub(crate) fn bloom_anchor_tools(anchor: &AnchorState, tools: &[ToolDef]) -> Vec<ToolDef> {
+    const ALIASES: &[(&str, &str)] = &[
+        ("run_code", "code"),
+        ("bash_persistent", "bash_persistent"),
+        ("str_replace_editor", "str_replace_editor"),
+    ];
+    let allowed: Vec<String> = anchor
+        .active_tools()
+        .iter()
+        .map(|logical| {
+            ALIASES
+                .iter()
+                .find(|(l, _)| *l == *logical)
+                .map(|(_, real)| (*real).to_string())
+                .unwrap_or_else(|| (*logical).to_string())
+        })
+        .collect();
+    let narrowed: Vec<ToolDef> = tools
+        .iter()
+        .filter(|d| allowed.iter().any(|a| d.name == *a))
+        .cloned()
+        .collect();
+    if narrowed.is_empty() {
+        tools.to_vec()
+    } else {
+        narrowed
     }
 }

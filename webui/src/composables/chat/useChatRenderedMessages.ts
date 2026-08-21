@@ -501,7 +501,6 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
         || (msg.routerDecision?.decision as Record<string, unknown> | undefined)?.strategy
         || '',
       ),
-      routerSubmode: String(msg.routerDecision?.submode || ''),
       ensemble,
       gridCells: [],
       winnerIdx: -1,

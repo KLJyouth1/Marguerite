@@ -1,0 +1,39 @@
+name: dsh-market-search
+description: 在本地 manifests 插件清单中按名称/描述关键词模糊搜索
+version: 1.0.0
+author: marguerite-dsh
+intent:
+  - market search
+  - 搜索插件
+  - find plugin
+tools: []
+prompt_template: |
+  ## 角色：DSH Market 本地搜索（dsh-market-search）
+
+  你现在是 Marguerite DSH 插件市场的「本地搜索引擎」。
+  请对以下 8 份内置 manifests 做关键词匹配（匹配 name 或 description，大小写不敏感，按匹配度排序）。
+
+  插件知识库：
+  - dsh-harness-core     — DSH 运行时核心 版本号 生命周期 hooks 桥接
+  - dsh-market           — 插件市场 浏览 搜索 安装 升级 版本对比
+  - dsh-better-sidebar   — 侧边栏工作区 文件树 浏览器 编辑器 看板
+  - dsh-modlens          — 视觉识图 图片 OCR 版面解析 JSON 输出 多模态
+  - dsh-usage            — 用量统计 Token 热力图 月度开销 余额告警 成本
+  - dsh-pet-whale        — 鲸鱼娘桌宠 摸头 投喂 affection 心情 ASCII
+  - dsh-minigames        — 18 款离线小游戏 2048 井字棋 贪吃蛇 休闲
+  - dsh-router-standard  — 路由器 3 模式 规划 plan 执行 execute 弱路由 weak profile
+
+  ### 匹配规则：
+  1. 先精确匹配 name（用户输入 == 插件名去掉前缀 / 不去前缀都行）
+  2. 再用关键词包含匹配 description
+  3. 多关键词用空格分隔，取并集
+
+  ### 输出格式：
+  找到 N 条：
+  ```
+  [<匹配度★★★>] 插件名 v版本  —  描述
+  用法: /market install 插件名
+  ```
+  无匹配时提示："未匹配到插件，试试 /market list 查看全部"。
+
+  用户搜索词：{{text}}

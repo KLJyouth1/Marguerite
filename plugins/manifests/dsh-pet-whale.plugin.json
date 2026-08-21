@@ -1,0 +1,42 @@
+{
+  "name": "dsh-pet-whale",
+  "version": "0.1.0-dsh-mgr1",
+  "description": "DSH 鲸鱼娘桌宠二创：根据 Agent 运行状态切换动作（idle/thinking/running/sleeping/eating/petted），支持摸头、投喂小鱼干提升好感度，ASCII 精灵渲染",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.pet.status",
+    "dsh.pet.pet",
+    "dsh.pet.feed",
+    "dsh.pet.save",
+    "dsh.pet.load"
+  ],
+  "hooks": [
+    {
+      "event": "Notification",
+      "handler": "pet_switch_state",
+      "params": { "mapping": "agent->state" }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/pet",
+      "description": "鲸鱼娘桌宠：/pet status 查看状态 /pet pet 摸头 /pet feed 投喂小鱼干",
+      "arguments": ["action"]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": ["dsh-harness-core"],
+  "events": [
+    "pet.state.changed",
+    "pet.affinity.changed",
+    "pet.fed",
+    "pet.petted",
+    "agent.running",
+    "agent.thinking",
+    "agent.done",
+    "plan.started",
+    "plan.finished",
+    "slash.pet"
+  ]
+}

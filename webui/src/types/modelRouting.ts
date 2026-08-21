@@ -9,15 +9,3 @@ export function isModelRoutingMode(value: unknown): value is ModelRoutingMode {
 export function normalizeModelRoutingMode(value: unknown): ModelRoutingMode {
   return isModelRoutingMode(value) ? value : 'off'
 }
-
-export const BLOOM_SUBMODES = ['deep', 'auto', 'swarm'] as const
-
-export type BloomSubmode = (typeof BLOOM_SUBMODES)[number]
-
-export function isBloomSubmode(value: unknown): value is BloomSubmode {
-  return typeof value === 'string' && BLOOM_SUBMODES.includes(value as BloomSubmode)
-}
-
-export function normalizeBloomSubmode(value: unknown): BloomSubmode {
-  return isBloomSubmode(value) ? value : 'deep'
-}

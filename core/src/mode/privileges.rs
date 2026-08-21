@@ -38,6 +38,9 @@ pub struct BloomPrivileges {
     pub allow_network_all: bool,
     /// 全部 shell 命令（仍受白名单 DENY 约束）
     pub allow_shell_all: bool,
+    /// DEEP 双模型深度：自动启用双模型协同（统一 Bloom 内化 DEEP）
+    #[serde(default)]
+    pub deep_dual_model: bool,
 }
 
 impl Default for BloomPrivileges {
@@ -52,9 +55,13 @@ impl Default for BloomPrivileges {
             unrestricted_filesystem: false,
             allow_network_all: true,
             allow_shell_all: false,
+            deep_dual_model: false,
         }
     }
 }
+
+/// EnsemblerEnsemble = BloomPrivileges 别名，兼容旧 spec 代码中引用
+pub type EnsemblePrivileges = BloomPrivileges;
 
 impl BloomPrivileges {
     /// 全量特权（对齐 `MaxModePrivileges.maximum()`）——NEXUS 级别
@@ -68,6 +75,7 @@ impl BloomPrivileges {
             unrestricted_filesystem: true,
             allow_network_all: true,
             allow_shell_all: true,
+            deep_dual_model: true,
         }
     }
 
@@ -86,6 +94,7 @@ impl BloomPrivileges {
             unrestricted_filesystem: dangerously_skip_permissions,
             allow_network_all: dangerously_skip_permissions,
             allow_shell_all: dangerously_skip_permissions,
+            deep_dual_model: true,
         }
     }
 

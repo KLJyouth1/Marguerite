@@ -25,7 +25,7 @@
       >
         <span :class="['router-fx-ensemble__dot', { done: isEnsembleDone, pending: !hasEnsembleModels }]" aria-hidden="true"></span>
         <span class="router-fx-ensemble__label" role="status" aria-live="polite">
-          <span v-if="isBloomPanel" class="router-fx-ensemble__bloom" aria-hidden="true">Bloom · {{ bloomSubmodeLabel }}</span>
+          <span v-if="isBloomPanel" class="router-fx-ensemble__bloom" aria-hidden="true">Bloom</span>
           {{ ensembleStatusLabel }}
         </span>
         <span class="router-fx-ensemble__badge" :title="routeBadge.label">
@@ -139,7 +139,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMediaQuery } from '@/composables/chat/useMediaQuery'
-import { normalizeBloomSubmode } from '@/types/modelRouting'
 import type { ChatEnsembleMetaModel, ChatRenderedMessage } from '@/types/chat'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
@@ -170,11 +169,6 @@ const isBloomPanel = computed(() =>
   isEnsemblePanel.value
   && (props.message.routerSource === 'bloom_ensemble' || props.message.routerMode === 'bloom_ensemble'),
 )
-const bloomSubmodeLabel = computed(() => {
-  if (!isBloomPanel.value) return ''
-  const submode = normalizeBloomSubmode(props.message.routerSubmode)
-  return t(`chat.routerFx.bloomSubmode_${submode}`)
-})
 const inspectorTitle = computed(() => {
   const strategy = String(props.message.routerStrategy || '').trim()
   if (isBloomPanel.value && strategy) {
@@ -268,7 +262,7 @@ const routeBadge = computed<RouteBadge>(() => {
     : ''
 
   if (isBloomPanel.value) {
-    return { icon: 'sparkles', tokens, label: `Bloom 路由 · ${bloomSubmodeLabel.value || '融合'}` }
+    return { icon: 'sparkles', tokens, label: 'Bloom 路由' }
   }
   if (hasAggregator.value) {
     return { icon: 'gitMerge', tokens, label: '候选融合（聚合器）' }

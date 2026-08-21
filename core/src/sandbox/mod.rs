@@ -294,6 +294,7 @@ fn mode_gate(mode: ModeKind, interactive: &AtomicBool) -> Result<(), String> {
     match mode {
         ModeKind::Plan => Err("plan 模式禁止写命令".to_string()),
         ModeKind::Bloom => Ok(()),
+        ModeKind::Ensemble => Ok(()),
         ModeKind::Agent => {
             if interactive.load(Ordering::SeqCst) {
                 Ok(())

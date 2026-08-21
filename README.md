@@ -63,3 +63,17 @@ cargo audit                               # 零已知漏洞
 ```
 
 详见 [架构文档](docs/architecture.md)。
+
+## 已集成的第三方 AI Harness
+
+| Harness | 集成方式 | 插件/模块数 | 说明 |
+|---|---|---|---|
+| **DeepSeek Harness (DSH)** | PluginManifest 插件化（8 份 manifests）+ 3 个 Rust 原生模块 | 10 plugins 二创复刻 | 视觉 Modlens / 交互 GenUI / Daily Usage / 鲸鱼娘 Pet / Mini Games / Market / Better Sidebar / Router 3 模式；7 条 slash 命令；63 条单测全绿；详细见 [DSH 集成指南](docs/dsh-integration-v1.md)。 |
+| UnivAgent | 架构对齐 + 子代理编排增强 | — | 见 `univagent-consolidation-to-marguerite-v1.md`。 |
+
+> **DSH 集成亮点（2026-08-19 v1.0）**
+> - 解决「视觉→交互→工作台→路由器」工作流中断：4 阶段 E2E 闭环 1 次跑通。
+> - Usage：SQLite 聚合（by_day/by_month）+ 字符热力图 + budget 阈值告警。
+> - GenUI：Card/Button/Progress/Form 全类型 Widget + 点击回传 SteeringEvent。
+> - Pet：6 帧 ASCII 状态机 + 摸头/投喂 + affinity 持久化。
+> - 不新增任何原生 Cargo 依赖；零 Electron/Tauri/WebView（宪法 D12/D16 守护）。

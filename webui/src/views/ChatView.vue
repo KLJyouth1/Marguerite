@@ -535,8 +535,6 @@
       :run-mode-lock-message="t('chat.composer.runModeLocked')"
       :model-routing-mode="modelRoutingMode"
       :model-routing-settings-busy="modelRoutingSettingsBusy"
-      :bloom-submode="bloomSubmode"
-      :bloom-submode-settings-busy="bloomSubmodeSettingsBusy"
       :coding-mode-enabled="codingModeEnabled"
       :coding-mode-settings-busy="codingModeSettingsBusy"
       :voice-busy="voiceBusy"
@@ -569,7 +567,6 @@
       @set-busy-send-mode="busySendMode = $event"
       @set-run-mode="setComposerRunMode"
       @set-model-routing-mode="setComposerModelRoutingMode"
-      @set-bloom-submode="setBloomSubmode"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
       @cancel-replan="cancelPlanRevision"
@@ -818,6 +815,7 @@ import { useVoiceInput } from '@/composables/chat/useVoiceInput'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import { hasOpenDialogLayer } from '@/composables/useDialogA11y'
 import { useToasts } from '@/composables/useToasts'
+import { usePartialTextRestore } from '@/composables/chat/usePartialTextRestore'
 import { useConfirm } from '@/composables/useConfirm'
 import { useProjectWorkspaces } from '@/composables/useProjectWorkspaces'
 import {
@@ -1384,6 +1382,16 @@ watch(sessionKey, () => {
   promptCacheKeepaliveStatus.value = null
 })
 
+// F1：切回会话时恢复流式 partial_text（若上一轮中断），提示用户生成内容已保留
+const { load: loadPartialText } = usePartialTextRestore()
+watch(sessionKey, () => {
+  void loadPartialText(sessionKey.value).then((partial) => {
+    if (partial) {
+      pushToast('检测到未完成的生成，正在恢复…', { tone: 'info' })
+    }
+  })
+})
+
 // activeSnapshot(workspace) 已抽出到 ./chat/active-snapshot 并通过顶部 import 引入。
 let applySessionRunState: (source: ChatRunStatusSource | null | undefined) => void = () => {}
 let resetComposerInputHistory: () => void = () => {}
@@ -1731,9 +1739,6 @@ const {
   routerTierConfigs,
   loadFeatureToggles,
   setModelRoutingMode,
-  bloomSubmode,
-  bloomSubmodeSettingsBusy,
-  setBloomSubmode,
   setCodingModeEnabled,
   bindFeatureRefresh,
 } = chatFeatureToggles

@@ -234,7 +234,10 @@
     "fleet": "Fleet",
     "computer-use": "Computer Use",
     "evolve": "Evolve",
-    "plugins": "Plugins"
+    "plugins": "Plugins",
+    "graph": "Graph",
+    "poker": "Poker",
+    "pet": "Pet"
   },
   "notFound": {
     "title": "Page not found",
@@ -3607,9 +3610,6 @@
       "ensembleToggleTrace": "Show ensemble route trace",
       "ensembleTraceTitle": "Candidate trace",
       "bloomInspectorTitle": "Bloom · AI orchestration {strategy}",
-      "bloomSubmode_deep": "Deep",
-      "bloomSubmode_auto": "Auto",
-      "bloomSubmode_swarm": "Swarm",
       "ensemblePlanMeta": "ensemble plan · pool {count}",
       "ensembleTelemetryPendingMeta": "ensemble plan · telemetry pending",
       "ensembleFallbackNone": "fallback none",
@@ -3869,13 +3869,6 @@
       "modelRoutingEnsembleDesc": "AI coordinates multiple models to improve capability on complex tasks.",
       "modelRoutingBloomEnsemble": "Bloom fusion routing",
       "modelRoutingBloomEnsembleDesc": "Fusion routing + AI auto-orchestration (Solo Agent / MAX Dual-Leader / Expert Team) for complex tasks.",
-      "bloomSubmode": "Bloom submode",
-      "bloomSubmodeDeep": "Deep",
-      "bloomSubmodeDeepDesc": "Four-stage deep reasoning for quality and stability.",
-      "bloomSubmodeAuto": "Auto",
-      "bloomSubmodeAutoDesc": "Autonomous loop with automatic QA and repair.",
-      "bloomSubmodeSwarm": "Swarm",
-      "bloomSubmodeSwarmDesc": "Dual-leader swarm attacking tasks in parallel.",
       "runMode": "Execution mode",
       "runModeSafe": "Safe",
       "runModeSafeDesc": "Uses the sandbox and your file, command, and network safety rules.",
@@ -4085,8 +4078,7 @@
       "ensembleModelsAria": "Ensemble models"
     },
     "modelRouting": {
-      "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again.",
-      "submodeUpdateFailed": "Couldn't update the Bloom submode — reverted. Check the gateway connection and try again."
+      "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again."
     },
     "routeFeedback": {
       "up": "Right model choice for this turn",

@@ -24,6 +24,7 @@ use marguerite_core::model::selector::ModelSelector;
 use marguerite_core::persistence::config::Config;
 use marguerite_core::pyengine::{PyEngineSidecar, PyEngineStatus, SidecarConfig};
 use marguerite_core::tui::workbench::{EngineRunner, RealEngine};
+use marguerite_core::vision::VisionCapability;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -49,6 +50,12 @@ pub struct AppState {
     pub py_sidecar: Arc<tokio::sync::Mutex<Option<Arc<PyEngineSidecar>>>>,
     /// 共享 token（与 Python 侧车 home 目录对齐）；启动侧车前用 auth::write_python_home_token 写入
     pub py_shared_token: String,
+    /// 视觉能力（modlens 结构化取证）：可注入 resolver/transport，默认离线降级
+    pub vision: Arc<VisionCapability>,
+    /// 扑克游戏大厅（Game Hall）：进程内房间管理器，支持多人本地对战 + AI 座位
+    pub poker: Arc<Mutex<marguerite_core::poker::PokerHub>>,
+    /// 知识图谱（KB 2.0 质量层 · kb.graph）：实体-关系共现/定型边，内存图
+    pub kb_graph: Arc<Mutex<marguerite_core::kb::KnowledgeGraph>>,
 }
 
 impl AppState {
@@ -101,6 +108,9 @@ impl AppState {
             model_selector: Arc::new(Mutex::new(selector)),
             py_sidecar: Arc::new(tokio::sync::Mutex::new(None)),
             py_shared_token,
+            vision: Arc::new(VisionCapability::offline_default()),
+            poker: Arc::new(Mutex::new(marguerite_core::poker::PokerHub::new())),
+            kb_graph: Arc::new(Mutex::new(marguerite_core::kb::KnowledgeGraph::new())),
         }
     }
 }
@@ -828,6 +838,170 @@ fn session_delete(id: String) -> Result<(), String> {
     manager.delete_session(&id).map_err(|e| e.to_string())
 }
 
+/// 创建工作区子目录（用于"新建会话/项目"的落盘目录）
+/// 红线修复：此前无后端命令 → 前端无法直接创建文件夹开始对话。
+#[tauri::command]
+fn create_workspace_folder(name: String) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("目录名不可为空".into());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("目录名不可包含路径分隔符或 ..".into());
+    }
+    let base = Config::data_dir().join("workspaces");
+    let path = base.join(name.trim());
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("创建工作区目录失败({}): {}", path.display(), e))?;
+    Ok(path.display().to_string())
+}
+
+/// 保存模型路由配置（前端路由切换器写入 → config.yaml.model_routing）
+/// 红线修复：此前无后端命令 → 前端"保存路由"必失败。
+#[tauri::command]
+fn routing_save(json: String) -> Result<(), String> {
+    let routing: marguerite_core::persistence::config::ModelRoutingConfig =
+        serde_json::from_str(&json).map_err(|e| format!("解析路由配置失败: {}", e))?;
+    let mut cfg = Config::load().map_err(|e| e.to_string())?;
+    cfg.model_routing = routing;
+    cfg.save().map_err(|e| e.to_string())
+}
+
+/// modlens 视觉取证：图片(base64) → 结构化 JSON 文档（文字/阅读顺序/语义/版面）。
+/// 无视觉模型时降级为元数据兜底（绝不静默失败，返回 source=metadata-fallback）。
+#[tauri::command]
+async fn modlens_analyze(
+    state: State<'_, Arc<AppState>>,
+    image_base64: String,
+    hint: String,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image_base64.trim())
+        .map_err(|e| format!("图片 base64 解码失败: {e}"))?;
+    let doc = state.vision.analyze_document(&bytes, &hint).await;
+    Ok(doc.to_json())
+}
+
+// ───────────── 扑克游戏大厅（Game Hall / 赌 Token）─────────────
+
+/// 创建扑克房间，返回 room_id
+#[tauri::command]
+fn poker_create_room(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    small_blind: i64,
+    big_blind: i64,
+) -> Result<String, String> {
+    let mut hub = state.poker.lock().map_err(|e| e.to_string())?;
+    Ok(hub.create_room(name, small_blind, big_blind))
+}
+
+/// 加入房间（人/AI），返回座位号
+#[tauri::command]
+fn poker_join_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    player_name: String,
+    tokens: i64,
+    is_human: bool,
+) -> Result<u32, String> {
+    let mut hub = state.poker.lock().map_err(|e| e.to_string())?;
+    hub.join_room(&room_id, player_name, tokens, is_human)
+}
+
+/// 开局（发牌 + 盲注）
+#[tauri::command]
+fn poker_start_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
+    let mut hub = state.poker.lock().map_err(|e| e.to_string())?;
+    hub.start_room(&room_id)
+}
+
+/// 玩家行动。action: "fold"|"check"|"call"|"raise"|"all_in"（amount 仅 raise 使用）
+#[tauri::command]
+fn poker_action(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    seat: u32,
+    action: String,
+    amount: Option<i64>,
+) -> Result<(), String> {
+    use marguerite_core::poker::ActionKind;
+    let kind = match action.as_str() {
+        "fold" => ActionKind::Fold,
+        "check" => ActionKind::Check,
+        "call" => ActionKind::Call,
+        "raise" => ActionKind::Raise,
+        "all_in" => ActionKind::AllIn,
+        other => return Err(format!("未知动作: {other}")),
+    };
+    let mut hub = state.poker.lock().map_err(|e| e.to_string())?;
+    hub.act(&room_id, seat, kind, amount)
+}
+
+/// 房间状态快照（供 UI 轮询/刷新）
+#[tauri::command]
+fn poker_state(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<marguerite_core::poker::PokerRoom, String> {
+    let hub = state.poker.lock().map_err(|e| e.to_string())?;
+    hub.room(&room_id).cloned().ok_or_else(|| "房间不存在".into())
+}
+
+/// AI 座位自动行动：循环到轮到人类座位或牌局结束。
+/// 简单策略：无注可跟时过牌（有对子以上则最小加注）；注额超过剩余 Token 时好牌全下否则弃牌；其余跟注。
+#[tauri::command]
+fn poker_auto(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
+    use marguerite_core::poker::{evaluate_7, ActionKind};
+    let mut hub = state.poker.lock().map_err(|e| e.to_string())?;
+    for _ in 0..64 {
+        let (hand_over, cur, is_human, to_call, tokens, has_pair, street_high, min_raise) = {
+            let room = hub.room(&room_id).ok_or("房间不存在")?;
+            let idx = room.current_seat as usize;
+            let p = &room.players[idx];
+            let has_pair = match (p.hole[0], p.hole[1]) {
+                (Some(a), Some(b)) => evaluate_7([a, b], &room.board).category >= 1,
+                _ => false,
+            };
+            (
+                room.hand_over,
+                room.current_seat,
+                p.is_human,
+                room.street_high - p.street_committed,
+                p.tokens,
+                has_pair,
+                room.street_high,
+                room.min_raise,
+            )
+        };
+        if hand_over {
+            return Ok(());
+        }
+        if is_human {
+            return Ok(());
+        }
+        let (action, amount) = if to_call <= 0 {
+            if has_pair && tokens > min_raise * 2 {
+                (ActionKind::Raise, Some(street_high + min_raise))
+            } else {
+                (ActionKind::Check, None)
+            }
+        } else if to_call >= tokens {
+            if has_pair {
+                (ActionKind::AllIn, None)
+            } else {
+                (ActionKind::Fold, None)
+            }
+        } else if has_pair {
+            (ActionKind::Call, None)
+        } else {
+            (ActionKind::Call, None)
+        };
+        hub.act(&room_id, cur, action, amount)?;
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct ExecResultView {
     stdout: String,
@@ -979,9 +1153,9 @@ fn kb_search(query: String, top_k: Option<usize>) -> Result<Vec<KbSearchResultVi
         .collect())
 }
 
-/// 知识库添加文档
+/// 知识库添加文档（同时索引进知识图谱，供 kb_graph_view 可视化）
 #[tauri::command]
-fn kb_add(title: String, text: String) -> Result<(), String> {
+fn kb_add(state: State<'_, Arc<AppState>>, title: String, text: String) -> Result<(), String> {
     let data_dir = Config::data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     let kb_path = data_dir.join("kb_store.json");
@@ -993,9 +1167,323 @@ fn kb_add(title: String, text: String) -> Result<(), String> {
             }
         }
     }
-    docs.push((title, text));
+    docs.push((title.clone(), text.clone()));
     let json = serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())?;
-    std::fs::write(&kb_path, json).map_err(|e| e.to_string())
+    std::fs::write(&kb_path, json).map_err(|e| e.to_string())?;
+    // 同步索引进内存知识图谱
+    let mut graph = state.kb_graph.lock().map_err(|e| e.to_string())?;
+    graph.index_document(&title, &text);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct KbGraphNodeView {
+    id: String,
+    degree: usize,
+}
+
+#[derive(serde::Serialize)]
+struct KbGraphEdgeView {
+    from: String,
+    to: String,
+    kind: String,
+    weight: f64,
+}
+
+#[derive(serde::Serialize)]
+struct KbGraphView {
+    nodes: Vec<KbGraphNodeView>,
+    edges: Vec<KbGraphEdgeView>,
+    entity_count: usize,
+    edge_count: usize,
+}
+
+/// 知识图谱全量视图（节点 + 边），供前端 SVG 图谱面板渲染。
+/// 懒加载：把持久化 KB（kb_store.json）中尚未索引的文档补进内存图谱。
+#[tauri::command]
+fn kb_graph_view(state: State<'_, Arc<AppState>>) -> Result<KbGraphView, String> {
+    let mut graph = state.kb_graph.lock().map_err(|e| e.to_string())?;
+
+    // 懒加载持久化 KB 文档（仅补索引尚未进图的 doc_id）
+    let data_dir = Config::data_dir();
+    let kb_path = data_dir.join("kb_store.json");
+    if kb_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&kb_path) {
+            if let Ok(docs) = serde_json::from_str::<Vec<(String, String)>>(&content) {
+                for (title, text) in docs {
+                    if graph.entities_in_document(&title).is_empty() {
+                        graph.index_document(&title, &text);
+                    }
+                }
+            }
+        }
+    }
+
+    // 计算度数（出/入边计数）
+    let edges = graph.edges();
+    let mut degree: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in edges {
+        *degree.entry(e.from.clone()).or_insert(0) += 1;
+        *degree.entry(e.to.clone()).or_insert(0) += 1;
+    }
+    let nodes: Vec<KbGraphNodeView> = graph
+        .entities()
+        .into_iter()
+        .map(|id| KbGraphNodeView {
+            degree: degree.get(id).copied().unwrap_or(0),
+            id: id.to_string(),
+        })
+        .collect();
+    let edges_view: Vec<KbGraphEdgeView> = edges
+        .iter()
+        .map(|e| KbGraphEdgeView {
+            from: e.from.clone(),
+            to: e.to.clone(),
+            kind: e.kind.label().to_string(),
+            weight: e.weight,
+        })
+        .collect();
+    Ok(KbGraphView {
+        entity_count: graph.entity_count(),
+        edge_count: graph.edge_count(),
+        nodes,
+        edges: edges_view,
+    })
+}
+
+/// 查询与某实体直接相连的邻居
+#[tauri::command]
+fn kb_graph_related(
+    state: State<'_, Arc<AppState>>,
+    entity: String,
+) -> Result<Vec<String>, String> {
+    let graph = state.kb_graph.lock().map_err(|e| e.to_string())?;
+    Ok(graph.neighbors(&entity))
+}
+
+// ───────────── Daily Usage（Token 消费统计，原生内置）─────────────
+
+/// 用量聚合（总量/输入/输出/会话/调用次数/分模型明细）。
+/// 台账为进程级单例（`usage::init` 幂等），数据落盘 `~/.marguerite/usage.db`。
+#[tauri::command]
+fn usage_summary() -> Result<serde_json::Value, String> {
+    marguerite_core::usage::init();
+    Ok(marguerite_core::usage::status(&serde_json::json!({})))
+}
+
+/// 最近 N 天按日聚合（热力图/月度开销数据源），UTC 日边界。
+#[tauri::command]
+fn usage_daily(days: u32) -> Result<serde_json::Value, String> {
+    marguerite_core::usage::init();
+    Ok(marguerite_core::usage::daily(days))
+}
+
+// ───────────── 鲸鱼娘桌宠（原生状态机，好感度持久化）─────────────
+
+#[derive(serde::Serialize)]
+struct PetStatusView {
+    mood: String,
+    energy: u8,
+    affection: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PetStore {
+    mood: String,
+    energy: u8,
+    affection: u32,
+    last_ms: u64,
+}
+
+fn pet_store_path() -> std::path::PathBuf {
+    Config::data_dir().join("pet_state.json")
+}
+
+fn pet_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn load_pet_store() -> PetStore {
+    match std::fs::read_to_string(pet_store_path()) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or(PetStore {
+            mood: "idle".into(),
+            energy: 100,
+            affection: 0,
+            last_ms: pet_now_ms(),
+        }),
+        Err(_) => PetStore {
+            mood: "idle".into(),
+            energy: 100,
+            affection: 0,
+            last_ms: pet_now_ms(),
+        },
+    }
+}
+
+fn save_pet_store(p: &PetStore) {
+    if let Ok(json) = serde_json::to_string(p) {
+        let _ = std::fs::write(pet_store_path(), json);
+    }
+}
+
+fn pet_mood_from_str(s: &str) -> marguerite_core::workbench::pet::PetMood {
+    match s {
+        "happy" => marguerite_core::workbench::pet::PetMood::Happy,
+        "sleepy" => marguerite_core::workbench::pet::PetMood::Sleepy,
+        "working" => marguerite_core::workbench::pet::PetMood::Working,
+        _ => marguerite_core::workbench::pet::PetMood::Idle,
+    }
+}
+
+fn pet_mood_str(m: marguerite_core::workbench::pet::PetMood) -> &'static str {
+    match m {
+        marguerite_core::workbench::pet::PetMood::Idle => "idle",
+        marguerite_core::workbench::pet::PetMood::Happy => "happy",
+        marguerite_core::workbench::pet::PetMood::Sleepy => "sleepy",
+        marguerite_core::workbench::pet::PetMood::Working => "working",
+    }
+}
+
+/// 桌宠状态（读取时按流逝时间做能量衰减 tick）
+#[tauri::command]
+fn pet_status() -> Result<PetStatusView, String> {
+    use marguerite_core::workbench::pet::{tick, PetState};
+    let mut store = load_pet_store();
+    let now = pet_now_ms();
+    let dt_secs = now.saturating_sub(store.last_ms) / 1000;
+    let cur = PetState {
+        mood: pet_mood_from_str(&store.mood),
+        energy: store.energy,
+    };
+    let next = tick(&cur, dt_secs);
+    store.energy = next.energy;
+    store.mood = pet_mood_str(next.mood).to_string();
+    store.last_ms = now;
+    save_pet_store(&store);
+    Ok(PetStatusView {
+        mood: store.mood.clone(),
+        energy: store.energy,
+        affection: store.affection,
+    })
+}
+
+/// 桌宠互动：pet（摸头）/ feed（投喂小鱼干），回能升 Happy 且好感度 +1
+#[tauri::command]
+fn pet_action(action: String) -> Result<PetStatusView, String> {
+    use marguerite_core::workbench::pet::{feed, pet, PetState};
+    let mut store = load_pet_store();
+    let cur = PetState {
+        mood: pet_mood_from_str(&store.mood),
+        energy: store.energy,
+    };
+    let next = match action.as_str() {
+        "pet" => pet(&cur),
+        "feed" => feed(&cur),
+        other => return Err(format!("未知互动: {other}")),
+    };
+    store.energy = next.energy;
+    store.mood = pet_mood_str(next.mood).to_string();
+    store.affection = store.affection.saturating_add(1);
+    store.last_ms = pet_now_ms();
+    save_pet_store(&store);
+    Ok(PetStatusView {
+        mood: store.mood.clone(),
+        energy: store.energy,
+        affection: store.affection,
+    })
+}
+
+// ───────────── Better Sidebar：文件树 / 编辑器 / 浏览器 ─────────────
+
+#[derive(serde::Serialize)]
+struct FsEntryView {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// 列目录。空路径默认到工作区根（data_dir/workspaces）。
+#[tauri::command]
+fn fs_list_dir(path: String) -> Result<Vec<FsEntryView>, String> {
+    let base = Config::data_dir();
+    let p = if path.trim().is_empty() {
+        base.join("workspaces")
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    let _ = std::fs::create_dir_all(&p);
+    let canon = p
+        .canonicalize()
+        .map_err(|e| format!("无法访问目录 {}: {}", p.display(), e))?;
+    let mut entries: Vec<FsEntryView> = Vec::new();
+    let rd = std::fs::read_dir(&canon).map_err(|e| format!("读取目录失败: {e}"))?;
+    for item in rd.flatten() {
+        let name = item.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // 隐藏文件/目录不展示，保持树干净
+        }
+        let is_dir = item.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let size = if is_dir {
+            0
+        } else {
+            item.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        entries.push(FsEntryView {
+            name,
+            path: item.path().to_string_lossy().to_string(),
+            is_dir,
+            size,
+        });
+    }
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    Ok(entries)
+}
+
+/// 读文本文件（>512KB 拒绝，防止 UI 卡死）
+#[tauri::command]
+fn fs_read_file(path: String) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("无法访问文件: {e}"))?;
+    if meta.len() > 512 * 1024 {
+        return Err("文件超过 512KB，请用外部编辑器打开".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// 写文本文件（自动创建父目录）
+#[tauri::command]
+fn fs_write_file(path: String, content: String) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, content).map_err(|e| format!("写入失败: {e}"))
+}
+
+/// 在系统默认浏览器打开链接（仅 http/https）
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("仅支持 http/https 链接".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {e}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {e}"))?;
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -1433,6 +1921,9 @@ pub fn run() {
             skills_install,
             session_list,
             session_delete,
+            create_workspace_folder,
+            routing_save,
+            modlens_analyze,
             exec_command,
             sandbox_info,
             computer_use_action,
@@ -1441,7 +1932,23 @@ pub fn run() {
             fleet_list,
             fleet_route,
             evolve_history,
-            plugins_list
+            plugins_list,
+            poker_create_room,
+            poker_join_room,
+            poker_start_room,
+            poker_action,
+            poker_state,
+            poker_auto,
+            kb_graph_view,
+            kb_graph_related,
+            usage_summary,
+            usage_daily,
+            pet_status,
+            pet_action,
+            fs_list_dir,
+            fs_read_file,
+            fs_write_file,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,6 +3,10 @@
 //! 纯逻辑、无渲染、可单测。能量夹紧 `0..=100`；低能转 `Sleepy`；
 //! 互动（`pet`）/ 投喂（`feed`）回能并升 `Happy`。
 
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
+
 /// 鲸鱼娘心情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PetMood {
@@ -60,6 +64,117 @@ pub fn feed(state: &PetState) -> PetState {
         mood: PetMood::Happy,
         energy: clamp_energy(state.energy as i32 + 25),
     }
+}
+
+// ───────────────────────────── 持久化层（网关 RPC 使用）─────────────────────────────
+
+/// 桌宠持久化状态（落盘 `data_dir/pet_state.json`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PetStore {
+    pub mood: String,
+    pub energy: u8,
+    pub affection: u32,
+    pub last_ms: u64,
+}
+
+/// 返回给前端的桌宠状态视图。
+#[derive(Debug, Clone, Serialize)]
+pub struct PetView {
+    pub mood: String,
+    pub energy: u8,
+    pub affection: u32,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn store_path() -> PathBuf {
+    crate::persistence::config::Config::data_dir().join("pet_state.json")
+}
+
+fn load_store() -> PetStore {
+    let default = || PetStore {
+        mood: "idle".into(),
+        energy: 100,
+        affection: 0,
+        last_ms: now_ms(),
+    };
+    match std::fs::read_to_string(store_path()) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| default()),
+        Err(_) => default(),
+    }
+}
+
+fn save_store(p: &PetStore) {
+    if let Ok(json) = serde_json::to_string(p) {
+        let _ = std::fs::write(store_path(), json);
+    }
+}
+
+fn mood_from_str(s: &str) -> PetMood {
+    match s {
+        "happy" => PetMood::Happy,
+        "sleepy" => PetMood::Sleepy,
+        "working" => PetMood::Working,
+        _ => PetMood::Idle,
+    }
+}
+
+fn mood_str(m: PetMood) -> &'static str {
+    match m {
+        PetMood::Idle => "idle",
+        PetMood::Happy => "happy",
+        PetMood::Sleepy => "sleepy",
+        PetMood::Working => "working",
+    }
+}
+
+/// 读取桌宠状态（按流逝时间 tick 衰减），供网关 RPC `pet.status`。
+pub fn status() -> PetView {
+    let mut store = load_store();
+    let dt = now_ms().saturating_sub(store.last_ms) / 1000;
+    let cur = PetState {
+        mood: mood_from_str(&store.mood),
+        energy: store.energy,
+    };
+    let next = tick(&cur, dt);
+    store.energy = next.energy;
+    store.mood = mood_str(next.mood).to_string();
+    store.last_ms = now_ms();
+    save_store(&store);
+    PetView {
+        mood: store.mood.clone(),
+        energy: store.energy,
+        affection: store.affection,
+    }
+}
+
+/// 互动（pet/feed），供网关 RPC `pet.action`。
+pub fn interact(action: &str) -> Result<PetView, String> {
+    let mut store = load_store();
+    let cur = PetState {
+        mood: mood_from_str(&store.mood),
+        energy: store.energy,
+    };
+    let next = match action {
+        "pet" => pet(&cur),
+        "feed" => feed(&cur),
+        other => return Err(format!("未知互动: {other}")),
+    };
+    store.energy = next.energy;
+    store.mood = mood_str(next.mood).to_string();
+    store.affection = store.affection.saturating_add(1);
+    store.last_ms = now_ms();
+    save_store(&store);
+    Ok(PetView {
+        mood: store.mood.clone(),
+        energy: store.energy,
+        affection: store.affection,
+    })
 }
 
 #[cfg(test)]

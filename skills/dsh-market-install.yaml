@@ -1,0 +1,47 @@
+name: dsh-market-install
+description: 安装指定 DSH 插件：把 *.plugin.json 复制到 manifests 目录并触发热更新事件
+version: 1.0.0
+author: marguerite-dsh
+intent:
+  - market install
+  - 安装插件
+  - add plugin
+tools:
+  - fs
+  - shell
+prompt_template: |
+  ## 角色：DSH Market 安装器（dsh-market-install）
+
+  你现在负责「安装 DSH manifest 插件」。安装流程：
+
+  ### 步骤：
+  1. 校验插件名：必须匹配 `dsh-<slug>` 命名法（蛇形或 kebab）
+  2. 确认源 manifest JSON 路径（用户需提供绝对路径，或从 templates/ 拷贝内置模板）
+  3. 复制目标文件到 `marguerite/plugins/manifests/<name>.plugin.json`
+  4. 发送事件总线事件：`ReloadManifests`，触发 `PluginRegistry::register_manifests()` 热加载
+  5. 返回安装结果（成功 / 已存在 / 源文件缺失 / 格式校验失败）
+
+  ### 可用的内置模板（直接生成即可）：
+  若用户没有提供外部 JSON，你可按以下骨架在 manifests/ 下直接新建：
+  ```json
+  {
+    "name": "{{name}}",
+    "version": "0.1.0",
+    "description": "用户安装的自定义插件",
+    "author": "local-user",
+    "capabilities": [],
+    "hooks": [],
+    "slash_commands": [],
+    "subagents": [],
+    "skills": [],
+    "dependencies": ["dsh-harness-core"],
+    "events": []
+  }
+  ```
+
+  ### 错误处理（必须明确提示错误类别）：
+  - ERR_EXIST：同名插件已存在，使用 `/market upgrade <name>` 升级
+  - ERR_IO：文件写入失败
+  - ERR_JSON：manifest 结构不合法（缺必填字段）
+
+  用户安装请求：{{text}}

@@ -17,9 +17,28 @@ use crate::events::{global_bus, Envelope};
 use crate::model::llm::TokenUsage;
 use crate::persistence::config::Config;
 
+/// Usage 查询服务子模块（T-2.1 FR-B1 聚合 + 查询 + budget 告警）。
+pub mod query_service;
+
 /// 用量台账（SQLite 落盘 `~/.marguerite/usage.db`）。
 pub struct UsageLedger {
     conn: Mutex<Connection>,
+}
+
+impl UsageLedger {
+    /// 兄弟模块可见：拿到底层 `Mutex<Connection>` 引用（只读查询用）。
+    pub(crate) fn conn_ref(&self) -> &Mutex<Connection> {
+        &self.conn
+    }
+
+    /// 兄弟模块可见：把一个已打开的 Connection 包成 UsageLedger，
+    /// 用于 `query_service::UsageQueryService::from_connection` 支持
+    /// `rusqlite::Connection::open_in_memory()`（测试用，不碰真实数据目录）。
+    pub(crate) fn wrap_for_query_service(conn: Connection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+        }
+    }
 }
 
 static LEDGER: OnceLock<Arc<UsageLedger>> = OnceLock::new();
@@ -158,6 +177,31 @@ impl UsageLedger {
         let items = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(json!({ "items": items }))
     }
+
+    /// 最近 `days` 天按日聚合（UTC 日边界）。
+    /// 返回升序 `(day_start_ms, total_tokens, calls)`，供用量页热力图/月度开销。
+    pub fn daily(&self, days: i64) -> rusqlite::Result<Vec<(i64, i64, i64)>> {
+        const DAY_MS: i64 = 86_400_000;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let cutoff = now_ms - days.clamp(1, 90) * DAY_MS;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT (created_ms / ?1) * ?1 AS day_start, COALESCE(SUM(total_tokens), 0), COUNT(*)
+             FROM usage_events WHERE created_ms >= ?2
+             GROUP BY day_start ORDER BY day_start ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![DAY_MS, cutoff], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+    }
 }
 
 /// 初始化进程级台账（幂等；网关托管时由 chat 运行时首次触发）。
@@ -240,6 +284,29 @@ pub fn query(params: &Value) -> Value {
     }
 }
 
+/// `usage.daily` 契约：最近 N 天按日聚合（用量页热力图/月度开销数据源）。
+pub fn daily(days: u32) -> Value {
+    match LEDGER.get() {
+        None => json!({ "days": [] }),
+        Some(ledger) => {
+            let days_i = days.clamp(1, 90) as i64;
+            match ledger.daily(days_i) {
+                Ok(rows) => {
+                    let days: Vec<Value> = rows
+                        .iter()
+                        .map(|(d, t, c)| json!({ "day": d, "total_tokens": t, "calls": c }))
+                        .collect();
+                    json!({ "days": days })
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "用量日聚合失败");
+                    json!({ "days": [] })
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +366,26 @@ mod tests {
         // 全局台账未初始化（或已被其他测试初始化）时，record 都不应 panic、无副作用
         let u = usage(10, 5);
         record("never-initialized-model", &u);
+    }
+
+    #[test]
+    fn daily_aggregates_by_day() {
+        let ledger = tmp_db("daily");
+        ledger
+            .record("ws.a", "deepseek-chat", &usage(100, 20))
+            .unwrap();
+        ledger
+            .record("ws.b", "deepseek-reasoner", &usage(200, 40))
+            .unwrap();
+        let rows = ledger.daily(7).unwrap();
+        // 两条都落在今天（UTC 日边界）→ 恰好 1 个日桶
+        assert_eq!(rows.len(), 1, "rows={rows:?}");
+        let (day_start, tokens, calls) = rows[0];
+        assert!(day_start > 0);
+        assert_eq!(tokens, 360);
+        assert_eq!(calls, 2);
+        // 空台账 → 空桶
+        let empty = tmp_db("daily-empty");
+        assert!(empty.daily(30).unwrap().is_empty());
     }
 }

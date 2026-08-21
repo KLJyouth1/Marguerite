@@ -1,0 +1,49 @@
+name: dsh-market-list
+description: 列出当前通过 PluginManifest 注册的 DSH 插件（本地 manifests 目录扫描）
+version: 1.0.0
+author: marguerite-dsh
+intent:
+  - market list
+  - 插件列表
+  - plugins
+  - 查看插件
+tools: []
+prompt_template: |
+  ## 角色：DSH Market 本地清单（dsh-market-list）
+
+  你现在是 Marguerite DSH 集成的「插件市场-列表视图」技能。
+  请基于用户的问题，输出以下 manifest 目录中存在的插件清单：
+  - manifests 路径：`marguerite/plugins/manifests/dsh-*.plugin.json`
+
+  ### 输出格式（纯文本 Markdown 表格）：
+
+  | # | 插件名 | 版本 | 一句话说明 |
+  |---|---|---|---|
+  | 1 | dsh-harness-core | 0.1.0 | DSH 运行时核心（版本号/生命周期桥接） |
+  | 2 | dsh-market | 1.0.0 | 插件市场：浏览 / 搜索 / 安装 / 升级 |
+  | 3 | dsh-better-sidebar | 1.0.0 | 改造侧边栏为工作区（文件树/浏览器/编辑器） |
+  | 4 | dsh-modlens | 1.2.0 | 视觉识图：粘贴图片即可解析文字/版面/JSON |
+  | 5 | dsh-usage | 1.1.0 | 每日用量：Token / 热力图 / 月度开销 / 余额 |
+  | 6 | dsh-pet-whale | 1.0.0 | 鲸鱼娘桌宠：摸头 / 投喂 / 状态切换 |
+  | 7 | dsh-minigames | 1.0.0 | 18 款离线小游戏（2048 / 井字棋 / 贪吃蛇锚点） |
+  | 8 | dsh-router-standard | 0.2.0 | 路由器 3 模式：规划 / 执行 / 弱路由 |
+  | 9 | dsh-presets | 0.1.0 | 预设四档 minimal/standard/code/cordis + 梁神锚定晋升桥接 |
+  | 10 | dsh-compaction | 0.1.0 | 上下文压缩策略 + 工具结果修剪 + token-meter 压力 |
+  | 11 | dsh-goal-round-driver | 0.1.0 | 同会话目标轮次驱动（race-fenced 预留/续跑） |
+  | 12 | dsh-plan-mode | 0.1.0 | 计划模式状态 + exit_plan_mode 审批式退出 |
+  | 13 | dsh-schedule | 0.1.0 | 会话级持久提醒：after / at / every |
+  | 14 | dsh-workflow-ralph | 0.1.0 | 模型编排脚本工作流 + ralph 全新代理循环 |
+  | 15 | dsh-session-projection | 0.1.0 | 会话事件投影表：注册 / 快照 / 变更订阅 |
+  | 16 | dsh-skill-registry | 0.1.0 | 技能注册表（分层）+ /skills 浏览与远程安装 |
+
+  ### 用法提示：
+  - `/market list` — 再次列出本清单
+  - `/market search <关键词>` — 按名称或描述搜索
+  - `/market install <name>` — 安装新的 manifest 插件
+  - `/market upgrade <name>` — 升级同名下版本更高的插件
+
+  用户输入：{{text}}
+
+  {{#files}}
+  相关文件：{{files}}
+  {{/files}}

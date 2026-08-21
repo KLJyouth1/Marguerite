@@ -1,18 +1,36 @@
-# mode/bloom.yaml — Bloom 受控强编排模式（MAX+YOLO 融合二次升级版）
-# 对齐 MAX 模式（4 阶段推理 + 特权模型）+ TUI 工作台 YOLO（免确认 + 沙箱分层 + 快照安全网）
+# mode/bloom.yaml — Bloom 统一编排模式（v3 定稿）
+#
+# 统一设计原则（策划 §三 定稿）：
+# 1. 「首轮锚定 + 工具收窄」冷启动（dsh-forge 前缀门控社区验证版）：
+#    首块文本走前缀门控（deepseek 系 "we" 且无 "let me" → 晋升；四步兜底；
+#    无工具首轮自动晋升）。锚定期仅暴露 2 个最小工具：bash_persistent +
+#    str_replace_editor；晋升后进入 PTC 单一 run_code 阶段。
+# 2. Bloom 不再分分子模式（MAX/YOLO/AUTO/SWARM/DEEP 全部内化）：
+#    - MAX 四阶段推理（生成→批判→改进→验证）→ thinking_depth +
+#      verification_passes 自动生效，无需切换模式。
+#    - YOLO 免确认 + 沙箱分层 + git 快照回滚 → privileges.auto_approve=true +
+#      sandbox 段 + snapshot_enabled，自动生效。
+#    - PTC 程序化工具调用（单 run_code）→ 锚定晋升后激活 run_code，自动生效。
+#    - SWARM 蜂群分片并行 → max_swarm_shards 自动按需扇出。
+#    - AUTO 自主闭环 → budget_tokens + max_iterations + max_fixes 自动生效。
+#    - DEEP 双模型深度编排 → privileges.deep_dual_model 自动启用。
+# 3. 工具面在单次会话内是单调扩展（锚定 → PTC → 完整面），中途禁止替换。
 name: bloom
-description: Bloom 融合模式：MAX 四阶段推理（生成→自批判→改进→验证）+ YOLO 免确认全自动（受沙箱白名单约束）
+description: |
+  Bloom 统一模式：首轮锚定+工具收窄的冷启动，随后吸收 PTC 的程序化工具调用、
+  MAX 的四阶段推理、YOLO 的免确认快照安全网、SWARM 蜂群并行、AUTO 自主闭环、
+  DEEP 双模型深度。全程不分子模式，按任务自动编排；工具面单调扩展，不中途替换。
 allowed_tools: []
-# 系统级/桌面控制（system_control/control_desktop/browser_control）不再恒禁：
-# 改由 Bloom 特权模型门控（skip_permissions 全开 → 免确认；否则人工确认）。
 denied_tools: []
 model_params:
   temperature: 0.1
   reasoning_effort: max
-anti_patterns: []
+anti_patterns:
+  - 禁止全上下文重注入（每轮只增量追加消息；禁止替换 system / 回滚整段历史）
+  - 避免中途替换工具面（会话内工具单调扩展；PTC 阶段不得回退到锚定工具集，也不得随机重置）
+  - 禁止在 Bloom 内切换到 Plan/Agent 的确认路径（auto_approve 全程一致）
 risk_level: high
 bloom:
-  submode: deep
   privileges:
     auto_approve: true
     skip_permissions: false
@@ -22,6 +40,8 @@ bloom:
     unrestricted_filesystem: false
     allow_network_all: true
     allow_shell_all: true
+    # DEEP 双模型深度：自动与特权模型协同；无需切模式
+    deep_dual_model: true
   sandbox:
     type: workspace-write
     network_access: true
@@ -32,7 +52,31 @@ bloom:
   snapshot_enabled: true
   auto_revert_max: 2
   max_swarm_shards: 11
+  max_sub_experts: 5
   auto_retry_failures: 5
+  budget_tokens: 120000
+  max_iterations: 20
+  max_fixes: 3
+  # 统一 Bloom 的锚定冷启动（PTC / dsh-forge 前缀门控合并）
+  anchoring:
+    enabled: true
+    # deepseek 系前缀门控：首块文本包含 we 且无 let me → 晋升
+    prefix_gate: "deepseek"
+    # 最小工具 2 件：bash_persistent + str_replace_editor（锚定期）
+    minimal_tools: ["bash_persistent", "str_replace_editor"]
+    # 晋升后工具：PTC 单一 run_code（随后再按需扩展至 bloom 全工具面，单调扩展）
+    ptc_tool: "run_code"
+    # 四步兜底阈值
+    fallback_steps: 4
+    # 锚定期消息源白名单（对齐梁神：仅 user 与 goal 直通；过滤后的自动轮不触发晋升分支）
+    message_sources: ["user", "goal"]
+    # 首轮请求输出预算（null = 不设限；梁神 1024 压住「We need」触发窗口，晋升后剥离）
+    bootstrap_max_tokens: ~
+    # 晋升后延迟注入的来源与步数（workspace 指令与技能目录晚一步注入，先稳 PTC 轨迹）
+    deferred_sources: ["agent-instructions", "skill-catalog"]
+    deferred_grace_steps: 1
+    # 无工具首轮自动晋升（对齐梁神 promoteAfterFirstResponse）
+    promote_after_first_response: true
 approval_policy:
   mutating: allow
   exec_write: allow

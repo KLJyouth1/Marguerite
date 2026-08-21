@@ -1,0 +1,45 @@
+{
+  "name": "dsh-plan-mode",
+  "version": "0.1.0-rc8-mgr1",
+  "description": "DSH plan-mode 二创：每 agent 计划模式状态（log-only 持久化，resume/fork/compaction 可恢复）+ exit_plan_mode 审批式退出；工具目录在模式间保持不变（请求缓存稳定），限制由沙箱/审批策略独立执行；复用 Marguerite mode/plan.yaml 只读探索模式与 plan/ 计划器",
+  "author": "marguerite-dsh",
+  "capabilities": [
+    "dsh.plan.set",
+    "dsh.plan.query",
+    "dsh.plan.exit"
+  ],
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "handler": "plan_mode_apply",
+      "params": {
+        "catalog_stable": "true",
+        "policy_source": "sandbox_and_approval"
+      }
+    }
+  ],
+  "slash_commands": [
+    {
+      "name": "/plan",
+      "description": "计划模式：/plan [message] 进入并附任务描述；/plan off 退出",
+      "arguments": [
+        "subcmd",
+        "message"
+      ]
+    }
+  ],
+  "subagents": [],
+  "skills": [],
+  "dependencies": [
+    "dsh-harness-core"
+  ],
+  "events": [
+    "plan.mode.flip",
+    "plan.exit.requested",
+    "plan.exit.approved",
+    "plan.exit.rejected"
+  ],
+  "capability_models": {
+    "dsh.plan.exit": "inherit"
+  }
+}

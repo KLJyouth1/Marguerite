@@ -1,6 +1,7 @@
 fn main() {
-    // 复制 opensquilla Web 界面产物（marguerite/webui/dist）到 src-tauri/webui/dist，
+    // 复制 Web 前端产物（仓库根 webui/dist，Vue 控制台，用户指定的 UI）到 src-tauri/webui/dist，
     // 使 bundle.resources 的 `webui/dist/**` glob 能匹配（tauri-build 的 glob 不支持 `../` 相对段）。
+    // 注意 build.rs 的 cwd 是 src-tauri/，`../..` 才是仓库根 marguerite/。
     let src = std::path::Path::new("../../webui/dist");
     let dst = std::path::Path::new("webui/dist");
     if src.join("index.html").is_file() {

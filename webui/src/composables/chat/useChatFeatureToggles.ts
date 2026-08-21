@@ -2,8 +2,8 @@ import { computed, ref } from 'vue'
 import i18n from '@/i18n'
 import { useToasts } from '@/composables/useToasts'
 import type { ChatRouterTierConfig } from '@/types/chat'
-import type { BloomSubmode, ModelRoutingMode } from '@/types/modelRouting'
-import { normalizeBloomSubmode, normalizeModelRoutingMode } from '@/types/modelRouting'
+import type { ModelRoutingMode } from '@/types/modelRouting'
+import { normalizeModelRoutingMode } from '@/types/modelRouting'
 import { normalizeRouterTier, sortRouterTiers } from '@/utils/chat/routerTiers'
 import { encodeRouterShape, decodeRouterShape } from '@/utils/chat/routerShapeCache'
 import {
@@ -65,7 +65,6 @@ interface ChatFeatureConfig {
   bloom?: {
     enabled?: boolean
     parallel_enabled?: boolean
-    submode?: string
   }
 }
 
@@ -88,10 +87,8 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
   const codingModeSettingsBusy = ref(false)
   const llmEnsembleEnabled = ref(false)
   const bloomEnsembleEnabled = ref(false)
-  const bloomSubmode = ref<BloomSubmode>('deep')
   const llmEnsembleSelectionMode = ref('')
   const llmEnsembleSettingsBusy = ref(false)
-  const bloomSubmodeSettingsBusy = ref(false)
   const modelRoutingSettingsBusy = ref(false)
   const routerSlots = ref<string[]>([])
   const routerModels = ref<Record<string, string>>({})
@@ -131,8 +128,6 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
     codingModeEnabled.value = cfg?.skills?.coding_mode === true
     llmEnsembleEnabled.value = ensembleEnabled
     bloomEnsembleEnabled.value = ensembleEnabled && String(cfg?.llm_ensemble?.orchestration_mode) === 'auto'
-    const rawSubmode = String(cfg?.bloom?.submode || '')
-    if (rawSubmode) bloomSubmode.value = normalizeBloomSubmode(rawSubmode)
     llmEnsembleSelectionMode.value = String(cfg?.llm_ensemble?.selection_mode || '')
     routerVisualMode.value = normalizeRouterVisualMode(router.visual_mode)
     const tiers = router.tiers
@@ -191,22 +186,6 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
       } catch {
         // Older Gateways have no canonical routing RPC; the config projection
         // applied above remains the read-only compatibility snapshot.
-      }
-      // Bloom 子模式由 Rust 引擎消费（`config.bloom.submode`）；侧车在线时
-      // config.get 走 Python 不返回该字段，故额外读 Rust-first 的 mode.get。
-      try {
-        const modeSnapshot = options.readCallOptions
-          ? await options.rpc.call<{ submode?: string }>(
-              'mode.get',
-              undefined,
-              options.readCallOptions,
-            )
-          : await options.rpc.call<{ submode?: string }>('mode.get')
-        if (typeof modeSnapshot?.submode === 'string' && modeSnapshot.submode) {
-          bloomSubmode.value = normalizeBloomSubmode(modeSnapshot.submode)
-        }
-      } catch {
-        // Older Gateways have no mode.get submode field; keep config projection.
       }
     } catch {
       // Feature toggles are optional for older gateways.
@@ -323,27 +302,6 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
     }
   }
 
-  async function setBloomSubmode(submode: BloomSubmode) {
-    if (bloomSubmodeSettingsBusy.value) return
-    const next = normalizeBloomSubmode(submode)
-    const previous = bloomSubmode.value
-    if (next === previous) return
-    bloomSubmode.value = next
-    bloomSubmodeSettingsBusy.value = true
-    try {
-      await options.rpc.waitForConnection()
-      // Bloom 子模式由 Rust 引擎消费（`config.bloom.submode`，YAML）；kind 固定
-      // bloom，使子模式切换即刻生效（与当前 Bloom 运行时一致，无需重启）。
-      await options.rpc.call('mode.switch', { kind: 'bloom', submode: next })
-    } catch (err) {
-      bloomSubmode.value = previous
-      console.warn('Failed to update Bloom submode:', err instanceof Error ? err.message : String(err))
-      pushToast(i18n.global.t('chat.modelRouting.submodeUpdateFailed'), { tone: 'danger' })
-    } finally {
-      bloomSubmodeSettingsBusy.value = false
-    }
-  }
-
   function bindFeatureRefresh(scheduleHistorySync?: () => void) {
     let timer: ReturnType<typeof setTimeout> | null = null
     const schedule = () => {
@@ -384,8 +342,6 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
     codingModeSettingsBusy,
     llmEnsembleEnabled,
     bloomEnsembleEnabled,
-    bloomSubmode,
-    bloomSubmodeSettingsBusy,
     llmEnsembleSelectionMode,
     llmEnsembleSettingsBusy,
     routerSlots,
@@ -394,7 +350,6 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
     loadFeatureToggles,
     setRouterEnabled,
     setModelRoutingMode,
-    setBloomSubmode,
     setCodingModeEnabled,
     setLlmEnsembleEnabled,
     setRouterVisualEffectsEnabled,

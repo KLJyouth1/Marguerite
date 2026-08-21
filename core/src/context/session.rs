@@ -63,6 +63,10 @@ pub struct SessionContext {
     pub snapshot_count: u32,
     /// 会话关联的项目根目录（跨重启持久化；None = 未绑定项目，属「最近」）
     pub project_path: Option<String>,
+    /// 流式生成中的「部分文本」（F1：turn 进行中增量持久化，
+    /// 供前端切走再切回时恢复正在生成的消息占位，不丢流式文本）。
+    #[serde(default)]
+    pub partial_text: Option<String>,
 }
 
 impl SessionContext {
@@ -78,6 +82,7 @@ impl SessionContext {
             compression_ratio: None,
             snapshot_count: 0,
             project_path: None,
+            partial_text: None,
         }
     }
 
@@ -570,6 +575,38 @@ pub fn record_turn(session: &str, role: &str, text: &str) -> f64 {
         .record(session, role, text)
 }
 
+/// 增量持久化流式「部分文本」（F1）：turn 进行中调用，切走再切回可恢复。
+pub fn record_partial(session: &str, text: &str) {
+    let mut g = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = g.load(session);
+    ctx.partial_text = if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    };
+    g.persist(&ctx);
+    g.sessions.insert(session.to_string(), ctx);
+}
+
+/// 读取会话的流式部分文本（无则 None）。
+pub fn partial_text(session: &str) -> Option<String> {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .status(session)
+        .partial_text
+        .clone()
+}
+
+/// 清除部分文本（turn 完成后调用，避免残留占位）。
+pub fn clear_partial(session: &str) {
+    let mut g = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = g.load(session);
+    ctx.partial_text = None;
+    g.persist(&ctx);
+    g.sessions.insert(session.to_string(), ctx);
+}
+
 /// 读取会话的全部上下文条目（供网关把会话历史落盘到 sessions.db / 水合 chat.history）。
 /// 无该会话时返回空 Vec。
 pub fn context_entries(session: &str) -> Vec<ContextEntry> {
@@ -679,6 +716,8 @@ pub fn context_status(session: &str) -> Value {
         "snapshot_count": ctx.snapshot_count,
         "entries": ctx.entries.len(),
         "summary": ctx.summary,
+        // F1：暴露流式 partial_text，供前端切回时恢复「正在生成」占位
+        "partial_text": ctx.partial_text,
     })
 }
 
@@ -920,6 +959,7 @@ mod tests {
             compression_ratio: None,
             snapshot_count: 0,
             project_path: None,
+            partial_text: None,
         };
         let write = std::fs::write(&path, serde_json::to_string(&ctx).unwrap());
         assert!(write.is_ok(), "临时台账写入失败");

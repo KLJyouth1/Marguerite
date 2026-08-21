@@ -41,7 +41,7 @@
 
 ```bat
 REM 步骤 A：构建前端（在仓库根目录）
-cd D:\path\to\marguerite
+cd "D:\path\to\marguerite"
 cd webui
 npm install
 npm run build          REM 产物写入 webui/dist

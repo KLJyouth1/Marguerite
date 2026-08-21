@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
@@ -134,6 +135,8 @@ pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErro
         reg.cap_recent();
     }
     // 上下文台账：用户输入无论引擎成败都属于会话上下文（引擎失败也会被记录）
+    // F1：先清上一轮可能残留的流式 partial_text，避免跨轮串扰
+    crate::context::session::clear_partial(&session_key);
     crate::context::session::record_turn(&session_key, "user", &message);
     // B3 行为捕获：用户消息观察（observation）
     crate::memory::behavior::record_behavior(&session_key, "user_message", &message);
@@ -285,18 +288,25 @@ pub async fn abort(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErr
 }
 
 /// 构建自进化经验台账（与 GUI 同款接线；初始化失败返回 None，不阻塞对话）
+///
+/// 进程级单例：SQLite 连接可安全复用（每条语句都能看到其他连接的最新提交），
+/// 避免每轮对话重复 open + CREATE TABLE/INDEX DDL（2 个库 × 每轮）。
 fn build_evolution() -> Option<Arc<Mutex<SelfEvolution>>> {
-    let data_dir = Config::data_dir();
-    let _ = std::fs::create_dir_all(&data_dir);
-    let mut ledger = ExperienceLedger::new(&data_dir.join("marguerite_experience.db"));
-    if ledger.init().is_err() {
-        return None;
-    }
-    let mut long_term = LongTermMemory::new(&data_dir.join("marguerite_ltm_gw.db"));
-    if long_term.init().is_err() {
-        return None;
-    }
-    Some(Arc::new(Mutex::new(SelfEvolution::new(ledger, long_term))))
+    static EVO: OnceLock<Option<Arc<Mutex<SelfEvolution>>>> = OnceLock::new();
+    EVO.get_or_init(|| {
+        let data_dir = Config::data_dir();
+        let _ = std::fs::create_dir_all(&data_dir);
+        let mut ledger = ExperienceLedger::new(&data_dir.join("marguerite_experience.db"));
+        if ledger.init().is_err() {
+            return None;
+        }
+        let mut long_term = LongTermMemory::new(&data_dir.join("marguerite_ltm_gw.db"));
+        if long_term.init().is_err() {
+            return None;
+        }
+        Some(Arc::new(Mutex::new(SelfEvolution::new(ledger, long_term))))
+    })
+    .clone()
 }
 
 /// 分层记忆栈（感知 → 短期 FTS → 长期语义）进程单例。
@@ -407,34 +417,104 @@ fn merged_turn_hint(text: &str, session: &str) -> String {
 /// 无命中返回 `None`（不阻塞对话）。
 ///
 /// 各层 top-K（按相关性 / 最近更新）截断，避免 token 膨胀。
-fn memory_stable_prefix(text: &str) -> Option<Message> {
-    let mut parts: Vec<String> = Vec::new();
+///
+/// 异步化 + `spawn_blocking`：四路召回含 SQLite 查询与磁盘 JSON 读取，原实现
+/// 直接阻塞 tokio worker（与「禁止同步 TcpStream 阻塞 worker」同类的坑）；
+/// 现在整体挪到阻塞池，内部再以 `thread::scope` 四路并行，结果按固定顺序拼装
+/// 保证前缀内容确定（稳定前缀 = KV-cache 键的一部分，顺序必须确定）。
+async fn memory_stable_prefix(text: &str) -> Option<Message> {
+    let text = text.to_string();
+    let parts = tokio::task::spawn_blocking(move || {
+        let (cp, stack, recall, exp) = std::thread::scope(|s| {
+            // 1) 跨项目记忆（已渲染为 Observation 列表的 System 消息）
+            let h_cp = s.spawn(|| {
+                let mut parts = Vec::new();
+                if let Some(Message::System { content, .. }) = recall_stable_prefix(&text, 4) {
+                    if !content.is_empty() {
+                        parts.push(content);
+                    }
+                }
+                parts
+            });
+            // 2) 长期语义记忆（向量相似度 top-K）+ 3) 短期 FTS 记忆（跨会话全文检索 top-K），
+            // 复用对话运行时分层记忆单例（与沉淀同一库，读取不阻塞写入）。
+            let h_stack = s.spawn(|| {
+                let mut parts = Vec::new();
+                if let Some(stack) = memory_stack() {
+                    let guard = match stack.lock() {
+                        Ok(g) => g,
+                        Err(e) => e.into_inner(),
+                    };
+                    if let Ok(hits) = guard.long_term.search(&text, 4) {
+                        for h in hits {
+                            parts.push(format!("[长期记忆] {}", h.content));
+                        }
+                    }
+                    if let Ok(summaries) = guard.short_term.search(&text, 4) {
+                        for s in summaries {
+                            parts.push(format!("[短期记忆·{}] {}", s.session_id, s.summary));
+                        }
+                    }
+                }
+                parts
+            });
+            // 4) 召回记忆（claude-mem 四类持久记忆：user / project / feedback / auto）
+            //    带 TTL 的进程缓存：避免每轮对话重复读盘 + JSON 解析，同时保证新导入的
+            //    记忆最多延迟 RECALL_CACHE_TTL 即可被召回（导入写盘走的是独立实例）。
+            let h_recall = s.spawn(|| {
+                use crate::memory::recall::MemoryBackend as _;
+                let mut parts = Vec::new();
+                let mem_dir = crate::persistence::config::Config::data_dir().join("memory");
+                let kb = cached_recall_kb(&mem_dir);
+                for category in crate::memory::recall::MemoryCategory::all() {
+                    for h in kb.recall(*category, &text, 3) {
+                        if !h.snippet.is_empty() {
+                            parts.push(format!("[召回记忆·{}] {}", h.category.as_str(), h.snippet));
+                        }
+                    }
+                }
+                parts
+            });
+            // 5) 经验记忆（自进化台账：踩坑/决策/模式，余弦相似度 top-K）
+            //    SQLite 连接进程级复用：语句级读事务天然可见其他连接的最新提交，
+            //    无需每轮重新 open + DDL。
+            let h_exp = s.spawn(|| {
+                let mut parts = Vec::new();
+                let mem_dir = crate::persistence::config::Config::data_dir().join("memory");
+                let exp_dir = mem_dir.join("experience.db");
+                let ledger = cached_experience_ledger(&exp_dir);
+                if let Ok(exps) = ledger
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .search(&text, 3)
+                {
+                    for e in exps {
+                        let body: String = e.body.chars().take(200).collect();
+                        parts.push(format!("[经验记忆·{}] {}：{}", e.kind.as_str(), e.title, body));
+                    }
+                }
+                parts
+            });
+            (
+                h_cp.join().unwrap_or_default(),
+                h_stack.join().unwrap_or_default(),
+                h_recall.join().unwrap_or_default(),
+                h_exp.join().unwrap_or_default(),
+            )
+        });
+        let mut parts: Vec<String> =
+            Vec::with_capacity(cp.len() + stack.len() + recall.len() + exp.len());
+        parts.extend(cp);
+        parts.extend(stack);
+        parts.extend(recall);
+        parts.extend(exp);
+        parts
+    })
+    .await
+    .unwrap_or_default();
 
-    // 1) 跨项目记忆（已渲染为 Observation 列表的 System 消息）
-    if let Some(Message::System { content, .. }) = recall_stable_prefix(text, 4) {
-        if !content.is_empty() {
-            parts.push(content);
-        }
-    }
-
-    // 2) 长期语义记忆（向量相似度 top-K）+ 3) 短期 FTS 记忆（跨会话全文检索 top-K），
-    // 复用对话运行时分层记忆单例（与沉淀同一库，读取不阻塞写入）。
-    if let Some(stack) = memory_stack() {
-        let guard = match stack.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-        if let Ok(hits) = guard.long_term.search(text, 4) {
-            for h in hits {
-                parts.push(format!("[长期记忆] {}", h.content));
-            }
-        }
-        if let Ok(summaries) = guard.short_term.search(text, 4) {
-            for s in summaries {
-                parts.push(format!("[短期记忆·{}] {}", s.session_id, s.summary));
-            }
-        }
-    }
+    // 注：sensory（感知记忆）即当前会话上下文，已由 session_history_messages 注入历史，
+    // 无需重复；behavior（行为记忆）尚无面向注入的检索 API，待补后一并纳入。
 
     if parts.is_empty() {
         return None;
@@ -443,6 +523,53 @@ fn memory_stable_prefix(text: &str) -> Option<Message> {
         content: parts.join("\n\n"),
         timestamp: chrono::Utc::now(),
     })
+}
+
+/// 召回记忆 KB 的进程缓存 TTL：命中窗口内免读盘，超窗后重载保证新鲜度。
+const RECALL_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// 召回记忆 KB 进程缓存（TTL 刷新；`KbBackedMemory` 构造时会读盘 + JSON 解析）。
+fn cached_recall_kb(dir: &std::path::Path) -> Arc<crate::memory::recall::KbBackedMemory> {
+    static CACHE: OnceLock<
+        Mutex<Option<(Instant, Arc<crate::memory::recall::KbBackedMemory>)>>,
+    > = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some((t, kb)) if t.elapsed() < RECALL_CACHE_TTL => kb.clone(),
+        _ => {
+            let kb = Arc::new(crate::memory::recall::KbBackedMemory::with_persistence(dir));
+            *guard = Some((Instant::now(), kb.clone()));
+            kb
+        }
+    }
+}
+
+/// 经验台账连接进程级单例（按路径缓存；未初始化成功时不缓存，降级为空台账）。
+type ExperienceLedgerMap = Mutex<
+    HashMap<
+        std::path::PathBuf,
+        Arc<Mutex<crate::memory::experience::ExperienceLedger>>,
+    >,
+>;
+
+fn cached_experience_ledger(
+    path: &std::path::Path,
+) -> Arc<Mutex<crate::memory::experience::ExperienceLedger>> {
+    static LEDGERS: OnceLock<ExperienceLedgerMap> = OnceLock::new();
+    let map = LEDGERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(arc) = guard.get(path) {
+        return arc.clone();
+    }
+    let mut ledger = crate::memory::experience::ExperienceLedger::new(path);
+    if ledger.init().is_err() {
+        // 不缓存失败实例：search 返回 Err，上层静默降级（与旧行为一致）
+        return Arc::new(Mutex::new(ledger));
+    }
+    let arc = Arc::new(Mutex::new(ledger));
+    guard.insert(path.to_path_buf(), arc.clone());
+    arc
 }
 
 /// 从上下文台账取本会话历史消息（排除当前用户输入，最多最近 20 轮），
@@ -510,15 +637,28 @@ fn resolve_session_project(session: &str) -> Option<String> {
         return Some(p);
     }
     // 3) DB 回退：会话曾绑定过项目，重启后仍能恢复归属
-    let db_path = crate::persistence::config::Config::config_dir().join("sessions.db");
-    let mut mgr = crate::persistence::session::SessionManager::new(&db_path);
-    if mgr.init().is_err() {
-        return None;
-    }
-    mgr.get_session(session)
+    //    连接进程级复用（与 persist_session 共用同一实例），避免每轮 open + DDL。
+    let mgr = session_db();
+    mgr.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_session(session)
         .ok()
         .flatten()
         .and_then(|s| s.project_path)
+}
+
+/// sessions.db 连接进程级单例（chat 路径读写共用；SQLite 语句级可见性保证
+/// 其他连接（session 管理命令）的提交也能被读到）。
+fn session_db() -> &'static Mutex<crate::persistence::session::SessionManager> {
+    static MGR: OnceLock<Mutex<crate::persistence::session::SessionManager>> = OnceLock::new();
+    MGR.get_or_init(|| {
+        let db_path = crate::persistence::config::Config::config_dir().join("sessions.db");
+        let mut manager = crate::persistence::session::SessionManager::new(&db_path);
+        if manager.init().is_err() {
+            tracing::warn!("sessions.db 初始化失败，后续读写将返回 Err（忽略）");
+        }
+        Mutex::new(manager)
+    })
 }
 
 /// 把会话上下文台账落盘到 SQLite（sessions.db），供 `sessions.list` / `chat.history` 恢复。
@@ -558,11 +698,11 @@ pub(crate) fn persist_session(session: &str) {
         }
         consolidate_runtime_memory(session);
     }
-    let db_path = crate::persistence::config::Config::config_dir().join("sessions.db");
-    let mut manager = crate::persistence::session::SessionManager::new(&db_path);
-    let _ = manager.init();
-    // 优先进程内 workspaceId 绑定，回退 DB 已有 project_path（跨重启粘住，防止会话掉进「最近」）
+    // 先解析项目归属（其内部锁用完即放），再取写库单例：
+    // std Mutex 不可重入，顺序颠倒会自锁（persist_session → resolve 同抢 session_db）。
     let project = resolve_session_project(session);
+    let manager = session_db();
+    let manager = manager.lock().unwrap_or_else(|e| e.into_inner());
     let result = match project {
         Some(p) => manager.save_snapshot_for_project(session, &p, "idle", &messages, 0),
         None => manager.save_snapshot(session, "idle", &messages, 0),
@@ -690,7 +830,7 @@ async fn run_turn(
         orch.set_route_decision(route_decision.clone());
         // 跨会话记忆召回（W-6）：长期 + 短期 + 跨项目记忆合并为稳定前缀 System 消息，
         // 落进 lead 上下文最前端 + 智能体人设（经验提示）拆分注入，避免记忆被重复塞入。
-        if let Some(prefix) = memory_stable_prefix(&text) {
+        if let Some(prefix) = memory_stable_prefix(&text).await {
             orch.set_stable_prefix(prefix);
         }
         let persona = agent_personality_hint(&session);
@@ -713,7 +853,7 @@ async fn run_turn(
     let engine = RealEngine::from_config(config)
         .with_evolution(build_evolution())
         .with_cross_project_hint(agent_personality_hint(&session))
-        .with_stable_prefix(memory_stable_prefix(&text))
+        .with_stable_prefix(memory_stable_prefix(&text).await)
         .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from))
         .with_route_decision(Some(route_decision.clone()));
     let outcome = engine
@@ -746,7 +886,6 @@ fn router_decision_payload(
     let analysis = &outcome.analysis;
     json!({
         "strategy": outcome.strategy.label(),
-        "submode": outcome.bloom_submode.clone().unwrap_or_default(),
         "model": model,
         "routed_model": model,
         "source": "orchestrator",
@@ -839,22 +978,23 @@ mod tests {
 
     /// 简易 mock LLM HTTP 服务器：单次响应
     async fn mock_llm_server(status: u16, body: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let reason = if status >= 500 { "Server Error" } else { "OK" };
-                let header = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-                let _ = socket.flush().await;
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    let reason = if status >= 500 { "Server Error" } else { "OK" };
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
             }
         });
         format!("http://{addr}")
@@ -862,7 +1002,7 @@ mod tests {
 
     /// 简易 mock LLM HTTP 服务器：循环响应 `times` 次（复杂任务分步执行需要多次调用）
     async fn mock_llm_server_multi(status: u16, body: &str, times: usize) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
@@ -872,8 +1012,7 @@ mod tests {
                     Ok(v) => v,
                     Err(_) => break,
                 };
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
+                let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
                 let reason = if status >= 500 { "Server Error" } else { "OK" };
                 let header = format!(
                     "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
