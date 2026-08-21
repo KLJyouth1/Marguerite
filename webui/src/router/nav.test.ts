@@ -8,14 +8,14 @@ import { sharedRoutes } from './sharedRoutes'
 
 describe('getWorkNavigationSection', () => {
   it('returns the flat sidebar order after the dedicated chat action', () => {
+    // v10 导航精简：fleet/computer-use 归入 agent 能力与模式逻辑，不再占导航。
     expect(getWorkNavigationSection().map((item) => item.path)).toEqual([
       '/skills',
-      '/fleet',
       '/cron',
-      '/computer-use',
       '/usage',
       '/evolve',
       '/plugins',
+      '/poker',
     ])
   })
 
@@ -49,15 +49,16 @@ describe('getWorkNavigationSection', () => {
 
 describe('navigation taxonomy invariants', () => {
   it('keeps Agents out of every primary navigation consumer', () => {
+    // v10 导航精简：电脑操控/舰队是 agent 能力与模式执行逻辑、关系图谱与宠物
+    // 移入设置，均不再出现在主导航。
     expect(getNavigationItems('primary').map((item) => item.path)).toEqual([
       '/chat',
       '/skills',
-      '/fleet',
       '/cron',
-      '/computer-use',
       '/usage',
       '/evolve',
       '/plugins',
+      '/poker',
     ])
   })
 

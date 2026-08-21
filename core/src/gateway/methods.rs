@@ -234,6 +234,10 @@ const RUST_FIRST_METHODS: &[&str] = &[
     "poker.action",
     "poker.state",
     "poker.auto",
+    // DSH 插件市场（本地 16 清单 + 技能市场）
+    "market.list",
+    "market.search",
+    "market.install",
 ];
 
 /// 方法分派入口（异步）：按方法名路由到 Rust 实现或 Python 侧车代理
@@ -1137,6 +1141,10 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         "evolve.history" => evolve_history(),
         // ── 插件槽位 ──
         "plugins.list" => plugins_list(),
+        // ── DSH 插件市场（本地 16 清单 + 技能市场）──
+        "market.list" => market_list(),
+        "market.search" => market_search(params),
+        "market.install" => market_install(params),
         // 其余写类方法或未分类方法统一 NOT_IMPLEMENTED
         _ => Value::Null,
     }
@@ -4625,6 +4633,126 @@ fn plugins_list() -> Value {
         })
         .collect();
     json!({ "plugins": items, "total": items.len() })
+}
+
+/// DSH 插件市场：插件清单目录候选（环境变量 > cwd > exe 相对 > 安装资源布局）。
+fn plugin_manifest_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("MARGUERITE_PLUGINS_DIR") {
+        if !p.trim().is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let exe = std::env::current_exe().ok()?;
+    let mut candidates = vec![
+        cwd.join("plugins").join("manifests"),
+        exe.parent()?.join("plugins").join("manifests"),
+        exe.parent()?.parent()?.join("plugins").join("manifests"),
+        exe.parent()?.join("resources").join("plugins").join("manifests"),
+    ];
+    candidates.retain(|p| p.is_dir());
+    candidates.into_iter().next()
+}
+
+/// 市场条目：16 份 DSH 插件清单（kind=plugin）+ 技能市场技能（kind=skill）。
+fn market_items() -> Vec<Value> {
+    let mut items: Vec<Value> = Vec::new();
+    if let Some(dir) = plugin_manifest_dir() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(m) = crate::plugins::manifest::PluginManifest::from_json(&text) {
+                        items.push(json!({
+                            "name": m.name,
+                            "version": m.version,
+                            "description": m.description,
+                            "kind": "plugin",
+                            "author": m.author.unwrap_or_default(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    // 技能市场：skills 目录下全部 YAML 技能
+    let skills_dir = crate::tools::skill_tools::resolve_skills_dir(&skills_dir_default());
+    if let Ok(skills) = crate::skills::loader::SkillLoader::new(&skills_dir).load_all() {
+        for skill in skills {
+            items.push(json!({
+                "name": skill.name,
+                "version": skill.version,
+                "description": skill.description,
+                "kind": "skill",
+                "author": String::new(),
+            }));
+        }
+    }
+    items.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
+    items
+}
+
+/// 技能目录默认配置（与编排器注册同源）。
+fn skills_dir_default() -> String {
+    crate::persistence::config::Config::default().skills.skills_dir.clone()
+}
+
+/// `market.list`：DSH 插件市场（本地清单 + 技能市场）。
+fn market_list() -> Value {
+    let items = market_items();
+    json!({ "items": items, "total": items.len() })
+}
+
+/// `market.search <q>`：按名称/描述模糊过滤。
+fn market_search(params: &Value) -> Value {
+    let q = params
+        .get("q")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let items: Vec<Value> = market_items()
+        .into_iter()
+        .filter(|i| {
+            q.is_empty()
+                || i["name"].as_str().unwrap_or("").to_lowercase().contains(&q)
+                || i["description"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .collect();
+    json!({ "items": items, "total": items.len() })
+}
+
+/// `market.install <name>`：清单解析校验 + 收录（运行期注册由网关重启生效，
+/// 诚实回报不做假成功）。
+fn market_install(params: &Value) -> Value {
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return json!({ "success": false, "message": "market.install 需要 name" });
+    };
+    let Some(dir) = plugin_manifest_dir() else {
+        return json!({ "success": false, "message": "插件清单目录不可用" });
+    };
+    let path = dir.join(format!("{name}.plugin.json"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return json!({ "success": false, "message": format!("未找到插件清单 {name}") });
+    };
+    match crate::plugins::manifest::PluginManifest::from_json(&text) {
+        Ok(m) => json!({
+            "success": true,
+            "message": format!("插件 {} v{} 校验通过并已收录（运行期注册随网关重启生效）", m.name, m.version),
+        }),
+        Err(e) => json!({ "success": false, "message": format!("清单解析失败: {e}") }),
+    }
 }
 
 /// ModelConfig → LLMConfig 转换（与 GUI Tauri 命令同源）

@@ -183,6 +183,10 @@
               @open-agent-configuration="openAgentConfiguration"
               @open-data-maintenance="openDataMaintenance"
             />
+            <SettingsExtensionsPanel
+              v-else-if="isExtensionSection(section)"
+              :section-id="section"
+            />
           </template>
           </fieldset>
         </div>
@@ -256,6 +260,7 @@ import ExpertsPanel from '@/components/settings/ExpertsPanel.vue'
 import SandboxSettingsPanel from '@/components/settings/SandboxSettingsPanel.vue'
 import DesktopRuntimePanel from '@/components/settings/DesktopRuntimePanel.vue'
 import DataMigrationPanel from '@/components/settings/DataMigrationPanel.vue'
+import SettingsExtensionsPanel from '@/components/settings/SettingsExtensionsPanel.vue'
 import { useSetupCatalog, SETTINGS_SECTIONS } from '@/composables/setup/useSetupCatalog'
 import { parseProviderHash, sectionFromRouteParam } from '@/composables/setup/useSettingsSection'
 import { useConfirm } from '@/composables/useConfirm'
@@ -271,6 +276,15 @@ const { confirm, confirmState } = useConfirm()
 // hides. `desktopOnly` sections are filtered out everywhere else.
 const isDesktop = usePlatform().capabilities.isDesktop
 const visibleSections = computed(() => SETTINGS_SECTIONS.filter(s => !s.desktopOnly || isDesktop))
+
+// 扩展与能力中心分区：插件/预设/市场/皮肤/宠物/图谱/协同/SSH（client 型）
+const EXTENSION_SECTION_IDS = new Set([
+  'plugins', 'agentPresets', 'pluginMarket', 'webUiPlugins', 'skinCenter',
+  'pet', 'communityPlugins', 'graph', 'collabSsh',
+])
+function isExtensionSection(id: string): boolean {
+  return EXTENSION_SECTION_IDS.has(id)
+}
 
 const {
   section,

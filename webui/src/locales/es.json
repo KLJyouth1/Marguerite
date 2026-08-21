@@ -721,7 +721,76 @@
         "gateway": "Puerta de enlace",
         "ai": "Configuración de IA",
         "preferences": "Preferencias",
-        "capabilities": "Capacidades"
+        "capabilities": "Capacidades",
+        "extensions": "Extensions"
+      },
+      "plugins": "Plugins",
+      "agentPresets": "Agent Presets",
+      "pluginMarket": "Plugin Market",
+      "webUiPlugins": "Web UI Plugins",
+      "skinCenter": "Skin Center",
+      "pet": "Pet",
+      "communityPlugins": "Community Plugins",
+      "graph": "Graph",
+      "collabSsh": "Collab & SSH"
+    },
+    "ext": {
+      "plugins": {
+        "title": "Plugins",
+        "desc": "Installed plugin registry: list, enable and disable local plugin manifests.",
+        "hint": "Manage the plugin registry served by the gateway.",
+        "open": "Open Plugins"
+      },
+      "agentPresets": {
+        "title": "Agent Presets",
+        "desc": "minimal / standard / code / cordis presets with the Bloom anchoring promotion bridge.",
+        "hint": "Agent presets select the tool surface and anchoring behavior per session. Preset switching is a mode-level action, not a config edit.",
+        "openAgents": "Open Agents"
+      },
+      "pluginMarket": {
+        "title": "Plugin Market",
+        "desc": "DeepSeek Harness plugin market: local manifests and skill market.",
+        "hint": "Market items are served by the gateway market.* RPC (16 DSH manifests + skill market).",
+        "loading": "Loading market…",
+        "empty": "No market items available.",
+        "unavailable": "Market service unavailable (gateway offline?)."
+      },
+      "webUiPlugins": {
+        "title": "Web UI Plugins",
+        "desc": "Web UI plugin surfaces: sidebar, skins, pet, usage widgets.",
+        "hint": "Web UI plugins are built-in extension surfaces toggled from this Settings hub.",
+        "open": "Open Plugins"
+      },
+      "skinCenter": {
+        "title": "Skin Center",
+        "desc": "Ink-wash and semantic token skins; wallpaper asset pack.",
+        "hint": "Skins apply instantly through the appearance system.",
+        "openAppearance": "Open Appearance"
+      },
+      "pet": {
+        "title": "Pet",
+        "desc": "Whale pet: a movable desktop pet with a settings toggle.",
+        "hint": "The pet floats over the page and can be dragged anywhere; its position is remembered.",
+        "toggleLabel": "Enable desktop pet",
+        "openPreview": "Open pet panel"
+      },
+      "communityPlugins": {
+        "title": "Community Plugins",
+        "desc": "Community plugin manifests and skill bundles.",
+        "hint": "Community plugins arrive as manifest JSON and skill YAML bundles.",
+        "open": "Open Plugins"
+      },
+      "graph": {
+        "title": "Graph",
+        "desc": "Knowledge graph visualization (KB 2.0).",
+        "hint": "Moved into Settings; deep link /graph remains valid.",
+        "open": "Open Graph"
+      },
+      "collabSsh": {
+        "title": "Collab & SSH",
+        "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
+        "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
+        "open": "Open Overview"
       }
     }
   },

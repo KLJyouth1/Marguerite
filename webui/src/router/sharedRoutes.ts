@@ -69,17 +69,22 @@ export const sharedRoutes: RouteRecordRaw[] = [
   // Readiness/doctor moved inline into Overview; the old deep link stays valid.
   { path: '/health',    redirect: '/overview' },
   // ── 电脑操控（三层架构：屏幕感知/键鼠控制/GUI定位）──
-  { path: '/computer-use', name: 'computer-use', component: ComputerUseView, meta: { title: 'Computer Use', group: 'Work', icon: 'cursor', nav: 'primary', navOrder: 55, platforms: ['web', 'desktop'] } },
+  // 这是 agent 的能力与模式执行逻辑（computer_use 工具链），不是独立导航页：
+  // 深链保留，但不出现在主导航（入口在 设置 → Agent 预设/能力）。
+  { path: '/computer-use', name: 'computer-use', component: ComputerUseView, meta: { title: 'Computer Use', group: 'Work', icon: 'cursor', platforms: ['web', 'desktop'] } },
   // ── 模型舰队（多角色路由）──
-  { path: '/fleet', name: 'fleet', component: FleetView, meta: { title: 'Fleet', group: 'Work', icon: 'agents', nav: 'primary', navOrder: 45, platforms: ['web', 'desktop'] } },
+  // 舰队是 agent 的编排/模型路由执行形态（multi_strategy），不占导航位。
+  { path: '/fleet', name: 'fleet', component: FleetView, meta: { title: 'Fleet', group: 'Work', icon: 'agents', platforms: ['web', 'desktop'] } },
   // ── 自进化 ──
   { path: '/evolve', name: 'evolve', component: EvolveView, meta: { title: 'Evolve', group: 'Work', icon: 'sparkles', nav: 'primary', navOrder: 65, platforms: ['web', 'desktop'] } },
   // ── 插件市场 ──
   { path: '/plugins', name: 'plugins', component: PluginsView, meta: { title: 'Plugins', group: 'Work', icon: 'blocks', nav: 'primary', navOrder: 70, platforms: ['web', 'desktop'] } },
   // ── 关系图谱（KB 2.0 知识图谱可视化）──
-  { path: '/graph', name: 'graph', component: GraphView, meta: { title: 'Graph', group: 'Work', icon: 'gitBranch', nav: 'primary', navOrder: 75, platforms: ['web', 'desktop'] } },
+  // 移入设置（设置 → 关系图谱）；深链保留。
+  { path: '/graph', name: 'graph', component: GraphView, meta: { title: 'Graph', group: 'Work', icon: 'gitBranch', platforms: ['web', 'desktop'] } },
   // ── 德州扑克（游戏大厅 · 赌 Token）──
   { path: '/poker', name: 'poker', component: PokerView, meta: { title: 'Poker', group: 'Work', icon: 'coins', nav: 'primary', navOrder: 80, platforms: ['web', 'desktop'] } },
   // ── 鲸鱼娘桌宠 ──
-  { path: '/pet', name: 'pet', component: PetView, meta: { title: 'Pet', group: 'Work', icon: 'sparkles', nav: 'primary', navOrder: 85, platforms: ['web', 'desktop'] } },
+  // 桌面悬浮桌宠（可拖拽）由 App 根部挂载；本路由转为设置内宠物面板入口，不进导航。
+  { path: '/pet', name: 'pet', component: PetView, meta: { title: 'Pet', group: 'Work', icon: 'sparkles', platforms: ['web', 'desktop'] } },
 ]

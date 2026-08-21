@@ -12,6 +12,10 @@
       </div>
     </header>
 
+    <p class="pet-desktop-note">
+      桌面桌宠：可在 设置 → 宠物 中开启「桌面桌宠」开关；开启后鲸鱼娘悬浮在页面之上，可拖拽到任意位置（位置自动记忆），双击抚摸。
+    </p>
+
     <section v-if="error" class="pet-error">{{ error }}</section>
 
     <section class="pet-card">
@@ -114,6 +118,7 @@ onUnmounted(() => {
 
 <style scoped>
 .pet-stage { padding: 24px 28px; max-width: 900px; margin: 0 auto; }
+.pet-desktop-note { margin: 14px 0 0; padding: 10px 14px; background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 12px; }
 .pet-error { margin: 16px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
 .pet-card { margin-top: 16px; padding: 28px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); text-align: center; }
 .pet-whale { width: 100%; max-width: 340px; display: block; margin: 0 auto; }

@@ -38,6 +38,17 @@ export const SETTINGS_SECTIONS = [
   { id: 'appearance', label: 'Appearance', icon: 'monitor', client: true, desktopOnly: false, group: 'preferences' },
   { id: 'keyboard', label: 'Keyboard', icon: 'keyboard', client: true, desktopOnly: false, group: 'preferences' },
   { id: 'advanced', label: 'Advanced', icon: 'gauge', client: true, desktopOnly: false, group: 'preferences' },
+  // --- 扩展与能力中心：插件/预设/市场/皮肤/宠物/图谱/协同/SSH 统一收纳 ---
+  // 全部 client 型：本地浏览偏好，不入 readiness/dirty 栏。
+  { id: 'plugins', label: 'Plugins', icon: 'blocks', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'agentPresets', label: 'Agent Presets', icon: 'agents', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'pluginMarket', label: 'Plugin Market', icon: 'skills', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'webUiPlugins', label: 'Web UI Plugins', icon: 'monitor', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'skinCenter', label: 'Skin Center', icon: 'sun', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'pet', label: 'Pet', icon: 'sparkles', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'communityPlugins', label: 'Community Plugins', icon: 'boxes', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'graph', label: 'Graph', icon: 'gitBranch', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'collabSsh', label: 'Collab & SSH', icon: 'terminal', client: true, desktopOnly: false, group: 'extensions' },
 ] as const
 
 // Data maintenance is a nested Advanced destination rather than a first-level

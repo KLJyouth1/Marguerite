@@ -721,7 +721,76 @@
         "gateway": "网关",
         "ai": "AI 配置",
         "preferences": "偏好设置",
-        "capabilities": "能力"
+        "capabilities": "能力",
+        "extensions": "扩展"
+      },
+      "plugins": "插件",
+      "agentPresets": "Agent 预设",
+      "pluginMarket": "插件市场",
+      "webUiPlugins": "Web UI 插件",
+      "skinCenter": "皮肤中心",
+      "pet": "宠物",
+      "communityPlugins": "社区插件",
+      "graph": "关系图谱",
+      "collabSsh": "企业协同与 SSH"
+    },
+    "ext": {
+      "plugins": {
+        "title": "插件",
+        "desc": "已安装插件注册表：列出、启用、禁用本地插件清单。",
+        "hint": "管理网关提供的插件注册表。",
+        "open": "打开插件"
+      },
+      "agentPresets": {
+        "title": "Agent 预设",
+        "desc": "minimal / standard / code / cordis 四档预设 + Bloom 锚定晋升桥接。",
+        "hint": "Agent 预设决定每个会话的工具面与锚定行为；切换属于模式级动作而非配置编辑。",
+        "openAgents": "打开 Agents"
+      },
+      "pluginMarket": {
+        "title": "插件市场",
+        "desc": "DeepSeek Harness 插件市场：本地清单 + 技能市场。",
+        "hint": "市场条目由网关 market.* RPC 提供（16 份 DSH 清单 + 技能市场）。",
+        "loading": "加载市场…",
+        "empty": "市场暂无条目。",
+        "unavailable": "市场服务不可用（网关离线？）。"
+      },
+      "webUiPlugins": {
+        "title": "Web UI 插件",
+        "desc": "Web UI 插件面：侧边栏、皮肤、宠物、用量小部件。",
+        "hint": "Web UI 插件为内置扩展面，统一在本设置中心开关。",
+        "open": "打开插件"
+      },
+      "skinCenter": {
+        "title": "皮肤中心",
+        "desc": "水墨与语义令牌皮肤；壁纸资产包。",
+        "hint": "皮肤经外观系统即时生效。",
+        "openAppearance": "打开外观"
+      },
+      "pet": {
+        "title": "宠物",
+        "desc": "鲸鱼娘：可移动桌面桌宠 + 设置开关。",
+        "hint": "桌宠悬浮在页面上方，可拖到任意位置；位置会被记住。",
+        "toggleLabel": "开启桌面桌宠",
+        "openPreview": "打开宠物面板"
+      },
+      "communityPlugins": {
+        "title": "社区插件",
+        "desc": "社区插件清单与技能包。",
+        "hint": "社区插件以清单 JSON 与技能 YAML 包形式接入。",
+        "open": "打开插件"
+      },
+      "graph": {
+        "title": "关系图谱",
+        "desc": "知识图谱可视化（KB 2.0）。",
+        "hint": "已移入设置；深链 /graph 仍然有效。",
+        "open": "打开关系图谱"
+      },
+      "collabSsh": {
+        "title": "企业协同与 SSH",
+        "desc": "企业级远程协同（Track G CRDT）与 SSH 部署能力。",
+        "hint": "协同由 yrs CRDT 引擎（awareness + RBAC）驱动；SSH 经网关与 CLI 提供部署/隧道/批命令执行。",
+        "open": "打开总览"
       }
     }
   },

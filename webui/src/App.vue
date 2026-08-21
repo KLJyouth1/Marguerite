@@ -302,6 +302,8 @@
       />
       <ArtifactImageLightbox />
       <PaperGrain v-if="appStore.theme === 'ink'" />
+      <!-- 鲸鱼娘桌面桌宠（可拖拽；设置 → 宠物 开关） -->
+      <DesktopPet />
     </div>
   </div>
 
@@ -439,6 +441,7 @@ import { useSessionListSubscription } from './composables/useSessionListSubscrip
 import { useSessionTaskAttention } from './composables/useSessionTaskAttention'
 import { useToasts } from './composables/useToasts'
 import PaperGrain from '@/components/ink/PaperGrain.vue'
+import DesktopPet from '@/components/pet/DesktopPet.vue'
 import { useConfirm } from './composables/useConfirm'
 import { useProjectWorkspaces } from './composables/useProjectWorkspaces'
 import { useFreshTaskDraft } from './composables/useFreshTaskDraft'
