@@ -29,6 +29,16 @@ fn analyzer() -> &'static Orchestrator {
     R.get_or_init(|| Orchestrator::new(Config::default()))
 }
 
+/// 子步骤瞬时失败的最大重试次数（v9 完成性补强：商业级任务对瞬时错误有界重试）。
+const STEP_MAX_RETRIES: usize = 3;
+
+/// 步骤错误是否可重试：治理门/宪法拦截与反思门禁失败是**确定性裁决**
+/// （重试无意义且会放大成本），一律不可重试；其余（网络/超时/5xx 等瞬时错误）
+/// 可退避重试。
+pub fn is_retryable_step_error(msg: &str) -> bool {
+    !(msg.contains("治理门") || msg.contains("宪法") || msg.contains(crate::orchestration::REFLECT_GATE_MARKER))
+}
+
 /// 项目型多阶段信号检测：不依赖复杂度分类器。
 ///
 /// 覆盖「帮我做一个完善的FPS…」这类被分类器判为 Simple/Chat、但本质是多阶段
@@ -115,12 +125,15 @@ pub fn should_auto_decompose(config: &Config, text: &str) -> bool {
 /// `session.event.router_decision` + `session.event.done` 富收据。
 /// `experience_hint` 为可选的系统提示注入片段（如跨项目记忆），随每个子步骤
 /// 编排器一并注入；空串时行为与旧版完全一致。
+/// `cache` 为可选的共享前缀缓存（v9）：长任务各步骤复用同一缓存，可重复请求
+/// 命中不重复预填充；None 时每步骤自建缓存。
 pub async fn run_autonomous(
     config: Config,
     prompt: String,
     session: String,
     bus: Arc<EventBus>,
     experience_hint: String,
+    cache: Option<Arc<crate::cache::PrefixCache>>,
 ) -> anyhow::Result<OrchestrationOutcome> {
     if !qualifies(&config, &prompt) {
         return Err(anyhow::anyhow!(
@@ -202,14 +215,43 @@ pub async fn run_autonomous(
             "【计划子步骤 {sid}｜{title}】\n整体目标：{prompt}\n\n请完成上述子步骤，输出有依据的结论；不要展开其他子步骤。"
         );
 
-        let mut orch = Orchestrator::new(config.clone());
+        let mut orch = Orchestrator::new_with_credentials_and_cache(
+            config.clone(),
+            None,
+            cache.clone(),
+        );
         orch.set_event_bus(bus.clone(), session.clone());
         // 跨项目记忆等提示随子步骤编排注入（空串自动跳过）
         if !experience_hint.is_empty() {
             orch.set_experience_hint(experience_hint.clone());
         }
-        match orch.dispatch(&step_task).await {
-            Ok(outcome) => {
+        // 步骤执行 + 瞬时失败退避重试（v9 完成性补强）：
+        // 治理门/宪法/反思门禁的拒绝是确定性裁决，绝不重试（重试无意义且烧额度）；
+        // 网络/超时/5xx 等瞬时错误退避重试至 STEP_MAX_RETRIES 次。
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut step_outcome = None;
+        for attempt in 0..STEP_MAX_RETRIES {
+            match orch.dispatch(&step_task).await {
+                Ok(outcome) => {
+                    step_outcome = Some(outcome);
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !is_retryable_step_error(&msg) || attempt + 1 >= STEP_MAX_RETRIES {
+                        last_err = Some(e);
+                        break;
+                    }
+                    tracing::warn!(
+                        session = %session, run_id = %run_id, attempt = attempt + 1,
+                        err = %msg, "步骤瞬时失败，退避重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs((attempt + 1) as u64)).await;
+                }
+            }
+        }
+        match step_outcome {
+            Some(outcome) => {
                 let reply = outcome.lead_reply;
                 lead_replies.push(reply.clone());
                 crate::context::session::record_turn(&session, "assistant", &reply);
@@ -251,14 +293,32 @@ pub async fn run_autonomous(
                     }
                 }
             }
-            Err(e) => {
+            None => {
+                let e = last_err.unwrap_or_else(|| anyhow::anyhow!("步骤执行失败"));
                 failed_step = Some(format!("{sid} {title}"));
                 stopped_reason = "failed";
                 let msg = format!("计划子步骤 {sid} 执行失败：{e}");
                 tracing::warn!(session = %session, run_id = %run_id, err = %e, "计划步骤失败");
                 crate::memory::behavior::record_behavior(&session, "plan_step_failed", &msg);
                 bus.publish(Envelope::error(&session, "plan_runner", &msg));
-                // 失败即终止本轮运行（不静默重试），已完成步骤结论保留回传
+                // 失败前落最终检查点（重试耗尽后的状态可被续跑机制消费）
+                {
+                    let mut g = long_running::global()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let _ = g.save_checkpoint(
+                        &lrt_id,
+                        Stage::Execute,
+                        json!({
+                            "runId": run_id,
+                            "stepId": sid,
+                            "completedSteps": completed_steps.saturating_sub(1),
+                            "maxSteps": max_steps,
+                            "failedStep": format!("{sid} {title}"),
+                        }),
+                    );
+                }
+                // 失败即终止本轮运行（重试已耗尽），已完成步骤结论保留回传
                 let _ = plan::plans_cancel(&json!({ "runId": run_id }));
                 break;
             }
@@ -283,7 +343,7 @@ pub async fn run_autonomous(
             );
         }
     }
-    let lead_reply = if lead_replies.is_empty() {
+    let mut lead_reply = if lead_replies.is_empty() {
         format!("计划执行结束（{}）。", stopped_reason)
     } else if stopped_reason == "failed" {
         format!(
@@ -296,13 +356,46 @@ pub async fn run_autonomous(
         lead_replies.join("\n\n")
     };
     let _ = latest;
+
+    // 完成门禁（v9 完成性补强）：聚合结论必须过四检查才可标记 allowed——
+    // 绝不硬编码放行；未放行时如实回传裁决与警告（永不假成功）。
+    let completion_verdict = if stopped_reason == "completed" {
+        let gate = crate::governance::completion_gate::CompletionGate::new();
+        let verdict = gate.check_completion(crate::governance::completion_gate::CompletionClaim {
+            task_description: &prompt,
+            execution_result: &lead_reply,
+            artifacts: &[],
+            verification: None,
+            verification_attempted: false,
+            execution_duration: None,
+        });
+        if !verdict.allowed {
+            let warns = verdict.warnings.join("；");
+            lead_reply = format!("{lead_reply}\n\n[完成门禁未放行] {warns}");
+            bus.publish(Envelope::error(
+                &session,
+                "plan_runner",
+                &format!("完成门禁未放行：{warns}"),
+            ));
+        }
+        verdict
+    } else {
+        // 失败/max_steps 终态：不允许标记完成，如实呈现
+        crate::governance::completion_gate::CompletionVerdict {
+            allowed: false,
+            blocked_by: vec![],
+            warnings: vec![format!("任务以 {stopped_reason} 结束")],
+            evidence: std::collections::HashMap::new(),
+        }
+    };
+
     let analysis = analyzer().analyze(&prompt);
     Ok(OrchestrationOutcome {
         strategy: analysis.strategy,
         lead_reply,
         subagent_summaries: lead_replies,
         analysis,
-        completion_verdict: crate::governance::completion_gate::CompletionVerdict::allowed(),
+        completion_verdict,
         reflect_verdict: None,
     })
 }
@@ -637,9 +730,31 @@ mod tests {
             "ws.x".to_string(),
             bus,
             String::new(),
+            None,
         )
         .await
         .expect_err("简单任务应被拒绝");
         assert!(err.to_string().contains("仅用于复杂/项目型任务"));
+    }
+
+    #[test]
+    fn retryable_error_classification_is_honest() {
+        // 瞬时错误可重试
+        assert!(is_retryable_step_error("连接超时 timeout"));
+        assert!(is_retryable_step_error("502 Bad Gateway"));
+        assert!(is_retryable_step_error("Chat completion failed: 网络错误"));
+        // 确定性裁决不可重试（重试无意义且烧额度）
+        assert!(
+            !is_retryable_step_error("治理门裁决未通过（违反：C1），需人工放行"),
+            "治理门拦截不可重试"
+        );
+        assert!(!is_retryable_step_error("宪法违规：破坏性操作"));
+        assert!(
+            !is_retryable_step_error(&format!(
+                "{} 反思门禁失败",
+                crate::orchestration::REFLECT_GATE_MARKER
+            )),
+            "反思门禁失败不可重试"
+        );
     }
 }

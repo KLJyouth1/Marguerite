@@ -324,6 +324,14 @@ impl LLMClient {
         Ok(())
     }
 
+    /// 从磁盘并入冷上下文缓存（W-7b 加载端接线）：条目与已观测前缀合并进既有缓存
+    /// （缺失/损坏静默忽略）；无缓存时静默成功。
+    pub fn load_cache(&self, path: &std::path::Path) {
+        if let Some(cache) = &self.cache {
+            cache.absorb(path);
+        }
+    }
+
     /// 构建请求 URL
     fn chat_url(&self) -> String {
         format!(

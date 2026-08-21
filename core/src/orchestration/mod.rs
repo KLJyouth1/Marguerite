@@ -72,7 +72,7 @@ const AUTO_MAX_ITERATIONS: usize = 20;
 /// Bloom 自主闭环子模式：自动修复上限。
 const AUTO_MAX_FIXES: usize = 3;
 /// 反思门禁失败标记：用于区分「DAG 不可用」与「反思自检未通过」，避免降级冒充成功。
-const REFLECT_GATE_MARKER: &str = "[REFLECT_GATE]";
+pub(crate) const REFLECT_GATE_MARKER: &str = "[REFLECT_GATE]";
 
 /// Bloom 自主闭环的确定性 QA 判定（离线可测）：非空、非过短、无失败信号 → 通过。
 fn qa_pass(result: &str) -> bool {
@@ -347,6 +347,15 @@ impl Orchestrator {
         Self::new_with_workspace_credentials(config, default_workspace(), credentials)
     }
 
+    /// 凭证缝 + 共享前缀缓存联合构造（默认工作区，v9 缓存 100% 接线）。
+    pub fn new_with_credentials_and_cache(
+        config: Config,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+        cache: Option<Arc<crate::cache::PrefixCache>>,
+    ) -> Self {
+        Self::new_with_workspace_credentials_cache(config, default_workspace(), credentials, cache)
+    }
+
     /// 指定工作区根目录构建编排器（项目模式：工具/终端/文件沙箱根随项目目录切换）。
     pub fn new_with_workspace(config: Config, workspace: std::path::PathBuf) -> Self {
         Self::new_with_workspace_credentials(config, workspace, None)
@@ -359,8 +368,21 @@ impl Orchestrator {
         workspace: std::path::PathBuf,
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> Self {
+        Self::new_with_workspace_credentials_cache(config, workspace, credentials, None)
+    }
+
+    /// 指定工作区根 + 凭证台账 + **共享前缀缓存**构建编排器（v9 缓存 100% 接线）：
+    /// `cache` 为 Some 时模型路由器复用共享实例——网关/长任务跨轮共享同一缓存，
+    /// 可重复请求无需重新预填充即可命中；None 时每编排器自建缓存。
+    pub fn new_with_workspace_credentials_cache(
+        config: Config,
+        workspace: std::path::PathBuf,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+        cache: Option<Arc<crate::cache::PrefixCache>>,
+    ) -> Self {
         // 先基于 &config 构造模型路由器（借用立即结束），再 move config 进 lead。
-        let model_router = Arc::new(ModelRouter::new_with_credentials(&config, credentials));
+        let model_router =
+            Arc::new(ModelRouter::new_with_credentials_and_cache(&config, credentials, cache));
         // D 期接入：把 20 个原生工具 + 命令护栏 + SSRF 防护注册进工具注册表，
         // 让自动编排（dispatch）下的 lead / 子 Agent 真正能调用工具（而非空注册）。
         let mut tool_registry = ToolRegistry::new();

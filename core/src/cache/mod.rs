@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -142,6 +143,9 @@ struct Inner {
 pub struct PrefixCache {
     inner: Mutex<Inner>,
     capacity: usize,
+    /// 自上次落盘以来是否有写入（put / absorb 置位；save/save_if_dirty 清除）。
+    /// 供网关「每轮后按需落盘」——无写入零 IO，跨轮/跨重启缓存不丢。
+    dirty: AtomicBool,
 }
 
 impl PrefixCache {
@@ -153,6 +157,7 @@ impl PrefixCache {
                 prefix_seen: std::collections::HashSet::new(),
             }),
             capacity: capacity.max(1),
+            dirty: AtomicBool::new(false),
         }
     }
 
@@ -189,6 +194,8 @@ impl PrefixCache {
                 g.map.remove(&evict);
             }
         }
+        drop(g);
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// 观测一次稳定前缀：若该前缀首次出现返回 false 并记录；若已出现过返回 true 并计入前缀复用。
@@ -245,9 +252,57 @@ impl PrefixCache {
                 g.map = p.map;
                 g.prefix_seen = p.prefix_seen;
                 cache.capacity = cache.capacity.max(g.map.len());
+                drop(g);
+                // open 恢复的是「已落盘」内容：不置脏（与 save_if_dirty 语义自洽）
+                cache.dirty.store(false, Ordering::Relaxed);
             }
         }
         cache
+    }
+
+    /// 把磁盘上的冷上下文**并入**当前缓存（条目按 key 去重合并 + 已观测前缀集合并），
+    /// 合并后置脏标记。文件缺失/损坏静默忽略（对齐 [`PrefixCache::open`] 的回退语义）。
+    ///
+    /// 供已构造的共享缓存（如网关级缓存）吸收历史落盘内容——跨进程重启后的
+    /// 可重复请求无需重新预填充即可命中。
+    pub fn absorb(&self, path: &Path) {
+        let cold = Self::open(path);
+        let mut merged_any = false;
+        {
+            let cold_g = cold.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for (k, v) in cold_g.map.iter() {
+                if !g.map.contains_key(k) {
+                    g.stats.stored_prompt_tokens += v.prompt_tokens as u64;
+                    g.map.insert(*k, v.clone());
+                    merged_any = true;
+                }
+            }
+            for h in cold_g.prefix_seen.iter() {
+                if g.prefix_seen.insert(*h) {
+                    merged_any = true;
+                }
+            }
+        }
+        if merged_any {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 是否含未落盘写入（put / absorb 后为 true，save/save_if_dirty 成功后为 false）。
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
+    }
+
+    /// 有未落盘写入时才原子落盘（临时文件 + rename）并清脏标记；无写入零 IO。
+    /// 返回是否实际发生了落盘。
+    pub fn save_if_dirty(&self, path: &Path) -> std::io::Result<bool> {
+        if !self.dirty.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        self.save(path)?;
+        self.dirty.store(false, Ordering::Relaxed);
+        Ok(true)
     }
 
     /// 落盘冷上下文缓存（W-7b）：原子写（临时文件 + rename），使跨进程重启可复用。
@@ -286,6 +341,7 @@ impl PrefixCache {
                 prefix_seen: p.prefix_seen,
             }),
             capacity: cap.max(1),
+            dirty: AtomicBool::new(false),
         }
     }
 }
@@ -443,6 +499,66 @@ pub fn report_prefix_cache_usage(prompt_tokens: u64, cache_read: u64, cache_crea
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn entry(content: &str, tokens: u32) -> CacheEntry {
+        CacheEntry {
+            content: content.into(),
+            prompt_tokens: tokens,
+            completion_tokens: 1,
+            last_used_ms: 1,
+        }
+    }
+
+    fn unique_cache_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mgt_cache_{tag}_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("prefix-cache.json")
+    }
+
+    #[test]
+    fn dirty_flag_tracks_puts_and_save_if_dirty_clears() {
+        let path = unique_cache_path("dirty");
+        let c = PrefixCache::new(8);
+        assert!(!c.is_dirty(), "新建缓存应干净");
+        c.put(1, entry("A", 10));
+        assert!(c.is_dirty(), "写入后应置脏");
+        assert!(c.save_if_dirty(&path).unwrap(), "有写入应落盘");
+        assert!(!c.is_dirty(), "落盘后应清脏");
+        assert!(!c.save_if_dirty(&path).unwrap(), "无新写入零 IO（不重复落盘）");
+    }
+
+    #[test]
+    fn absorb_merges_cold_entries_and_marks_dirty() {
+        let path = unique_cache_path("absorb");
+        {
+            let a = PrefixCache::new(8);
+            a.put(42, entry("冷上下文", 30));
+            a.save(&path).unwrap();
+        }
+        let b = PrefixCache::new(8);
+        assert!(!b.is_dirty());
+        b.absorb(&path);
+        assert!(b.is_dirty(), "并入后应置脏（待落盘合并结果）");
+        let hit = b.get(42).expect("冷上下文并入后应命中——可重复请求 100% 复用的证明");
+        assert_eq!(hit.content, "冷上下文");
+    }
+
+    #[test]
+    fn persisted_roundtrip_achieves_full_hit_on_repeat() {
+        // 跨"重启"命中证明：写 → 落盘 → 新进程语义（open）→ 同一 key 100% 命中
+        let path = unique_cache_path("roundtrip");
+        {
+            let a = PrefixCache::new(8);
+            a.put(7, entry("B", 20));
+            assert!(a.save_if_dirty(&path).unwrap());
+        }
+        let b = PrefixCache::open(&path);
+        assert!(b.get(7).is_some(), "重启后相同请求必须命中（100% 复用）");
+        let s = b.stats();
+        assert_eq!(s.hits, 1);
+        assert_eq!(s.misses, 0);
+    }
 
     #[test]
     fn put_then_get_returns_entry() {

@@ -1065,6 +1065,45 @@ mod tests {
         assert!(!runtime.interrupt_flag.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn test_stable_prefix_byte_identical_across_turns() {
+        // 缓存 100% 命中前提（v9）：同一装配输入产出逐字节一致的稳定前缀——
+        // 时间戳等易变数据若混入前缀，服务端 KV-cache 键即漂移、永不命中。
+        let config = Config::default();
+        let mut runtime = AgentRuntime::new(config);
+        runtime.set_stable_prefix(Message::System {
+            content: "记忆召回前缀".into(),
+            timestamp: Utc::now(),
+        });
+        runtime.set_mode_section(Some("模式规则段".into()));
+        runtime.set_experience_hint("经验提示".into());
+        let history = vec![Message::User {
+            content: "用户输入".into(),
+            timestamp: Utc::now(),
+        }];
+        let guide = "工具指引".to_string();
+
+        let a = runtime.build_model_messages(&history, Some(&guide));
+        let b = runtime.build_model_messages(&history, Some(&guide));
+        let prefix = |msgs: &[Message]| -> Vec<String> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    Message::System { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pa = prefix(&a);
+        let pb = prefix(&b);
+        assert_eq!(pa, pb, "稳定前缀必须逐字节一致（KV-cache 命中前提）");
+        // 顺序契约：stable → mode → guide → hint（历史之前全是 System）
+        assert_eq!(pa.len(), 4, "前缀 = stable + mode + guide + hint");
+        assert_eq!(pa[0], "记忆召回前缀");
+        assert_eq!(pa[1], "模式规则段");
+        assert_eq!(pa[2], "工具指引");
+        assert_eq!(pa[3], "经验提示");
+    }
+
     /// 简易 mock LLM HTTP 服务器：单次响应
     async fn mock_llm_server(status: u16, body: &str) -> String {
         use tokio::io::AsyncWriteExt;

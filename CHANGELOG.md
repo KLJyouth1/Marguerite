@@ -1,6 +1,27 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · 完成性/缓存 100% 补强 (v9)
+
+Added
+  cache/mod.rs                → PrefixCache 脏标记 + absorb 冷上下文并入 + save_if_dirty 按需落盘
+                                （无写入零 IO）；3 项单测（含跨重启命中 hits=1/misses=0 证明）
+  model/{llm,router}.rs       → LLMClient::load_cache + ModelRouter::new_with_cache /
+                                new_with_credentials_and_cache / load_cache_from（共享缓存构造链）
+  orchestration/mod.rs        → new_with_credentials_and_cache / new_with_workspace_credentials_cache
+                                （原构造器委托 None）；REFLECT_GATE_MARKER 改 pub(crate)
+  tui/workbench RealEngine     → with_shared_cache + execute_turn/run_turn 透传
+  gateway/chat.rs             → gateway_prefix_cache（OnceLock 冷启动 open 恢复 + 跨轮共享）+
+                                persist_gateway_cache 三条路径每轮按需落盘 + Bloom/RealEngine/长任务接线
+  plan/runner.rs              → 步骤瞬时错误退避重试至 3 次（治理门/宪法/反思门禁确定性拒绝绝不重试，
+                                is_retryable_step_error 分类 + 单测）；失败终态先存检查点；
+                                完成门禁真实执行（移除硬编码 allowed()，未放行如实回传，永不假成功）
+  agent/runtime.rs            → 稳定前缀逐字节一致守卫单测（KV-cache 命中前提锁定）
+  docs/completion-cache-100pct-report-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2050 → 2055（+5 新单测）
+Tests : 2055 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v8 (剩余四项一次性收尾)
 
 Added

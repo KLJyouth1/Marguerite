@@ -139,6 +139,9 @@ pub struct RealEngine {
     /// 凭证台账（可选，凭证缝接入）：Some = 模型路由器经凭证台账解析 API Key
     /// （provider 路由键 → 常见引用 → config 回退）；None = 不启用。
     credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    /// 共享前缀缓存（可选，v9 缓存 100% 接线）：Some = 编排器模型路由器复用
+    /// 该缓存实例（跨轮/跨重启可重复请求命中）；None = 每轮自建。
+    cache: Option<Arc<crate::cache::PrefixCache>>,
 }
 
 impl RealEngine {
@@ -153,6 +156,7 @@ impl RealEngine {
             workspace: None,
             mode_section: None,
             credentials: None,
+            cache: None,
         }
     }
 
@@ -202,6 +206,12 @@ impl RealEngine {
         self
     }
 
+    /// 接入共享前缀缓存（v9 缓存 100% 接线：跨轮/跨重启可重复请求命中）。
+    pub fn with_shared_cache(mut self, cache: Option<Arc<crate::cache::PrefixCache>>) -> Self {
+        self.cache = cache;
+        self
+    }
+
     /// 运行一轮并返回编排结果（网关 / 桌面端复用；事件经总线回流）
     ///
     /// 与 [`EngineRunner::run_turn`] 共享同一执行体，额外返回 lead 综合后的答复与
@@ -241,12 +251,17 @@ impl RealEngine {
         // 自动编排器：每条输入由它离线分析并自动选定 Solo / MAX 双带队 / 专家团队 / 集群形态，
         // 用户（及本 TUI）不手动选择编排形态——形态只能由编排内核自动得出。
         let mut orch = match &self.workspace {
-            Some(ws) => Orchestrator::new_with_workspace_credentials(
+            Some(ws) => Orchestrator::new_with_workspace_credentials_cache(
                 config,
                 ws.clone(),
                 self.credentials.clone(),
+                self.cache.clone(),
             ),
-            None => Orchestrator::new_with_credentials(config, self.credentials.clone()),
+            None => Orchestrator::new_with_credentials_and_cache(
+                config,
+                self.credentials.clone(),
+                self.cache.clone(),
+            ),
         };
         // 关键：把进程级运行时模式（前端 mode.switch 切换的 Plan/Agent/Bloom）
         // 应用到本次编排，否则模式切换形同虚设。
@@ -295,6 +310,7 @@ impl EngineRunner for RealEngine {
         let evolution = self.evolution.clone();
         let mode_section = self.mode_section.clone();
         let credentials = self.credentials.clone();
+        let cache = self.cache.clone();
         Box::pin(async move {
             Self {
                 config,
@@ -305,6 +321,7 @@ impl EngineRunner for RealEngine {
                 workspace: None,
                 mode_section,
                 credentials,
+                cache,
             }
             .execute_turn(text, session, bus)
             .await

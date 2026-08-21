@@ -78,10 +78,16 @@ pub struct ModelRouter {
 impl ModelRouter {
     /// 从配置创建模型路由器
     pub fn new(config: &Config) -> Self {
-        let template_config = Self::build_template_config(config);
-        // 跨所有客户端共享一份缓存：精确前缀命中 + 服务端前缀复用观测 + 预热，全部路径受益。
-        let cache = Arc::new(PrefixCache::new(2048));
+        Self::new_with_cache(config, Arc::new(PrefixCache::new(2048)))
+    }
 
+    /// 从配置 + **共享前缀缓存**创建模型路由器（v9 缓存 100% 接线）：
+    /// 默认客户端、故障转移链、懒创建客户端全部复用同一 `cache` 实例——
+    /// 网关/长任务跨轮共享同一缓存时，可重复请求无需重新预填充即可命中；
+    /// 冷上下文经 [`PrefixCache::open`] 构造或 [`ModelRouter::load_cache_from`]
+    /// 并入后，跨进程重启同样命中。
+    pub fn new_with_cache(config: &Config, cache: Arc<PrefixCache>) -> Self {
+        let template_config = Self::build_template_config(config);
         let default_client =
             Arc::new(LLMClient::new(template_config.clone()).with_cache(cache.clone()));
 
@@ -107,17 +113,39 @@ impl ModelRouter {
         config: &Config,
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> Self {
-        let Some(store) = credentials else {
-            return Self::new(config);
+        Self::new_with_credentials_and_cache(config, credentials, None)
+    }
+
+    /// 凭证缝 + 共享缓存联合构造：`cache` 为 Some 时复用共享实例，None 时新建。
+    pub fn new_with_credentials_and_cache(
+        config: &Config,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+        cache: Option<Arc<PrefixCache>>,
+    ) -> Self {
+        let resolved_cfg;
+        let effective: &Config = match &credentials {
+            Some(store) => {
+                let resolved = crate::credentials::resolve_llm_key(
+                    store,
+                    &config.model.provider,
+                    &config.model.api_key,
+                );
+                let mut overridden = config.clone();
+                overridden.model.api_key = resolved;
+                resolved_cfg = overridden;
+                &resolved_cfg
+            }
+            None => config,
         };
-        let resolved = crate::credentials::resolve_llm_key(
-            &store,
-            &config.model.provider,
-            &config.model.api_key,
-        );
-        let mut overridden = config.clone();
-        overridden.model.api_key = resolved;
-        Self::new(&overridden)
+        match cache {
+            Some(c) => Self::new_with_cache(effective, c),
+            None => Self::new(effective),
+        }
+    }
+
+    /// 把磁盘上的冷上下文缓存并入共享缓存（跨进程重启加载端接线）。
+    pub fn load_cache_from(&self, path: &std::path::Path) {
+        self.cache.absorb(path);
     }
 
     /// 设置回退客户端

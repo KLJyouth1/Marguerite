@@ -129,6 +129,27 @@ fn gateway_credentials() -> Arc<crate::credentials::CredentialsStore> {
         .clone()
 }
 
+/// 网关级共享前缀缓存（v9 缓存 100% 接线）：`<data_dir>/llm-prefix-cache.json`
+/// 冷启动即恢复历史条目，跨轮共享——可重复请求无需重新预填充即可命中；
+/// 每轮结束后经 [`persist_gateway_cache`] 按需落盘，跨进程重启不丢。
+fn gateway_prefix_cache() -> Arc<crate::cache::PrefixCache> {
+    static C: OnceLock<Arc<crate::cache::PrefixCache>> = OnceLock::new();
+    C.get_or_init(|| {
+        Arc::new(crate::cache::PrefixCache::open(
+            &crate::persistence::config::Config::data_dir().join("llm-prefix-cache.json"),
+        ))
+    })
+    .clone()
+}
+
+/// 网关缓存按需落盘（脏标记驱动：无写入零 IO；失败仅告警不阻断对话）。
+fn persist_gateway_cache() {
+    let path = crate::persistence::config::Config::data_dir().join("llm-prefix-cache.json");
+    if let Err(e) = gateway_prefix_cache().save_if_dirty(&path) {
+        eprintln!("[cache] 网关缓存落盘失败: {e}");
+    }
+}
+
 /// 网关级提醒台账（DSH schedule v7，进程级缓存）；打开失败退内存模式
 /// （离线可运行：绝不因提醒台账不可写而阻断对话）。
 fn schedule_store() -> Arc<Mutex<crate::schedule::ScheduleStore>> {
@@ -963,6 +984,7 @@ async fn run_turn(
             session.clone(),
             private_bus.clone(),
             merged_turn_hint(&text, &session, &persona_model, &persona_cwd),
+            Some(gateway_prefix_cache()),
         )
         .await?;
         // 上下文台账：记录 assistant 回复（user 输入已在 send 接受时记账）
@@ -973,6 +995,7 @@ async fn run_turn(
         }
         emit_due_schedule_reminders(&session, &bus);
         emit_projection_snapshot(&session, &bus);
+        persist_gateway_cache();
         persist_session(&session);
         return Ok(outcome);
     }
@@ -983,9 +1006,10 @@ async fn run_turn(
     let bloom_runtime = crate::mode::runtime_mode() == crate::mode::ModeKind::Bloom;
     if config.bloom.parallel_enabled || bloom_runtime {
         tracing::info!(session = %session, "Bloom 并行编排：Captain + Copilot 并行");
-        let mut orch = crate::orchestration::Orchestrator::new_with_credentials(
+        let mut orch = crate::orchestration::Orchestrator::new_with_credentials_and_cache(
             config.clone(),
             Some(gateway_credentials()),
+            Some(gateway_prefix_cache()),
         );
         orch.set_event_bus(private_bus.clone(), session.clone());
         // 置为 Bloom 模式后走统一的 dispatch 入口：并行由模式路由保证，
@@ -1026,6 +1050,7 @@ async fn run_turn(
         }
         emit_due_schedule_reminders(&session, &bus);
         emit_projection_snapshot(&session, &bus);
+        persist_gateway_cache();
         persist_session(&session);
         return Ok(outcome);
     }
@@ -1036,7 +1061,8 @@ async fn run_turn(
         .with_stable_prefix(memory_stable_prefix(&text).await)
         .with_workspace(resolve_session_project(&session).map(std::path::PathBuf::from))
         .with_route_decision(Some(route_decision.clone()))
-        .with_credentials(Some(gateway_credentials()));
+        .with_credentials(Some(gateway_credentials()))
+        .with_shared_cache(Some(gateway_prefix_cache()));
     let outcome = engine
         .run_turn_reply(text.clone(), session.clone(), private_bus)
         .await?;
@@ -1050,6 +1076,7 @@ async fn run_turn(
     }
     emit_due_schedule_reminders(&session, &bus);
     emit_projection_snapshot(&session, &bus);
+    persist_gateway_cache();
     persist_session(&session);
 
     Ok(outcome)
