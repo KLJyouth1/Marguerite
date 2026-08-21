@@ -13,7 +13,7 @@ pub mod route;
 pub use argv::{parse_args, Args, CliMode, SUBCOMMANDS};
 pub use dslash::{
     parse_dslash, publish_dslash_event, DshSlashCommand, DshSlashKind, DshSlashPayload,
-    GamesCmd, MarketCmd, ModlensMode, PetAction, RouterCmd, RouterMode, SidebarCmd,
+    GamesCmd, MarketCmd, ModlensMode, PetAction, RouterCmd, RouterMode, ScheduleCmd, SidebarCmd,
     SlashParseError, UsageScope,
 };
 pub use output::{exit_with, print_json_err, print_json_ok, ExitCode};

@@ -1,6 +1,22 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v7 (schedule 会话提醒)
+
+Added
+  schedule/mod.rs             → 上游 dsh-schedule 移植：ReminderTrigger{after/at/every} +
+                                MIN_EVERY_INTERVAL_SECONDS=300 + ScheduleError 错误码族 +
+                                SQLite 台账（schedule.db）+ due 纯查询 + every 锚点重挂载
+                                （不枚举积压）+ cancel；9 项单测
+  gateway/chat.rs             → emit_due_schedule_reminders：三条对话路径每轮后触发到期提醒，
+                                schedule.due 事件下发；schedule_store 进程级缓存 + 失败退内存
+  cli/dslash.rs               → 第 8 条斜杠命令 /schedule（list/after/at/every/cancel + 错误路径）
+  plugins/manifests/dsh-schedule.plugin.json → 0.1.1-mgr1（+list/cancel 能力 + slash_command）
+  docs/dsh-fusion-v7-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2026 → 2035（+9 新单测）
+Tests : 2035 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v6 (goal race-fence + persona)
 
 Added

@@ -64,6 +64,9 @@ pub mod security;
 pub mod serve;
 pub mod session;
 pub mod skills;
+/// DSH schedule 会话级提醒移植（上游 dsh-schedule）：after/at/every 三种触发、
+/// SQLite 持久台账、due 纯查询 + every 锚点重挂载（不枚举积压）、cancel。
+pub mod schedule;
 pub mod terminal;
 pub mod tools;
 pub mod tui;

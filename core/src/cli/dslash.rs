@@ -1,6 +1,6 @@
 //! DSH 二创斜杠命令解析器（Task T-1.3）
 //!
-//! 覆盖 FR-A2 的 7 条 DSH 专用命令：
+//! 覆盖 FR-A2 的 8 条 DSH 专用命令：
 //! | 命令 | 载荷 kind |
 //! |---|---|
 //! | `/modlens <mode> [path]`  `modlens` |
@@ -10,13 +10,14 @@
 //! | `/market list|search <kw>|install <name>|upgrade <name>`  `market` |
 //! | `/router set <plan|execute|weak>` 或 `/router query` 或 `/router auto <task>`  `router` |
 //! | `/sidebar list|pin <slot>|refresh|open <path>`  `sidebar` |
+//! | `/schedule list|after <sec> <msg>|at <iso> <msg>|every <sec> <msg>|cancel <id>`  `schedule` |
 //!
 //! 设计：
 //! - 解析函数 `parse_dslash` 独立、纯函数，便于离线单测。
 //! - 不直接依赖 stdin/stdout；由上层（REPL / TUI workbench）拿到 `DshSlashCommand`
 //!   后再调用 `publish_dslash_event` 写进 EventBus。
 //! - 事件 envelope：`EventType::Status` + `kind = "slash.command"`，
-//!   负载包含 `{ name, kind, args }`，避免为 7 条命令单独扩展 EventType enum 造成破坏性变动。
+//!   负载包含 `{ name, kind, args }`，避免为 8 条命令单独扩展 EventType enum 造成破坏性变动。
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,7 +25,7 @@ use thiserror::Error;
 
 use crate::events::{Envelope, EventBus, EventType};
 
-/// DSH 7 条命令分类（kind）
+/// DSH 8 条命令分类（kind）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DshSlashKind {
@@ -35,10 +36,11 @@ pub enum DshSlashKind {
     Market,
     Router,
     Sidebar,
+    Schedule,
 }
 
 impl DshSlashKind {
-    pub const ALL: [DshSlashKind; 7] = [
+    pub const ALL: [DshSlashKind; 8] = [
         DshSlashKind::Modlens,
         DshSlashKind::Usage,
         DshSlashKind::Pet,
@@ -46,6 +48,7 @@ impl DshSlashKind {
         DshSlashKind::Market,
         DshSlashKind::Router,
         DshSlashKind::Sidebar,
+        DshSlashKind::Schedule,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -57,6 +60,7 @@ impl DshSlashKind {
             DshSlashKind::Market => "market",
             DshSlashKind::Router => "router",
             DshSlashKind::Sidebar => "sidebar",
+            DshSlashKind::Schedule => "schedule",
         }
     }
 
@@ -170,7 +174,17 @@ pub enum SidebarCmd {
     Open { path: String },
 }
 
-/// 7 类命令 → 载荷结构体（归一化枚举）
+/// `/schedule` 子命令（DSH schedule 会话级提醒；注册面，执行见 core/src/schedule）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduleCmd {
+    List,
+    After { seconds: u64, message: String },
+    At { iso: String, message: String },
+    Every { seconds: u64, message: String },
+    Cancel { id: String },
+}
+
+/// 8 类命令 → 载荷结构体（归一化枚举）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "args")]
 pub enum DshSlashPayload {
@@ -181,6 +195,7 @@ pub enum DshSlashPayload {
     Market(MarketCmd),
     Router(RouterCmd),
     Sidebar(SidebarCmd),
+    Schedule(ScheduleCmd),
 }
 
 /// 归一化命令结构
@@ -201,7 +216,7 @@ impl DshSlashCommand {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SlashParseError {
-    #[error("非 DSH 斜杠命令（不以 /modlens /usage /pet /games /market /router /sidebar 开头）")]
+    #[error("非 DSH 斜杠命令（不以 /modlens /usage /pet /games /market /router /sidebar /schedule 开头）")]
     NotDsh,
     #[error("缺少子命令或参数: {0}")]
     MissingArg(String),
@@ -231,6 +246,7 @@ pub fn parse_dslash(input: &str) -> Result<DshSlashCommand, SlashParseError> {
         "market" => DshSlashKind::Market,
         "router" => DshSlashKind::Router,
         "sidebar" => DshSlashKind::Sidebar,
+        "schedule" => DshSlashKind::Schedule,
         _ => return Err(SlashParseError::NotDsh),
     };
     let args: Vec<&str> = parts.collect();
@@ -242,6 +258,7 @@ pub fn parse_dslash(input: &str) -> Result<DshSlashCommand, SlashParseError> {
         DshSlashKind::Market => parse_market(&args)?,
         DshSlashKind::Router => parse_router(&args)?,
         DshSlashKind::Sidebar => parse_sidebar(&args)?,
+        DshSlashKind::Schedule => parse_schedule(&args)?,
     };
     Ok(DshSlashCommand {
         kind,
@@ -449,6 +466,93 @@ fn parse_sidebar(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
     Ok(DshSlashPayload::Sidebar(cmd))
 }
 
+/// `/schedule` 解析（DSH schedule 会话级提醒；解析面，执行见 core/src/schedule）。
+fn parse_schedule(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
+    let sub = args.first().copied().unwrap_or("list");
+    let rest: Vec<&str> = args.iter().skip(1).copied().collect();
+    let cmd = match sub {
+        "" | "list" | "ls" => ScheduleCmd::List,
+        "after" | "in" => {
+            let seconds = rest
+                .first()
+                .copied()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|s| *s > 0)
+                .ok_or_else(|| {
+                    SlashParseError::InvalidArg("/schedule after 需要正整数秒数".to_string())
+                })?;
+            let message = rest
+                .iter()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if message.trim().is_empty() {
+                return Err(SlashParseError::MissingArg(
+                    "/schedule after 需要提醒消息".to_string(),
+                ));
+            }
+            ScheduleCmd::After { seconds, message }
+        }
+        "at" => {
+            let iso = rest
+                .first()
+                .copied()
+                .ok_or_else(|| SlashParseError::MissingArg("/schedule at 需要 ISO 时刻".to_string()))?
+                .to_string();
+            let message = rest
+                .iter()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if message.trim().is_empty() {
+                return Err(SlashParseError::MissingArg(
+                    "/schedule at 需要提醒消息".to_string(),
+                ));
+            }
+            ScheduleCmd::At { iso, message }
+        }
+        "every" => {
+            let seconds = rest
+                .first()
+                .copied()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|s| *s > 0)
+                .ok_or_else(|| {
+                    SlashParseError::InvalidArg("/schedule every 需要正整数秒数".to_string())
+                })?;
+            let message = rest
+                .iter()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if message.trim().is_empty() {
+                return Err(SlashParseError::MissingArg(
+                    "/schedule every 需要提醒消息".to_string(),
+                ));
+            }
+            ScheduleCmd::Every { seconds, message }
+        }
+        "cancel" | "rm" => {
+            let id = rest
+                .first()
+                .copied()
+                .ok_or_else(|| SlashParseError::MissingArg("/schedule cancel 需要 <id>".to_string()))?
+                .to_string();
+            ScheduleCmd::Cancel { id }
+        }
+        other => {
+            return Err(SlashParseError::InvalidSubcommand(
+                other.to_string(),
+                "list|after <sec> <msg>|at <iso> <msg>|every <sec> <msg>|cancel <id>".to_string(),
+            ))
+        }
+    };
+    Ok(DshSlashPayload::Schedule(cmd))
+}
+
 /// 把解析出的命令以 Envelope 的方式发布进 EventBus。
 ///
 /// 使用 `EventType::Status` + `kind = "slash.command"` 作为统一事件，
@@ -475,7 +579,7 @@ mod tests {
 
     /// T-1.3 TR-R1：10 个 case 覆盖 7 条命令 + 默认值变体
     #[test]
-    fn parse_7_slash_commands_all_kinds() {
+    fn parse_8_slash_commands_all_kinds() {
         // modlens
         let c = parse_dslash("/modlens /tmp/a.png").unwrap();
         assert_eq!(c.kind, DshSlashKind::Modlens);
@@ -566,6 +670,41 @@ mod tests {
                 slot: "LeftSidebar".into()
             })
         );
+
+        // schedule
+        let c = parse_dslash("/schedule").unwrap();
+        assert_eq!(c.payload, DshSlashPayload::Schedule(ScheduleCmd::List));
+        let c = parse_dslash("/schedule after 600 休息一下").unwrap();
+        assert_eq!(
+            c.payload,
+            DshSlashPayload::Schedule(ScheduleCmd::After {
+                seconds: 600,
+                message: "休息一下".into()
+            })
+        );
+        let c = parse_dslash("/schedule at 2026-08-22T10:00:00Z 开会").unwrap();
+        assert_eq!(
+            c.payload,
+            DshSlashPayload::Schedule(ScheduleCmd::At {
+                iso: "2026-08-22T10:00:00Z".into(),
+                message: "开会".into()
+            })
+        );
+        let c = parse_dslash("/schedule every 300 打卡").unwrap();
+        assert_eq!(
+            c.payload,
+            DshSlashPayload::Schedule(ScheduleCmd::Every {
+                seconds: 300,
+                message: "打卡".into()
+            })
+        );
+        let c = parse_dslash("/schedule cancel rem_abc").unwrap();
+        assert_eq!(
+            c.payload,
+            DshSlashPayload::Schedule(ScheduleCmd::Cancel {
+                id: "rem_abc".into()
+            })
+        );
         let c = parse_dslash("/sidebar open C:\\Work\\Project").unwrap();
         assert_eq!(
             c.payload,
@@ -624,6 +763,27 @@ mod tests {
         assert!(matches!(
             parse_dslash("/router set UltraMode").unwrap_err(),
             SlashParseError::InvalidSubcommand(_, _)
+        ));
+        // schedule 错误路径
+        assert!(matches!(
+            parse_dslash("/schedule foobar").unwrap_err(),
+            SlashParseError::InvalidSubcommand(_, _)
+        ));
+        assert!(matches!(
+            parse_dslash("/schedule after abc 消息").unwrap_err(),
+            SlashParseError::InvalidArg(_)
+        ));
+        assert!(matches!(
+            parse_dslash("/schedule after 0 消息").unwrap_err(),
+            SlashParseError::InvalidArg(_)
+        ));
+        assert!(matches!(
+            parse_dslash("/schedule after 60").unwrap_err(),
+            SlashParseError::MissingArg(_)
+        ));
+        assert!(matches!(
+            parse_dslash("/schedule cancel").unwrap_err(),
+            SlashParseError::MissingArg(_)
         ));
     }
 

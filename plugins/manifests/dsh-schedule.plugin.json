@@ -1,15 +1,27 @@
 {
   "name": "dsh-schedule",
-  "version": "0.1.0-rc8-mgr1",
-  "description": "DSH schedule 二创：会话级持久提醒（after_seconds / at 绝对时刻 / every_seconds 固定间隔，最短 5 分钟）；状态由会话事件日志持有，定时器与提醒是可弃投影；复用 Marguerite automation/cron 与 task-board 账本",
+  "version": "0.1.1-mgr1",
+  "description": "DSH schedule 二创（v7 接线完成）：会话级持久提醒（after / at / every，every 下限 5 分钟对齐上游 MIN_EVERY_INTERVAL_SECONDS）；core/src/schedule SQLite 台账持有状态、due 纯查询 + every 锚点重挂载不补跑；网关每轮后触发到期提醒经 schedule.due 事件下发；/schedule 斜杠命令解析面（list/after/at/every/cancel）",
   "author": "marguerite-dsh",
   "capabilities": [
     "dsh.schedule.after",
     "dsh.schedule.at",
-    "dsh.schedule.every"
+    "dsh.schedule.every",
+    "dsh.schedule.list",
+    "dsh.schedule.cancel"
   ],
   "hooks": [],
-  "slash_commands": [],
+  "slash_commands": [
+    {
+      "name": "/schedule",
+      "description": "会话级提醒：/schedule list | after <秒> <消息> | at <ISO时刻> <消息> | every <秒≥300> <消息> | cancel <id>",
+      "arguments": [
+        "subcmd",
+        "value",
+        "message"
+      ]
+    }
+  ],
   "subagents": [],
   "skills": [],
   "dependencies": [

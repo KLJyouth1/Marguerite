@@ -129,6 +129,44 @@ fn gateway_credentials() -> Arc<crate::credentials::CredentialsStore> {
         .clone()
 }
 
+/// 网关级提醒台账（DSH schedule v7，进程级缓存）；打开失败退内存模式
+/// （离线可运行：绝不因提醒台账不可写而阻断对话）。
+fn schedule_store() -> Arc<Mutex<crate::schedule::ScheduleStore>> {
+    static S: OnceLock<Arc<Mutex<crate::schedule::ScheduleStore>>> = OnceLock::new();
+    S.get_or_init(|| {
+        let store = crate::schedule::ScheduleStore::open_default().unwrap_or_else(|e| {
+            eprintln!("[schedule] 台账打开失败，退内存模式: {e}");
+            crate::schedule::ScheduleStore::open(None).expect("内存提醒库必可用")
+        });
+        Arc::new(Mutex::new(store))
+    })
+    .clone()
+}
+
+/// DSH schedule 会话级提醒（v7）：每轮对话结束后触发到期提醒——
+/// `schedule.due` Status 事件（前端可渲染），after/at 一次性置 fired、
+/// every 由台账自动锚点重挂载（不补跑）。
+fn emit_due_schedule_reminders(session: &str, bus: &EventBus) {
+    let due = match schedule_store().lock() {
+        Ok(mut store) => store.due(session, chrono::Utc::now().timestamp_millis()),
+        Err(_) => return,
+    };
+    for r in due {
+        bus.publish(Envelope::new(
+            EventType::Status,
+            json!({
+                "kind": "schedule.due",
+                "reminder": {
+                    "id": r.id,
+                    "message": r.message,
+                    "trigger": r.trigger.kind(),
+                }
+            }),
+            session,
+        ));
+    }
+}
+
 /// `chat.send`：接受一轮 Bloom 对话（后台执行，事件经总线回流）
 pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcError> {
     let message = params
@@ -876,6 +914,7 @@ async fn run_turn(
         if crate::context::session::context_status(&session)["alert"] == "compact_required" {
             crate::context::session::context_compact(&session, Some(&bus));
         }
+        emit_due_schedule_reminders(&session, &bus);
         persist_session(&session);
         return Ok(outcome);
     }
@@ -927,6 +966,7 @@ async fn run_turn(
         if crate::context::session::context_status(&session)["alert"] == "compact_required" {
             crate::context::session::context_compact(&session, Some(&bus));
         }
+        emit_due_schedule_reminders(&session, &bus);
         persist_session(&session);
         return Ok(outcome);
     }
@@ -949,6 +989,7 @@ async fn run_turn(
     if crate::context::session::context_status(&session)["alert"] == "compact_required" {
         crate::context::session::context_compact(&session, Some(&bus));
     }
+    emit_due_schedule_reminders(&session, &bus);
     persist_session(&session);
 
     Ok(outcome)
