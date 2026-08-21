@@ -221,6 +221,8 @@ fn is_vision_model(model: &str) -> bool {
         "glm-4v",
         "internvl",
         "deepseek-vl",
+        // 上游 PR #2726：deepseek-v4-flash-vision-exp（text+image 视觉目录新增）
+        "flash-vision",
         "gemini",
         "claude-3-5-sonnet",
         "claude-sonnet-4",
@@ -2523,6 +2525,7 @@ mod tests {
         assert!(is_vision_model("gpt-4.1-mini"));
         assert!(is_vision_model("glm-4v-flash"));
         assert!(is_vision_model("deepseek-vl2"));
+        assert!(is_vision_model("deepseek-v4-flash-vision-exp"));
         assert!(is_vision_model("gemini-2.0-flash"));
         assert!(!is_vision_model("deepseek-chat"));
         assert!(!is_vision_model("DeepSeek-V4 Flash/Pro"));
