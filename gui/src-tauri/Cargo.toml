@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-gui"
-version = "0.1.4"
+version = "0.1.5"
 description = "Marguerite CLI Workbench - Tauri GUI Shell"
 edition = "2021"
 
