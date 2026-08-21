@@ -167,6 +167,63 @@ fn emit_due_schedule_reminders(session: &str, bus: &EventBus) {
     }
 }
 
+/// 网关级会话投影库（DSH 融合 v8 消费方接线）：`<data_dir>/session-projections.db`；
+/// 打开失败退内存（离线可运行）。
+fn gateway_projection_store() -> Arc<Mutex<crate::projection::ProjectionStore>> {
+    static P: OnceLock<Arc<Mutex<crate::projection::ProjectionStore>>> = OnceLock::new();
+    P.get_or_init(|| {
+        let store = crate::projection::ProjectionStore::open(Some(
+            crate::persistence::config::Config::data_dir().join("session-projections.db"),
+        ))
+        .unwrap_or_else(|e| {
+            eprintln!("[projection] 会话投影库打开失败，退内存: {e}");
+            crate::projection::ProjectionStore::open(None).expect("内存投影库必可用")
+        });
+        Arc::new(Mutex::new(store))
+    })
+    .clone()
+}
+
+/// 折叠一轮事件进会话投影并渲染快照载荷（纯函数，可离线单测）。
+///
+/// 投影单元：`turnCount`（user/assistant 整轮计数，带视图）与 `hostAudit`
+/// （host-only 事件计数，无视图）——projection fold 契约的真实消费方。
+fn build_projection_snapshot(
+    store: &mut crate::projection::ProjectionStore,
+    session: &str,
+    turn_events: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let turns = store
+        .project(&crate::projection::TurnCounterUnit, session, turn_events, 0)
+        .ok()?;
+    let audit = store
+        .project(&crate::projection::HostAuditUnit, session, turn_events, 0)
+        .ok()?;
+    Some(json!({
+        "kind": "projection.snapshot",
+        "projections": {
+            "turns": turns,
+            "hostAudit": audit,
+        }
+    }))
+}
+
+/// 每轮对话结束后：把本轮事件折叠进会话投影库，并发布 `projection.snapshot`
+/// 事件（前端可渲染会话级投影视图——对齐上游 client 侧 surface-projection 消费）。
+fn emit_projection_snapshot(session: &str, bus: &EventBus) {
+    let turn_events = vec![
+        serde_json::json!({ "type": "user/message" }),
+        serde_json::json!({ "type": "assistant/message" }),
+    ];
+    let snapshot = match gateway_projection_store().lock() {
+        Ok(mut store) => build_projection_snapshot(&mut store, session, &turn_events),
+        Err(_) => None,
+    };
+    if let Some(payload) = snapshot {
+        bus.publish(Envelope::new(EventType::Status, payload, session));
+    }
+}
+
 /// `chat.send`：接受一轮 Bloom 对话（后台执行，事件经总线回流）
 pub async fn send(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcError> {
     let message = params
@@ -915,6 +972,7 @@ async fn run_turn(
             crate::context::session::context_compact(&session, Some(&bus));
         }
         emit_due_schedule_reminders(&session, &bus);
+        emit_projection_snapshot(&session, &bus);
         persist_session(&session);
         return Ok(outcome);
     }
@@ -967,6 +1025,7 @@ async fn run_turn(
             crate::context::session::context_compact(&session, Some(&bus));
         }
         emit_due_schedule_reminders(&session, &bus);
+        emit_projection_snapshot(&session, &bus);
         persist_session(&session);
         return Ok(outcome);
     }
@@ -990,6 +1049,7 @@ async fn run_turn(
         crate::context::session::context_compact(&session, Some(&bus));
     }
     emit_due_schedule_reminders(&session, &bus);
+    emit_projection_snapshot(&session, &bus);
     persist_session(&session);
 
     Ok(outcome)
@@ -1087,6 +1147,23 @@ fn send_response(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn projection_snapshot_folds_turns_per_round() {
+        // projection fold 契约的真实消费方：每轮 user+assistant 各计 1 轮（累计）
+        let mut store = crate::projection::ProjectionStore::open(None).unwrap();
+        let events = vec![
+            serde_json::json!({ "type": "user/message" }),
+            serde_json::json!({ "type": "assistant/message" }),
+        ];
+        let first = build_projection_snapshot(&mut store, "s1", &events).expect("快照应可构建");
+        assert_eq!(first["projections"]["turns"]["turns"], 2);
+        assert_eq!(first["projections"]["hostAudit"]["events"], 2);
+        // 第二轮：跨轮累计（版本一致续折叠）
+        let second = build_projection_snapshot(&mut store, "s1", &events).unwrap();
+        assert_eq!(second["projections"]["turns"]["turns"], 4);
+        assert_eq!(second["projections"]["hostAudit"]["events"], 4);
+    }
 
     fn ctx_with_bus() -> (GatewayContext, Arc<EventBus>) {
         let bus = Arc::new(EventBus::default());

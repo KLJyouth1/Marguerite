@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "assetRoot": "/wallpapers",
+  "wallpapers": [
+    {
+      "id": "ink-wash",
+      "name": "水墨",
+      "description": "Marguerite 默认水墨视觉：青灰渐变 + 墨色山影，呼应水墨 skin token",
+      "file": "ink-wash.svg",
+      "palette": ["#0f172a", "#334155", "#64748b", "#f59e0b"]
+    },
+    {
+      "id": "deep-space",
+      "name": "深空蓝橙",
+      "description": "蓝橙语义令牌主题：深空底 + 品牌蓝渐变 + 橙色星点",
+      "file": "deep-space.svg",
+      "palette": ["#030510", "#1a56db", "#3b82f6", "#f59e0b"]
+    },
+    {
+      "id": "sakura",
+      "name": "夜樱",
+      "description": "个性化夜樱主题：深底 + 樱粉渐变光晕",
+      "file": "sakura.svg",
+      "palette": ["#1a1020", "#f9a8d4", "#f472b6", "#ffffff"]
+    },
+    {
+      "id": "whale-ocean",
+      "name": "鲸海",
+      "description": "鲸鱼娘桌宠主题：深海渐变 + 气泡光点",
+      "file": "whale-ocean.svg",
+      "palette": ["#021c2e", "#0369a1", "#38bdf8", "#e0f2fe"]
+    }
+  ]
+}

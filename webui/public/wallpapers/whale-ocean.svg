@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#021c2e"/>
+      <stop offset="0.55" stop-color="#0369a1"/>
+      <stop offset="1" stop-color="#0b4a6f"/>
+    </linearGradient>
+    <radialGradient id="bubble" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#e0f2fe" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <path d="M 0 900 Q 480 760 960 900 T 1920 900 L 1920 1080 L 0 1080 Z" fill="#02101c" opacity="0.85"/>
+  <path d="M 640 720 Q 960 620 1280 720 Q 960 820 640 720 Z" fill="#082f49" opacity="0.9"/>
+  <path d="M 860 690 Q 960 650 1060 690 Q 960 730 860 690 Z" fill="#0c4a6e" opacity="0.9"/>
+  <circle cx="300" cy="420" r="26" fill="url(#bubble)"/>
+  <circle cx="560" cy="300" r="16" fill="url(#bubble)"/>
+  <circle cx="1420" cy="500" r="20" fill="url(#bubble)"/>
+  <circle cx="1700" cy="280" r="12" fill="url(#bubble)"/>
+  <text x="96" y="128" font-family="sans-serif" font-size="56" fill="#e0f2fe" opacity="0.9">鲸海 · Whale Ocean</text>
+</svg>

@@ -521,6 +521,10 @@ pub fn handle_slash(
                 }
             }
         }
+        "/schedule" => {
+            // DSH schedule 执行面（v7）：解析 + 落到提醒台账
+            println!("{}", crate::schedule::execute_slash(store.session_id(), input));
+        }
         other => {
             println!("未知命令：{other}（输入 /help 查看可用命令）");
         }
@@ -538,6 +542,7 @@ fn print_help() {
          /save      立即保存当前会话\n  \
          /sessions  列出最近会话\n  \
          /load <id> 切换到指定会话（支持短 id 前缀）\n  \
+         /schedule  会话级提醒（list / after / at / every / cancel）\n  \
          /model     显示当前模型路由说明\n  \
          /exit      退出 REPL（或按 Ctrl-D）"
     );

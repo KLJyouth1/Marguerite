@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#030510"/>
+      <stop offset="0.55" stop-color="#0b1c45"/>
+      <stop offset="1" stop-color="#1a56db"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect x="560" y="140" width="800" height="800" fill="url(#glow)"/>
+  <circle cx="640" cy="300" r="4" fill="#f59e0b"/>
+  <circle cx="1310" cy="220" r="3" fill="#f59e0b"/>
+  <circle cx="1050" cy="760" r="5" fill="#fbbf24"/>
+  <circle cx="1660" cy="640" r="3" fill="#f59e0b"/>
+  <circle cx="300" cy="820" r="4" fill="#fbbf24"/>
+  <text x="96" y="128" font-family="sans-serif" font-size="56" fill="#e0e7ff" opacity="0.9">Deep Space · 蓝橙</text>
+</svg>

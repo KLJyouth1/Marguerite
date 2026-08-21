@@ -1,6 +1,25 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v8 (剩余四项一次性收尾)
+
+Added
+  workflow/mod.rs             → 声明式工作流引擎（WorkflowSpec 阶段内 fan-out + 阶段间屏障 +
+                                单条失败→None 不拖垮整轮；fanout_plan 纯函数；离线单测）
+  workflow/ralph.rs           → Ralph 全新子代理循环（next_prompt/parse_report 纯函数 +
+                                run_with 注入式 spawn + 工作区记忆文件 + clamp[1,16]；8 项单测）
+  gateway/chat.rs             → 会话投影消费方：每轮折叠 turnCount/hostAudit 进 session-projections.db，
+                                projection.snapshot 事件下发（+1 单测）
+  schedule/mod.rs             → execute_slash 执行面（/schedule list|after|at|every|cancel 落地台账，
+                                +2 单测）；cli/repl.rs /schedule 分支 + /help 更新
+  webui/public/wallpapers/    → 主题/个性化资产包：4 款 SVG（水墨/深空蓝橙/夜樱/鲸海）+
+                                manifest.json 版本化清单 + README
+  docs/dsh-fusion-v8-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2035 → 2050（+15 新单测）
+Tests : 2050 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+WebUI : npm run typecheck 通过（check:architecture 10 项守卫 + vue-tsc）
+
 [0.1.5-dev] - 2026-08-21 · DSH 0.1.1-rc.1 Fusion v7 (schedule 会话提醒)
 
 Added

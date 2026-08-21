@@ -77,6 +77,10 @@ pub mod usage;
 /// 且任何进入渲染的文本须先过 `genui::validate` 类闸门防注入。
 pub mod workbench;
 pub mod vision;
+/// DSH workflow/ralph 移植（上游 dsh-tool-workflow + dsh-tool-ralph）：
+/// 声明式 WorkflowSpec（阶段内 fan-out、阶段间屏障、单条失败不拖垮整轮）+
+/// Ralph 每轮全新子代理循环（工作区共享记忆、有界结构化报告）。
+pub mod workflow;
 
 /// T-1.8 / DSH 跨模块闭环测试骨架（仅 `cfg(test)` 编译，**不导出任何生产符号**）。
 ///

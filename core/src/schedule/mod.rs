@@ -306,6 +306,93 @@ pub fn schedule_path() -> PathBuf {
     crate::persistence::config::Config::config_dir().join("schedule.db")
 }
 
+/// `/schedule` 斜杠命令执行面（v7 接线点 3）：解析 → 执行 → 返回展示文本。
+///
+/// REPL / 前端处理器共用；纯同步、失败不 panic（返回错误文本）。
+pub fn execute_slash(session: &str, input: &str) -> String {
+    let cmd = match crate::cli::dslash::parse_dslash(input) {
+        Ok(cmd) => cmd,
+        Err(e) => return e.to_string(),
+    };
+    match cmd.payload {
+        crate::cli::dslash::DshSlashPayload::Schedule(sched) => execute_cmd(session, &sched),
+        _ => "该命令不由 schedule 执行面处理".to_string(),
+    }
+}
+
+/// 执行一条已解析的 `/schedule` 子命令（against 默认台账）。
+fn execute_cmd(session: &str, cmd: &crate::cli::dslash::ScheduleCmd) -> String {
+    let mut store = match ScheduleStore::open_default() {
+        Ok(s) => s,
+        Err(e) => return format!("提醒台账打开失败: {e}"),
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match cmd {
+        crate::cli::dslash::ScheduleCmd::List => {
+            let items = store.list(session);
+            if items.is_empty() {
+                return "暂无提醒。".to_string();
+            }
+            let mut lines = vec![format!("提醒（{}）：", items.len())];
+            for r in items {
+                let state = if r.fired { "已触发" } else { "待触发" };
+                lines.push(format!(
+                    "[{}] {} {} — {}（{}）",
+                    r.id,
+                    r.trigger.kind(),
+                    r.message,
+                    state,
+                    chrono::DateTime::from_timestamp_millis(r.next_fire_ms)
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| r.next_fire_ms.to_string())
+                ));
+            }
+            lines.join("\n")
+        }
+        crate::cli::dslash::ScheduleCmd::After { seconds, message } => {
+            match store.register(
+                session,
+                message,
+                ReminderTrigger::After { seconds: *seconds },
+                now_ms,
+            ) {
+                Ok(r) => format!("已注册提醒 {}：{} 秒后「{}」", r.id, seconds, r.message),
+                Err(e) => format!("注册失败: {e}"),
+            }
+        }
+        crate::cli::dslash::ScheduleCmd::At { iso, message } => {
+            let ts = match chrono::DateTime::parse_from_rfc3339(iso) {
+                Ok(t) => t.timestamp_millis(),
+                Err(_) => return format!("时刻解析失败（需要 RFC3339，如 2026-08-22T10:00:00Z）: {iso}"),
+            };
+            match store.register(session, message, ReminderTrigger::At { ts_ms: ts }, now_ms) {
+                Ok(r) => format!("已注册提醒 {}：{}「{}」", r.id, iso, r.message),
+                Err(e) => format!("注册失败: {e}"),
+            }
+        }
+        crate::cli::dslash::ScheduleCmd::Every { seconds, message } => {
+            match store.register(
+                session,
+                message,
+                ReminderTrigger::Every {
+                    interval_seconds: *seconds,
+                },
+                now_ms,
+            ) {
+                Ok(r) => format!("已注册提醒 {}：每 {} 秒「{}」", r.id, seconds, r.message),
+                Err(e) => format!("注册失败: {e}"),
+            }
+        }
+        crate::cli::dslash::ScheduleCmd::Cancel { id } => {
+            if store.cancel(id) {
+                format!("已取消提醒 {id}。")
+            } else {
+                format!("未找到提醒 {id}。")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +557,42 @@ mod tests {
         assert_eq!(store.list("a").len(), 1);
         assert_eq!(store.due("a", NOW + 60_000).len(), 1);
         assert!(store.due("b", NOW).is_empty());
+    }
+
+    #[test]
+    fn execute_slash_registers_lists_and_cancels() {
+        let _g = lock_tests();
+        let db = isolated_db("slash");
+        std::env::set_var("MARGUERITE_SCHEDULE_DB", db.to_string_lossy().to_string());
+        let out = execute_slash("s1", "/schedule after 600 喝水");
+        assert!(out.contains("已注册提醒"), "{out}");
+        assert!(out.contains("喝水"));
+        let list = execute_slash("s1", "/schedule list");
+        assert!(list.contains("喝水"), "{list}");
+        // 取首条提醒 id 并取消
+        let id = list
+            .lines()
+            .nth(1)
+            .and_then(|l| l.split_whitespace().next())
+            .map(|s| s.trim_start_matches('[').trim_end_matches(']').to_string())
+            .expect("应有提醒行");
+        let cancel = execute_slash("s1", &format!("/schedule cancel {id}"));
+        assert!(cancel.contains("已取消"), "{cancel}");
+        assert!(execute_slash("s1", "/schedule list").contains("暂无提醒"));
+        std::env::remove_var("MARGUERITE_SCHEDULE_DB");
+    }
+
+    #[test]
+    fn execute_slash_reports_errors() {
+        let _g = lock_tests();
+        let db = isolated_db("slash_err");
+        std::env::set_var("MARGUERITE_SCHEDULE_DB", db.to_string_lossy().to_string());
+        assert!(
+            execute_slash("s1", "/schedule every 60 太快").contains("下限"),
+            "低于 5 分钟应报 FrequencyTooHigh"
+        );
+        assert!(execute_slash("s1", "/schedule at 不是时刻 x").contains("解析失败"));
+        assert!(execute_slash("s1", "/schedule foobar").contains("无效子命令"));
+        std::env::remove_var("MARGUERITE_SCHEDULE_DB");
     }
 }

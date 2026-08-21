@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.6" stop-color="#334155"/>
+      <stop offset="1" stop-color="#64748b"/>
+    </linearGradient>
+    <linearGradient id="mountain" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0b1120"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <circle cx="1560" cy="210" r="120" fill="#f59e0b" opacity="0.9"/>
+  <circle cx="1560" cy="210" r="150" fill="#f59e0b" opacity="0.15"/>
+  <path d="M0 760 L240 560 L430 700 L640 480 L860 720 L1080 540 L1300 730 L1540 560 L1760 720 L1920 620 L1920 1080 L0 1080 Z" fill="url(#mountain)"/>
+  <path d="M0 900 L300 760 L560 900 L840 720 L1140 920 L1450 780 L1920 940 L1920 1080 L0 1080 Z" fill="#0b1120" opacity="0.9"/>
+  <text x="96" y="128" font-family="serif" font-size="64" fill="#e2e8f0" opacity="0.85">Marguerite · 水墨</text>
+</svg>
