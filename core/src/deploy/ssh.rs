@@ -69,6 +69,96 @@ impl SshTarget {
     }
 }
 
+/// 结构化主机地址（`user@host:port` 形状；用户/端口可缺省）。
+///
+/// 与 `SshTarget` 的区别：`HostSpec` 只描述连接端点，不携带远端部署目录与私钥，
+/// 供命令行参数、`~/.ssh/config` 别名等场景做纯解析与结构校验。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSpec {
+    /// 登录用户（缺省 None，由调用方决定默认值）
+    pub user: Option<String>,
+    /// 主机名或 IP
+    pub host: String,
+    /// SSH 端口（缺省 22）
+    pub port: u16,
+}
+
+impl HostSpec {
+    /// 解析 `[user@]host[:port]`。
+    ///
+    /// - `host` → user=None, port=22
+    /// - `user@host` → user=Some(user), port=22
+    /// - `host:2222` → user=None, port=2222
+    /// - `user@host:2222` → user=Some(user), port=2222
+    ///
+    /// 非法形状（空串、空主机名、空用户名、多个 `@`、端口非数字或为 0）报错。
+    pub fn parse(s: &str) -> Result<Self> {
+        let raw = s.trim();
+        if raw.is_empty() {
+            bail!("主机形状为空");
+        }
+        if raw.matches('@').count() > 1 {
+            bail!("主机形状含多个 '@': {raw}");
+        }
+        let (user, hostport) = match raw.split_once('@') {
+            Some((u, hp)) => {
+                if u.is_empty() {
+                    bail!("'@' 前缺少用户名: {raw}");
+                }
+                (Some(u.to_string()), hp)
+            }
+            None => (None, raw),
+        };
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((h, p)) => {
+                if h.is_empty() {
+                    bail!("':' 前缺少主机名: {raw}");
+                }
+                let port: u16 = p
+                    .parse()
+                    .map_err(|_| anyhow!("端口解析失败（须为 1..=65535）: {p}"))?;
+                if port == 0 {
+                    bail!("端口不能为 0: {raw}");
+                }
+                (h.to_string(), port)
+            }
+            None => {
+                if hostport.is_empty() {
+                    bail!("缺少主机名: {raw}");
+                }
+                (hostport.to_string(), 22)
+            }
+        };
+        Ok(Self { user, host, port })
+    }
+
+    /// 取登录用户（缺省时回退到 `default`）。
+    pub fn user_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.user.as_deref().unwrap_or(default)
+    }
+
+    /// 转成 `SshTarget`（补上远端部署目录；私钥留待调用方设置）。
+    pub fn into_ssh_target(self, remote_dir: &str) -> SshTarget {
+        SshTarget {
+            user: self.user_or("root").to_string(),
+            host: self.host,
+            port: self.port,
+            remote_dir: remote_dir.to_string(),
+            identity: None,
+        }
+    }
+
+    /// 连接端点描述（对齐 `SshTarget::endpoint`）。
+    pub fn endpoint(&self) -> String {
+        format!("{}@{}:{}", self.user_or("root"), self.host, self.port)
+    }
+}
+
+/// 解析 `[user@]host[:port]` 为结构化 `HostSpec`（纯函数，离线可测）。
+pub fn parse_hostspec(s: &str) -> Result<HostSpec> {
+    HostSpec::parse(s)
+}
+
 /// 部署选项
 #[derive(Clone, Debug)]
 pub struct DeployOptions {
@@ -97,6 +187,14 @@ pub struct DeployReport {
 pub trait SshTransport {
     /// 执行远端命令，远端非零退出视为失败（返回 Err）
     fn exec(&self, cmd: &str) -> Result<String>;
+    /// 带幂等标记执行命令；缺省忽略旗标并委托 `exec`（向后兼容）。
+    ///
+    /// `idempotent = false` 表示该命令非幂等（写/启停/删除类），断线重连可能被重放，
+    /// 实现方应记录警告标记（对齐 dsh-ssh「断线重连可能重放非幂等命令」审计语义）。
+    fn exec_idempotent(&self, cmd: &str, idempotent: bool) -> Result<String> {
+        let _ = idempotent;
+        self.exec(cmd)
+    }
     /// 上传本地文件到远端路径
     fn upload(&self, local: &Path, remote: &Path) -> Result<()>;
     /// 下载远端文件到本地路径
@@ -135,12 +233,19 @@ impl SshTransport for SystemSshTransport {
             .map_err(|e| anyhow!("ssh 执行失败（请确认 ssh 客户端可用且已配置密钥）: {e}"))?;
         if !out.status.success() {
             bail!(
-                "ssh 远端命令失败 ({}): {}",
-                out.status,
+                "ssh 远端命令失败（{}）: {}",
+                exit_code_label(out.status.code()),
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    fn exec_idempotent(&self, cmd: &str, idempotent: bool) -> Result<String> {
+        if let Some(w) = idempotency_warning(cmd, idempotent) {
+            tracing::warn!(command = %cmd, warning = %w, "非幂等命令执行告警");
+        }
+        self.exec(cmd)
     }
 
     fn upload(&self, local: &Path, remote: &Path) -> Result<()> {
@@ -166,8 +271,8 @@ impl SshTransport for SystemSshTransport {
             .map_err(|e| anyhow!("scp 执行失败（请确认 scp 客户端可用且已配置密钥）: {e}"))?;
         if !out.status.success() {
             bail!(
-                "scp 上传失败 ({}): {}",
-                out.status,
+                "scp 上传失败（{}）: {}",
+                exit_code_label(out.status.code()),
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
@@ -197,8 +302,8 @@ impl SshTransport for SystemSshTransport {
             .map_err(|e| anyhow!("scp 执行失败（请确认 scp 客户端可用且已配置密钥）: {e}"))?;
         if !out.status.success() {
             bail!(
-                "scp 下载失败 ({}): {}",
-                out.status,
+                "scp 下载失败（{}）: {}",
+                exit_code_label(out.status.code()),
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
@@ -206,14 +311,31 @@ impl SshTransport for SystemSshTransport {
     }
 }
 
+/// 批量顺序执行（单连接、逐条保真收集、任一失败不吞并继续执行后续命令）。
+///
+/// `alias` 为连接别名，仅用于错误上下文标注（对齐 dsh-ssh 主机别名语义）。
+/// 返回与 `commands` 一一对应的结果：每条独立 `Ok(stdout)` 或 `Err(带别名前缀的错误信息)`。
+pub fn exec_batch(
+    transport: &dyn SshTransport,
+    alias: &str,
+    commands: &[&str],
+) -> Vec<Result<String, String>> {
+    commands
+        .iter()
+        .map(|cmd| transport.exec(cmd).map_err(|e| format!("[{alias}] {e}")))
+        .collect()
+}
+
 /// 记录型传输：纯记录调用、不实际执行，可注入失败（用于单测与 --dry-run）
 pub struct RecordingTransport {
     inner: RefCell<RecordingInner>,
     fail_on: Option<String>,
+    echo: bool,
 }
 
 struct RecordingInner {
     execs: Vec<String>,
+    execs_idem: Vec<(String, bool)>,
     uploads: Vec<(PathBuf, String)>,
     downloads: Vec<(String, PathBuf)>,
 }
@@ -229,10 +351,12 @@ impl RecordingTransport {
         Self {
             inner: RefCell::new(RecordingInner {
                 execs: Vec::new(),
+                execs_idem: Vec::new(),
                 uploads: Vec::new(),
                 downloads: Vec::new(),
             }),
             fail_on: None,
+            echo: false,
         }
     }
 
@@ -242,8 +366,19 @@ impl RecordingTransport {
         self
     }
 
+    /// 配置：`exec` 返回命令本身作为 stdout（便于批命令逐条对齐测试）；缺省返回 "ok"。
+    pub fn with_echo(mut self) -> Self {
+        self.echo = true;
+        self
+    }
+
     pub fn exec_calls(&self) -> Vec<String> {
         self.inner.borrow().execs.clone()
+    }
+
+    /// 经 `exec_idempotent` 执行的命令及其幂等旗标（按执行顺序）。
+    pub fn exec_idempotent_calls(&self) -> Vec<(String, bool)> {
+        self.inner.borrow().execs_idem.clone()
     }
 
     pub fn upload_calls(&self) -> Vec<(PathBuf, String)> {
@@ -263,7 +398,19 @@ impl SshTransport for RecordingTransport {
                 bail!("（mock）远端命令失败: {cmd}");
             }
         }
-        Ok("ok".to_string())
+        Ok(if self.echo {
+            cmd.to_string()
+        } else {
+            "ok".to_string()
+        })
+    }
+
+    fn exec_idempotent(&self, cmd: &str, idempotent: bool) -> Result<String> {
+        self.inner
+            .borrow_mut()
+            .execs_idem
+            .push((cmd.to_string(), idempotent));
+        self.exec(cmd)
     }
 
     fn upload(&self, local: &Path, remote: &Path) -> Result<()> {
@@ -298,6 +445,72 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// 输出折叠保留的头部字符数（4 KB）
+pub const OUTPUT_SNIP_HEAD: usize = 4096;
+/// 输出折叠保留的尾部字符数（4 KB）
+pub const OUTPUT_SNIP_TAIL: usize = 4096;
+
+/// 长输出按「头 + 截断标记 + 尾」折叠（头 4KB + 尾 4KB），
+/// 风格对齐 `context::session::snip_long`，供批命令/集群等大输出渲染前截断。
+///
+/// 未超阈值（`OUTPUT_SNIP_HEAD + OUTPUT_SNIP_TAIL` 字符）时原样返回。
+pub fn snip_output(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= OUTPUT_SNIP_HEAD + OUTPUT_SNIP_TAIL {
+        return text.to_string();
+    }
+    let head: String = chars[..OUTPUT_SNIP_HEAD].iter().collect();
+    let tail: String = chars[chars.len() - OUTPUT_SNIP_TAIL..].iter().collect();
+    let omitted = chars.len() - OUTPUT_SNIP_HEAD - OUTPUT_SNIP_TAIL;
+    format!("{head}\n…[输出过长，已省略中间 {omitted} 字符]…\n{tail}")
+}
+
+/// 退出码标签（保真：正常退出给出数字码，被信号终止时明确标注无退出码）。
+fn exit_code_label(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("退出码 {c}"),
+        None => "被信号终止（无退出码）".to_string(),
+    }
+}
+
+/// 判定命令是否幂等（可安全重放）。
+///
+/// 白名单为读/探活/幂等建目录类命令；写、启停、删除、上传类一律视为非幂等。
+/// 保守默认 → 宁可多标非幂等、不可漏标（对齐 dsh-ssh「断线重连可能重放非幂等命令」审计语义）。
+pub fn is_idempotent_command(cmd: &str) -> bool {
+    let c = cmd.trim();
+    if c.is_empty() {
+        return true; // 空命令无副作用
+    }
+    let c = c.strip_prefix("sudo ").unwrap_or(c).trim_start();
+    const NON_IDEMPOTENT: &[&str] = &[
+        "mv ", "rm ", "cp ", "cat >", "tee ", "dd ", "install ", "pkill", "kill",
+        "nohup", "systemctl restart", "systemctl start", "systemctl stop",
+        "systemctl enable", "systemctl disable", "systemctl daemon-reload",
+        "systemctl mask", "systemctl unmask", "apt ", "apt-get ", "yum ", "dnf ",
+        "touch ", "mkfs", "scp ", "rsync ", "curl -X POST", "curl -X PUT",
+    ];
+    if NON_IDEMPOTENT.iter().any(|p| c.contains(p)) {
+        return false;
+    }
+    const IDEMPOTENT: &[&str] = &[
+        "echo ", "cat ", "ls ", "ll ", "df", "free", "uptime", "uname", "hostname",
+        "id", "whoami", "pwd", "test ", "[ ", "grep ", "which ", "command -v ",
+        "mkdir -p ", "systemctl is-active ", "systemctl status ", "systemctl is-enabled ",
+        "systemctl is-failed ", "curl -fsS ",
+    ];
+    IDEMPOTENT.iter().any(|p| c.starts_with(p))
+}
+
+/// 生成幂等性审计警告：非幂等命令返回警告标记（供断线重连审计），幂等返回 None。
+pub fn idempotency_warning(cmd: &str, idempotent: bool) -> Option<String> {
+    if idempotent {
+        None
+    } else {
+        Some(format!("[非幂等] 断线重连可能重放此命令: {cmd}"))
+    }
 }
 
 /// shell 单引号转义（用于远端路径/URL）
@@ -802,5 +1015,175 @@ mod tests {
         assert_eq!(r.stop_all(), 3);
         assert!(r.is_empty());
         assert_eq!(r.stop_all(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 企业级远程协同开发补强（离线可测，不真连 SSH）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snip_output_exactly_threshold_unchanged() {
+        let s = "a".repeat(OUTPUT_SNIP_HEAD + OUTPUT_SNIP_TAIL);
+        assert_eq!(snip_output(&s), s, "恰好不超阈值应原样返回");
+    }
+
+    #[test]
+    fn test_snip_output_over_by_one_folds() {
+        let s = "a".repeat(OUTPUT_SNIP_HEAD + OUTPUT_SNIP_TAIL + 1);
+        let out = snip_output(&s);
+        assert_ne!(out, s, "超 1 字节应触发折叠");
+        assert!(out.contains("省略中间 1 字符"), "截断标记应含省略数: {out}");
+        assert!(out.starts_with(&"a".repeat(OUTPUT_SNIP_HEAD)), "头部 4KB 应保留");
+    }
+
+    #[test]
+    fn test_snip_output_way_over_shrinks() {
+        let s = "b".repeat(100_000);
+        let out = snip_output(&s);
+        assert!(out.len() < s.len(), "超很多时应显著变短");
+        assert!(out.contains("省略中间"), "应含截断标记");
+        assert!(out.starts_with(&"b".repeat(OUTPUT_SNIP_HEAD)), "头部 4KB 应保留");
+        assert!(out.ends_with(&"b".repeat(OUTPUT_SNIP_TAIL)), "尾部 4KB 应保留");
+    }
+
+    #[test]
+    fn test_exit_code_label_fidelity() {
+        assert_eq!(exit_code_label(Some(0)), "退出码 0");
+        assert_eq!(exit_code_label(Some(127)), "退出码 127");
+        assert!(
+            exit_code_label(None).contains("信号"),
+            "被信号终止应明确标注无退出码"
+        );
+    }
+
+    #[test]
+    fn test_is_idempotent_classification() {
+        // 读/探活/幂等建目录 → 幂等
+        assert!(is_idempotent_command("echo hi"));
+        assert!(is_idempotent_command("cat /etc/os-release"));
+        assert!(is_idempotent_command("mkdir -p /opt/app"));
+        assert!(is_idempotent_command("systemctl is-active marguerite"));
+        assert!(is_idempotent_command("sudo systemctl status app"));
+        assert!(is_idempotent_command(""));
+        // 写/启停/删除 → 非幂等
+        assert!(!is_idempotent_command("mv a b"));
+        assert!(!is_idempotent_command("rm -rf /tmp/x"));
+        assert!(!is_idempotent_command("systemctl restart marguerite"));
+        assert!(!is_idempotent_command("nohup ./app &"));
+    }
+
+    #[test]
+    fn test_idempotency_warning_semantics() {
+        // 非幂等 → 有警告；幂等 → 无警告
+        assert!(idempotency_warning("rm -rf x", false).is_some());
+        assert!(idempotency_warning("rm -rf x", true).is_none());
+        assert!(idempotency_warning("echo hi", false).is_some(), "调用方明确标记非幂等即告警");
+        assert!(idempotency_warning("echo hi", true).is_none());
+        // 警告文案须点明「重放」审计语义
+        let w = idempotency_warning("mv a b", false).unwrap();
+        assert!(w.contains("重放") && w.contains("mv a b"));
+    }
+
+    #[test]
+    fn test_exec_idempotent_records_flag() {
+        let t = RecordingTransport::new();
+        t.exec_idempotent("echo hi", true).unwrap();
+        t.exec_idempotent("rm -rf /tmp/x", false).unwrap();
+        let calls = t.exec_idempotent_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], ("echo hi".to_string(), true));
+        assert_eq!(calls[1], ("rm -rf /tmp/x".to_string(), false));
+    }
+
+    #[test]
+    fn test_exec_batch_aligned_per_item() {
+        let t = RecordingTransport::new().with_echo();
+        let cmds = ["id", "uname -a", "pwd"];
+        let results = exec_batch(&t, "web", &cmds);
+        assert_eq!(results.len(), 3, "结果数须与命令数一一对应");
+        assert_eq!(results[0].as_ref().unwrap(), "id");
+        assert_eq!(results[1].as_ref().unwrap(), "uname -a");
+        assert_eq!(results[2].as_ref().unwrap(), "pwd");
+    }
+
+    #[test]
+    fn test_exec_batch_failure_not_swallowed() {
+        let t = RecordingTransport::new().with_fail("bad");
+        let cmds = ["ok1", "bad-cmd", "ok2"];
+        let results = exec_batch(&t, "db", &cmds);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err(), "失败命令应原样暴露，不吞");
+        assert!(results[2].is_ok(), "任一失败不应阻断后续命令");
+        let err = results[1].as_ref().unwrap_err();
+        assert!(err.contains("[db]"), "错误信息应带别名前缀: {err}");
+        // 逐条保真收集：三条均被执行且顺序一致
+        assert_eq!(
+            t.exec_calls(),
+            vec!["ok1".to_string(), "bad-cmd".to_string(), "ok2".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_exec_batch_empty() {
+        let t = RecordingTransport::new();
+        assert!(exec_batch(&t, "x", &[]).is_empty());
+    }
+
+    #[test]
+    fn test_parse_hostspec_full() {
+        let h = parse_hostspec("deploy@192.168.1.10:2222").unwrap();
+        assert_eq!(h.user.as_deref(), Some("deploy"));
+        assert_eq!(h.host, "192.168.1.10");
+        assert_eq!(h.port, 2222);
+        assert_eq!(h.endpoint(), "deploy@192.168.1.10:2222");
+    }
+
+    #[test]
+    fn test_parse_hostspec_defaults() {
+        let h = parse_hostspec("host").unwrap();
+        assert_eq!(h.user, None, "缺省用户应为 None");
+        assert_eq!(h.host, "host");
+        assert_eq!(h.port, 22, "缺省端口应为 22");
+        assert_eq!(h.user_or("root"), "root");
+
+        let h2 = parse_hostspec("root@host").unwrap();
+        assert_eq!(h2.user.as_deref(), Some("root"));
+        assert_eq!(h2.port, 22);
+
+        let h3 = parse_hostspec("host:2200").unwrap();
+        assert_eq!(h3.user, None);
+        assert_eq!(h3.port, 2200);
+
+        // 前后空白应容忍
+        let h4 = parse_hostspec("  user@host:2222  ").unwrap();
+        assert_eq!(h4.user.as_deref(), Some("user"));
+        assert_eq!(h4.port, 2222);
+    }
+
+    #[test]
+    fn test_parse_hostspec_invalid_shapes() {
+        assert!(parse_hostspec("").is_err());
+        assert!(parse_hostspec("   ").is_err());
+        assert!(parse_hostspec("@host").is_err(), "空用户名应报错");
+        assert!(parse_hostspec("user@").is_err(), "空主机名应报错");
+        assert!(parse_hostspec(":22").is_err(), "空主机名应报错");
+        assert!(parse_hostspec("host:").is_err(), "空端口应报错");
+        assert!(parse_hostspec("host:abc").is_err(), "非数字端口应报错");
+        assert!(parse_hostspec("host:0").is_err(), "端口 0 应报错");
+        assert!(parse_hostspec("host:99999").is_err(), "端口超 u16 应报错");
+        assert!(parse_hostspec("a@b@c").is_err(), "多个 @ 应报错");
+    }
+
+    #[test]
+    fn test_hostspec_into_ssh_target() {
+        let t = parse_hostspec("deploy@host:22")
+            .unwrap()
+            .into_ssh_target("/opt/mgt");
+        assert_eq!(t.user, "deploy");
+        assert_eq!(t.host, "host");
+        assert_eq!(t.port, 22);
+        assert_eq!(t.remote_dir, "/opt/mgt");
+        assert_eq!(t.endpoint(), "deploy@host:22");
     }
 }

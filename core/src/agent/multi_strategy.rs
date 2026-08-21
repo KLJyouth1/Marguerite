@@ -367,6 +367,66 @@ impl FleetRouter {
     }
 }
 
+/// 角色 → 模型偏好解析（联合调用强化：供 Team / 子代理在 intent/complexity 路由之外叠加角色专属模型）。
+///
+/// 审计结论：`Team`/`SubAgentManager` 目前只按 `intent`/`complexity` 走 [`ModelRouter`]，
+/// 角色专属模型偏好未被消费（`TeamMember` 仅用 `role` 做聚合标签/依赖/事件，不参与选路）。
+/// 本函数提供「角色 → 模型名」的确定性映射，供上层在角色级选路时调用：
+/// 命中内置角色表返回其偏好模型，未命中（或空角色）回退 `default`。
+///
+/// 内置常见角色表（键大小写/分隔符不敏感，见 [`normalize_role`]）：
+/// - `architect` / `architecture` → `deepseek-v4-pro`（架构设计需强推理）
+/// - `reviewer` / `review` / `critic` → `deepseek-v4-pro`（审查需严谨强推理）
+/// - `qa` / `tester` / `test` → `deepseek-v4-flash`（测试迭代轻量快模型）
+/// - `researcher` / `research` → `deepseek-v4-pro`（深度研究）
+/// - `coder` / `engineer` / `developer` / `code` → `deepseek-v4-flash`（编码实现轻量快模型）
+pub fn resolve_role_model(role: &str, default: &str) -> String {
+    let normalized = normalize_role(role);
+    if normalized.is_empty() {
+        return default.to_string();
+    }
+    for (key, model) in builtin_role_models() {
+        if normalized == *key {
+            return (*model).to_string();
+        }
+    }
+    default.to_string()
+}
+
+/// 规范化角色名：转小写并去掉分隔符（`-`/`_`/空白等），使 `Code-Review` / `code_review`
+/// 归一到同一键。只保留字母/数字（含中日韩文字），便于与内置表精确匹配。
+fn normalize_role(role: &str) -> String {
+    role.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// 内置角色 → 模型偏好表（键已归一化）。
+fn builtin_role_models() -> &'static [(&'static str, &'static str)] {
+    &[
+        // 架构/规划：强推理模型
+        ("architect", "deepseek-v4-pro"),
+        ("architecture", "deepseek-v4-pro"),
+        // 审查/评审：强推理模型
+        ("reviewer", "deepseek-v4-pro"),
+        ("review", "deepseek-v4-pro"),
+        ("critic", "deepseek-v4-pro"),
+        // QA/测试：轻量快模型
+        ("qa", "deepseek-v4-flash"),
+        ("tester", "deepseek-v4-flash"),
+        ("test", "deepseek-v4-flash"),
+        // 研究/调研：强推理模型
+        ("researcher", "deepseek-v4-pro"),
+        ("research", "deepseek-v4-pro"),
+        // 编码/实现：轻量快模型
+        ("coder", "deepseek-v4-flash"),
+        ("engineer", "deepseek-v4-flash"),
+        ("developer", "deepseek-v4-flash"),
+        ("code", "deepseek-v4-flash"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +614,32 @@ mod tests {
     fn strategy_with_model_tags_target() {
         let s = strategy_with_model("rev", "你是审查者", Fake { reply: "R".into() }, "opus");
         assert_eq!(s.model.as_deref(), Some("opus"));
+    }
+
+    // ---- resolve_role_model（角色 → 模型解析，联合调用消费点）----
+
+    #[test]
+    fn resolve_role_model_maps_core_roles() {
+        assert_eq!(resolve_role_model("architect", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("reviewer", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("qa", "fb"), "deepseek-v4-flash");
+        assert_eq!(resolve_role_model("researcher", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("coder", "fb"), "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn resolve_role_model_normalizes_case_and_separators() {
+        assert_eq!(resolve_role_model("Architect", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("REVIEWER", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("re-viewer", "fb"), "deepseek-v4-pro");
+        assert_eq!(resolve_role_model("Q_A", "fb"), "deepseek-v4-flash");
+        assert_eq!(resolve_role_model("Engineer", "fb"), "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn resolve_role_model_falls_back_to_default() {
+        assert_eq!(resolve_role_model("unknown-role", "fallback"), "fallback");
+        assert_eq!(resolve_role_model("", "fallback"), "fallback");
+        assert_eq!(resolve_role_model("   ", "fallback"), "fallback");
     }
 }

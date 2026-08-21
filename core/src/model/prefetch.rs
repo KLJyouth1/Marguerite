@@ -65,12 +65,18 @@ impl PrefetchStats {
 #[derive(Debug)]
 pub struct PrefetchDedup {
     client: LLMClient,
-    /// 稳定前缀哈希 → 最近预热时间
+    /// 全局去重：稳定前缀哈希 → 最近预热时间（TTL 窗口语义）
     warmed: Mutex<HashMap<String, Instant>>,
+    /// 会话级去重：`session|前缀` 集合（无 TTL，会话生命周期内恒去重；容量上限见
+    /// [`SESSION_DEDUP_CAP`]）
+    session_warmed: Mutex<std::collections::HashSet<String>>,
     /// 去重窗口（TTL）
     ttl: Duration,
     stats: Mutex<PrefetchStats>,
 }
+
+/// 会话级去重键的容量上限（超出即整体清空——进程级 LRU 近似，防无界膨胀）。
+pub const SESSION_DEDUP_CAP: usize = 4096;
 
 impl PrefetchDedup {
     /// 创建去重预填充器。
@@ -78,6 +84,7 @@ impl PrefetchDedup {
         Self {
             client,
             warmed: Mutex::new(HashMap::new()),
+            session_warmed: Mutex::new(std::collections::HashSet::new()),
             ttl,
             stats: Mutex::new(PrefetchStats::default()),
         }
@@ -93,47 +100,85 @@ impl PrefetchDedup {
     /// - 窗口内同前缀已预热 → 计入 `deduped` 并跳过。
     /// - 否则发一次 `warmup`，记录前缀与时间，计入 `prefetches`。
     ///
-    /// 预热失败静默忽略（尽力而为，不阻塞调用方）。
-    pub async fn warmup_once(&self, messages: &[Message]) -> Result<()> {
-        let ordered = crate::context::optimize::reorder_stable_prefix(messages);
-        let stable: Vec<Message> = ordered
-            .into_iter()
-            .filter(|m| matches!(m, Message::System { .. }))
-            .collect();
-        if stable.is_empty() {
-            return Ok(());
-        }
-        // 稳定前缀标识：按 (role:content) 逐条拼接，去重判定只看前缀本体是否一致
-        let key = stable
-            .iter()
-            .map(|m| format!("{}:{}", m.role(), message_content(m)))
-            .collect::<Vec<_>>()
-            .join("|");
-        let now = Instant::now();
+/// 预热失败静默忽略（尽力而为，不阻塞调用方）。
+pub async fn warmup_once(&self, messages: &[Message]) -> Result<()> {
+    // 兼容入口：无会话维度（全局窗口语义保持既有行为）
+    self.warmup_once_for_session("", messages).await
+}
 
-        // 窗口内已预热 → 跳过（去重命中）
+/// 会话级去重预填充（v10：窗口对齐会话生命周期）：
+///
+/// 键 = `session | 稳定前缀`。**会话维度的去重不受 TTL 约束**——同一会话的
+/// 稳定前缀在会话生命周期内只预热一次，服务端 KV 块在整个会话中持续复用
+/// （对齐验收报告 §4 的剩余边界：把去重窗口从固定 5 分钟拉长为会话全程）。
+/// `session` 为空时回退全局 TTL 窗口语义（向后兼容）。
+///
+/// 内存有界：会话键集合超过 `SESSION_DEDUP_CAP` 时整体清空（进程级 LRU 近似），
+/// 绝不无限膨胀。
+pub async fn warmup_once_for_session(&self, session: &str, messages: &[Message]) -> Result<()> {
+    let ordered = crate::context::optimize::reorder_stable_prefix(messages);
+    let stable: Vec<Message> = ordered
+        .into_iter()
+        .filter(|m| matches!(m, Message::System { .. }))
+        .collect();
+    if stable.is_empty() {
+        return Ok(());
+    }
+    // 稳定前缀标识：按 (role:content) 逐条拼接，去重判定只看前缀本体是否一致
+    let key = stable
+        .iter()
+        .map(|m| format!("{}:{}", m.role(), message_content(m)))
+        .collect::<Vec<_>>()
+        .join("|");
+    let now = Instant::now();
+
+    if !session.is_empty() {
+        // 会话生命周期去重：无 TTL，仅受容量上限约束
+        let session_key = format!("{session}|{key}");
         {
-            let warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(t) = warmed.get(&key) {
-                if now.duration_since(*t) < self.ttl {
-                    let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-                    s.deduped = s.deduped.saturating_add(1);
-                    return Ok(());
-                }
+            let mut seen = self
+                .session_warmed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if seen.len() >= SESSION_DEDUP_CAP {
+                seen.clear();
+            }
+            if !seen.insert(session_key) {
+                let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                s.deduped = s.deduped.saturating_add(1);
+                return Ok(());
             }
         }
-
         // 真正预热
         let _ = self.client.warmup(messages).await;
-
-        // 懒清理过期条目，再记录本次
-        let mut warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
-        warmed.retain(|_, t| now.duration_since(*t) < self.ttl);
-        warmed.insert(key, now);
         let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         s.prefetches = s.prefetches.saturating_add(1);
-        Ok(())
+        return Ok(());
     }
+
+    // 窗口内已预热 → 跳过（去重命中）
+    {
+        let warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = warmed.get(&key) {
+            if now.duration_since(*t) < self.ttl {
+                let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                s.deduped = s.deduped.saturating_add(1);
+                return Ok(());
+            }
+        }
+    }
+
+    // 真正预热
+    let _ = self.client.warmup(messages).await;
+
+    // 懒清理过期条目，再记录本次
+    let mut warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
+    warmed.retain(|_, t| now.duration_since(*t) < self.ttl);
+    warmed.insert(key, now);
+    let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+    s.prefetches = s.prefetches.saturating_add(1);
+    Ok(())
+}
 
     /// 当前统计快照。
     pub fn stats(&self) -> PrefetchStats {
@@ -222,5 +267,65 @@ mod tests {
         assert!((a.dedup_ratio() - 0.75).abs() < 1e-9);
         let empty = PrefetchStats::default();
         assert_eq!(empty.dedup_ratio(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn session_dedup_ignores_ttl_and_scopes_by_session() {
+        // 极短 TTL：全局窗口转瞬过期；会话维度无 TTL —— 同会话恒去重
+        let dedup = PrefetchDedup::new(client(), Duration::from_millis(1));
+        let msgs = vec![sys("persona"), user("q")];
+        dedup
+            .warmup_once_for_session("s1", &msgs)
+            .await
+            .expect("尽力而为不报错");
+        dedup
+            .warmup_once_for_session("s1", &msgs)
+            .await
+            .expect("尽力而为不报错");
+        let s = dedup.stats();
+        assert_eq!(s.prefetches, 1, "同会话同前缀恒去重（无视 TTL）: {s:?}");
+        assert!(s.deduped >= 1);
+        // 不同会话同前缀 → 各自预热一次（会话隔离）
+        dedup
+            .warmup_once_for_session("s2", &msgs)
+            .await
+            .expect("尽力而为不报错");
+        let s2 = dedup.stats();
+        assert_eq!(s2.prefetches, 2, "不同会话各预热一次: {s2:?}");
+        // 空会话回退全局 TTL 语义：与 s1/s2 互不影响
+        dedup
+            .warmup_once(&msgs)
+            .await
+            .expect("尽力而为不报错");
+        let s3 = dedup.stats();
+        assert_eq!(s3.prefetches, 3, "无会话维度仍各自预热: {s3:?}");
+    }
+
+    #[tokio::test]
+    async fn session_dedup_bounded_capacity_survives_clear() {
+        let dedup = PrefetchDedup::new(client(), Duration::from_secs(60));
+        // 直接注满会话键集合（绕过真实预热网络路径，容量语义纯逻辑可测）
+        {
+            let mut seen = dedup
+                .session_warmed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for i in 0..SESSION_DEDUP_CAP {
+                seen.insert(format!("seed{i}|p"));
+            }
+        }
+        let msgs = vec![sys("final"), user("q")];
+        dedup
+            .warmup_once_for_session("s-final", &msgs)
+            .await
+            .expect("尽力而为不报错");
+        dedup
+            .warmup_once_for_session("s-final", &msgs)
+            .await
+            .expect("尽力而为不报错");
+        assert!(
+            dedup.stats().deduped >= 1,
+            "容量超限整体清空后仍能正常去重"
+        );
     }
 }

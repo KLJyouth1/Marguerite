@@ -27,7 +27,13 @@ pub enum IntentType {
     Translation,
     /// 总结
     Summarization,
-    /// 通用
+    /// 网页检索 / 联网搜索
+    WebSearch,
+    /// 视觉理解（图片 / 截图）
+    Vision,
+    /// 长上下文 / 长任务（1M 上下文）
+    LongContext,
+    /// 通用（未知意图的兜底）
     General,
 }
 
@@ -230,22 +236,33 @@ impl ModelRouter {
     }
 
     /// 解析命中规则的模型名
+    ///
+    /// 按规则表顺序逐条扫描，命中时仅在「priority 严格更高」时替换当前最优；
+    /// 同 priority 的平局保留**表首**（先出现者），使选择结果确定、可复现，
+    /// 不再依赖 [`Iterator::max_by_key`] 在平局时返回「末位」的迭代序语义。
     fn resolve_model(&self, intent: &IntentType, complexity: &Complexity) -> String {
-        self.routing_rules
-            .iter()
-            .filter(|rule| {
-                let intent_matches = match &rule.intent_pattern {
-                    Some(pattern) => pattern == intent,
-                    None => true,
-                };
-                let complexity_matches = match &rule.complexity {
-                    Some(c) => c == complexity,
-                    None => true,
-                };
-                intent_matches && complexity_matches
-            })
-            .max_by_key(|rule| rule.priority)
-            .map(|rule| rule.model.clone())
+        let mut best: Option<&ModelRoutingRule> = None;
+        for rule in &self.routing_rules {
+            let intent_matches = match &rule.intent_pattern {
+                Some(pattern) => pattern == intent,
+                None => true,
+            };
+            let complexity_matches = match &rule.complexity {
+                Some(c) => c == complexity,
+                None => true,
+            };
+            if !(intent_matches && complexity_matches) {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some(cur) => rule.priority > cur.priority,
+            };
+            if replace {
+                best = Some(rule);
+            }
+        }
+        best.map(|rule| rule.model.clone())
             .unwrap_or_else(|| self.default_client.config.model.clone())
     }
 
@@ -269,6 +286,43 @@ impl ModelRouter {
     /// 命中路由规则时返回对应模型的客户端，否则返回默认客户端。
     pub fn select_model(&self, intent: &IntentType, complexity: Complexity) -> Arc<LLMClient> {
         self.client_for(&self.resolve_model(intent, &complexity))
+    }
+
+    /// 构建「思考档」主客户端（Track A 非工具 / 流式 / 带工具共用）：
+    /// 选中模型 + 仅覆盖思考预算（[`LLMClient::with_thinking`] 不改 max_tokens /
+    /// context_window，语义正交，见 [`crate::model::llm::LLMClient`]）。
+    fn primary_with_thinking(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        effort: crate::model::thinking::ThinkingEffort,
+    ) -> Arc<LLMClient> {
+        Arc::new(
+            self.select_model(intent, complexity)
+                .as_ref()
+                .clone()
+                .with_thinking(effort),
+        )
+    }
+
+    /// 构建「输出上限」主客户端（锚定 bootstrap 通道）：`max_tokens` 为 Some 时
+    /// 仅在选中主模型上覆盖输出上限（[`LLMClient::with_max_tokens`] 只改
+    /// max_tokens），None 时原样返回选中客户端。
+    fn primary_with_cap(
+        &self,
+        intent: &IntentType,
+        complexity: Complexity,
+        max_tokens: Option<u32>,
+    ) -> Arc<LLMClient> {
+        match max_tokens {
+            Some(cap) => Arc::new(
+                self.select_model(intent, complexity)
+                    .as_ref()
+                    .clone()
+                    .with_max_tokens(cap),
+            ),
+            None => self.select_model(intent, complexity),
+        }
     }
 
     /// 按意图和复杂度路由的聊天调用
@@ -296,15 +350,7 @@ impl ModelRouter {
         messages: &[Message],
         max_tokens: Option<u32>,
     ) -> Result<LLMResponse> {
-        let primary = match max_tokens {
-            Some(cap) => Arc::new(
-                self.select_model(intent, complexity)
-                    .as_ref()
-                    .clone()
-                    .with_max_tokens(cap),
-            ),
-            None => self.select_model(intent, complexity),
-        };
+        let primary = self.primary_with_cap(intent, complexity, max_tokens);
         let chain = self.candidate_chain(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
@@ -379,12 +425,7 @@ impl ModelRouter {
         messages: &[Message],
     ) -> Result<LLMResponse> {
         let effort = decision.thinking_effort();
-        let primary = Arc::new(
-            self.select_model(intent, complexity)
-                .as_ref()
-                .clone()
-                .with_thinking(effort),
-        );
+        let primary = self.primary_with_thinking(intent, complexity, effort);
         let chain = self.candidate_chain(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
@@ -398,12 +439,7 @@ impl ModelRouter {
         messages: &[Message],
     ) -> Result<StreamReceiver> {
         let effort = decision.thinking_effort();
-        let primary = Arc::new(
-            self.select_model(intent, complexity)
-                .as_ref()
-                .clone()
-                .with_thinking(effort),
-        );
+        let primary = self.primary_with_thinking(intent, complexity, effort);
         let chain = self.candidate_chain(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_stream(messages))).await
     }
@@ -418,12 +454,7 @@ impl ModelRouter {
         tools: &[ToolDef],
     ) -> Result<LLMResponse> {
         let effort = decision.thinking_effort();
-        let primary = Arc::new(
-            self.select_model(intent, complexity)
-                .as_ref()
-                .clone()
-                .with_thinking(effort),
-        );
+        let primary = self.primary_with_thinking(intent, complexity, effort);
         let chain = self.candidate_chain(primary);
         try_failover_chain(&chain, |c| {
             Box::pin(c.chat_complete_with_tools_cached(messages, tools))
@@ -562,8 +593,17 @@ fn provider_sibling_model(primary: &str) -> Option<&'static str> {
 }
 
 /// 默认路由规则
+///
+/// 档位分层（沿用既有 priority 风格）：
+/// - **强档**（priority 100）：代码 / 推理 / 长上下文 / 视觉 / 复杂问答的中高复杂度
+///   → 强推理模型 `deepseek-v4-pro`；
+/// - **中轻档**（priority 80）：各意图的简单任务、以及代码 / 对话 / 检索的中等复杂度
+///   → 轻量模型 `deepseek-v4-flash`（「简单任务 flash 档」）；
+/// - **恒定轻档**（priority 70）：翻译 / 总结无论复杂度都用轻量模型；
+/// - **兜底**（priority 50）：通用 / 未知意图 → 默认强模型 `deepseek-v4-pro`。
 fn default_routing_rules() -> Vec<ModelRoutingRule> {
     vec![
+        // ---- 强档：中高复杂度 → 强推理模型 ----
         ModelRoutingRule {
             intent_pattern: Some(IntentType::Code),
             complexity: Some(Complexity::Complex),
@@ -576,12 +616,105 @@ fn default_routing_rules() -> Vec<ModelRoutingRule> {
             model: "deepseek-v4-pro".to_string(),
             priority: 100,
         },
+        // 推理中档仍需强模型（证明 / 数学校验非轻任务）
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Reasoning),
+            complexity: Some(Complexity::Medium),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::LongContext),
+            complexity: Some(Complexity::Complex),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::LongContext),
+            complexity: Some(Complexity::Medium),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Vision),
+            complexity: Some(Complexity::Complex),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Vision),
+            complexity: Some(Complexity::Medium),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::WebSearch),
+            complexity: Some(Complexity::Complex),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Chat),
+            complexity: Some(Complexity::Complex),
+            model: "deepseek-v4-pro".to_string(),
+            priority: 100,
+        },
+        // ---- 中轻档：简单任务 / 轻量意图的中等复杂度 → 轻量模型 ----
         ModelRoutingRule {
             intent_pattern: Some(IntentType::Code),
             complexity: Some(Complexity::Medium),
             model: "deepseek-v4-flash".to_string(),
             priority: 80,
         },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Code),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Reasoning),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::LongContext),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Vision),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::WebSearch),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::WebSearch),
+            complexity: Some(Complexity::Medium),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Chat),
+            complexity: Some(Complexity::Simple),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        ModelRoutingRule {
+            intent_pattern: Some(IntentType::Chat),
+            complexity: Some(Complexity::Medium),
+            model: "deepseek-v4-flash".to_string(),
+            priority: 80,
+        },
+        // ---- 恒定轻档：翻译 / 总结 无论复杂度都用轻量模型 ----
         ModelRoutingRule {
             intent_pattern: Some(IntentType::Translation),
             complexity: None,
@@ -594,6 +727,7 @@ fn default_routing_rules() -> Vec<ModelRoutingRule> {
             model: "deepseek-v4-flash".to_string(),
             priority: 70,
         },
+        // ---- 兜底：通用 / 未知意图 → 默认强模型 ----
         ModelRoutingRule {
             intent_pattern: None,
             complexity: None,
@@ -607,6 +741,7 @@ fn default_routing_rules() -> Vec<ModelRoutingRule> {
 mod tests {
     use super::*;
     use crate::model::llm::TokenUsage;
+    use crate::model::thinking::{TaskKind, ThinkingEffort};
     use anyhow::anyhow;
     // Message is imported via super::* from the module
 
@@ -741,6 +876,176 @@ mod tests {
     fn test_complexity_ordering() {
         assert!(Complexity::Simple != Complexity::Complex);
         assert!(Complexity::Medium != Complexity::Simple);
+    }
+
+    // ---- 路由规则审计与补全：全矩阵 + 平局确定性 + 边界回退 ----
+
+    const PRO: &str = "deepseek-v4-pro";
+    const FLASH: &str = "deepseek-v4-flash";
+
+    fn all_intents() -> Vec<IntentType> {
+        vec![
+            IntentType::Code,
+            IntentType::Chat,
+            IntentType::Reasoning,
+            IntentType::Translation,
+            IntentType::Summarization,
+            IntentType::WebSearch,
+            IntentType::Vision,
+            IntentType::LongContext,
+            IntentType::General,
+        ]
+    }
+
+    fn all_complexities() -> Vec<Complexity> {
+        vec![Complexity::Simple, Complexity::Medium, Complexity::Complex]
+    }
+
+    /// 全矩阵期望：intent × complexity → 期望模型名（与 `default_routing_rules` 严格对齐）。
+    fn expected_model(intent: &IntentType, complexity: &Complexity) -> &'static str {
+        use Complexity::*;
+        match (intent, complexity) {
+            (IntentType::Code, Complex) => PRO,
+            (IntentType::Code, Medium) | (IntentType::Code, Simple) => FLASH,
+            (IntentType::Reasoning, Complex) | (IntentType::Reasoning, Medium) => PRO,
+            (IntentType::Reasoning, Simple) => FLASH,
+            (IntentType::Translation, _) => FLASH,
+            (IntentType::Summarization, _) => FLASH,
+            (IntentType::WebSearch, Complex) => PRO,
+            (IntentType::WebSearch, Medium) | (IntentType::WebSearch, Simple) => FLASH,
+            (IntentType::Vision, Complex) | (IntentType::Vision, Medium) => PRO,
+            (IntentType::Vision, Simple) => FLASH,
+            (IntentType::LongContext, Complex) | (IntentType::LongContext, Medium) => PRO,
+            (IntentType::LongContext, Simple) => FLASH,
+            (IntentType::Chat, Complex) => PRO,
+            (IntentType::Chat, Medium) | (IntentType::Chat, Simple) => FLASH,
+            // General（未知 / 兜底意图）走基础档 → 默认强模型
+            (IntentType::General, _) => PRO,
+        }
+    }
+
+    #[test]
+    fn test_routing_matrix_full_coverage() {
+        // 全档遍历：Simple/Medium/Complex × 全部 IntentType 变体必须返回合法模型
+        //（不 panic、不空串），且与期望矩阵严格一致。
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        for intent in all_intents() {
+            for complexity in all_complexities() {
+                let model = router.resolve_model(&intent, &complexity);
+                assert!(!model.is_empty(), "{intent:?}×{complexity:?} 不得返回空串");
+                assert_eq!(
+                    model,
+                    expected_model(&intent, &complexity),
+                    "{intent:?}×{complexity:?} 模型不符"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_model_tie_breaks_to_first_rule() {
+        // 同 priority 多条规则命中同一请求时，选择必须确定：取规则表最前者（先追加者）。
+        // 用最高优先级压过所有内建规则，验证平局语义与具体意图/复杂度无关。
+        let config = Config::default();
+        let mut router = ModelRouter::new(&config);
+        router.add_rule(ModelRoutingRule {
+            intent_pattern: None,
+            complexity: None,
+            model: "first-added".to_string(),
+            priority: 250,
+        });
+        router.add_rule(ModelRoutingRule {
+            intent_pattern: None,
+            complexity: None,
+            model: "second-added".to_string(),
+            priority: 250,
+        });
+        assert_eq!(
+            router.resolve_model(&IntentType::General, &Complexity::Simple),
+            "first-added",
+            "同 priority 平局应取规则表最前者（确定顺序）"
+        );
+        assert_eq!(
+            router.resolve_model(&IntentType::Code, &Complexity::Complex),
+            "first-added",
+            "平局确定性应与具体意图/复杂度无关"
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_falls_back_to_default_when_no_rule_matches() {
+        let config = Config::default();
+        let mut router = ModelRouter::new(&config);
+        router.routing_rules.clear();
+        let model = router.resolve_model(&IntentType::Code, &Complexity::Complex);
+        assert_eq!(model, router.default_client.config.model);
+        assert_eq!(model, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn test_classify_task_empty_message_defaults_to_chat() {
+        // 空消息 / 空 User 文本 → Chat 档，不得 panic、不得返回空档位。
+        assert_eq!(classify_task(&[]), TaskKind::Chat);
+        let empty_user = Message::User {
+            content: String::new(),
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(classify_task(&[empty_user]), TaskKind::Chat);
+    }
+
+    // ---- 联合调用就绪性：with_thinking / with_max_tokens 叠加语义 ----
+
+    #[test]
+    fn test_primary_with_thinking_preserves_max_tokens() {
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        let client =
+            router.primary_with_thinking(&IntentType::Code, Complexity::Complex, ThinkingEffort::Deep);
+        assert_eq!(client.config.model, PRO);
+        assert_eq!(client.config.thinking, ThinkingEffort::Deep);
+        // with_thinking 仅覆盖思考档，不得改动 max_tokens（保持模板默认值）。
+        assert_eq!(client.config.max_tokens, LLMConfig::default().max_tokens);
+    }
+
+    #[test]
+    fn test_primary_with_cap_overrides_max_tokens_only() {
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        let client = router.primary_with_cap(&IntentType::Code, Complexity::Medium, Some(1024));
+        assert_eq!(client.config.model, FLASH);
+        assert_eq!(client.config.max_tokens, 1024);
+        // with_max_tokens 不改 thinking（保持模板默认 Off）。
+        assert_eq!(client.config.thinking, ThinkingEffort::Off);
+        // None → 原样返回选中客户端，max_tokens 不被覆盖。
+        let uncapped = router.primary_with_cap(&IntentType::Code, Complexity::Medium, None);
+        assert_eq!(uncapped.config.max_tokens, LLMConfig::default().max_tokens);
+        assert_eq!(uncapped.config.model, FLASH);
+    }
+
+    #[test]
+    fn test_thinking_and_cap_compose_orthogonally() {
+        let base = LLMClient::new(LLMConfig::default());
+        // 思考档 + 输出上限叠加：各自字段独立生效，max_tokens 取上限值（更小者）。
+        let both = base
+            .clone()
+            .with_thinking(ThinkingEffort::Max)
+            .with_max_tokens(2048);
+        assert_eq!(both.config.thinking, ThinkingEffort::Max);
+        assert_eq!(both.config.max_tokens, 2048);
+        // 反向叠加顺序结果一致（确定性）。
+        let rev = base
+            .clone()
+            .with_max_tokens(2048)
+            .with_thinking(ThinkingEffort::Max);
+        assert_eq!(rev.config.thinking, ThinkingEffort::Max);
+        assert_eq!(rev.config.max_tokens, 2048);
+        // 自适应大输出档 + 输出上限 → 上限（min）生效，思考档保留。
+        let adaptive = base.clone().with_adaptive_profile(TaskKind::Code);
+        assert!(adaptive.config.max_tokens > 2048);
+        let capped = adaptive.with_max_tokens(2048);
+        assert_eq!(capped.config.max_tokens, 2048);
+        assert_eq!(capped.config.thinking, ThinkingEffort::Deep);
     }
 
     // ---- P-8 故障转移链（蒸馏 外部参考 provider-plane） ----

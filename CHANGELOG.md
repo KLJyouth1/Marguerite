@@ -1,6 +1,26 @@
 # Marguerite CHANGELOG
 Version v0.1.4 · Build 2026-08-20 whale-riding
 
+[0.1.5-dev] - 2026-08-21 · 五项深度强化 (v10)
+
+Added
+  model/prefetch.rs           → PrefetchDedup 会话级去重（warmup_once_for_session 无 TTL、
+                                SESSION_DEDUP_CAP 有界）+ agent/team 会话注入
+  model/router.rs             → IntentType 增 WebSearch/Vision/LongContext + 规则补全 +
+                                平局确定性（同 priority 取表首）+ primary_with_thinking/cap 抽取
+  harness/routing.rs          → 三模式策略边界测试与修复
+  agent/multi_strategy.rs     → resolve_role_model（角色→模型表：architect/reviewer/researcher→pro 等）
+  tests/joint_call.rs         → 离线闭环集成测试（模型路由→子代理→工具执行，mock LLM 循环应答）
+  deploy/ssh.rs               → snip_output / is_idempotent_command / idempotency_warning /
+                                exec_idempotent（trait 默认实现）/ exec_batch / HostSpec::parse +
+                                退出码保真；14 项离线单测
+  tools/builtin.rs            → str_replace_editor 补 insert/undo_edit + CRLF·空文件·多次替换
+                                边界硬化（子代理交付）
+  docs/five-hardening-round-2026-08-21.md
+Changed
+  AGENTS.md §2 测试基线 2055 → 2083（+28 新单测）
+Tests : 2083 passed / 0 failed / 14 ignored（NO_COLOR 已移除环境下）
+
 [0.1.5-dev] - 2026-08-21 · 完成性/缓存 100% 补强 (v9)
 
 Added

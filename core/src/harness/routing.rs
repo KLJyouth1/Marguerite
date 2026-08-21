@@ -54,6 +54,23 @@ impl RoutingPolicy {
     }
 }
 
+/// 字符串 → 策略解析：与 [`RoutingPolicy::as_str`] 互逆。
+///
+/// 未知 / 空串回退到 [`RoutingPolicy::Balanced`]（运维容错：外部配置传未知策略
+/// 时不 panic，稳定落到均衡档，语义与「策略切换幂等、回退确定」一致）。
+impl std::str::FromStr for RoutingPolicy {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "latency_first" => RoutingPolicy::LatencyFirst,
+            "cost_first" => RoutingPolicy::CostFirst,
+            "quality_first" => RoutingPolicy::QualityFirst,
+            _ => RoutingPolicy::Balanced,
+        })
+    }
+}
+
 /// 复杂度上调一档
 fn escalate(complexity: Complexity) -> Complexity {
     match complexity {

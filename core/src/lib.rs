@@ -90,5 +90,7 @@ pub mod workflow;
 #[cfg(test)]
 pub mod tests {
     pub mod dsh_e2e;
+    /// 联合调用闭环集成测试（v10）：模型路由 → 智能体 → 工具 串起来（离线 mock）。
+    pub mod joint_call;
     pub mod mock_http;
 }

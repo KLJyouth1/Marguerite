@@ -183,6 +183,9 @@ pub struct Team {
     /// 复用服务端已填充的 KV 块，省去重复预填充的 prompt 与无效输出 token。
     /// 默认未注入（保持向后兼容，不改变 `run` 的网络行为）。
     pub prefetch: Option<Arc<PrefetchDedup>>,
+    /// 会话标识（可选，v10）：注入后预填充去重按会话生命周期（无 TTL）——
+    /// 同会话同前缀恒去重、跨会话互不影响（对齐验收报告 §4 剩余边界）。
+    pub session: Option<String>,
 }
 
 impl Default for Team {
@@ -194,6 +197,7 @@ impl Default for Team {
                 DEFAULT_TEAM_PREFIX_CAP,
             )))),
             prefetch: None,
+            session: None,
         }
     }
 }
@@ -257,6 +261,12 @@ impl Team {
         self
     }
 
+    /// 注入会话标识（v10）：预填充去重按会话生命周期（无 TTL，跨会话互不影响）。
+    pub fn with_session(mut self, session: impl Into<String>) -> Self {
+        self.session = Some(session.into());
+        self
+    }
+
     /// 并行 spawn 所有成员并经子 Agent 管理器真实执行。
     ///
     /// - spawn：每个成员经 [`SubAgentManager::spawn_with_spec`] 真实执行
@@ -278,13 +288,21 @@ impl Team {
                 };
                 scope.observe(&[sys_msg], 1.0);
             }
-            // 团队级去重预填充（W-9）：相同稳定前缀只 warmup_once 一次（窗口内去重）。
+            // 团队级去重预填充（W-9 / v10）：相同稳定前缀只 warmup_once 一次；
+            // 注入会话标识时按会话生命周期去重（无 TTL，跨会话互不影响）。
             if let Some(prefetch) = &self.prefetch {
                 let sys_msg = Message::System {
                     content: m.system_prompt.clone(),
                     timestamp: Utc::now(),
                 };
-                let _ = prefetch.warmup_once(&[sys_msg]).await;
+                match &self.session {
+                    Some(sid) => {
+                        let _ = prefetch.warmup_once_for_session(sid, &[sys_msg]).await;
+                    }
+                    None => {
+                        let _ = prefetch.warmup_once(&[sys_msg]).await;
+                    }
+                }
             }
             let r = subagents
                 .spawn_with_spec(
