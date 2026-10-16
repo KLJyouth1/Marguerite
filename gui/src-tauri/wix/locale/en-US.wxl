@@ -14,4 +14,7 @@
   <String Id="DowngradeErrorMessage">A newer version of Marguerite is already installed.</String>
   <String Id="PathEnvVarFeature">Add the install location of the Marguerite executable to the PATH system environment variable. This allows the Marguerite executable to be called from any location.</String>
   <String Id="InstallAppFeature">Installs Marguerite.</String>
+  <!-- MSI v0.2.0+: uninstaller strings for thorough cleanup -->
+  <String Id="UninstallLink">Uninstall Marguerite</String>
+  <String Id="UninstallDescription">Removes Marguerite from your computer. Your personal data in %APPDATA%\Marguerite will be preserved.</String>
 </WixLocalization>

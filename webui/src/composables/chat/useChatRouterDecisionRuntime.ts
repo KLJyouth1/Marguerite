@@ -1,7 +1,12 @@
 import { ref, type Ref } from 'vue'
 import type { ChatEnsembleMeta, ChatEnsembleMetaModel, ChatMessage } from '@/types/chat'
 import type { ModelRoutingMode } from '@/types/modelRouting'
-import type { EnsembleProgressPayload, RouterDecisionPayload } from '@/types/rpc'
+import type { EnsembleProgressPayload, RouterDecisionPayload, TaskStep } from '@/types/rpc'
+import { normalizeTaskSteps } from '@/composables/task/useTaskWorkspace'
+import {
+  normalizeActivePersona,
+  useChatRouteFeedback,
+} from '@/composables/chat/useChatRouteFeedback'
 import {
   type NormalizedRouterDecision,
   normalizeRouterDecision,
@@ -28,6 +33,7 @@ export interface UseChatRouterDecisionRuntimeOptions {
 
 export function useChatRouterDecisionRuntime(options: UseChatRouterDecisionRuntimeOptions) {
   const pendingRouterDecision = ref<{ payload: RouterDecisionPayload; decision: NormalizedRouterDecision } | null>(null)
+  const { setActivePersona } = useChatRouteFeedback()
 
   // Router and ensemble events can arrive throughout a long streamed answer.
   // They should follow the live edge only while the reader has elected to stay
@@ -46,6 +52,26 @@ export function useChatRouterDecisionRuntime(options: UseChatRouterDecisionRunti
 
   function payloadTurnId(payload: RouterDecisionPayload | EnsembleProgressPayload): string {
     return String(payload.turn_id || payload.turnId || payload.task_id || payload.taskId || '').trim()
+  }
+
+  /**
+   * T05: pull the compound-task step list (`decision.subtasks`) off a router
+   * decision payload and normalize it into `TaskStep[]`.
+   *
+   * The backend carries the steps under `payload.decision.subtasks`; we also
+   * accept a top-level `subtasks` for forward compatibility. Attaching the
+   * parsed list to the normalized decision means downstream consumers (the task
+   * workspace, the router strip) read one canonical, typed shape instead of
+   * re-parsing the raw payload — and never fabricate steps when it is absent.
+   */
+  function extractSubtasks(payload: RouterDecisionPayload): TaskStep[] {
+    const decision = payload?.decision
+    const nested =
+      decision && typeof decision === 'object'
+        ? (decision as { subtasks?: unknown }).subtasks
+        : undefined
+    const raw = nested ?? (payload as unknown as Record<string, unknown>).subtasks
+    return normalizeTaskSteps(raw)
   }
 
   function latestExplicitTurnId(): string {
@@ -76,6 +102,14 @@ export function useChatRouterDecisionRuntime(options: UseChatRouterDecisionRunti
 
   function appendRouterDecision(payload: RouterDecisionPayload, decision = normalizeRouterDecision(payload)) {
     if (!decision) return
+    // P0-2: publish / clear the active persona at the single append choke point
+    // (live + flushed paths both land here). Non-expert sessions omit `persona`,
+    // which normalizes to null and clears the header badge.
+    setActivePersona(normalizeActivePersona(payload.persona))
+    // T05: surface the compound-task steps on the normalized decision so any
+    // consumer of `message.routerDecision` sees the same typed list.
+    const subtasks = extractSubtasks(payload)
+    if (subtasks.length) decision.subtasks = subtasks
     const messageId = payload?.stream_seq
       ? `router-${options.sessionKey.value}-${payload.stream_seq}`
       : `router-${options.sessionKey.value}-${Date.now()}`

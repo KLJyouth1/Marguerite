@@ -67,9 +67,22 @@
           </button>
         </template>
       </div>
-      <div v-if="message.text" class="msg-user-bubble">
-        {{ stripTimePrefix(message.text) }}
+      <div
+        v-if="message.text"
+        class="msg-user-bubble"
+        :class="{ 'msg-user-bubble--clamped': isLongText && !expanded }"
+      >
+        {{ plainText }}
       </div>
+      <button
+        v-if="isLongText"
+        type="button"
+        class="msg-user-expand"
+        :aria-expanded="expanded"
+        @click.stop="expanded = !expanded"
+      >
+        {{ expanded ? t('chat.collapse') : t('chat.expand') }}
+      </button>
       <span
         v-if="steerStatusLabel"
         class="msg-user-steer-status"
@@ -155,6 +168,36 @@ const timeIso = computed(() => isoTime(props.message.ts))
 const timeAbs = computed(() => absoluteTime(props.message.ts))
 const timeRel = computed(() => relativeTime(props.message.ts, now.value))
 const timeFull = computed(() => fullTime(props.message.ts))
+
+// Long pastes must not blow out the transcript. Clamp the bubble to a fixed
+// height with a fade and offer an explicit expand toggle. The threshold checks
+// both character count and line count so a short-but-many-line paste (a log, a
+// stack trace) is caught too.
+const LONG_TEXT_CHAR_LIMIT = 1200
+const LONG_TEXT_LINE_LIMIT = 16
+const expanded = ref(false)
+const plainText = computed(() => props.stripTimePrefix(props.message.text ?? ''))
+const isLongText = computed(() => {
+  const text = plainText.value
+  if (text.length > LONG_TEXT_CHAR_LIMIT) return true
+  let lines = 0
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      lines += 1
+      if (lines > LONG_TEXT_LINE_LIMIT) return true
+    }
+  }
+  return false
+})
+
+// A reused instance (virtual scroll / key reuse) must not carry the expanded
+// state onto a different message.
+watch(
+  () => props.message.messageId,
+  () => {
+    expanded.value = false
+  },
+)
 const STEER_WAIT_DETAIL_DELAY_MS = 700
 const showSteerWaitDetail = ref(false)
 let steerWaitDetailTimer: ReturnType<typeof setTimeout> | undefined
@@ -409,6 +452,40 @@ function attachmentMeta(attachment: DisplayAttachment): string {
   max-width: 82%;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Long pastes: cap the bubble and fade the cut edge instead of letting a
+   100k-char block stretch the transcript to thousands of pixels. */
+.msg-user-bubble--clamped {
+  max-height: 14rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--text) 100%, transparent) 74%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--text) 100%, transparent) 74%,
+    transparent 100%
+  );
+}
+
+.msg-user-expand {
+  align-self: flex-start;
+  margin-top: 0.125rem;
+  padding: 0 0.125rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  text-decoration: underline;
+}
+
+.msg-user-expand:hover {
+  color: var(--text);
 }
 
 .msg-user-actions {

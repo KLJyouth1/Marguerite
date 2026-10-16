@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App, type ComponentPublicInstance } from 'vue'
 import { createI18n } from 'vue-i18n'
+import { createPinia } from 'pinia'
 
 import ChatHeaderActions from './ChatHeaderActions.vue'
 
@@ -32,6 +33,7 @@ const messages = {
     share: 'Share',
     shareSelectHint: 'Select messages to share',
     shareSendFirst: 'Send a message first to share',
+    persona: { newSession: 'New expert session' },
   },
 }
 
@@ -76,6 +78,7 @@ async function mountHeader(
     onStartShare: handlers.share,
     onCopySessionKey: handlers.copy,
   })
+  app.use(createPinia())
   app.use(createI18n({
     legacy: false,
     locale: 'en',
@@ -153,6 +156,14 @@ describe('ChatHeaderActions', () => {
     const actions = renderedActions(el)
     expect(actions.sort()).toEqual(['compact-context', 'copy-session-key', 'deliverables', 'share'].sort())
     expect(new Set(actions).size).toBe(actions.length)
+
+    // P0-2: the "new expert session" picker is mounted in the wide actions row,
+    // but never counted as a session action above (its own testid/role differ).
+    if (name === 'wide') {
+      expect(el.querySelector('[data-testid="expert-session-trigger"]')).toBeTruthy()
+    } else {
+      expect(el.querySelector('[data-testid="expert-session-trigger"]')).toBeNull()
+    }
 
     if (name === 'compact') {
       expect(el.querySelector('[data-action="deliverables"]')).toBeTruthy()

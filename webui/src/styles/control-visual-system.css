@@ -33,7 +33,7 @@
   font-size: clamp(1.625rem, 1.2rem + 1vw, 2.25rem);
   font-weight: 700;
   letter-spacing: 0;
-  line-height: 1.05;
+  line-height: 1.1;
   margin: 0;
 }
 
@@ -856,7 +856,7 @@ summary.control-row--divider:focus-visible {
      list clips overflow on both axes and the sidebar's transform would trap a
      plain position:fixed, so the menu must escape the scroll container. */
   position: fixed;
-  z-index: 210;
+  z-index: 215;
   min-width: 150px;
   padding: var(--sp-1);
   background: var(--bg-elevated);

@@ -736,7 +736,12 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
       <div>
         <strong>{{ t('setup.provider.emptyTitle') }}</strong>
         <p>{{ t('setup.provider.configuredEmpty') }}</p>
-        <p class="setup-provider-empty__next">{{ t('setup.provider.emptyRoutingHint') }}</p>
+        <!-- v3.2：空状态三步引导（添加→验证→路由）；v3.3.1 文案 i18n 化 -->
+        <ol class="setup-provider-empty__steps">
+          <li>{{ t('setup.provider.emptyStep1', { add: t('setup.provider.addProvider') }) }}</li>
+          <li>{{ t('setup.provider.emptyStep2') }}</li>
+          <li>{{ t('setup.provider.emptyStep3') }}</li>
+        </ol>
       </div>
     </div>
 
@@ -1382,6 +1387,17 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   margin: var(--sp-1) 0 0;
 }
 
+/* v3.2：空状态三步引导列表（添加→验证→路由） */
+.setup-provider-empty__steps {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  margin: var(--sp-2) auto 0;
+  padding-left: var(--sp-5);
+  text-align: left;
+  display: grid;
+  gap: var(--sp-1);
+}
+
 .setup-provider-empty .setup-provider-empty__next {
   color: var(--text-secondary);
   font-size: var(--fs-xs);
@@ -1783,7 +1799,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   justify-content: center;
   padding: var(--sp-6);
   position: fixed;
-  z-index: 420;
+  z-index: 900;
 }
 
 .setup-provider-modal {

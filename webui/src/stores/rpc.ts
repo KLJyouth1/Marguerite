@@ -17,6 +17,24 @@ function getDefaultRpcUrl(): string {
   return `${proto}//${location.host}/ws`
 }
 
+/**
+ * 网关随同源 index.html 注入的 bootstrap WS token（`#Marguerite-data`
+ * 的 `data-ws-token`，见 core/src/gateway/server.rs maybe_inject_index）。
+ *
+ * F-T4-01 修复后，网关在 token 已配置时强制校验握手：仅回环同源页面
+ * 能读到该属性（远端网页跨源读不到，其 WS 也会被 Origin 白名单拒绝），
+ * 桌面 WebView 因此无需用户手工粘贴 token 即可完成握手。
+ * `?token=` 深链写入的 sessionStorage 值仍优先（指向其它实例时以它为准）。
+ */
+function injectedWsToken(): string {
+  try {
+    const el = document.getElementById('Marguerite-data')
+    return el?.getAttribute('data-ws-token') || ''
+  } catch {
+    return ''
+  }
+}
+
 function clearStoragePrefix(storage: Storage, prefix: string): void {
   try {
     for (const key of Object.keys(storage)) {
@@ -63,7 +81,7 @@ function loadConnectionSettings(): { url: string; token: string } {
   let url = getDefaultRpcUrl()
   let token = ''
   try { url = localStorage.getItem(WS_URL_KEY) || url } catch {}
-  try { token = sessionStorage.getItem(WS_TOKEN_KEY) || '' } catch {}
+  try { token = sessionStorage.getItem(WS_TOKEN_KEY) || injectedWsToken() } catch {}
   return { url, token }
 }
 

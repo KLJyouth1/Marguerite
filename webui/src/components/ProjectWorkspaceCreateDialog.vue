@@ -140,7 +140,7 @@ useDialogA11y(dialogRef, computed(() => props.open), close, {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1100;
+  z-index: 1108; /* Layer: modal-dialog */
   display: grid;
   place-items: center;
   background: var(--scrim);

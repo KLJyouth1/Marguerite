@@ -3,6 +3,7 @@ import type { ChatRunStatus } from '@/types/chat'
 import type { ApprovalStatusPayload, ToolResultPayload } from '@/types/rpc'
 import type { RpcEventHandler } from '@/lib/rpc'
 import type {
+  ChatIntentPreview,
   InterruptApprovalData,
   InterruptClarifyData,
   InterruptViewState,
@@ -54,6 +55,7 @@ export interface ChatApprovalItem {
   destructive?: boolean
   irreversible?: boolean
   backupState?: string
+  intent?: ChatIntentPreview
   agent: string
   sessionKey: string
   deadline: number          // legacy/internal epoch deadline; 0 for human review
@@ -143,6 +145,7 @@ interface ApprovalsSnapshotItem {
   destructive?: boolean
   irreversible?: boolean
   backupState?: string
+  intent?: ChatIntentPreview
 }
 
 interface ApprovalsSnapshotResponse {
@@ -188,6 +191,7 @@ interface ApprovalPushPayload {
   irreversible?: boolean
   backup_state?: string
   backupState?: string
+  intent?: ChatIntentPreview
 }
 
 type ApprovalsRpcClient = {
@@ -341,6 +345,28 @@ function legacyDisplayTarget(
   return ''
 }
 
+/** M2-C1：从任意来源值解析结构化意图预览（core `tool_intent::ToolIntention`）。
+ *  非法形状返回 undefined → 前端回退到旧渲染，向后兼容。 */
+function safeIntentPreview(value: unknown): ChatIntentPreview | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const v = value as Record<string, unknown>
+  const kind = v.kind && typeof v.kind === 'string' ? v.kind : undefined
+  const sideEffects = Array.isArray(v.side_effects)
+    ? v.side_effects.map(String).filter(Boolean)
+    : undefined
+  const target = v.target && typeof v.target === 'string' ? v.target : undefined
+  const scope = v.scope && typeof v.scope === 'string' ? v.scope : undefined
+  return {
+    kind,
+    target,
+    scope,
+    irreversible: v.irreversible === true,
+    destructive: v.destructive === true,
+    high_risk: v.high_risk === true,
+    side_effects: sideEffects && sideEffects.length > 0 ? sideEffects : undefined,
+  }
+}
+
 function snapshotItemToApproval(item: ApprovalsSnapshotItem): ChatApprovalItem | null {
   const id = String(item.id || '').trim()
   if (!id) return null
@@ -376,6 +402,9 @@ function snapshotItemToApproval(item: ApprovalsSnapshotItem): ChatApprovalItem |
     displayTarget: legacyDisplayTarget(displayKind, item.displayTarget, args),
     destructive: item.destructive === true,
     irreversible: item.irreversible === true,
+    intent: safeIntentPreview(item.intent)
+      ?? safeIntentPreview(rawArgs?.intent)
+      ?? safeIntentPreview(params?.intent),
     backupState: safeBackupState(item.backupState),
     agent: String(item.agent || ''),
     sessionKey: String(item.sessionKey || ''),
@@ -400,6 +429,7 @@ function approvalItemToInterruptData(item: ChatApprovalItem): InterruptApprovalD
     destructive: item.destructive,
     irreversible: item.irreversible,
     backupState: item.backupState,
+    intent: item.intent,
     agent: item.agent,
     sessionKey: item.sessionKey,
     deadline: item.deadline,
@@ -440,6 +470,7 @@ function pushPayloadToInterruptData(payload: ApprovalPushPayload): InterruptAppr
     destructive: payload.destructive === true,
     irreversible: payload.irreversible === true,
     backupState: safeBackupState(payload.backup_state || payload.backupState),
+    intent: safeIntentPreview(payload.intent),
     agent: String(payload.agent || ''),
     sessionKey: String(payload.session_key || payload.sessionKey || ''),
     deadline: Number(payload.deadline) || 0,

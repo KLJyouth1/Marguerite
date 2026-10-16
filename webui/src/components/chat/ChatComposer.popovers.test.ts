@@ -185,8 +185,7 @@ describe('ChatComposer popovers', () => {
   })
 
   it.each([
-    ['Model routing', '.composer-model-routing'],
-    ['Execution mode', '.composer-run-mode'],
+    ['Run mode & routing', '.run-mode-panel__popover'],
   ])('closes %s on outside pointerdown', async (label, selector) => {
     const { app, el } = await mountComposer()
 
@@ -217,12 +216,18 @@ describe('ChatComposer popovers', () => {
 
     await clickButton(el, 'More')
     expectPopover(el, '.chat-more-actions-menu', true)
-    await clickButton(el, 'Model routing')
+    expectPopover(el, '.run-mode-panel__popover', false)
+    await clickButton(el, 'Run mode & routing')
     expectPopover(el, '.chat-more-actions-menu', false)
-    expectPopover(el, '.composer-model-routing', true)
-    await clickButton(el, 'Execution mode')
-    expectPopover(el, '.composer-model-routing', false)
-    expectPopover(el, '.composer-run-mode', true)
+    expectPopover(el, '.run-mode-panel__popover', true)
+
+    // 面板内同时承载沙箱/协作/模型路由三个维度
+    expect(el.querySelector('.composer-run-mode')).toBeTruthy()
+    expect(el.querySelector('.composer-model-routing')).toBeTruthy()
+
+    await clickButton(el, 'More')
+    expectPopover(el, '.run-mode-panel__popover', false)
+    expectPopover(el, '.chat-more-actions-menu', true)
 
     app.unmount()
   })
@@ -262,8 +267,7 @@ describe('ChatComposer popovers', () => {
     const popovers = [
       ['Add', '.composer-add-menu'],
       ['More', '.chat-more-actions-menu'],
-      ['Model routing', '.composer-model-routing'],
-      ['Execution mode', '.composer-run-mode'],
+      ['Run mode & routing', '.run-mode-panel__popover'],
     ] as const
     for (const [label, selector] of popovers) {
       props.collapsed = false
@@ -284,26 +288,28 @@ describe('ChatComposer popovers', () => {
     app.unmount()
   })
 
-  it('shows a custom lock tooltip without the native title while the session is active', async () => {
+  it('shows a custom lock tooltip while the sandbox is locked (chip stays enabled for routing/plan)', async () => {
     const lockMessage = 'Run mode cannot be changed while a task is running.'
     const { app, el } = await mountComposer({
       runModeLocked: true,
       runModeLockMessage: lockMessage,
     })
-    const button = el.querySelector<HTMLButtonElement>(
-      'button[aria-label="Execution mode"]',
+    const chip = el.querySelector<HTMLButtonElement>(
+      'button[aria-label="Run mode & routing"]',
     )
     const tooltip = el.querySelector<HTMLElement>('[role="tooltip"]')
 
-    expect(button?.disabled).toBe(true)
-    expect(button?.hasAttribute('title')).toBe(false)
-    expect(button?.classList.contains('is-locked')).toBe(true)
-    expect(tooltip?.classList.contains('chat-run-mode-lock-tip')).toBe(true)
+    expect(chip?.disabled).toBe(false)
+    expect(chip?.getAttribute('aria-describedby')).toBe(tooltip?.id)
+    expect(tooltip?.classList.contains('run-mode-panel__lock-tip')).toBe(true)
     expect(tooltip?.textContent?.trim()).toBe(lockMessage)
-    expect(button?.getAttribute('aria-describedby')).toBe(tooltip?.id)
-    button?.click()
+
+    // 展开后，沙箱分区展示锁定说明，但协作/路由仍可使用
+    chip?.click()
     await nextTick()
-    expectPopover(el, '.composer-run-mode', false)
+    expectPopover(el, '.run-mode-panel__popover', true)
+    expect(el.querySelector('.run-mode-panel__lock-note')?.textContent?.trim()).toBe(lockMessage)
+    expect(el.querySelector('.composer-run-mode__option')?.hasAttribute('disabled')).toBe(true)
 
     app.unmount()
   })

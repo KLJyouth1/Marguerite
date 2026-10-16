@@ -50,6 +50,9 @@ const props = defineProps<{
   runMode: SandboxRunMode
   allowedRunModes: SandboxRunMode[]
   safeSetupAvailable?: boolean
+  /** 会话进行中锁定：所有沙箱选项禁用，仅展示锁定提示。 */
+  runModeLocked?: boolean
+  runModeLockMessage?: string
 }>()
 
 const emit = defineEmits<{
@@ -78,6 +81,7 @@ const allowedRunModes = computed(() => {
 })
 
 function isDisabled(mode: SandboxRunMode): boolean {
+  if (props.runModeLocked) return true
   if (mode === 'safe' && props.safeSetupAvailable) return false
   return !allowedRunModes.value.includes(mode)
 }

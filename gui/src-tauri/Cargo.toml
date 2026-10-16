@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-gui"
-version = "0.1.5"
+version = "0.2.12"
 description = "Marguerite CLI Workbench - Tauri GUI Shell"
 edition = "2021"
 
@@ -10,6 +10,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 见下方 [dependencies] 中的同名说明：必须放在 build-dependencies —— schemars 位于
+# proc-macro/build 依赖图，resolver=2 下普通 [dependencies] 的特性不会并集进来。
+indexmap = { version = "1", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }

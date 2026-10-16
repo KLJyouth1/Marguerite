@@ -41,9 +41,13 @@
       </button>
     </div>
 
-    <!-- Always-visible flat nav index. Bounded and self-scrolling under a
-         short viewport so it never squeezes Recents, which owns the elastic
-         space below; every destination stays a labelled text row. -->
+    <!-- Bounded, self-scrolling nav index. The primary rail (New task + Work
+         rows) and the collapsible capability groups share ONE scroll region so
+         a short viewport shrinks the nav as a unit instead of squeezing the
+         rail into a sliver — or overflowing the column. Every destination
+         stays reachable by scrolling the nav; Recents keeps the elastic space
+         below. See `.sidebar-nav` in base.css. -->
+    <div class="sidebar-nav">
     <div class="sidebar-section sidebar-core" role="navigation" :aria-label="t('chrome.controlNav')">
       <!-- New task leads the index: it opens a draft instantly against the
            default agent (no picker to interrupt the flow) and reads as a row
@@ -74,6 +78,54 @@
         <span class="sidebar-fn-label">{{ item.title }}</span>
       </router-link>
     </div>
+
+    <!-- Collapsible capability groups (Task #6): deep-link destinations that
+         were previously unreachable from the rail are now bucketed into
+         Work / Operate / Observe / Settings sections. Each section collapses
+         independently; the active route stays visible even when collapsed. -->
+    <div
+      v-for="section in groupedNav"
+      :key="section.id"
+      class="sidebar-group"
+      :data-group="section.id"
+    >
+      <button
+        type="button"
+        class="sidebar-group__header"
+        :aria-expanded="!collapsedGroups.has(section.id)"
+        @click="toggleGroup(section.id)"
+      >
+        <Icon
+          name="chevronRight"
+          :size="14"
+          class="sidebar-group__chevron"
+          :class="{ 'is-collapsed': collapsedGroups.has(section.id) }"
+        />
+        <span class="sidebar-group__title">{{ section.title }}</span>
+        <span
+          v-if="section.items.length > 0"
+          class="sidebar-group__count"
+          :title="t('nav.groupCountHint', { count: section.items.length, group: section.title })"
+        >{{ section.items.length }}</span>
+      </button>
+      <div v-show="!collapsedGroups.has(section.id)" class="sidebar-group__items">
+        <router-link
+          v-for="item in section.items"
+          :key="item.path"
+          :to="item.path"
+          class="sidebar-fn-item sidebar-fn-item--nested"
+          :class="{ 'is-active': isPrimaryNavActive(item.path) }"
+          :aria-current="isPrimaryNavActive(item.path) ? 'page' : undefined"
+          @click="handleNavClick"
+        >
+          <Icon :name="item.icon" :size="16" />
+          <span class="sidebar-fn-label">{{ item.title }}</span>
+        </router-link>
+      </div>
+    </div>
+    <!-- Shell extension seam (append-only; renders nothing while empty). -->
+    <SlotHost slot="sidebar.nav" />
+    </div><!-- /.sidebar-nav -->
 
     <SidebarSetupBanner />
 
@@ -115,6 +167,8 @@
         <Icon name="settings" :size="16" />
         <span class="sidebar-fn-label">{{ t('chrome.settings') }}</span>
       </button>
+      <!-- Shell extension seam (append-only; renders nothing while empty). -->
+      <SlotHost slot="sidebar.footer" />
     </div>
   </nav>
 
@@ -168,7 +222,13 @@
       'main--tabbar-hidden': mobileKeyboardOpen,
     }"
   >
-    <header class="topbar" :class="{ 'topbar--chat': isChatRoute }">
+    <header
+      class="topbar"
+      :class="{
+        'topbar--chat': isChatRoute,
+        'topbar--desktop-shell': isDesktopShell,
+      }"
+    >
       <div class="topbar-left">
         <!-- Sidebar toggle — visible when sidebar is collapsed -->
         <button
@@ -189,6 +249,18 @@
             <kbd v-if="sidebarToggleHint">{{ sidebarToggleHint }}</kbd>
           </span>
         </button>
+        <!-- 禅模式：一键收起侧栏与工作台 dock，只留内容区；再点还原进入前状态。
+             复用既有 .topbar-toggle 样式，不新增 CSS（从而不触碰配色/动效/圆角守卫）。 -->
+        <button
+          class="sidebar-dock-toggle topbar-toggle"
+          :aria-label="t('chrome.zenMode')"
+          :aria-pressed="appStore.zenMode"
+          :title="t('chrome.zenMode')"
+          data-testid="zen-mode-toggle"
+          @click="appStore.toggleZenMode()"
+        >
+          <Icon :name="appStore.zenMode ? 'collapse' : 'expand'" :size="18" />
+        </button>
       </div>
       <!-- Permanent target: Chat teleports its route-owned actions into the
            same in-flow header as the app controls without duplicating state. -->
@@ -197,7 +269,28 @@
         class="topbar-route-header"
         data-testid="route-header-host"
       ></div>
+      <!-- Custom title-bar drag region. The main window runs with native
+           decorations disabled, so the blank part of the topbar is the only
+           place the user can move the window.
+
+           It MUST stay out of flow. `.topbar--chat` is a GRID whose four columns
+           were declared for exactly four children; a fifth in-flow child makes
+           `.topbar-right` auto-place onto an implicit second row, which pushed
+           the window controls below the bar where the chat banner covered them.
+           Absolute positioning keeps the grid/flex track count untouched and gives
+           the region a guaranteed draggable width independent of the route actions.
+           `pointer-events` follows `.topbar` (none) except where the region itself
+           is the drag target, so it can never intercept a control click. -->
       <div
+        v-if="isDesktopShell"
+        class="topbar-drag-region"
+        data-tauri-drag-region
+        aria-hidden="true"
+      />
+      <!-- 全局模式徽标：实时显示当前运行时模式，点击进智能中枢切换 -->
+      <ModeBadge />
+      <div
+        ref="topbarRightRef"
         class="topbar-right"
         :class="{ 'topbar-right--attention': appStore.approvalCount > 0 }"
       >
@@ -213,57 +306,40 @@
           v-if="webConfigEnabled"
           type="button"
           class="conn-pill conn-pill--link"
-          :class="rpcStore.state"
+          :class="gatewayReadiness"
           :title="t('chrome.connectionTitle', { state: connectionStateLabel })"
           :aria-label="t('chrome.manageConnection')"
           @click="openConnectionSettings"
         >{{ connectionStateLabel }}</button>
-        <span v-else class="conn-pill" :class="rpcStore.state">{{ connectionStateLabel }}</span>
+        <span
+          v-else
+          class="conn-pill"
+          :class="gatewayReadiness"
+          :title="t('chrome.connectionTitle', { state: connectionStateLabel })"
+          :aria-label="t('chrome.connectionTitle', { state: connectionStateLabel })"
+        >{{ connectionStateLabel }}</span>
         <DesktopUpdateIndicator />
         <!-- Opt-in (Settings → Appearance or the command palette); off by
              default so the topbar stays music-free until asked for. -->
         <BgmControl v-if="bgmEnabled" />
         <LanguageSwitcher />
-        <div class="theme-menu-wrap">
-          <button
-            ref="themeButtonRef"
-            class="btn btn--icon btn--ghost"
-            :title="t('chrome.theme')"
-            :aria-label="t('chrome.theme')"
-            aria-haspopup="menu"
-            :aria-expanded="themeMenuOpen"
-            @click.stop="themeMenuOpen = !themeMenuOpen"
-          >
-            <Icon :name="themeIconName" :size="16" />
-          </button>
-          <div v-if="themeMenuOpen" class="theme-menu" role="menu" :aria-label="t('chrome.theme')">
-            <button
-              v-for="opt in themeOptions"
-              :key="opt.mode"
-              type="button"
-              class="theme-menu__item"
-              role="menuitemradio"
-              :aria-checked="appStore.theme === opt.mode"
-              @click="pickTheme(opt.mode)"
-            >
-              <Icon :name="opt.icon" :size="15" />
-              <span>{{ opt.labelKey ? t(opt.labelKey) : opt.label }}</span>
-              <Icon v-if="appStore.theme === opt.mode" class="theme-menu__check" name="check" :size="14" />
-            </button>
-            <button
-              type="button"
-              class="theme-menu__item theme-menu__item--more"
-              role="menuitem"
-              :title="t('chrome.moreThemesHint')"
-              @click="openMoreThemes"
-            >
-              <Icon name="chevronRight" :size="15" />
-              <span>{{ t('chrome.moreThemes') }}</span>
-              <Icon v-if="isCustomThemeActive" class="theme-menu__check" name="check" :size="14" />
-            </button>
-          </div>
-        </div>
+        <ThemeMenu
+          ref="themeMenuRef"
+          v-model:open="themeMenuOpen"
+          :theme="appStore.theme"
+          :resolved-theme="appStore.resolvedTheme"
+          @pick-theme="onThemePick"
+          @open-more-themes="onOpenMoreThemes"
+        />
+        <!-- Shell extension seam (append-only; renders nothing while empty). -->
+        <SlotHost slot="topbar.actions" />
       </div>
+      <!-- Window controls are a direct `.topbar` child, absolutely pinned to the
+           top-right corner. Keeping them inside `.topbar-right` made them a grid
+           item on `.topbar--chat`, so they moved and wrapped with the app cluster
+           and could fall outside the bar. Out of flow, they stay put on every
+           route and at every viewport width. -->
+      <TitleBarControls />
     </header>
     <div class="app-workspace">
       <main
@@ -273,26 +349,7 @@
         :data-skin-variant="variants || undefined"
         id="content"
       >
-        <ErrorBoundary>
-          <router-view v-slot="{ Component, route }">
-            <!-- out-in: one view in the DOM at a time, so pages never overlap (no
-                 double-exposure, and never two composers/textareas mid-swap).
-                 Console views are kept-alive, so the entering page is instant —
-                 out-in no longer incurs the old remount/fetch "dead gap". -->
-            <template v-if="route.meta.routeTransition === 'none'">
-              <KeepAlive v-if="route.meta.keepAlive" :max="12">
-                <component :is="Component" :key="route.meta.viewKey || route.name" />
-              </KeepAlive>
-              <component v-else :is="Component" :key="route.meta.viewKey || route.name" />
-            </template>
-            <Transition v-else name="route-fade" mode="out-in">
-              <KeepAlive v-if="route.meta.keepAlive" :max="12">
-                <component :is="Component" :key="route.meta.viewKey || route.name" />
-              </KeepAlive>
-              <component v-else :is="Component" :key="route.meta.viewKey || route.name" />
-            </Transition>
-          </router-view>
-        </ErrorBoundary>
+        <AppRouterView />
       </main>
       <AppWorkbench
         :enabled="appStore.features.artifactWorkbench === true"
@@ -310,77 +367,23 @@
   <!-- Mobile bottom tab bar (<=768px only; hides while the keyboard is up):
        Chat, Sessions, Overview, then More for the flat drawer containing
        Sessions / Overview / Skills & Channels / Cron and Settings. -->
-  <nav
-    class="mobile-tabbar"
-    :class="{ 'is-keyboard-open': mobileKeyboardOpen }"
+  <MobileTabBar
+    :is-chat-active="isNavActive('/chat')"
+    :is-sessions-active="isNavActive('/sessions')"
+    :is-overview-active="isOverviewNavActive"
+    :is-more-active="isMobileMoreActive"
+    :is-keyboard-open="mobileKeyboardOpen"
     :inert="appStore.sidebarOpen && isSidebarDrawer"
-    :aria-label="t('chrome.primaryMobile')"
-  >
-    <router-link
-      to="/chat"
-      class="mobile-tab"
-      :class="{ 'is-active': isNavActive('/chat') }"
-      @click="handleNavClick"
-    >
-      <Icon name="chat" :size="20" />
-      <span class="mobile-tab__label">{{ t('nav.chat') }}</span>
-    </router-link>
-    <router-link
-      to="/sessions"
-      class="mobile-tab"
-      :class="{ 'is-active': isNavActive('/sessions') }"
-      @click="handleNavClick"
-    >
-      <Icon name="sessions" :size="20" />
-      <span class="mobile-tab__label">{{ t('nav.sessions') }}</span>
-      <span v-if="appStore.approvalCount > 0" class="mobile-tab__badge">{{ appStore.approvalCount }}</span>
-    </router-link>
-    <router-link
-      to="/overview"
-      class="mobile-tab"
-      :class="{ 'is-active': isOverviewNavActive }"
-      @click="handleNavClick"
-    >
-      <Icon name="home" :size="20" />
-      <span class="mobile-tab__label">{{ t('nav.overview') }}</span>
-    </router-link>
-    <button
-      type="button"
-      class="mobile-tab"
-      :class="{ 'is-active': isMobileMoreActive }"
-      @click="openSidebarDrawer"
-    >
-      <Icon name="menu" :size="20" />
-      <span class="mobile-tab__label">{{ t('chrome.more') }}</span>
-    </button>
-  </nav>
+    :approval-count="appStore.approvalCount"
+    @nav="handleNavClick"
+    @more="openSidebarDrawer"
+  />
 
   <ToastHost />
 
   <ConfirmModal />
 
-  <ProjectWorkspaceCreateDialog
-    v-if="rpcStore.canChooseProject"
-    :open="projectCreateOpen && !projectCreateConfirming && !projectSourcePickerOpen"
-    :name="projectCreateName"
-    :source-path="projectCreateSourcePath"
-    :busy="projectCreateBusy"
-    :source-picking="projectCreateSourcePicking"
-    @update:name="projectCreateName = $event"
-    @choose-source="chooseProjectSourceDirectory"
-    @close="closeProjectCreator"
-    @create="createProjectWorkspace"
-  />
-
-  <ProjectWorkspacePickerDialog
-    v-if="rpcStore.canChooseProject"
-    :open="projectCreateOpen && projectSourcePickerOpen"
-    :enabled="rpcStore.canChooseProject"
-    :session-key="currentSessionKey || 'agent:main:webchat:workspace-picker'"
-    :initial-path="projectCreateSourcePath"
-    @close="projectSourcePickerOpen = false"
-    @choose="onProjectSourcePathChosen"
-  />
+  <ProjectWorkspaceDialogs ref="projectWorkspaceDialogsRef" :session-key="currentSessionKey" />
 
   <ProjectWorkspaceEditDialog
     v-if="rpcStore.canManageProjectWorkspaces"
@@ -393,6 +396,19 @@
 
   <UpdateBanner />
 
+  <!-- S5: structured evidence card for a dead host (Python sidecar) process.
+       App.vue owns the single shared exit-evidence instance via
+       provide/inject — the same discipline `useGatewayReadiness` documents for
+       the readiness state: a per-call-site instance would multiply the
+       `host.exit_evidence` RPC on every disconnect and let two widgets disagree
+       about whether evidence had been fetched. Mounted here (the app shell)
+       rather than inside a view so it survives navigation while disconnected. -->
+  <HostExitCard class="app-host-exit" />
+
+  <OnboardingOverlay />
+
+  <BootOrchestra />
+
   <!-- Single app-wide announcer for the pending-approval count. The nav badge
        and topbar pill stay silent (no double-announce); this region carries the
        only spoken update when the count changes. -->
@@ -401,12 +417,15 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { initActiveMode, disposeActiveMode } from '@/composables/useActiveMode'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { routeTitle } from './router'
 import { getPlatform } from '@/platform'
 import { useAppStore, type ThemeMode, type PendingApproval } from './stores/app'
 import { useRpcStore } from './stores/rpc'
+import { provideGatewayReadiness } from './composables/useGatewayReadiness'
+import { provideHostExitEvidence } from './composables/useHostExitEvidence'
 import {
   arrangeSidebarSections,
   useSessions,
@@ -415,26 +434,31 @@ import {
   type SidebarSectionRow,
 } from './composables/useSessions'
 import Icon from './components/Icon.vue'
-import ErrorBoundary from './components/ErrorBoundary.vue'
+import AppRouterView from './components/AppRouterView.vue'
+import MobileTabBar from './components/MobileTabBar.vue'
+import ThemeMenu from './components/ThemeMenu.vue'
+import ProjectWorkspaceDialogs from './components/ProjectWorkspaceDialogs.vue'
 import ToastHost from './components/ToastHost.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
-import ProjectWorkspaceCreateDialog from './components/ProjectWorkspaceCreateDialog.vue'
 import ProjectWorkspaceEditDialog from './components/ProjectWorkspaceEditDialog.vue'
-import ProjectWorkspacePickerDialog from './components/ProjectWorkspacePickerDialog.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
+import OnboardingOverlay from './components/OnboardingOverlay.vue'
+import BootOrchestra from './components/boot/BootOrchestra.vue'
 import DesktopUpdateIndicator from './components/DesktopUpdateIndicator.vue'
 import SidebarConversations from './components/SidebarConversations.vue'
 import SidebarSetupBanner from './components/SidebarSetupBanner.vue'
+import HostExitCard from './components/HostExitCard.vue'
+import SlotHost from './shell/slots/SlotHost.vue'
 import SidebarResizer from './components/SidebarResizer.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import BgmControl from './components/BgmControl.vue'
 import ArtifactImageLightbox from './components/chat/ArtifactImageLightbox.vue'
 import AppWorkbench from './components/workbench/AppWorkbench.vue'
+import TitleBarControls from './components/shell/TitleBarControls.vue'
 import { useBgm } from './composables/useBgm'
 import { useSidebarLayout } from './composables/useSidebarLayout'
 import { useDocumentEvent } from './composables/useDocumentEvent'
-import { useDialogLayer } from './composables/useDialogA11y'
 import { provideArtifactImageLightbox } from './composables/chat/useArtifactImageLightbox'
 import { useAgentOptions } from './composables/useAgentOptions'
 import { useSessionListSubscription } from './composables/useSessionListSubscription'
@@ -446,8 +470,8 @@ import { useConfirm } from './composables/useConfirm'
 import { useProjectWorkspaces } from './composables/useProjectWorkspaces'
 import { useFreshTaskDraft } from './composables/useFreshTaskDraft'
 import { useNavigation } from './app/useNavigation'
+import ModeBadge from '@/components/ModeBadge.vue'
 import { useSurfaceSkin } from './themes/useSurfaceSkin'
-import { themePickerOptions, getManifest } from './themes/registry'
 import { normalizeAgentId } from './utils/chat/sessionKeys'
 import { installSessionNavigationDiagConsole, recordSessionNavigationDiag } from './utils/chat/sessionNavigationDiag'
 import type { RpcEventHandler } from '@/lib/rpc'
@@ -499,6 +523,33 @@ watch(sidebarEffectiveWidth, width => {
   if (!sidebarResizeActive.value) setSidebarCssWidth(width)
 }, { immediate: true })
 
+// `.chat-header` reserves the topbar's app cluster (connection pill + language
+// switcher + theme menu) in `padding-right: var(--topbar-right-reserve)`, and
+// that comment already promised App publishes the live value. Do it: the width
+// tracks the connection state label and the locale's language label, so a
+// hard-coded constant would either clip the chat actions or waste the row. The
+// CSS fallback (224px) only covers the frames before measurement.
+const topbarRightRef = ref<HTMLElement | null>(null)
+let topbarRightObserver: ResizeObserver | null = null
+
+function publishTopbarRightReserve(width: number) {
+  if (!Number.isFinite(width) || width <= 0) return
+  // +2px absorbs sub-pixel rounding so the action group never touches the pill.
+  document.getElementById('app')?.style.setProperty('--topbar-right-reserve', `${Math.round(width) + 2}px`)
+}
+
+function observeTopbarRight() {
+  const el = topbarRightRef.value
+  if (!el || typeof ResizeObserver === 'undefined') return
+  publishTopbarRightReserve(el.getBoundingClientRect().width)
+  topbarRightObserver?.disconnect()
+  topbarRightObserver = new ResizeObserver(entries => {
+    const entry = entries[0]
+    publishTopbarRightReserve(entry?.contentRect.width ?? el.getBoundingClientRect().width)
+  })
+  topbarRightObserver.observe(el)
+}
+
 interface DeleteSessionsResponse {
   deleted?: string[]
   errors?: string[]
@@ -507,9 +558,20 @@ interface DeleteSessionsResponse {
 const APP_SESSION_SYNC_SOURCE = 'app-sidebar'
 
 // Localized connection-state label for the topbar pill and its tooltip. The
-// store state ('connected' | 'connecting' | 'disconnected') is a stable key, not
-// display text; CSS uppercases the result (a no-op for CJK scripts).
-const connectionStateLabel = computed(() => t(`chrome.connectionState.${rpcStore.state}`))
+// unified readiness merges WS transport state with gateway business readiness
+// (onboarding.status), so the pill shows "Setup needed" (yellow) when the
+// WebSocket is up but no API key is configured — instead of a misleading green
+// "Connected" that sends users into a failing first chat turn.
+// App.vue is the single always-mounted owner of the unified readiness state;
+// it publishes the one instance for ModeHintBar and any other consumer via
+// provide/inject (string key), so every widget reads the SAME computed and can
+// never disagree in the same frame.
+const { readiness: gatewayReadiness } = provideGatewayReadiness()
+// S5: single owner of the shared host-exit evidence state. Must be called in the
+// always-mounted root for the same reason as `provideGatewayReadiness` above —
+// see useHostExitEvidence.ts for the full rationale.
+provideHostExitEvidence()
+const connectionStateLabel = computed(() => t(`chrome.connectionState.${gatewayReadiness.value}`))
 const router = useRouter()
 
 // afterEach only fires on navigation, so a same-route language switch needs an
@@ -520,20 +582,14 @@ watch(() => appStore.locale, () => {
 const { allSessions, sessionListError, isLoading, loadSessions, applySessionRunStatus } = useSessions(
   optionalSessionRpcCallOptions,
 )
-const { bottomRoutes, workNav } = useNavigation()
+const { bottomRoutes, workNav, groupedNav, collapsedGroups, toggleGroup } = useNavigation()
 // Axis-B: the active expressive skin for the routed content area (meta.skin).
 const { skinId, variants } = useSurfaceSkin()
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
 const projectWorkspaces = useProjectWorkspaces()
 const freshTaskDraft = useFreshTaskDraft()
-const projectCreateOpen = ref(false)
-const projectCreateName = ref('')
-const projectCreateSourcePath = ref('')
-const projectCreateBusy = ref(false)
-const projectCreateSourcePicking = ref(false)
-const projectCreateConfirming = ref(false)
-const projectSourcePickerOpen = ref(false)
+const projectWorkspaceDialogsRef = ref<InstanceType<typeof ProjectWorkspaceDialogs> | null>(null)
 const editingProjectId = ref('')
 const editingProject = computed(() =>
   editingProjectId.value
@@ -547,13 +603,6 @@ watch(
       scheduleSessionRefresh()
       return
     }
-    projectCreateOpen.value = false
-    projectCreateName.value = ''
-    projectCreateSourcePath.value = ''
-    projectCreateBusy.value = false
-    projectCreateSourcePicking.value = false
-    projectCreateConfirming.value = false
-    projectSourcePickerOpen.value = false
     editingProjectId.value = ''
   },
 )
@@ -561,6 +610,14 @@ watch(
 // Settings → Appearance and the command palette.
 const { enabled: bgmEnabled } = useBgm()
 const webConfigEnabled = getPlatform().capabilities.hasWebConfig
+// The main window runs undecorated in the Tauri shell, so the topbar needs a
+// drag region. The CLI gateway serves the same bundle in a plain browser where
+// no window exists — keep the topbar layout byte-identical there.
+const isDesktopShell = (() => {
+  if (typeof window === 'undefined') return false
+  const scope = window as unknown as Record<string, unknown>
+  return Boolean(scope.__TAURI__ || scope.__TAURI_INTERNALS__)
+})()
 
 interface AppCronRunFinishedPayload {
   jobId?: string
@@ -628,48 +685,19 @@ const sidebarToggleAriaShortcut = computed(() => {
   return parts.join('+')
 })
 
-const themeIconName = computed(() => {
-  if (appStore.theme === 'system') return 'monitor'
-  const active = getManifest(appStore.resolvedTheme)
-  return active?.icon ?? (appStore.resolvedTheme === 'dark' ? 'moon' : 'sun')
-})
-
 const themeMenuOpen = ref(false)
-useDialogLayer(themeMenuOpen)
-const themeButtonRef = ref<HTMLButtonElement | null>(null)
-
-// The compact topbar menu deliberately lists only the basic modes (Light / Dark
-// / System). Custom value themes live in Settings → Appearance, reached via the
-// "More themes…" action below — see themePickerOptions({ scope }) in registry.ts.
-const themeOptions = themePickerOptions({ scope: 'basic' })
-
-// A custom value theme (chosen in Settings) is active but not shown in the basic
-// topbar menu; mark "More themes…" instead of leaving no selection indicator.
-const isCustomThemeActive = computed(
-  () => !themeOptions.some((o) => o.mode === appStore.theme),
-)
-
-function pickTheme(mode: ThemeMode) {
-  appStore.setTheme(mode)
-  themeMenuOpen.value = false
-  themeButtonRef.value?.focus()
-}
+const themeMenuRef = ref<InstanceType<typeof ThemeMenu> | null>(null)
 
 // "More themes…": the full theme list lives in Settings → Appearance. Close the
 // menu and deep-link straight to that section.
-function openMoreThemes() {
-  themeMenuOpen.value = false
+function onOpenMoreThemes() {
   handleNavClick()
   router.push('/settings/appearance')
 }
 
-useDocumentEvent('click', (e) => {
-  if (!themeMenuOpen.value) return
-  const wrap = themeButtonRef.value?.closest('.theme-menu-wrap')
-  if (wrap && e.target instanceof Node && !wrap.contains(e.target)) {
-    themeMenuOpen.value = false
-  }
-})
+function onThemePick(mode: ThemeMode) {
+  appStore.setTheme(mode)
+}
 
 // Current session key from ChatView via URL
 const currentSessionKey = computed(() => {
@@ -1166,116 +1194,10 @@ function startProjectTask(workspaceId: string) {
   })
 }
 
-function projectNameFromPath(path: string): string {
-  const normalized = path.trim().replace(/[\\/]+$/, '')
-  return normalized.split(/[\\/]/).pop() || normalized
-}
-
-function resetProjectCreator() {
-  projectCreateOpen.value = false
-  projectCreateName.value = ''
-  projectCreateSourcePath.value = ''
-  projectCreateBusy.value = false
-  projectCreateSourcePicking.value = false
-  projectCreateConfirming.value = false
-  projectSourcePickerOpen.value = false
-}
-
+// The create dialog now owns its own state machine; App just forwards the
+// open intent (from the sidebar "new project" row and the new-chat guide).
 function openProjectCreator() {
-  if (!rpcStore.canChooseProject) return
-  projectCreateName.value = ''
-  projectCreateSourcePath.value = ''
-  projectCreateBusy.value = false
-  projectCreateSourcePicking.value = false
-  projectCreateConfirming.value = false
-  projectSourcePickerOpen.value = false
-  projectCreateOpen.value = true
-}
-
-function closeProjectCreator() {
-  if (projectCreateBusy.value) return
-  resetProjectCreator()
-}
-
-function onProjectPathChosen(path: string) {
-  if (!projectCreateOpen.value || !rpcStore.canChooseProject) return
-  projectCreateSourcePath.value = path
-  if (!projectCreateName.value.trim()) {
-    projectCreateName.value = projectNameFromPath(path)
-  }
-}
-
-function onProjectSourcePathChosen(path: string) {
-  projectSourcePickerOpen.value = false
-  onProjectPathChosen(path)
-}
-
-async function chooseProjectSourceDirectory() {
-  if (
-    !projectCreateOpen.value
-    || !rpcStore.canChooseProject
-    || projectCreateBusy.value
-    || projectCreateSourcePicking.value
-    || projectSourcePickerOpen.value
-  ) return
-
-  const nativePicker = getPlatform().files.chooseProjectDirectory
-  if (typeof nativePicker !== 'function') {
-    projectSourcePickerOpen.value = true
-    return
-  }
-
-  projectCreateSourcePicking.value = true
-  try {
-    const choice = await nativePicker()
-    const selected = String(choice?.path || '').trim()
-    if (selected) onProjectPathChosen(selected)
-  } catch (err) {
-    pushToast(t('workspaces.directoryPickerFailed', { error: errorMessage(err) }), {
-      tone: 'danger',
-    })
-  } finally {
-    projectCreateSourcePicking.value = false
-  }
-}
-
-async function createProjectWorkspace(payload: { name: string; path: string }) {
-  if (
-    !projectCreateOpen.value
-    || !rpcStore.canChooseProject
-    || projectCreateBusy.value
-    || projectCreateSourcePicking.value
-    || projectSourcePickerOpen.value
-  ) return
-  const name = payload.name.trim()
-  const path = payload.path.trim()
-  if (!name || !path) return
-  projectCreateConfirming.value = true
-  await nextTick()
-  const trusted = await confirm({
-    title: t('workspaces.trustTitle'),
-    body: t('workspaces.trustBody', { path }),
-    primaryLabel: t('workspaces.trustConfirm'),
-    primaryClass: 'btn--primary',
-  })
-  if (!trusted) {
-    projectCreateConfirming.value = false
-    return
-  }
-  projectCreateBusy.value = true
-  try {
-    const workspace = await projectWorkspaces.openWorkspace(path)
-    if (!workspace) throw new Error('Gateway returned an empty project.')
-    if (workspace.name !== name) {
-      await projectWorkspaces.renameWorkspace(workspace.id, name)
-    }
-    resetProjectCreator()
-    pushToast(t('workspaces.projectCreated', { name }), { tone: 'ok' })
-  } catch (err) {
-    projectCreateBusy.value = false
-    projectCreateConfirming.value = false
-    pushToast(t('workspaces.createProjectFailed', { error: errorMessage(err) }), { tone: 'danger' })
-  }
+  projectWorkspaceDialogsRef.value?.openProjectCreator()
 }
 
 async function onProjectPin(payload: { workspaceId: string; pinned: boolean }) {
@@ -1692,7 +1614,7 @@ function handleKeydown(e: KeyboardEvent) {
 
   if (e.key === 'Escape' && themeMenuOpen.value) {
     themeMenuOpen.value = false
-    themeButtonRef.value?.focus()
+    themeMenuRef.value?.focusButton()
     return
   }
   // Escape dismisses the sidebar only as the mobile slide-over. On desktop the
@@ -1862,9 +1784,15 @@ onMounted(() => {
   // Keep the approval badge/count live app-wide, not just on the Approvals page.
   subscribeApprovals()
   unsubscribeCronFinished = rpcStore.on('cron.run.finished', handleCronRunFinished)
+  // Global runtime-mode subscription (upgrade-masterplan §5): a mode switch in
+  // ControlCenter now propagates to the top bar / sidebar / open views instantly.
+  initActiveMode()
   // Seed now in case the socket is already connected (the `_state` listener
   // covers later reconnects); recovers a request pending before mount.
   if (rpcStore.isConnected) void seedPendingApprovals()
+  // Publish the topbar app cluster's live width as --topbar-right-reserve
+  // (see publishTopbarRightReserve).
+  void nextTick(observeTopbarRight)
   // 每 30 秒刷新会话列表，更新运行状态和闲置时间
   sessionStatusTimer = window.setInterval(() => {
     if (rpcStore.isConnected) scheduleSessionRefresh()
@@ -1883,6 +1811,7 @@ onUnmounted(() => {
   unsubscribeApprovals()
   unsubscribeCronFinished?.()
   unsubscribeCronFinished = null
+  disposeActiveMode()
   void rpcStore.call('cron.unsubscribe', {}).catch(() => undefined)
   if (titleDebounce) {
     clearTimeout(titleDebounce)
@@ -1890,11 +1819,106 @@ onUnmounted(() => {
   }
   document.title = BASE_TITLE
   window.visualViewport?.removeEventListener('resize', syncMobileKeyboard)
+  topbarRightObserver?.disconnect()
+  topbarRightObserver = null
 })
 
 </script>
 
 <style scoped>
+/* Reserve room for the absolutely pinned window controls so they never cover the
+   last item in the app cluster. Scoped to the desktop shell: in the CLI gateway
+   the controls do not render, so the cluster must not lose 110px of width.
+
+   `.topbar` and `.topbar-right` are both in THIS component's template, so the
+   scoped attribute lands on them and a plain descendant selector matches. */
+.topbar--desktop-shell .topbar-right {
+  padding-inline-end: 110px;
+}
+
+/* Custom title-bar drag region (Tauri shell only).
+
+   Out of flow on purpose — see the markup comment. `.topbar` is `position:
+   absolute` (non-chat) / `relative` (chat), so it is the containing block in both
+   modes. The region is pinned to the vertical middle band between the route
+   actions and the app cluster, so it always keeps real pixels to grab no matter
+   how wide the teleported Chat actions are.
+
+   `z-index: 1` sits above the bar's own background but below every control
+   (`pointer-events: none` is inherited from `.topbar`; only the region opts back
+   in), so drags land here while control clicks pass through untouched. */
+.topbar-drag-region {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  /* Start after the sidebar toggle; stop short of the mode badge / app cluster. */
+  left: 56px;
+  right: 320px;
+  min-width: 48px;
+  pointer-events: auto;
+  cursor: default;
+}
+
+/* Below ~640px there is no honest free band left between the route actions and
+   the app cluster, so reclaim the right inset and keep only a narrow strip. */
+@media (max-width: 640px) {
+  .topbar-drag-region {
+    right: 190px;
+  }
+}
+/* Collapsible capability groups (Task #6) */
+.sidebar-group {
+  margin-top: 6px;
+}
+.sidebar-group__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.sidebar-group__header:hover {
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  color: var(--text);
+}
+.sidebar-group__chevron {
+  transition: transform var(--dur-fast) var(--ease-standard);
+  transform: rotate(90deg);
+}
+.sidebar-group__chevron.is-collapsed {
+  transform: rotate(0deg);
+}
+.sidebar-group__title {
+  flex: 1;
+  text-align: left;
+}
+.sidebar-group__count {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.6;
+}
+.sidebar-group__items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 2px;
+}
+.sidebar-fn-item--nested {
+  padding-left: 26px;
+  font-size: 13px;
+}
+
 .app-workspace {
   position: relative;
   display: flex;
@@ -1928,5 +1952,22 @@ onUnmounted(() => {
   clip: rect(0 0 0 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* S5 host-exit card: pinned bottom-center like an app-level alert, so it stays
+   visible regardless of which view is mounted underneath it. The component's
+   own root is `v-if`'d away when there is no evidence, so this box never
+   reserves space in the normal case. */
+.app-host-exit {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 40;
+  width: min(32rem, calc(100vw - 2 * var(--sp-4)));
+  pointer-events: none;
+}
+
+.app-host-exit > * {
+  pointer-events: auto;
 }
 </style>

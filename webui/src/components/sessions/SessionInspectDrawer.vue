@@ -46,6 +46,54 @@
         </span>
       </div>
 
+      <!-- 会话级 thinking 强度 / 上下文长度：null/空 = 继承全局模型配置 -->
+      <div class="inspect-reasoning">
+        <label class="inspect-reasoning__field">
+          <span class="inspect-reasoning__label">{{ t('sessions.reasoning.effortLabel') }}</span>
+          <select
+            v-model="reasoningEffortModel"
+            class="control-input inspect-reasoning__input"
+            :disabled="reasoningSaving"
+            :title="t('sessions.reasoning.inheritHint')"
+            @change="onReasoningEffortChange"
+          >
+            <option value="">{{ t('sessions.reasoning.effortInherit') }}</option>
+            <option value="off">{{ t('sessions.reasoning.effortOff') }}</option>
+            <option value="normal">{{ t('sessions.reasoning.effortNormal') }}</option>
+            <option value="deep">{{ t('sessions.reasoning.effortDeep') }}</option>
+            <option value="max">{{ t('sessions.reasoning.effortMax') }}</option>
+          </select>
+        </label>
+        <label class="inspect-reasoning__field">
+          <span class="inspect-reasoning__label">{{ t('sessions.reasoning.contextLabel') }}</span>
+          <input
+            v-model="contextWindowModel"
+            class="control-input control-input--narrow inspect-reasoning__input"
+            type="number"
+            inputmode="numeric"
+            min="0"
+            step="1"
+            :placeholder="t('sessions.reasoning.contextPlaceholder')"
+            :disabled="reasoningSaving"
+            :title="t('sessions.reasoning.inheritHint')"
+            @change="onContextWindowChange"
+          />
+        </label>
+        <span class="inspect-reasoning__hint">{{ t('sessions.reasoning.inheritHint') }}</span>
+      </div>
+
+      <div v-if="workspaceView" class="inspect-workspace">
+        <span class="inspect-workspace__badge" :class="workspaceView.cls">
+          <Icon :name="workspaceView.icon" :size="12" />
+          {{ workspaceView.label }}
+        </span>
+        <code
+          v-if="workspace?.root"
+          class="inspect-workspace__root"
+          :title="workspace?.guidance"
+        >{{ workspace.root }}</code>
+      </div>
+
       <p v-if="snippetText" class="inspect-snippet">{{ snippetText }}</p>
 
       <div
@@ -146,10 +194,12 @@ import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import HistoryLoadSentinel from '@/components/HistoryLoadSentinel.vue'
 import RunTrace from '@/components/run/RunTrace.vue'
 import { useSessionInspect } from '@/composables/sessions/useSessionInspect'
+import { useWorkspaceStatus } from '@/composables/sessions/useWorkspaceStatus'
 import { useChatTextRendering } from '@/composables/chat/useChatTextRendering'
 import { useRunTrace } from '@/composables/run/useRunTrace'
 import { useToasts } from '@/composables/useToasts'
 import { useConfirm } from '@/composables/useConfirm'
+import { useRpcStore } from '@/stores/rpc'
 import { copyTextWithFallback } from '@/utils/browser'
 import {
   captureVisibleMessageAnchor,
@@ -159,7 +209,9 @@ import {
 import { nodeStepsFromHistoryMessage } from '@/components/run/runTrace'
 import type { NodeStep, RunTraceStatus, RunTraceSummary } from '@/types/runTrace'
 import type { SessionItem } from '@/composables/useSessions'
-import { sessionRelTime, sessionStatusBadge, sessionSurfaceIcon } from './sessionDisplay'
+import { patchReasoningSettings } from '@/composables/useSessions'
+import type { SessionsGetResponse } from '@/types/rpc'
+import { sessionRelTime, sessionStatusBadge, sessionSurfaceIcon, workspaceBadge } from './sessionDisplay'
 
 interface TranscriptRow {
   id: string
@@ -202,6 +254,11 @@ const {
 } = useSessionInspect()
 
 const { t } = useI18n()
+const {
+  status: workspace,
+  load: loadWorkspace,
+  reset: resetWorkspace,
+} = useWorkspaceStatus()
 const { renderMarkdown, stripDirectiveTags, stripTimePrefix } = useChatTextRendering()
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
@@ -218,6 +275,11 @@ const keyCopied = ref(false)
 const aborting = ref(false)
 const resultView = ref<{ rowId: string; title: string; content: string } | null>(null)
 
+// 会话级 thinking 强度 / 上下文长度编辑态：'' 表示「继承全局模型配置」（= null）
+const reasoningEffortModel = ref('')
+const contextWindowModel = ref('')
+const reasoningSaving = ref(false)
+
 let keyCopiedTimer: ReturnType<typeof setTimeout> | null = null
 let invokerEl: HTMLElement | null = null
 let inspectAnchorGeneration = 0
@@ -230,6 +292,10 @@ function cancelInspectAnchorStabilization() {
 }
 
 const badge = computed(() => (props.item ? sessionStatusBadge(props.item, props.needsInput === true) : null))
+// Workspace chip: only "bound" means the agent reads/writes the user's real
+// project. Anything else is the app-data fallback — the condition that used to
+// surface as an unexplained tool failure.
+const workspaceView = computed(() => (workspace.value ? workspaceBadge(workspace.value) : null))
 const canAbort = computed(() =>
   !!props.item && (props.item.runStatus === 'running' || props.item.runStatus === 'queued'))
 
@@ -247,6 +313,102 @@ const costText = computed(() => {
   if (!Number.isFinite(value)) return ''
   return `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}`
 })
+
+// —— 会话级 thinking 强度 / 上下文长度（持久化到 sessions 表）——
+
+/** 从会话行读取思考强度（双 key 归一）；'' = 继承全局模型配置 */
+function readRawReasoningEffort(raw: Record<string, unknown> | undefined): string {
+  const value = String(raw?.['reasoningEffort'] ?? raw?.['reasoning_effort'] ?? '').trim()
+  return value ? value.toLowerCase() : ''
+}
+
+/** 从会话行读取上下文长度（双 key 归一）；'' = 继承全局模型配置 */
+function readRawContextWindow(raw: Record<string, unknown> | undefined): string {
+  const value = Number(raw?.['contextWindow'] ?? raw?.['context_window'] ?? NaN)
+  return Number.isFinite(value) && value > 0 ? String(value) : ''
+}
+
+/** 把会话行上的持久化值同步到编辑控件（打开抽屉 / 切换会话时） */
+function syncReasoningModels() {
+  const raw = props.item?.raw as Record<string, unknown> | undefined
+  reasoningEffortModel.value = readRawReasoningEffort(raw)
+  contextWindowModel.value = readRawContextWindow(raw)
+}
+
+/**
+ * 用 sessions.patch 返回的持久化结果刷新编辑控件。
+ * patch 返回值已是权威值；本地同步保证重开抽屉前 UI 与持久化一致，
+ * 侧栏列表由宿主视图的轮询/事件刷新，无需在此触发。
+ */
+function applyReasoningPatchResult(
+  result: { reasoningEffort: string | null; contextWindow: number | null },
+) {
+  reasoningEffortModel.value = result.reasoningEffort ? result.reasoningEffort.toLowerCase() : ''
+  contextWindowModel.value = result.contextWindow != null && result.contextWindow > 0
+    ? String(result.contextWindow)
+    : ''
+  const item = props.item
+  if (item) {
+    const raw = { ...(item.raw as Record<string, unknown>) }
+    raw.reasoningEffort = result.reasoningEffort
+    raw.contextWindow = result.contextWindow
+    item.reasoningEffort = result.reasoningEffort
+    item.contextWindow = result.contextWindow
+    item.raw = raw as SessionItem['raw']
+  }
+}
+
+/** 持久化一次会话级 thinking 设置改动；失败回滚编辑控件 */
+async function persistReasoning(patch: { reasoningEffort?: string | null; contextWindow?: number | null }) {
+  const item = props.item
+  if (!item || reasoningSaving.value) return
+  const previousEffort = reasoningEffortModel.value
+  const previousContext = contextWindowModel.value
+  reasoningSaving.value = true
+  try {
+    const result = await patchReasoningSettings(item.key, patch)
+    applyReasoningPatchResult(result)
+    pushToast(t('sessions.reasoning.saveDone'), { tone: 'ok' })
+  } catch (err) {
+    console.warn('[SessionInspectDrawer] sessions.patch reasoning error:', err instanceof Error ? err.message : err)
+    reasoningEffortModel.value = previousEffort
+    contextWindowModel.value = previousContext
+    pushToast(t('sessions.reasoning.saveFailed'), { tone: 'danger' })
+  } finally {
+    reasoningSaving.value = false
+  }
+}
+
+function onReasoningEffortChange() {
+  // '' = 清除覆盖（null），否则设置档位
+  void persistReasoning({ reasoningEffort: reasoningEffortModel.value || null })
+}
+
+function onContextWindowChange() {
+  const raw = contextWindowModel.value.trim()
+  const n = Number(raw)
+  // 空 / 0 / 非法值统一按清除覆盖（null）处理
+  void persistReasoning({ contextWindow: raw !== '' && Number.isFinite(n) && n > 0 ? Math.floor(n) : null })
+}
+
+/**
+ * 轻量刷新会话级 thinking 设置：`sessions.get` 只取权威会话行，
+ * 用其 reasoning/contextWindow 字段回填编辑控件并同步 item.raw。
+ * 列表刷新交给宿主视图的轮询/事件，这里不拉整页 sessions.list。
+ */
+async function refreshReasoningModels(key: string) {
+  const rpc = useRpcStore()
+  try {
+    const data = await rpc.call<SessionsGetResponse>('sessions.get', { key })
+    const row = data?.session
+    if (!row || !props.open || props.item?.key !== key) return
+    reasoningEffortModel.value = readRawReasoningEffort(row as Record<string, unknown>)
+    contextWindowModel.value = readRawContextWindow(row as Record<string, unknown>)
+  } catch (err) {
+    // 刷新失败不阻塞抽屉展示；下次打开会重新同步
+    console.warn('[SessionInspectDrawer] sessions.get reasoning refresh error:', err instanceof Error ? err.message : err)
+  }
+}
 
 function roleTone(role: string): string {
   if (role === 'user') return 'user'
@@ -432,6 +594,9 @@ watch(
         document.addEventListener('keydown', onDocumentKeydown)
       }
       keyCopied.value = false
+      void loadWorkspace(props.item?.workspace)
+      syncReasoningModels()
+      void refreshReasoningModels(key)
       const generation = inspectAnchorGeneration
       void load(key).then(() => {
         if (generation === inspectAnchorGeneration && props.open && props.item?.key === key) {
@@ -443,6 +608,7 @@ watch(
       document.removeEventListener('keydown', onDocumentKeydown)
       resultView.value = null
       reset()
+      resetWorkspace()
       if (invokerEl && document.contains(invokerEl)) invokerEl.focus()
       invokerEl = null
     }
@@ -601,6 +767,38 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 会话级 thinking 强度 / 上下文长度编辑行（inspect-meta 下方） */
+.inspect-reasoning {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-4) 0;
+}
+
+.inspect-reasoning__field {
+  align-items: center;
+  display: inline-flex;
+  gap: var(--sp-1);
+}
+
+.inspect-reasoning__label {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.inspect-reasoning__input {
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+}
+
+.inspect-reasoning__hint {
+  color: var(--text-dim);
+  flex-basis: 100%;
+  font-size: var(--fs-xs);
+}
+
 .inspect-snippet {
   border-bottom: 1px solid var(--hairline);
   color: var(--text-muted);
@@ -614,6 +812,49 @@ onUnmounted(() => {
   white-space: pre-wrap;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.inspect-workspace {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-4) 0;
+}
+
+.inspect-workspace__badge {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  gap: 4px;
+  padding: 2px var(--sp-2);
+  white-space: nowrap;
+}
+
+.inspect-workspace__badge.is-bound {
+  color: var(--text-muted);
+}
+
+/* Unbound / missing roots are the states that used to fail invisibly. */
+.inspect-workspace__badge.is-unbound,
+.inspect-workspace__badge.is-missing {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--warn);
+}
+
+.inspect-workspace__root {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspect-body {

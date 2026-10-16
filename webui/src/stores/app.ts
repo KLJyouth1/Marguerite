@@ -23,6 +23,24 @@ import {
 // themes typeable while preserving autocomplete for the built-ins.
 export type ThemeMode = 'light' | 'dark' | 'system' | (string & {})
 
+/**
+ * Boot-splash animation tier. Mirrors the inline script in index.html, which
+ * stamps `data-boot` on <html> before first paint from the same storage key.
+ */
+export type BootAnimationMode = 'off' | 'minimal' | 'full'
+
+const BOOT_ANIMATION_STORAGE_KEY = 'marguerite-boot-animation'
+
+function hydrateBootAnimation(): BootAnimationMode {
+  try {
+    const raw = localStorage.getItem(BOOT_ANIMATION_STORAGE_KEY)
+    if (raw === 'off' || raw === 'minimal' || raw === 'full') return raw
+  } catch {
+    // Unavailable storage: fall through to the default.
+  }
+  return 'full'
+}
+
 const LOCALE_SYNC_PENDING_KEY = 'marguerite-locale-sync-pending'
 
 function readPendingLocaleSync(): LocaleCode | null {
@@ -63,6 +81,10 @@ export interface ApprovalFocusRequest {
 
 export const useAppStore = defineStore('app', () => {
   const theme = ref<ThemeMode>('system')
+  // Boot-splash tier (browser-local). Hydrated synchronously and stamped below,
+  // so the store re-applies the same value the index.html inline script already
+  // wrote before first paint.
+  const bootAnimation = ref<BootAnimationMode>(hydrateBootAnimation())
   // Active UI locale. Browser-local storage preserves the immediate UI
   // preference; an explicit selection also syncs the Gateway-wide language
   // used for fixed channel notices. The sidebar/topbar switcher and the
@@ -203,6 +225,28 @@ export const useAppStore = defineStore('app', () => {
     setTheme(next)
   }
 
+  // Resolve and stamp the boot-splash tier. 'full' degrades to 'minimal' when the
+  // OS asks for reduced motion — boot.css carries the same media query as the
+  // belt to this braces, so a mid-session preference change also stops the loop.
+  // flush:'sync' keeps the DOM write synchronous (and directly testable).
+  function applyBootAnimation() {
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const mode = reduced && bootAnimation.value === 'full' ? 'minimal' : bootAnimation.value
+    document.documentElement.setAttribute('data-boot', mode)
+  }
+
+  watch(bootAnimation, applyBootAnimation, { immediate: true, flush: 'sync' })
+
+  function setBootAnimation(mode: BootAnimationMode) {
+    bootAnimation.value = mode
+    try { localStorage.setItem(BOOT_ANIMATION_STORAGE_KEY, mode) } catch {}
+    // Choosing Full again re-arms the post-mount constellation orchestra so
+    // operators can replay the fanfare from Appearance without clearing storage.
+    if (mode === 'full') {
+      try { localStorage.removeItem('marguerite-boot-orchestra-seen') } catch {}
+    }
+  }
+
   function applyLocale(code: LocaleCode) {
     i18n.global.locale.value = code
     document.documentElement.setAttribute('lang', code)
@@ -314,6 +358,33 @@ export const useAppStore = defineStore('app', () => {
     sidebarOpen.value = !sidebarOpen.value
   }
 
+  /**
+   * 禅模式：一键把外壳收掉，只留对话/内容区。
+   *
+   * 为什么用"记住并还原 sidebarOpen"而不是新增一套平行的可见性派生：
+   * `App.vue` 里侧栏的渲染 / drawer / inert 判定有十余处都绑在
+   * `appStore.sidebarOpen` 上，再造一个状态必然漏改（漏一处就会出现
+   * "禅模式下半截侧栏还在"）。复用既有单一事实源最稳。
+   */
+  const zenMode = ref(false)
+  let sidebarBeforeZen: boolean | null = null
+
+  function setZenMode(on: boolean) {
+    if (on === zenMode.value) return
+    if (on) {
+      sidebarBeforeZen = sidebarOpen.value
+      sidebarOpen.value = false
+    } else if (sidebarBeforeZen !== null) {
+      sidebarOpen.value = sidebarBeforeZen
+      sidebarBeforeZen = null
+    }
+    zenMode.value = on
+  }
+
+  function toggleZenMode() {
+    setZenMode(!zenMode.value)
+  }
+
   function setSidebarWidthPreference(preference: SidebarWidthPreference) {
     const normalized = normalizeSidebarWidthPreference(preference)
     sidebarWidthPreference.value = normalized
@@ -422,6 +493,7 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     theme,
+    bootAnimation,
     locale,
     pendingChannelNoticeLocale,
     resolvedTheme,
@@ -436,11 +508,15 @@ export const useAppStore = defineStore('app', () => {
     destroyTheme,
     setTheme,
     cycleTheme,
+    setBootAnimation,
     initLocale,
     setLocale,
     syncLocaleToGateway,
     setSidebarOpen,
     toggleSidebar,
+    zenMode,
+    setZenMode,
+    toggleZenMode,
     setSidebarWidthPreference,
     resetSidebarWidthPreference,
     setApprovalCount,

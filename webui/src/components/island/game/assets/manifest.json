@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "note": "Island-game MVP asset manifest. 本机未安装 Blender（`blender --version` 不存在），本波次全部地标/精灵/花草均为 three.js 程序化低多边形几何（项目自有，license: project），未下载任何外部二进制资产。下列 CC0 条目为蓝图 §4.3 允许的后续补法来源，当前仅登记为白名单来源，不入库、不随包分发。",
+  "assets": [
+    {
+      "id": "island_terrain_procedural",
+      "kind": "geometry",
+      "license": "project",
+      "source": "procedural (three.js CylinderGeometry / CircleGeometry)",
+      "bundled": true
+    },
+    {
+      "id": "daisy_sanctum_procedural",
+      "kind": "geometry",
+      "license": "project",
+      "source": "procedural (cylinder base + 10 petal boxes + cone roof)",
+      "bundled": true
+    },
+    {
+      "id": "garden_trees_procedural",
+      "kind": "geometry",
+      "license": "project",
+      "source": "procedural (trunk cylinder + cone canopy)",
+      "bundled": true
+    },
+    {
+      "id": "quest_board_procedural",
+      "kind": "geometry",
+      "license": "project",
+      "source": "procedural (two posts + plank)",
+      "bundled": true
+    },
+    {
+      "id": "player_pet_elf_procedural",
+      "kind": "geometry",
+      "license": "project",
+      "source": "procedural (capsule body + sphere head/cone wing)",
+      "bundled": true
+    },
+    {
+      "id": "kenney_nature_kit",
+      "kind": "reference-only",
+      "license": "cc0",
+      "source": "https://www.kenney.nl/assets/nature-kit",
+      "bundled": false,
+      "note": "后续补 Blender→GLB 管线时的地形/植被占位包；CC0 可商用随包。"
+    },
+    {
+      "id": "quaternius_lowpoly",
+      "kind": "reference-only",
+      "license": "cc0",
+      "source": "https://quaternius.com",
+      "bundled": false,
+      "note": "后续低模建筑扩充来源；CC0。"
+    }
+  ],
+  "redline": "来源不明 / AI 抓取 / CC-BY 未署名的模型禁止入库（蓝图 §4.3 库存红线）。"
+}

@@ -14,6 +14,7 @@ use marguerite_core::events::EventBus;
 use marguerite_core::gateway::{self, GatewayState, DEFAULT_PORT};
 use marguerite_core::guard::repair::{RepairConfig, RepairLoop, RepairResult};
 use marguerite_core::guard::syntax::Language;
+use marguerite_core::guard::approval_registry::{global_registry, DecisionResult};
 use marguerite_core::guard::{GuardConfig, GuardGateway, GuardReport};
 use marguerite_core::memory::{ExperienceKind, ExperienceLedger, LongTermMemory, SelfEvolution};
 use marguerite_core::mode::ModeKind;
@@ -56,6 +57,12 @@ pub struct AppState {
     pub poker: Arc<Mutex<marguerite_core::poker::PokerHub>>,
     /// 知识图谱（KB 2.0 质量层 · kb.graph）：实体-关系共现/定型边，内存图
     pub kb_graph: Arc<Mutex<marguerite_core::kb::KnowledgeGraph>>,
+    /// P0 S3：磁盘 `plugins/manifests/*.plugin.json` 真源快照（setup 时只读装载一次）。
+    ///
+    /// 供 `plugins_list` / `doctor_check` 消费 —— 取代原先「从能力注册表假投影」的写法。
+    pub plugin_manifests: Arc<Mutex<Vec<marguerite_core::plugins::manifest::PluginManifest>>>,
+    /// P0 S3：patch 层只读装载摘要（含诊断）；未装载时为 `None`。
+    pub plugin_patch_summary: Arc<Mutex<Option<marguerite_core::plugins::patch::PatchSummary>>>,
 }
 
 impl AppState {
@@ -111,6 +118,8 @@ impl AppState {
             vision: Arc::new(VisionCapability::offline_default()),
             poker: Arc::new(Mutex::new(marguerite_core::poker::PokerHub::new())),
             kb_graph: Arc::new(Mutex::new(marguerite_core::kb::KnowledgeGraph::new())),
+            plugin_manifests: Arc::new(Mutex::new(Vec::new())),
+            plugin_patch_summary: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -160,6 +169,77 @@ fn capability_to_view(c: &Capability) -> CapabilityView {
         .to_string(),
         description: c.description.clone(),
         supersedes: c.supersedes.clone(),
+    }
+}
+
+// ─────────────────────────── 开机自启动（HKCU Run 键，零依赖） ───────────────────────────
+//
+// 为什么不用 tauri-plugin-autostart：那需要联网拉新依赖，而本机到 crates.io 未必可达
+// （实测 huggingface 已被拦）。这里直接用 Windows 自带的 `reg.exe` 读写 HKCU 的 Run 键：
+// 零新依赖、不触网、对安装后的 exe 同样有效。
+//
+// ⚠ 安装器必须同步：开启后会在 HKCU 写入一条名为 `Marguerite` 的值。卸载流程若不删除它，
+// 会残留一条指向已删除 exe 的自启动项——所以 wix/nsis 的卸载步骤要一并清掉（见安装器配置）。
+#[cfg(windows)]
+const AUTOSTART_VALUE_NAME: &str = "Marguerite";
+#[cfg(windows)]
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// 开机自启动是否已开启。
+///
+/// 判定口径：Run 键里**存在** `Marguerite` 这个值即算开（不比对路径）。
+/// 为什么不比对路径：便携版/多份安装并存时 exe 路径会变，按"值是否在册"判定更贴合
+/// 用户对这个开关的意图；比对路径反而会把"用户已开启"误报成"已关闭"。
+#[tauri::command]
+fn autostart_status() -> bool {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("reg")
+            .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_VALUE_NAME])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        // 非 Windows 平台不提供该能力：如实返回 false，而不是编造一个"已开启"。
+        false
+    }
+}
+
+/// 开启/关闭开机自启动。
+///
+/// 失败必须回 Err 让前端如实提示（例如组策略限制 Run 键），**不要假装成功**——
+/// 否则用户会以为下次开机应用会自动起来，实际不会。
+#[tauri::command]
+fn autostart_set(enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("取当前程序路径失败：{e}"))?
+            .to_string_lossy()
+            .to_string();
+        let out = if enabled {
+            std::process::Command::new("reg")
+                .args([
+                    "add", AUTOSTART_KEY, "/v", AUTOSTART_VALUE_NAME, "/t", "REG_SZ", "/d", &exe, "/f",
+                ])
+                .output()
+        } else {
+            std::process::Command::new("reg")
+                .args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_VALUE_NAME, "/f"])
+                .output()
+        };
+        match out {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => Err(format!("调用 reg.exe 失败：{e}")),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("开机自启动目前仅支持 Windows".to_string())
     }
 }
 
@@ -331,6 +411,38 @@ fn toggle_window(app: tauri::AppHandle) {
     }
 }
 
+// ───────────── M2-C1：GUI 审批裁决桥（Intent Preview 动作确认卡）─────────────
+// GUI 端事件经 `mgt:{session}` 转发 core 的 `approval` Envelope（含结构化
+// tool_intent::ToolIntention），前端渲染 ActionCard；批准/拒绝走本命令，
+// 经全局审批注册表定位持有挂起审批的 gate 完成裁决（fail-closed 语义由
+// gate::resolve 保证：超时 / 已消费 / ID 不匹配一律不执行）。
+
+#[derive(serde::Serialize)]
+struct ApprovalDecisionView {
+    /// 裁决是否真正消费了挂起审批（false = 不存在/已超时/已消费）
+    resolved: bool,
+}
+
+fn approval_decide(id: String, approve: bool) -> ApprovalDecisionView {
+    let resolved = match global_registry().decide(&id, approve) {
+        DecisionResult::Decided(_) => true,
+        DecisionResult::NotFound => false,
+    };
+    ApprovalDecisionView { resolved }
+}
+
+/// 批准一条挂起审批（M2-C1）
+#[tauri::command]
+fn approval_approve(approval_id: String) -> ApprovalDecisionView {
+    approval_decide(approval_id, true)
+}
+
+/// 拒绝一条挂起审批（M2-C1）
+#[tauri::command]
+fn approval_deny(approval_id: String) -> ApprovalDecisionView {
+    approval_decide(approval_id, false)
+}
+
 /// 运行一轮对话（真实引擎；事件经总线转发到前端事件通道）
 ///
 /// 前端通过 `listen("mgt:{session}", ...)` 订阅本次会话的全部事件
@@ -344,6 +456,26 @@ async fn run_turn(
     session: String,
     mode: String,
 ) -> Result<(), String> {
+    let config = Config::load().unwrap_or_default();
+    if config.model.api_key.is_empty() {
+        let event_name = format!("mgt:{session}");
+        let _ = app.emit(&event_name, serde_json::json!({
+            "event": "error",
+            "payload": {
+                "kind": "configuration",
+                "code": "api_key_missing",
+                "message": "API Key 未配置",
+                "detail": "当前没有配置任何大模型 API Key，无法发送消息。请先配置 API Key 后再试。",
+                "action": {
+                    "label": "去配置",
+                    "target": "settings/providers"
+                },
+                "recoverable": true
+            }
+        }));
+        return Ok(());
+    }
+
     let mode_kind = ModeKind::from_name(&mode).unwrap_or(ModeKind::Bloom);
     let bus = Arc::new(EventBus::default());
     // 订阅全部事件并转发到前端（事件名含 session，避免多会话串台）
@@ -380,6 +512,126 @@ fn hide_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
+}
+
+// ───────────── V2.1-P2：桌面桌宠悬浮窗（pet-overlay）─────────────
+//
+// 设计约束（R1/R3 诚实透明 + 回环红线）：
+//   · 悬浮窗 label=pet-overlay，decorations=false transparent=true always_on_top=true，
+//     尺寸 360×420，缺省位置屏幕右下；
+//   · URL 指向 /control/pet-overlay（由统一网关托管的 Vue3 页面，见 WebUI PetOverlayView），
+//     复用 pet.* RPC 全套契约，不新增 Tauri→Core 通道；
+//   · 桌面交互（拖拽/双击抚摸/右键菜单）全部由 Tauri Window 级 API 完成，
+//     不要求 webview 捕获系统事件（WebGL 画布透明时 click-through 会失效，走菜单兜底）。
+
+const PET_OVERLAY_LABEL: &str = "pet-overlay";
+
+/// 桌宠悬浮窗 URL。**端口取自单一事实源** `marguerite_core::gateway::DEFAULT_PORT`
+/// （`core/src/gateway/mod.rs`），不硬编码 —— 避免「改端口要改 N 处」的静默漂移。
+fn pet_overlay_url() -> String {
+    format!("http://localhost:{DEFAULT_PORT}/control/pet-overlay")
+}
+const PET_OVERLAY_W: f64 = 360.0;
+const PET_OVERLAY_H: f64 = 420.0;
+
+/// 计算桌宠悬浮窗缺省位置：屏幕右下角（有工作区则避开任务栏 + 24px 边距）。
+/// 纯函数（可单测）：`workarea = (x, y, width, height)`；无显示器信息时回退 (640, 480)。
+fn pet_overlay_default_position(
+    workarea: Option<(f64, f64, f64, f64)>,
+    w: f64,
+    h: f64,
+) -> (f64, f64) {
+    match workarea {
+        Some((x, y, ww, wh)) => (x + ww - w - 24.0, y + wh - h - 24.0),
+        None => (640.0, 480.0),
+    }
+}
+
+/// 创建 / 显示桌宠悬浮窗（幂等：已存在则 show + 置前）。
+///
+/// 返回窗口句柄信息（是否新建），供前端托盘按钮判断是否需要刷新皮肤。
+#[derive(serde::Serialize)]
+struct PetOverlayOp {
+    created: bool,
+    label: String,
+}
+
+#[tauri::command]
+fn pet_overlay_show(app: tauri::AppHandle) -> Result<PetOverlayOp, String> {
+    use tauri::Manager;
+    use tauri::WebviewWindowBuilder;
+
+    if let Some(win) = app.get_webview_window(PET_OVERLAY_LABEL) {
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        return Ok(PetOverlayOp { created: false, label: PET_OVERLAY_LABEL.into() });
+    }
+
+    // 计算默认位置：屏幕右下角（有工作区则避开任务栏）。
+    let work = match app.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let a = monitor.work_area();
+            Some((
+                a.position.x as f64,
+                a.position.y as f64,
+                a.size.width as f64,
+                a.size.height as f64,
+            ))
+        }
+        _ => None,
+    };
+    let (x, y) = pet_overlay_default_position(work, PET_OVERLAY_W, PET_OVERLAY_H);
+
+    // 窗口创建后由 Tauri 按 label 管理生命周期，无需本地持有句柄（前缀 _ 避免 unused 告警）
+    let _win = WebviewWindowBuilder::new(&app, PET_OVERLAY_LABEL, tauri::WebviewUrl::External(pet_overlay_url().parse().map_err(|e| format!("非法桌宠 URL: {e}"))?))
+        .title("Marguerite Pet")
+        .inner_size(PET_OVERLAY_W, PET_OVERLAY_H)
+        .position(x, y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .visible(true)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| format!("桌宠悬浮窗创建失败: {e}"))?;
+
+    // Win11 需要再显式 set_ignore_cursor_events(false) 才能穿透透明区域，此处保持默认
+    // （让用户能右键菜单、拖拽标题区）。
+
+    Ok(PetOverlayOp { created: true, label: PET_OVERLAY_LABEL.into() })
+}
+
+/// 隐藏桌宠悬浮窗（存在则 hide，不存在静默跳过，保持幂等）。
+#[tauri::command]
+fn pet_overlay_hide(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window(PET_OVERLAY_LABEL) {
+        let _ = win.hide();
+    }
+    Ok(())
+}
+
+/// 切换显示/隐藏（托盘右键菜单快捷入口）。
+#[tauri::command]
+fn pet_overlay_toggle(app: tauri::AppHandle) -> Result<PetOverlayOp, String> {
+    use tauri::Manager;
+    match app.get_webview_window(PET_OVERLAY_LABEL) {
+        Some(win) if win.is_visible().unwrap_or(false) => {
+            let _ = win.hide();
+            Ok(PetOverlayOp { created: false, label: PET_OVERLAY_LABEL.into() })
+        }
+        _ => pet_overlay_show(app),
+    }
+}
+
+/// 桌宠悬浮窗：拖拽到新屏幕坐标（x,y 为窗口左上角，由前端 `dragend` 上报）。
+#[tauri::command]
+fn pet_overlay_move(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window(PET_OVERLAY_LABEL) {
+        let _ = win.set_position(tauri::LogicalPosition { x, y });
+    }
+    Ok(())
 }
 
 /// 经验视图（序列化给前端）
@@ -552,6 +804,13 @@ fn model_add(
         builtin: false,
         temperature: 0.7,
         max_tokens: 4096,
+        tier: marguerite_core::model::tier::ModelTier::Balanced,
+        tier_caps: marguerite_core::model::tier::TierCaps::default(),
+        // GUI 里手工添加的档案**没有**声明过档位能力（caps 是 Default 填充的），
+        // 故必须显式给 false：路由准入据此区分「未声明（信任档位、标记未验证）」
+        // 与「已声明（用 caps 严格卡线）」。若给 true，会把默认均衡档当成作者的
+        // 严格声明，把该档案错误地卡在旗舰候选链之外。
+        tier_caps_declared: false,
     };
     let mut sel = state.model_selector.lock().map_err(|e| e.to_string())?;
     sel.add(profile).map_err(|e| e.to_string())
@@ -618,9 +877,24 @@ struct DoctorReportView {
     status: String,
 }
 
+/// 轻量运行时状态（供前端首次加载时判断是否需要引导配置）
+#[tauri::command]
+fn runtime_status() -> Result<serde_json::Value, String> {
+    let config = Config::load().unwrap_or_default();
+    let key_ok = !config.model.api_key.is_empty();
+    let config_exists = Config::config_path().exists();
+    Ok(serde_json::json!({
+        "api_key_configured": key_ok,
+        "model_provider": format!("{:?}", config.model.provider),
+        "model_name": config.model.model_name,
+        "first_run": !config_exists,
+        "gateway_ready": true,
+    }))
+}
+
 /// 系统诊断（对齐 `marguerite doctor`）
 #[tauri::command]
-fn doctor_check() -> DoctorReportView {
+fn doctor_check(state: State<'_, Arc<AppState>>) -> DoctorReportView {
     let config = Config::load().unwrap_or_default();
     let config_dir = Config::config_dir();
     let key_ok = !config.model.api_key.is_empty();
@@ -709,6 +983,68 @@ fn doctor_check() -> DoctorReportView {
             String::new()
         } else {
             "引擎未注册任何工具".into()
+        },
+    });
+
+    // ── P0 S3：插件真源组（让「声明了但没实现」在 doctor 里可见）──
+    let manifests = snapshot_plugin_manifests(&state);
+    let declarative = manifests.iter().filter(|m| m.is_declarative_only()).count();
+    let native = manifests.len() - declarative;
+    let manifest_diags: Vec<marguerite_core::plugins::ManifestDiagnostic> =
+        manifests.iter().flat_map(|m| m.validate()).collect();
+    let manifest_ok = !manifests.is_empty() && manifest_diags.is_empty();
+    checks.push(DoctorCheckView {
+        name: "plugin.manifest".into(),
+        // detail 口径与 S3 测试/UI 一致：先报「N 份中多少 declarative-only」，再报诊断。
+        detail: format!(
+            "{} 份清单：{} declarative-only / {} native；validate 诊断 {} 条",
+            manifests.len(),
+            declarative,
+            native,
+            manifest_diags.len()
+        ),
+        ok: manifest_ok,
+        hint: if manifests.is_empty() {
+            "未装载到任何 plugin manifest（plugins/manifests 目录缺失？）".into()
+        } else if manifest_diags.is_empty() {
+            format!(
+                "{declarative} 份清单均为纯声明式（无 entry / permissions），原生实现尚未接入"
+            )
+        } else {
+            manifest_diags
+                .iter()
+                .map(|d| format!("[{}] {}: {}", d.code, d.manifest, d.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        },
+    });
+
+    // patch 层摘要（S2 只读装载结果）
+    let patch_summary = state
+        .plugin_patch_summary
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let patch_diags = patch_summary
+        .as_ref()
+        .map(|s| s.diagnostics.len())
+        .unwrap_or(0);
+    checks.push(DoctorCheckView {
+        name: "plugin.patch".into(),
+        ok: patch_diags == 0,
+        detail: match &patch_summary {
+            Some(s) => format!("{} 条 patch；诊断 {} 条", s.total, s.diagnostics.len()),
+            None => "未装载（未找到 plugins/patches）".into(),
+        },
+        hint: match (&patch_summary, patch_diags) {
+            (None, _) => "patch 层未装载（plugins/patches 目录缺失或未启用）".into(),
+            (Some(_), 0) => "patch 层装载无诊断".into(),
+            (Some(s), _) => s
+                .diagnostics
+                .iter()
+                .map(|d| format!("[{}] {}: {}", d.code, d.target, d.message))
+                .collect::<Vec<_>>()
+                .join("; "),
         },
     });
 
@@ -992,8 +1328,6 @@ fn poker_auto(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), St
             } else {
                 (ActionKind::Fold, None)
             }
-        } else if has_pair {
-            (ActionKind::Call, None)
         } else {
             (ActionKind::Call, None)
         };
@@ -1060,6 +1394,7 @@ fn sandbox_info() -> SandboxInfoView {
 
 /// 计算机操控（对齐 TUI/CLI computer_use 工具，三层架构）
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // 输入动作参数天然较多，Tauri 命令签名直传
 async fn computer_use_action(
     action: String,
     x: Option<i64>,
@@ -1458,9 +1793,32 @@ fn fs_read_file(path: String) -> Result<String, String> {
 #[tauri::command]
 fn fs_write_file(path: String, content: String) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
     std::fs::write(&path, content).map_err(|e| format!("写入失败: {e}"))
+}
+
+/// 创建目录（含父目录），支持中文路径
+#[tauri::command]
+fn fs_mkdir(path: String) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("路径不可为空".into());
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {e}"))
+}
+
+/// 删除文件或目录（目录递归删除）
+#[tauri::command]
+fn fs_delete(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("路径不存在".into());
+    }
+    if p.is_dir() {
+        std::fs::remove_dir_all(p).map_err(|e| format!("删除目录失败: {e}"))
+    } else {
+        std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {e}"))
+    }
 }
 
 /// 在系统默认浏览器打开链接（仅 http/https）
@@ -1471,7 +1829,9 @@ fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        use marguerite_core::proc::SilentCommand;
         std::process::Command::new("cmd")
+            .silent()
             .args(["/C", "start", "", &url])
             .spawn()
             .map_err(|e| format!("打开浏览器失败: {e}"))?;
@@ -1558,27 +1918,79 @@ fn evolve_history() -> Result<Vec<EvolutionRecordView>, String> {
 }
 
 #[derive(serde::Serialize)]
+struct PluginDiagnosticView {
+    /// 机器可读诊断码，如 `manifest.hot_without_entry`
+    code: String,
+    /// 产生该诊断的清单 name
+    manifest: String,
+    /// 人类可读说明
+    message: String,
+}
+
+/// 插件槽视图（P0 S3）。
+///
+/// ⚠️ **向后兼容硬约束**：`name` / `kind` / `description` / `version` 四个字段是
+/// 既有契约（`gui/src/panels/PluginsPanel.tsx` 在消费），**只增不改**；`mode` /
+/// `entry` / `activation` / `permissions` / `diagnostics` 为 S3 纯增量字段。
+#[derive(serde::Serialize)]
 struct PluginSlotView {
+    // ── 既有字段（名与类型保持不变）──
     name: String,
     kind: String,
     description: String,
     version: String,
+    // ── P0 S3 新增字段 ──
+    /// `"declarative-only"`（纯声明式，无原生实现）| `"native"`（声明了 entry 或权限）
+    mode: String,
+    /// 原生入口（相对 manifest 目录），无则 None
+    entry: Option<String>,
+    /// `"restart"` | `"hot"`
+    activation: String,
+    /// 已声明权限条数
+    permissions: usize,
+    /// 清单自洽性诊断（`PluginManifest::validate()`）
+    diagnostics: Vec<PluginDiagnosticView>,
 }
 
-/// 插件槽列表（对齐 PluginSlot 统一注册）
+/// 插件清单列表（P0 S3：读**磁盘真源** `plugins/manifests/*.plugin.json`）。
+///
+/// 取代旧实现「从 `domain::capabilities::registry()` 假投影」——旧写法从不读磁盘清单，
+/// 导致「装了不动」在 UI 上完全不可见。现按真源输出，并把 `validate()` 诊断一并带出，
+/// 使「声明了但没实现」在同一张卡片上可见。
 #[tauri::command]
-fn plugins_list() -> Vec<PluginSlotView> {
-    // 返回内置工具/技能槽位信息（从能力注册表派生）
-    use marguerite_core::domain::capabilities;
-    capabilities::registry()
-        .iter()
-        .filter(|c| c.maturity.is_implemented())
-        .take(50)
-        .map(|c| PluginSlotView {
-            name: c.id.0.clone(),
-            kind: format!("{:?}", c.group),
-            description: c.description.clone(),
-            version: "0.1.0".into(),
+fn plugins_list(state: State<'_, Arc<AppState>>) -> Vec<PluginSlotView> {
+    use marguerite_core::plugins::Activation;
+
+    snapshot_plugin_manifests(&state)
+        .into_iter()
+        .map(|m| {
+            let diagnostics: Vec<PluginDiagnosticView> = m
+                .validate()
+                .into_iter()
+                .map(|d| PluginDiagnosticView {
+                    code: d.code.to_string(),
+                    manifest: d.manifest,
+                    message: d.message,
+                })
+                .collect();
+            PluginSlotView {
+                name: m.name.clone(),
+                kind: "plugin".to_string(),
+                description: m.description.clone(),
+                version: m.version.clone(),
+                mode: if m.is_declarative_only() {
+                    "declarative-only".to_string()
+                } else {
+                    "native".to_string()
+                },
+                entry: m.entry.clone(),
+                activation: match m.activation {
+                    Activation::Restart => "restart".to_string(),
+                    Activation::Hot => "hot".to_string(),
+                },
+                permissions: m.permissions.len(),
+                diagnostics,
+            }
         })
         .collect()
 }
@@ -1587,10 +1999,21 @@ fn plugins_list() -> Vec<PluginSlotView> {
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示工作台", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
+    // V2.1-P2：桌宠悬浮窗入口，缺省为可见状态（启动后未创建时点击会创建）。
+    let pet_toggle = MenuItem::with_id(app, "pet_toggle", "桌宠悬浮窗 · 切换显示", true, Some("CmdOrCtrl+Shift+P"))?;
+    let pet_hide = MenuItem::with_id(app, "pet_hide", "桌宠悬浮窗 · 隐藏", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Marguerite", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&show, &hide, &PredefinedMenuItem::separator(app)?, &quit],
+        &[
+            &show,
+            &hide,
+            &PredefinedMenuItem::separator(app)?,
+            &pet_toggle,
+            &pet_hide,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
     )?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
@@ -1603,6 +2026,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_window(app.clone()),
             "hide" => hide_window(app.clone()),
+            "pet_toggle" => {
+                let _ = pet_overlay_toggle(app.clone());
+            }
+            "pet_hide" => {
+                let _ = pet_overlay_hide(app.clone());
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -1659,6 +2088,96 @@ fn register_shortcut(app: &tauri::AppHandle) {
     eprintln!("[phase-c] 警告: 全部快捷键组合均被占用，切换窗口请用托盘");
 }
 
+/// 插件清单目录候选（`MARGUERITE_PLUGINS_DIR` > cwd > exe 同目录/上溯 > 安装资源布局）。
+///
+/// 与 core 的 `gateway::market::plugin_manifest_dir()` 同构 —— 该函数是 `pub(crate)`，
+/// 跨 crate 无法复用，故在此复刻候选项与「目录必须存在」的口径。
+fn plugin_manifest_dir_local() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("MARGUERITE_PLUGINS_DIR") {
+        if !p.trim().is_empty() {
+            let path = std::path::PathBuf::from(p);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let exe = std::env::current_exe().ok()?;
+    let mut candidates = vec![
+        cwd.join("plugins").join("manifests"),
+        exe.parent()?.join("plugins").join("manifests"),
+        exe.parent()?.parent()?.join("plugins").join("manifests"),
+        exe.parent()?
+            .join("resources")
+            .join("plugins")
+            .join("manifests"),
+    ];
+    candidates.retain(|p| p.is_dir());
+    candidates.into_iter().next()
+}
+
+/// P0 S3：按需回读磁盘 `plugins/manifests/*.plugin.json` 真源。
+///
+/// 与 setup 内 S2 只读装载块同口径（读失败/解析失败**按文件告警后跳过**，不让启动失败），
+/// 但按**文件路径排序**以保证顺序确定。仅在 `AppState` 快照为空时被
+/// `snapshot_plugin_manifests()` 调用（如 setup 尚未跑、或清单目录当时不存在）。
+fn load_plugin_manifests_local() -> Vec<marguerite_core::plugins::manifest::PluginManifest> {
+    use marguerite_core::plugins::manifest::PluginManifest;
+
+    let Some(dir) = plugin_manifest_dir_local() else {
+        eprintln!("[plugin] 未找到 plugins/manifests 目录（MARGUERITE_PLUGINS_DIR / cwd / exe 上溯）");
+        return Vec::new();
+    };
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            eprintln!("[plugin] 清单目录 {} 不可读: {e}", dir.display());
+            return Vec::new();
+        }
+    };
+
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let is_manifest = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".plugin.json"))
+            .unwrap_or(false);
+        if is_manifest {
+            paths.push(path);
+        }
+    }
+    // read_dir 顺序由文件系统决定；排序后与平台无关，且 plugins_list 输出稳定。
+    paths.sort();
+
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match PluginManifest::from_json(&text) {
+                Ok(m) => out.push(m),
+                Err(e) => eprintln!("[plugin] 清单 {} 解析失败，已跳过: {e}", path.display()),
+            },
+            Err(e) => eprintln!("[plugin] 清单 {} 读取失败，已跳过: {e}", path.display()),
+        }
+    }
+    out
+}
+
+/// 取插件真源快照：优先 `AppState`（setup 装入），快照为空时按需回读磁盘。
+///
+/// **不回写** `AppState`，避免在只读消费路径上引入写锁竞争。
+fn snapshot_plugin_manifests(
+    state: &State<'_, Arc<AppState>>,
+) -> Vec<marguerite_core::plugins::manifest::PluginManifest> {
+    if let Ok(guard) = state.plugin_manifests.lock() {
+        if !guard.is_empty() {
+            return guard.clone();
+        }
+    }
+    load_plugin_manifests_local()
+}
+
 /// 解析 Marguerite Web 界面产物目录（打包资源 > exe 同目录/上溯 > 工作目录），
 /// 供内嵌网关托管 `/control/` 控制台。
 ///
@@ -1668,12 +2187,40 @@ fn register_shortcut(app: &tauri::AppHandle) {
 /// 否则双击裸 exe（如 `target\release`）时网关会 serve 不存在的目录，
 /// UI 加载旧实例或 404，新改动不可见。
 fn resolve_webui_dir(app: &tauri::App) -> Option<std::path::PathBuf> {
+    webui_dir_candidates(app)
+        .into_iter()
+        .find(|p| p.join("index.html").is_file())
+}
+
+/// 可执行文件所在目录（Windows 上必须用 `current_exe()` 兜底）。
+///
+/// `tauri::path::PathResolver::executable_dir()` 在 Tauri 2.11 的文档里明确写着
+/// **Windows: Not supported**（内部 `dirs::executable_dir()` 在 Windows 返回 `None`
+/// → `Err(UnknownPath)`）。因此原 `if let Ok(exe) = app.path().executable_dir()`
+/// 这条腿在 Windows 上**恒不成立**，「exe 同目录 + 上溯 6 级」是死代码——实测裸 exe
+/// 只探测到 resource_dir 与 cwd 两个候选。此处回退到 `std::env::current_exe()`，
+/// 让该腿真正生效（双击 `target\release\marguerite-gui.exe` → 上溯找到仓库 `webui/dist`）。
+fn exe_dir(app: &tauri::App) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    if let Ok(dir) = app.path().executable_dir() {
+        return Some(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+}
+
+/// `resolve_webui_dir` 的全部候选路径（按探测顺序）。
+///
+/// 单独抽出供**诊断输出**使用：产物缺失时必须能让用户看到「到底找过哪些路径」，
+/// 而不是静默白屏（P0-D 缺陷 1：裸 exe 出仓库 → `/control/` 404 白屏且日志谎报就绪）。
+fn webui_dir_candidates(app: &tauri::App) -> Vec<std::path::PathBuf> {
     use tauri::Manager;
     let mut candidates = Vec::new();
     if let Ok(res) = app.path().resource_dir() {
         candidates.push(res.join("webui/dist"));
     }
-    if let Ok(exe) = app.path().executable_dir() {
+    if let Some(exe) = exe_dir(app) {
         candidates.push(exe.join("webui/dist"));
         // 与 pyengine 侧车探测一致：从 exe 目录向上逐级查找 `webui/dist`，
         // 覆盖 `target\release\marguerite-gui.exe` 双击 → `marguerite\webui\dist`。
@@ -1692,8 +2239,6 @@ fn resolve_webui_dir(app: &tauri::App) -> Option<std::path::PathBuf> {
         candidates.push(cwd.join("webui/dist"));
     }
     candidates
-        .into_iter()
-        .find(|p| p.join("index.html").is_file())
 }
 
 /// 解析内嵌技能目录（打包资源），供 `setup` 注入 `config.skills.skills_dir`。
@@ -1743,8 +2288,154 @@ fn alert_async(app: &tauri::AppHandle, title: &str, msg: &str) {
     let title = title.to_string();
     let msg = msg.to_string();
     tauri::async_runtime::spawn(async move {
-        let _ = handle.dialog().message(msg).title(title).show(move |_| {});
+        handle.dialog().message(msg).title(title).show(move |_| {});
     });
+}
+
+// ---------------------------------------------------------------------------
+// 内嵌网关「界面就绪」判定（P0-D 缺陷 1）
+//
+// 历史缺陷：就绪判定只做一次 TCP `connect_timeout`——网关在监听即打印
+// 「内嵌网关已在 127.0.0.1:18790 就绪」，但 `/control/` 实际返回 404
+// （裸 exe 复制到仓库外、`webui/dist` 缺失时），窗口全白且日志谎报成功。
+// 现在改为真实 `GET /control/` 并要求 HTTP 200 + 非兜底诊断页。
+// ---------------------------------------------------------------------------
+
+/// `/control/` 探测结论
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlProbe {
+    /// HTTP 200 且返回真实控制台入口（非兜底诊断页）
+    Ready,
+    /// 网关在监听，但返回兜底诊断页（core 侧 `webui/dist` 缺失）
+    FallbackPage { status: u16 },
+    /// 其它 HTTP 状态码（期望 200）
+    HttpStatus { status: u16 },
+    /// 连接 / 读取失败
+    Unreachable { reason: String },
+}
+
+/// 从原始 HTTP 响应判定 `/control/` 是否真的可用（纯函数，便于单测）。
+///
+/// 规则：
+/// - `200` 且**不含**兜底诊断页标记 → [`ControlProbe::Ready`]；
+/// - 含标记（core 的产物缺失诊断页，固定 503）→ [`ControlProbe::FallbackPage`]；
+/// - 无合法状态行 → [`ControlProbe::Unreachable`]；
+/// - 其它状态码 → [`ControlProbe::HttpStatus`]（同样视为未就绪）。
+fn classify_control_response(raw: &str) -> ControlProbe {
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let is_fallback = raw.contains(marguerite_core::gateway::server::WEBUI_MISSING_MARKER);
+    match (status, is_fallback) {
+        (200, false) => ControlProbe::Ready,
+        (_, true) => ControlProbe::FallbackPage { status },
+        (0, false) => ControlProbe::Unreachable {
+            reason: "响应缺少合法状态行".to_string(),
+        },
+        _ => ControlProbe::HttpStatus { status },
+    }
+}
+
+/// 对 `127.0.0.1:{DEFAULT_PORT}/control/` 发一次真实 HTTP/1.1 GET（手写请求，
+/// 不引入新依赖、不走任何第三方 HTTP 客户端），返回原始响应文本。
+fn fetch_control_page(timeout: std::time::Duration) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let addr: std::net::SocketAddr = ([127u8, 0, 0, 1], DEFAULT_PORT).into();
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("连接 127.0.0.1:{DEFAULT_PORT} 失败: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(
+            b"GET /control/ HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: marguerite-gui-readiness\r\nConnection: close\r\n\r\n",
+        )
+        .map_err(|e| format!("发送 GET /control/ 失败: {e}"))?;
+    let _ = stream.flush();
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 512 * 1024 {
+                    break;
+                }
+            }
+            // 读超时：已读到的部分照常判定（不因末尾无 FIN 而丢弃整段响应）
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break
+            }
+            Err(e) => return Err(format!("读取 /control/ 响应失败: {e}")),
+        }
+    }
+    if buf.is_empty() {
+        return Err("连接被立即关闭（无任何响应字节）".to_string());
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 真实探测一次 `/control/` 可用性。
+fn probe_control_page(timeout: std::time::Duration) -> ControlProbe {
+    match fetch_control_page(timeout) {
+        Ok(raw) => classify_control_response(&raw),
+        Err(reason) => ControlProbe::Unreachable { reason },
+    }
+}
+
+/// 把探测结论转成「可执行的诊断」（摘要 + 修复动作），供 stderr 与原生对话框共用。
+///
+/// 纯函数：`webui_missing` 为 `resolve_webui_dir` 的结果，`candidates` 为探测过的
+/// 全部候选路径——用户据此能自己把产物放对位置，而不是面对白屏猜。
+fn diagnose_control_failure(
+    probe: &ControlProbe,
+    webui_missing: bool,
+    candidates: &[std::path::PathBuf],
+) -> (String, String) {
+    let summary = match probe {
+        ControlProbe::Ready => format!(
+            "内嵌网关已在 127.0.0.1:{DEFAULT_PORT} 就绪（GET /control/ → HTTP 200）"
+        ),
+        ControlProbe::FallbackPage { status } => format!(
+            "界面未就绪：GET /control/ 返回 HTTP {status}（兜底诊断页 = WebUI 产物缺失），窗口显示的是诊断页而非控制台"
+        ),
+        ControlProbe::HttpStatus { status } => format!(
+            "界面未就绪：GET /control/ 返回 HTTP {status}（期望 200），窗口可能是错误页"
+        ),
+        ControlProbe::Unreachable { reason } => format!(
+            "界面未就绪：无法访问 http://127.0.0.1:{DEFAULT_PORT}/control/（{reason}）"
+        ),
+    };
+
+    let mut hint = String::new();
+    let artifacts_missing =
+        webui_missing || matches!(probe, ControlProbe::FallbackPage { .. });
+    if artifacts_missing {
+        hint.push_str(&format!(
+            "未找到 webui/dist（已探测 {} 个候选路径，均无 index.html）：",
+            candidates.len()
+        ));
+        for c in candidates {
+            hint.push_str(&format!("\n  - {}", c.display()));
+        }
+        hint.push_str(&format!(
+            "\n修复（任选其一）：1) 把 webui/dist 放到 exe 同级目录；2) 设置环境变量 MARGUERITE_WEBUI_DIST=<绝对路径>；3) 在源码目录运行 npm run build（webui/）后重启本程序。\n窗口内已显示同一份诊断页（HTTP {DEFAULT_PORT}/control/ 返回 503 诊断页，非空白页）。"
+        ));
+    } else {
+        hint.push_str(&format!(
+            "网关进程可能未起来或端口被占用：确认 127.0.0.1:{DEFAULT_PORT} 无其它 Marguerite 实例占用，再重启本程序。"
+        ));
+    }
+    (summary, hint)
 }
 
 /// 应用入口
@@ -1807,7 +2498,15 @@ pub fn run() {
             // `ws://localhost:18790/ws` 走 RPC v3 全量方法（渠道/技能/记忆/工具）。
             // 端口占用已在 setup 入口的单实例守卫处拦截（弹窗并退出）；此处网关节点
             // 若仍 bind 失败，同样走 alert_fatal 弹窗退出，不再静默降级到陈旧实例。
+            let webui_candidates = webui_dir_candidates(app);
             let webui_dir = resolve_webui_dir(app);
+            let webui_missing = webui_dir.is_none();
+            if webui_missing {
+                eprintln!(
+                    "[gateway] 未找到 webui/dist（探测 {} 个候选路径）：/control/ 将回诊断页而非控制台",
+                    webui_candidates.len()
+                );
+            }
             let bundled_skills = resolve_skills_dir(app);
             let gw_app = app.handle().clone();
             std::thread::spawn(move || {
@@ -1833,6 +2532,112 @@ pub fn run() {
                     if let Some(skills) = bundled_skills {
                         config.skills.skills_dir = skills.to_string_lossy().into_owned();
                     }
+                    // ── P0 S2：插件 patch 层**只读装载**（解析 + 校验 + 排序 + 摘要日志）──
+                    // 现状：「装了不动」在本项目是**完全静默**的（清单只被当数据读）。
+                    // 本切片只加载一次并打一行摘要；**不 apply 到槽位**（见后续切片 S4），
+                    // 不改 GatewayState、不新增 RPC。装载失败仅告警，绝不让启动失败。
+                    {
+                        use marguerite_core::plugins::manifest::PluginManifest;
+                        use marguerite_core::plugins::patch;
+
+                        let known: Vec<PluginManifest> =
+                            match plugin_manifest_dir_local() {
+                                Some(dir) => match std::fs::read_dir(&dir) {
+                                    Ok(entries) => {
+                                        let mut out = Vec::new();
+                                        for entry in entries.flatten() {
+                                            let path = entry.path();
+                                            let is_manifest = path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .map(|n| n.ends_with(".plugin.json"))
+                                                .unwrap_or(false);
+                                            if !is_manifest {
+                                                continue;
+                                            }
+                                            match std::fs::read_to_string(&path) {
+                                                Ok(text) => match PluginManifest::from_json(&text) {
+                                                    Ok(m) => out.push(m),
+                                                    Err(e) => eprintln!(
+                                                        "[patch] 清单 {} 解析失败，已跳过: {e}",
+                                                        path.display()
+                                                    ),
+                                                },
+                                                Err(e) => eprintln!(
+                                                    "[patch] 清单 {} 读取失败，已跳过: {e}",
+                                                    path.display()
+                                                ),
+                                            }
+                                        }
+                                        out
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[patch] 清单目录 {} 不可读: {e}",
+                                            dir.display()
+                                        );
+                                        Vec::new()
+                                    }
+                                },
+                                None => {
+                                    eprintln!(
+                                        "[patch] 未找到 plugins/manifests 目录，patch 校验将全部报 orphan_target"
+                                    );
+                                    Vec::new()
+                                }
+                            };
+
+                        // P0 S3：把真源清单快照存进 AppState（供 plugins_list / doctor_check 读取）。
+                        // 只加字段，不改 GatewayState、不改本块既有校验语义。
+                        if let Some(state) = gw_app.try_state::<Arc<AppState>>() {
+                            if let Ok(mut guard) = state.plugin_manifests.lock() {
+                                *guard = known.clone();
+                            }
+                        }
+
+                        match patch::patches_dir() {
+                            Some(dir) => match patch::PatchLayer::load_dir(&dir) {
+                                Ok(layers) => {
+                                    let summary = patch::summarize(&layers, &known);
+                                    // P0 S3：patch 摘要（含诊断）同样存入 AppState，供 doctor 消费。
+                                    if let Some(state) = gw_app.try_state::<Arc<AppState>>() {
+                                        if let Ok(mut guard) = state.plugin_patch_summary.lock() {
+                                            *guard = Some(summary.clone());
+                                        }
+                                    }
+                                    let profiles = summary
+                                        .by_profile
+                                        .iter()
+                                        .map(|(p, n)| format!("{p}={n}"))
+                                        .collect::<Vec<_>>()
+                                        .join(",");
+                                    eprintln!(
+                                        "[patch] 装载 {} 条 patch（profile: {}），诊断 {} 条",
+                                        summary.total,
+                                        if profiles.is_empty() {
+                                            "无".to_string()
+                                        } else {
+                                            profiles
+                                        },
+                                        summary.diagnostics.len()
+                                    );
+                                    for d in &summary.diagnostics {
+                                        eprintln!(
+                                            "[patch] [{}] target={} {}",
+                                            d.code, d.target, d.message
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[patch] patch 目录 {} 装载失败: {e:#}", dir.display())
+                                }
+                            },
+                            None => eprintln!(
+                                "[patch] 未找到 patch 目录（MARGUERITE_PATCHES_DIR / plugins/patches）"
+                            ),
+                        }
+                    }
+
                     match GatewayState::new(config, webui_dir) {
                         Ok(state) => {
                             let state = std::sync::Arc::new(state);
@@ -1858,35 +2663,41 @@ pub fn run() {
                 });
             });
 
-            // ── 网关就绪等待（窗口加载 /control/ 前确保网关已监听）──
+            // ── 网关就绪等待（窗口加载 /control/ 前确保**界面**真的可用）──
+            // 判定依据是真实 `GET /control/` 的 HTTP 200（且非兜底诊断页），
+            // 不是 TCP connect：后者曾在产物缺失时谎报「就绪」（P0-D 缺陷 1）。
             {
-                let addr: std::net::SocketAddr = ([127, 0, 0, 1], DEFAULT_PORT).into();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-                let mut ready = false;
-                while std::time::Instant::now() < deadline {
-                    if std::net::TcpStream::connect_timeout(
-                        &addr,
-                        std::time::Duration::from_millis(200),
-                    )
-                    .is_ok()
+                // 循环体内必定赋值后才可能 break，故此处无需初值（避免 unused_assignments）。
+                let mut last: ControlProbe;
+                loop {
+                    last = probe_control_page(std::time::Duration::from_millis(1500));
+                    if matches!(last, ControlProbe::Ready)
+                        || std::time::Instant::now() >= deadline
                     {
-                        ready = true;
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(150));
                 }
-                if ready {
-                    eprintln!("[gateway] 内嵌网关已在 127.0.0.1:{DEFAULT_PORT} 就绪");
+
+                if matches!(last, ControlProbe::Ready) {
+                    eprintln!(
+                        "[gateway] 内嵌网关已在 127.0.0.1:{DEFAULT_PORT} 就绪（GET /control/ → HTTP 200，真实控制台入口）"
+                    );
                 } else {
-                    // 网关未就绪：窗口可能显示错误页。用原生对话框告知用户（非致命，
-                    // 不阻塞启动），便于排查端口被占用等环境问题。
+                    // 未就绪：打印可执行诊断（探测过的路径 + 修复动作），并用原生对话框
+                    // 告知用户（非致命，不阻塞启动）。窗口本身会渲染 core 侧的 503
+                    // 诊断页，因此不会停在空白页。
+                    let (summary, hint) =
+                        diagnose_control_failure(&last, webui_missing, &webui_candidates);
+                    eprintln!("[gateway] {summary}");
+                    for line in hint.lines() {
+                        eprintln!("[gateway] {line}");
+                    }
                     alert_async(
                         &handle,
-                        "内嵌网关未就绪",
-                        &format!(
-                            "8 秒内内嵌网关未在 127.0.0.1:{} 就绪，主窗口可能显示错误页。\n若已有其它 Marguerite 实例占用该端口，请先关闭它。",
-                            DEFAULT_PORT
-                        ),
+                        "内嵌网关界面未就绪",
+                        &format!("{summary}\n\n{hint}"),
                     );
                 }
             }
@@ -1895,12 +2706,22 @@ pub fn run() {
         .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             guard_check,
+            // 开机自启动（HKCU Run 键，零依赖；见文件上方说明与安装器同步要求）
+            autostart_status,
+            autostart_set,
             repair_code,
             plan_task,
             run_turn,
+            approval_approve,
+            approval_deny,
             toggle_window,
             show_window,
             hide_window,
+            // V2.1-P2：桌宠悬浮窗（独立命令组，契约与托盘菜单同步）
+            pet_overlay_show,
+            pet_overlay_hide,
+            pet_overlay_toggle,
+            pet_overlay_move,
             record_experience,
             search_experience,
             model_list,
@@ -1916,6 +2737,7 @@ pub fn run() {
             sidecar_start,
             sidecar_stop,
             doctor_check,
+            runtime_status,
             mcp_list,
             skills_list,
             skills_install,
@@ -1948,8 +2770,155 @@ pub fn run() {
             fs_list_dir,
             fs_read_file,
             fs_write_file,
+            fs_mkdir,
+            fs_delete,
             open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ───────────── V2.2-Tauri 联调：桌宠悬浮窗纯逻辑单测 ─────────────
+//
+// 真实 `cargo tauri dev` 需要桌面会话 + WebView2，无法在无头 CI 自动断言。
+// 此处把窗口决策的纯逻辑抽成可测函数（缺省位置 / 幂等标签），在 lib 层单测覆盖；
+// 命令本体（WebviewWindowBuilder 配置）由 `cargo check -p marguerite-gui` 编译门禁
+// + 人工 `cargo tauri dev` 冒烟清单（见 docs/development.md）保证。
+#[cfg(test)]
+mod pet_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn default_position_uses_workarea_bottom_right() {
+        let (x, y) = pet_overlay_default_position(Some((0.0, 0.0, 1920.0, 1040.0)), 360.0, 420.0);
+        assert_eq!(x, 1920.0 - 360.0 - 24.0);
+        assert_eq!(y, 1040.0 - 420.0 - 24.0);
+    }
+
+    #[test]
+    fn default_position_offsets_from_non_zero_workarea_origin() {
+        let (x, y) = pet_overlay_default_position(Some((80.0, 40.0, 1000.0, 800.0)), 360.0, 420.0);
+        assert_eq!(x, 80.0 + 1000.0 - 360.0 - 24.0);
+        assert_eq!(y, 40.0 + 800.0 - 420.0 - 24.0);
+    }
+
+    #[test]
+    fn default_position_falls_back_without_monitor() {
+        let (x, y) = pet_overlay_default_position(None, 360.0, 420.0);
+        assert_eq!((x, y), (640.0, 480.0));
+    }
+
+    #[test]
+    fn overlay_window_constants_are_consistent() {
+        // 契约卫生：URL 指向回环 DEFAULT_PORT 的 /control/pet-overlay（WebUI PetOverlayView 路由）
+        let url = pet_overlay_url();
+        assert!(
+            url.starts_with(&format!("http://localhost:{DEFAULT_PORT}/control/pet-overlay")),
+            "got: {url}"
+        );
+        assert_eq!(PET_OVERLAY_LABEL, "pet-overlay");
+        const { assert!(PET_OVERLAY_W > 0.0 && PET_OVERLAY_H > 0.0) };
+    }
+}
+
+/// P0-D 缺陷 1：内嵌网关「界面就绪」判定的单测。
+///
+/// 原缺陷是「TCP connect 成功即判就绪」——产物缺失时 `/control/` 实为 404 白屏，
+/// 日志却打印就绪。这些测试把判定钉在真实 HTTP 状态 + 内容标记上。
+#[cfg(test)]
+mod gateway_readiness_tests {
+    use super::*;
+
+    const REAL_INDEX: &str =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<!doctype html><html><body><div id=\"app\"></div></body></html>";
+
+    #[test]
+    fn ready_only_for_200_without_fallback_marker() {
+        assert_eq!(
+            classify_control_response(REAL_INDEX),
+            ControlProbe::Ready,
+            "200 + 真实入口应判就绪"
+        );
+    }
+
+    #[test]
+    fn missing_webui_fallback_page_is_never_ready() {
+        // core 兜底诊断页：503 + 标记（标记常量与 core 同源，防两处字面量漂移）
+        let page = format!(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/html\r\nx-marguerite-webui: missing\r\n\r\n<!doctype html><html><body {}>未找到 webui/dist</body></html>",
+            marguerite_core::gateway::server::WEBUI_MISSING_MARKER
+        );
+        assert_eq!(
+            classify_control_response(&page),
+            ControlProbe::FallbackPage { status: 503 },
+            "兜底诊断页不得判就绪（这正是原缺陷的假阳性）"
+        );
+    }
+
+    #[test]
+    fn status_200_with_marker_still_treated_as_fallback() {
+        // 防御：万一诊断页状态码被改成 200，标记仍能拦住假就绪
+        let page = format!(
+            "HTTP/1.1 200 OK\r\n\r\n<html><body {}></body></html>",
+            marguerite_core::gateway::server::WEBUI_MISSING_MARKER
+        );
+        assert_eq!(
+            classify_control_response(&page),
+            ControlProbe::FallbackPage { status: 200 }
+        );
+    }
+
+    #[test]
+    fn blank_404_and_other_statuses_are_not_ready() {
+        // 实测的原缺陷响应：404 且 content-length: 0（空白窗）
+        let blank = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n";
+        assert_eq!(
+            classify_control_response(blank),
+            ControlProbe::HttpStatus { status: 404 }
+        );
+        assert_eq!(
+            classify_control_response("HTTP/1.1 500 Internal Server Error\r\n\r\nx"),
+            ControlProbe::HttpStatus { status: 500 }
+        );
+        assert!(matches!(
+            classify_control_response("not-http-at-all"),
+            ControlProbe::Unreachable { .. }
+        ));
+    }
+
+    #[test]
+    fn diagnostics_list_probed_paths_and_fix_actions() {
+        let candidates = vec![
+            std::path::PathBuf::from(r"C:\app\resources\webui\dist"),
+            std::path::PathBuf::from(r"C:\app\webui\dist"),
+        ];
+        let (summary, hint) = diagnose_control_failure(
+            &ControlProbe::FallbackPage { status: 503 },
+            true,
+            &candidates,
+        );
+        assert!(summary.contains("HTTP 503"), "摘要: {summary}");
+        assert!(summary.contains("未就绪"), "摘要: {summary}");
+        for c in &candidates {
+            assert!(
+                hint.contains(&c.display().to_string()),
+                "诊断须列出已探测路径: {hint}"
+            );
+        }
+        assert!(hint.contains("npm run build"), "诊断须给构建指引: {hint}");
+        assert!(hint.contains("MARGUERITE_WEBUI_DIST"), "诊断须给环境变量: {hint}");
+        assert!(hint.contains("exe 同级目录"), "诊断须给放置指引: {hint}");
+
+        // 产物存在但网关不可达：给端口占用指引，而不是误报产物缺失
+        let (summary, hint) = diagnose_control_failure(
+            &ControlProbe::Unreachable {
+                reason: "连接失败: 拒绝".to_string(),
+            },
+            false,
+            &candidates,
+        );
+        assert!(summary.contains("无法访问"), "摘要: {summary}");
+        assert!(hint.contains("18790"), "端口指引: {hint}");
+        assert!(!hint.contains("npm run build"), "不该误报产物缺失: {hint}");
+    }
 }

@@ -27,14 +27,18 @@ async function mountRouting(options: { modelRoutingMode: ModelRoutingMode; busy?
 }
 
 describe('ChatComposerModelRouting', () => {
-  it('renders the four routing modes including Bloom fusion routing', async () => {
+  it('renders the five routing modes including deep fusion and extreme orchestration', async () => {
     const { app, el } = await mountRouting({ modelRoutingMode: 'off' })
 
     const options = Array.from(el.querySelectorAll<HTMLButtonElement>('.composer-model-routing__option'))
-    expect(options).toHaveLength(4)
+    expect(options).toHaveLength(5)
     expect(options[0].getAttribute('role')).toBe('radio')
-    expect(options.some(option => option.textContent?.includes('Bloom fusion routing'))).toBe(true)
+    expect(options.some(option => option.textContent?.includes('Deep fusion routing'))).toBe(true)
     expect(el.textContent).toContain('Fusion routing + AI auto-orchestration')
+    // 极致编排路由（原全谱超模）选项现已落地
+    const omniOption = options.find(option => option.classList.contains('composer-model-routing__option--omni_agent'))
+    expect(omniOption).toBeTruthy()
+    expect(omniOption?.getAttribute('aria-checked')).toBe('false')
 
     app.unmount()
     el.remove()

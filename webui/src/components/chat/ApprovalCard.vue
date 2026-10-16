@@ -53,6 +53,50 @@
         <div class="approval-card__label">{{ t('chat.approval.command') }}</div>
         <pre class="approval-card__pre approval-card__pre--cmd">{{ displayCommand }}</pre>
       </template>
+      <!-- M2-C1 Intent Preview：结构化意图（操作类型/目标对象/影响范围/副作用） -->
+      <section
+        v-if="intentShown"
+        class="approval-card__intent"
+        data-testid="approval-intent"
+        role="note"
+      >
+        <div class="approval-card__label approval-card__label--intent">
+          {{ t('chat.approval.intent') }}
+        </div>
+        <dl class="approval-card__intent-grid">
+          <template v-if="intentSelected.kind">
+            <div class="approval-card__intent-row" data-testid="approval-intent-kind">
+              <dt>{{ t('chat.approval.intentAction') }}</dt>
+              <dd><code class="approval-card__intent-kind">{{ intentSelected.kind }}</code></dd>
+            </div>
+          </template>
+          <template v-if="intentSelected.target">
+            <div class="approval-card__intent-row" data-testid="approval-intent-target">
+              <dt>{{ t('chat.approval.intentObject') }}</dt>
+              <dd><code class="approval-card__intent-target">{{ intentSelected.target }}</code></dd>
+            </div>
+          </template>
+          <template v-if="intentSelected.scope && intentSelected.scope !== intentSelected.target">
+            <div class="approval-card__intent-row" data-testid="approval-intent-scope">
+              <dt>{{ t('chat.approval.intentScope') }}</dt>
+              <dd>{{ intentSelected.scope }}</dd>
+            </div>
+          </template>
+          <template v-if="intentSelected.irreversible">
+            <div class="approval-card__intent-row" data-testid="approval-intent-irreversible">
+              <dt>{{ t('chat.approval.intentIrreversible') }}</dt>
+              <dd class="approval-card__intent-irreversible">{{ t('chat.approval.intentIrreversibleYes') }}</dd>
+            </div>
+          </template>
+        </dl>
+        <ul v-if="intentSideEffects.length" class="approval-card__intent-effects">
+          <li
+            v-for="(fx, i) in intentSideEffects"
+            :key="i"
+            class="approval-card__intent-effect"
+          >{{ fx }}</li>
+        </ul>
+      </section>
       <section
         v-if="riskTitle"
         class="approval-card__risk"
@@ -234,6 +278,27 @@ const displayCommand = computed(() =>
 
 const showCommand = computed(() =>
   Boolean(displayCommand.value))
+
+// ---- M2-C1 Intent Preview：结构化意图投影 ----
+const intentSelected = computed(() => {
+  const it = props.approval.intent
+  return {
+    kind: it?.kind ? String(it.kind) : '',
+    target: it?.target ? String(it.target) : '',
+    scope: it?.scope ? String(it.scope) : '',
+    irreversible: it?.irreversible === true,
+  }
+})
+
+const intentSideEffects = computed<string[]>(() =>
+  Array.isArray(props.approval.intent?.side_effects)
+    ? props.approval.intent!.side_effects!.map(String).filter(Boolean)
+    : [])
+
+const intentShown = computed(() =>
+  Boolean(intentSelected.value.kind)
+  || intentSelected.value.irreversible
+  || intentSideEffects.value.length > 0)
 
 const isSandboxApproval = computed(() =>
   !props.approval.destructive
@@ -444,6 +509,65 @@ function emitDeny() {
   color: var(--warn);
   font-size: var(--fs-sm);
   margin: 0;
+}
+
+.approval-card__intent {
+  background: color-mix(in srgb, var(--border) 6%, var(--bg-surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  padding: 10px var(--sp-3);
+}
+
+.approval-card__label--intent {
+  margin-bottom: 6px;
+}
+
+.approval-card__intent-grid {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.approval-card__intent-row {
+  display: grid;
+  font-size: var(--fs-xs);
+  gap: 8px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  line-height: 1.4;
+}
+
+.approval-card__intent-row dt {
+  color: var(--text-muted);
+}
+
+.approval-card__intent-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.approval-card__intent-kind,
+.approval-card__intent-target {
+  font-weight: 600;
+}
+
+.approval-card__intent-irreversible {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.approval-card__intent-effects {
+  display: grid;
+  font-size: var(--fs-xs);
+  gap: 2px;
+  margin: 8px 0 0;
+  padding-left: 16px;
+}
+
+.approval-card__intent-effect {
+  color: var(--text-muted);
+  line-height: 1.45;
 }
 
 .approval-card__risk {

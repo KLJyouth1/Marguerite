@@ -12,7 +12,11 @@
           <Icon name="listChecks" :size="17" />
         </span>
         <span class="plan-card__eyebrow">{{ t('chat.plan.label') }}</span>
-        <span class="plan-card__revision">{{ t('chat.plan.revision', { id: plan.revisionId }) }}</span>
+        <span
+          class="plan-card__revision"
+          :title="plan.revisionId"
+          :aria-label="t('chat.plan.revisionFull', { id: plan.revisionId })"
+        >{{ t('chat.plan.revision', { id: revisionShortId }) }}</span>
       </div>
       <div class="plan-card__header-actions">
         <span
@@ -59,6 +63,22 @@
       @transitionend="finishBodyMotion"
     >
       <div ref="bodyContentElement" class="plan-card__body-content">
+        <!-- A5：编排形态 / 决策理由由前端按 i18n 渲染（引擎只下发机器键 + 自述文本），
+             标签不再硬编码进 Markdown 正文，避免非中文界面冒中文。 -->
+        <dl
+          v-if="plan.strategy || plan.rationale"
+          class="plan-card__meta"
+        >
+          <template v-if="plan.strategy">
+            <dt class="plan-card__meta-label">{{ t('chat.plan.strategyLabel') }}</dt>
+            <dd class="plan-card__meta-value">{{ strategyLabel }}</dd>
+          </template>
+          <template v-if="plan.rationale">
+            <dt class="plan-card__meta-label">{{ t('chat.plan.rationaleLabel') }}</dt>
+            <dd class="plan-card__meta-value">{{ plan.rationale }}</dd>
+          </template>
+        </dl>
+
         <!-- eslint-disable-next-line vue/no-v-html -- useChatTextRendering sanitizes this HTML. -->
         <div
           v-if="renderedMarkdown"
@@ -73,20 +93,111 @@
         >
           <h4 :id="stepsTitleId" class="plan-card__steps-title">
             {{ t('chat.plan.steps') }}
+            <span
+              v-if="editing"
+              class="plan-card__editing-badge"
+            >
+              {{ t('chat.plan.editing') }}
+            </span>
           </h4>
           <ol class="plan-card__step-list">
             <li
-              v-for="step in plan.steps"
+              v-for="(step, stepIndex) in plan.steps"
               :key="step.stepId"
               class="plan-card__step"
               :data-step-id="step.stepId"
             >
+              <span class="plan-card__step-index" aria-hidden="true">{{ stepIndex + 1 }}</span>
               <span class="plan-card__step-copy">
-                <span class="plan-card__step-title">{{ step.title }}</span>
+                <!-- M2-C2：行内重命名（执行前编辑子任务） -->
+                <template v-if="editing && renamingStepId === step.stepId">
+                  <input
+                    :id="`plan-step-title-${step.stepId}`"
+                    v-model="renameDraft"
+                    class="plan-card__step-input"
+                    :placeholder="t('chat.plan.stepTitlePlaceholder')"
+                    @keydown.enter.prevent="commitRename(step)"
+                    @keydown.esc.prevent="cancelRename"
+                  />
+                </template>
+                <template v-else>
+                  <span class="plan-card__step-title">
+                    <span>{{ step.title }}</span>
+                    <span
+                      v-if="editing"
+                      class="plan-card__step-rename"
+                      role="button"
+                      tabindex="0"
+                      :aria-label="t('chat.plan.renameStep')"
+                      @click="startRename(step)"
+                      @keydown.enter.prevent="startRename(step)"
+                      @keydown.space.prevent="startRename(step)"
+                    >{{ t('chat.plan.renameStep') }}</span>
+                  </span>
+                </template>
                 <span v-if="step.details" class="plan-card__step-details">{{ step.details }}</span>
+                <!-- M2-C2：DAG 可视化——展示依赖的前置步骤（空 = 可并行） -->
+                <span
+                  v-if="stepDependencyTitles(step).length"
+                  class="plan-card__step-deps"
+                >
+                  <span class="plan-card__step-deps-label">{{ t('chat.plan.dependsOn') }}</span>
+                  <span
+                    v-for="depTitle in stepDependencyTitles(step)"
+                    :key="depTitle"
+                    class="plan-card__step-dep"
+                  >{{ depTitle }}</span>
+                </span>
               </span>
+              <button
+                v-if="editing"
+                class="plan-card__step-remove"
+                type="button"
+                :disabled="actionsDisabled"
+                :aria-label="t('chat.plan.removeStep')"
+                :title="t('chat.plan.removeStep')"
+                @click="emit('step-remove', step.stepId)"
+              >
+                <Icon name="trash" :size="14" aria-hidden="true" />
+              </button>
             </li>
           </ol>
+          <!-- M2-C2：执行前添加子任务 -->
+          <div v-if="editing" class="plan-card__step-add">
+            <template v-if="addingStep">
+              <input
+                v-model="addDraft"
+                class="plan-card__step-input"
+                :placeholder="t('chat.plan.stepTitlePlaceholder')"
+                @keydown.enter.prevent="commitAdd()"
+                @keydown.esc.prevent="addingStep = false"
+              />
+              <button
+                class="btn btn--primary btn--sm"
+                type="button"
+                :disabled="!addDraft.trim()"
+                @click="commitAdd()"
+              >
+                {{ t('chat.plan.saveStep') }}
+              </button>
+              <button
+                class="btn btn--sm"
+                type="button"
+                @click="addingStep = false"
+              >
+                {{ t('chat.plan.cancel') }}
+              </button>
+            </template>
+            <button
+              v-else
+              class="btn btn--sm"
+              type="button"
+              :disabled="actionsDisabled"
+              @click="addingStep = true"
+            >
+              {{ t('chat.plan.addStep') }}
+            </button>
+          </div>
         </section>
       </div>
       <span
@@ -97,6 +208,19 @@
     </div>
 
     <footer v-if="plan.current" class="plan-card__actions">
+      <button
+        v-if="plan.reuseCandidate"
+        class="btn plan-card__action--reuse"
+        type="button"
+        :disabled="actionsDisabled"
+        data-testid="plan-card-reuse-last"
+        @click="emit('reuse-last', {
+          planId: plan.planId,
+          revisionId: plan.reuseCandidate.revisionId,
+        })"
+      >
+        {{ t('chat.plan.reuseLast', { title: plan.reuseCandidate.title }) }}
+      </button>
       <button
         class="btn btn--primary plan-card__action--primary"
         type="button"
@@ -154,15 +278,23 @@ const props = withDefaults(defineProps<{
   plan: PlanRevisionSnapshot
   disabled?: boolean
   pendingAction?: PlanCardAction | null
+  /** M2-C2：执行前是否允许增删改子任务（仅当前计划且无运行中任务时启用） */
+  editing?: boolean
 }>(), {
   disabled: false,
   pendingAction: null,
+  editing: false,
 })
 
 const emit = defineEmits<{
   'implement-current': [target: PlanCardActionTarget]
   'implement-new': [target: PlanCardActionTarget]
   replan: [target: PlanCardActionTarget]
+  /** D-05/T08：复用「上次跑通」的同需求计划（按钮仅在有复用候选时出现）。 */
+  'reuse-last': [target: PlanCardActionTarget]
+  'step-add': [step: { stepTitle: string; details?: string; deps?: string[] }]
+  'step-remove': [stepId: string]
+  'step-update': [step: { stepId: string; stepTitle: string }]
 }>()
 
 const { t } = useI18n()
@@ -194,7 +326,30 @@ const renderedMarkdown = computed(() => {
   // already-sanitized inputs and leave their labels as plain list content.
   return renderMarkdown(markdown).replace(/<input\b[^>]*>/gi, '')
 })
-const hasBody = computed(() => Boolean(renderedMarkdown.value || props.plan.steps.length))
+// A9：版本号只显示短标识（前缀 + 前 8 位），完整 UUID 放回 title / aria-label
+// 供复制与无障碍 —— 34 位 UUID 裸露在卡头既噪音又挤占标题行。
+const revisionShortId = computed(() => {
+  const id = props.plan.revisionId
+  const prefix = 'rev-'
+  const body = id.startsWith(prefix) ? id.slice(prefix.length) : id
+  return id.startsWith(prefix) ? `${prefix}${body.slice(0, 8)}` : body.slice(0, 8)
+})
+// A5：形态展示名按 i18n 渲染；未知键回退机器键本身，绝不静默留空。
+const strategyLabel = computed(() => {
+  const key = props.plan.strategy
+  if (!key) return ''
+  const tKey = `chat.plan.strategy.${key}`
+  const translated = t(tKey)
+  return translated === tKey ? key : translated
+})
+const hasBody = computed(() =>
+  Boolean(
+    renderedMarkdown.value
+    || props.plan.steps.length
+    || props.plan.strategy
+    || props.plan.rationale,
+  ),
+)
 const likelyOverflow = computed(() => {
   const stepCharacters = props.plan.steps.reduce(
     (total, step) => total + step.title.length + (step.details?.length || 0),
@@ -302,6 +457,54 @@ function emitAction(action: PlanCardAction) {
 function actionLabel(action: PlanCardAction, key: string): string {
   if (props.pendingAction === action) return String(t('chat.plan.working'))
   return String(t(key))
+}
+
+// ── M2-C2：执行前编辑子任务（增删改）──
+const renamingStepId = ref<string | null>(null)
+const renameDraft = ref('')
+const addingStep = ref(false)
+const addDraft = ref('')
+
+/** DAG 可视化：把步骤的 deps stepId 映射为前置步骤标题（含序号），供展示依赖边 */
+function stepDependencyTitles(step: { stepId: string; deps?: string[] }): string[] {
+  const deps = step.deps ?? []
+  if (!deps.length) return []
+  const byId = new Map(props.plan.steps.map((s, i) => [s.stepId, `#${i + 1} ${s.title}`]))
+  return deps
+    .map((depId) => byId.get(depId) ?? depId)
+}
+
+function startRename(step: { stepId: string; title: string }) {
+  renamingStepId.value = step.stepId
+  renameDraft.value = step.title
+  requestAnimationFrame(() => {
+    const input = document.querySelector<HTMLInputElement>(`#plan-step-title-${step.stepId}`)
+    input?.focus()
+    input?.select()
+  })
+}
+
+function cancelRename() {
+  renamingStepId.value = null
+  renameDraft.value = ''
+}
+
+function commitRename(step: { stepId: string }) {
+  const title = renameDraft.value.trim()
+  if (!title) {
+    cancelRename()
+    return
+  }
+  emit('step-update', { stepId: step.stepId, stepTitle: title })
+  cancelRename()
+}
+
+function commitAdd() {
+  const title = addDraft.value.trim()
+  if (!title) return
+  emit('step-add', { stepTitle: title })
+  addDraft.value = ''
+  addingStep.value = false
 }
 
 onMounted(async () => {
@@ -461,6 +664,28 @@ onBeforeUnmount(() => {
 
 .plan-card__markdown {
   margin-top: var(--sp-2);
+}
+
+/* A5：编排形态 / 决策理由的 i18n 标签 + 引擎自述值（取代正文里的硬编码中文标签）。 */
+.plan-card__meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--sp-2);
+  margin: var(--sp-2) 0 0;
+}
+
+.plan-card__meta-label {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 650;
+}
+
+.plan-card__meta-value {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .plan-card__markdown :deep(ul),

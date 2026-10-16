@@ -149,6 +149,36 @@
   </WorkbenchHost>
 </template>
 
+<script lang="ts">
+// This SFC has a plain `<script>` block in addition to `<script setup>`; both
+// compile into the same module scope, so shared imports are declared here once.
+import { useAppStore } from '@/stores/app'
+import { useWorkbenchStore } from '@/workbench/store'
+import type { WorkbenchItem } from '@/workbench/types'
+
+/**
+ * Dock a registered view into the workbench as a keep-alive tab.
+ *
+ * Docking is additive: it opens an additional instance of the view rather than
+ * navigating the main area, so the route-exclusion model is untouched and the
+ * docked view survives navigating the main region elsewhere. Returns whether the
+ * tab was opened (the store rejects only native-surface overflow, which `view`
+ * panels never hit, so this is effectively always true).
+ */
+export function openViewPanel(opts: { view: string; title: string }): boolean {
+  const item: WorkbenchItem = {
+    id: `view:${opts.view}`,
+    kind: 'view',
+    title: opts.title,
+    scope: { type: 'app' },
+    hostKind: 'dom',
+    retention: 'keep-alive',
+    payload: { view: opts.view, title: opts.title },
+  }
+  return useWorkbenchStore().openItem(item)
+}
+</script>
+
 <script setup lang="ts">
 import {
   computed,
@@ -192,11 +222,9 @@ import {
   attachWorkbenchRuntime,
   WorkbenchRuntimeManager,
 } from '@/workbench/runtime'
-import { useWorkbenchStore } from '@/workbench/store'
 import type {
   NativeSurfaceRect,
   WorkbenchComponentEvent,
-  WorkbenchItem,
   WorkbenchPanelHeader,
   WorkbenchPanelRenderState,
   WorkbenchToolbarSelectOption,
@@ -205,11 +233,25 @@ import type {
 import { createArtifactWorkbenchDefinitions } from './artifactWorkbenchProvider'
 import { createBrowserWorkbenchDefinition } from './browserWorkbenchProvider'
 import { createTerminalWorkbenchDefinition } from './terminalWorkbenchProvider'
+import { createGoalWorkbenchDefinition } from './goalWorkbenchProvider'
+import { createTaskWorkbenchDefinition } from './taskWorkbenchProvider'
+import { createIslandWorkbenchDefinition } from './islandWorkbenchProvider'
+import { createViewWorkbenchDefinition } from './viewWorkbenchProvider'
 import {
   TERMINAL_WORKBENCH_OPEN_EVENT,
   createTerminalWorkbenchItem,
   type TerminalWorkbenchOpenEventDetail,
 } from '@/workbench/terminalItems'
+import {
+  TASK_WORKBENCH_OPEN_EVENT,
+  openTaskWorkbenchItem,
+  type TaskWorkbenchOpenEventDetail,
+} from '@/workbench/taskItems'
+import {
+  ISLAND_WORKBENCH_OPEN_EVENT,
+  openIslandWorkbenchItem,
+  type IslandWorkbenchOpenEventDetail,
+} from '@/workbench/islandItems'
 import WorkbenchHost from './WorkbenchHost.vue'
 
 const props = withDefaults(defineProps<{
@@ -229,6 +271,29 @@ const { confirm } = useConfirm()
 const { pushToast } = useToasts()
 const platform = usePlatform()
 const store = useWorkbenchStore()
+const appStore = useAppStore()
+
+/**
+ * 禅模式：收掉工作台 dock 面板，退出时还原**进入前**的展开状态。
+ *
+ * 放在这里而不是 App.vue：dock 的展开状态归本组件消费的 workbench store 管，
+ * "谁持有状态、谁负责收放"应在一处，避免 App.vue 跨两个 store 做编排。
+ * 只读 `expanded` 而不用 `isOpen`：`isOpen` 未导出，且它额外要求 host 可用/有选中项，
+ * 直接读 `expanded` 才能忠实反映"用户之前是不是把 dock 打开着"。
+ */
+let dockWasExpandedBeforeZen = false
+watch(
+  () => appStore.zenMode,
+  (on) => {
+    if (on) {
+      dockWasExpandedBeforeZen = store.expanded
+      if (store.expanded) store.setExpanded(false)
+    } else if (dockWasExpandedBeforeZen) {
+      store.setExpanded(true)
+      dockWasExpandedBeforeZen = false
+    }
+  },
+)
 const artifactImageLightbox = useArtifactImageLightbox()
 const nativeSurfaceOccluded = useNativeSurfaceOcclusionState()
 const surfaceBlocked = computed(() => props.modalBlocked || nativeSurfaceOccluded.value)
@@ -311,6 +376,40 @@ function onTerminalWorkbenchOpen(event: Event) {
   openTerminal(detail?.scopeId)
 }
 
+/**
+ * Open the task-progress panel (Gap4). Wired to a real caller — the
+ * {@link TASK_WORKBENCH_OPEN_EVENT} window event dispatched by
+ * `requestTaskWorkbenchOpen` (CommandPalette "Task progress" action) — so
+ * `createTaskWorkbenchItem` is no longer dead code.
+ */
+function openTask(scopeId?: string): void {
+  const resolved = scopeId || store.activeSessionId || props.sessionId || undefined
+  if (!openTaskWorkbenchItem(store, resolved)) {
+    pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
+  }
+}
+
+function onTaskWorkbenchOpen(event: Event) {
+  const detail = (event as CustomEvent<TaskWorkbenchOpenEventDetail>).detail
+  openTask(detail?.scopeId)
+}
+
+/**
+ * 岛屿面板入口（由 `requestIslandWorkbenchOpen` 派发，例如 /island 页头的「在工作台打开」）：
+ * 与任务面板同一套 scope 解析口径 —— 显式 scope → 当前活跃会话 → 宿主传入的会话。
+ */
+function openIsland(scopeId?: string): void {
+  const resolved = scopeId || store.activeSessionId || props.sessionId || undefined
+  if (!openIslandWorkbenchItem(store, resolved)) {
+    pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
+  }
+}
+
+function onIslandWorkbenchOpen(event: Event) {
+  const detail = (event as CustomEvent<IslandWorkbenchOpenEventDetail>).detail
+  openIsland(detail?.scopeId)
+}
+
 for (const definition of createArtifactWorkbenchDefinitions({
   authToken: readAuthToken,
   baseOrigin,
@@ -364,6 +463,10 @@ workbenchPanelRegistry.register(createBrowserWorkbenchDefinition({
   t: (key, params) => String(t(key, params || {})),
 }), { replace: true })
 workbenchPanelRegistry.register(createTerminalWorkbenchDefinition(), { replace: true })
+workbenchPanelRegistry.register(createGoalWorkbenchDefinition(), { replace: true })
+workbenchPanelRegistry.register(createTaskWorkbenchDefinition(), { replace: true })
+workbenchPanelRegistry.register(createIslandWorkbenchDefinition(), { replace: true })
+workbenchPanelRegistry.register(createViewWorkbenchDefinition(), { replace: true })
 detachRuntime = attachWorkbenchRuntime(store, runtimeManager)
 
 function panelComponent(item: WorkbenchItem) {
@@ -538,11 +641,15 @@ onMounted(() => {
   if (nativeApi) stopSurfaceEvents = nativeApi.onSurfaceEvent(onNativeSurfaceEvent)
   window.addEventListener(BROWSER_WORKBENCH_OPEN_EVENT, onBrowserWorkbenchOpen)
   window.addEventListener(TERMINAL_WORKBENCH_OPEN_EVENT, onTerminalWorkbenchOpen)
+  window.addEventListener(TASK_WORKBENCH_OPEN_EVENT, onTaskWorkbenchOpen)
+  window.addEventListener(ISLAND_WORKBENCH_OPEN_EVENT, onIslandWorkbenchOpen)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener(BROWSER_WORKBENCH_OPEN_EVENT, onBrowserWorkbenchOpen)
   window.removeEventListener(TERMINAL_WORKBENCH_OPEN_EVENT, onTerminalWorkbenchOpen)
+  window.removeEventListener(TASK_WORKBENCH_OPEN_EVENT, onTaskWorkbenchOpen)
+  window.removeEventListener(ISLAND_WORKBENCH_OPEN_EVENT, onIslandWorkbenchOpen)
   stopSurfaceEvents?.()
   stopSurfaceEvents = null
   if (detachRuntime) void detachRuntime()

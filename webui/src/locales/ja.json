@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "アイランドゲーム",
+    "title": "マルグリット・アイル",
+    "subtitle": "実際のエンジン状態に連動する生きたオープンワールド島",
+    "controls": "WASD / 矢印キーで移動 · カメラは追従",
+    "canvasAria": "3D 島シーン（WASD で歩行可能）",
+    "engine": {
+      "online": "ゲートウェ接続中",
+      "offline": "ゲートウェイ未接続 — エンジン状態は非表示",
+      "mode": "モード",
+      "shards": "シャード",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "晴",
+      "rain": "雨",
+      "night": "夜",
+      "fog": "霧"
+    },
+    "day": {
+      "day": "昼",
+      "night": "夜"
+    },
+    "tier": {
+      "high": "高",
+      "medium": "中",
+      "low": "低"
+    },
+    "quest": {
+      "title": "クエスト掲示板",
+      "advance": "進める",
+      "turnIn": "納品",
+      "complete": "完了",
+      "status": {
+        "posted": "受注可",
+        "accepted": "受注中",
+        "in_progress": "進行中",
+        "verifying": "納品可",
+        "completed": "完了",
+        "failed": "失敗"
+      }
+    },
+    "titles": {
+      "title": "称号",
+      "none": "称号なし",
+      "zeroWarn": "ゼロ警告の騎士",
+      "gateKeeper": "ゲート制覇者",
+      "nightOwl": "夜更かし",
+      "thrifty": "倹約家"
+    },
+    "party": {
+      "title": "パーティ",
+      "aria": "仲間エルフのスロット",
+      "slotAria": "仲間エルフ枠 {n} を切替",
+      "scout": "偵察鴉",
+      "smith": "工匠蜂",
+      "aegis": "盾亀",
+      "gull": "伝書鷗"
+    },
+    "theme": {
+      "verdant": "緑豊か",
+      "blossom": "花見",
+      "twilight": "黄昏"
+    },
+    "region": {
+      "garden": "PSI の庭",
+      "atrium": "デイジー聖堂",
+      "board": "クエスト板"
+    },
+    "worldgen": {
+      "title": "ワールド生成",
+      "label": "島への変更を記述",
+      "placeholder": "例：雨の花の島、難しいダンジョン付き",
+      "apply": "生成",
+      "rollback": "巻戻し",
+      "hint": "検証失敗 → 前の世界を保持"
+    },
+    "fallback": {
+      "aria": "2D フォールバック島マップ",
+      "note": "WebGL 利用不可 — アクセス可能な 2D 島を表示。"
+    },
+    "world3d": {
+      "canvasAria": "3D オープンワールド島シーン。WASD で移動、マウスで視点操作",
+      "controls": "WASD / 矢印キーで移動 · クリックでマウスロック · E で拾う",
+      "tierLabel": "モデルティア",
+      "tier": {
+        "flagship": "フラッグシップ推論",
+        "efficient": "効率推論",
+        "sprint": "高速生産",
+        "omni": "オムニパレート"
+      },
+      "connected": "接続済み",
+      "offline": "オフライン",
+      "pending": "保留",
+      "pickup": "拾う",
+      "glow": "グロー",
+      "particles": "パーティクル",
+      "npcDepth": "対話深度",
+      "npcTitle": "AI NPC 対話",
+      "npcPlaceholder": "話題を入力…",
+      "talk": "話す",
+      "npcDisclaimer": "決定論的テンプレート対話（リアルタイムモデル出力ではありません）",
+      "fallbackNote": "WebGL 利用不可 — 2D フォールバック島を表示。",
+      "prop": {
+        "code_crystal": {
+          "name": "コード結晶",
+          "desc": "ツール出力の結晶。拾うと分析を依頼。"
+        },
+        "doc_scroll": {
+          "name": "文書巻物",
+          "desc": "納品された文書。拾うと解説を依頼。"
+        },
+        "data_fruit": {
+          "name": "データ果実",
+          "desc": "実行データの果実。拾うと洞察を依頼。"
+        },
+        "quest_beacon": {
+          "name": "クエスト灯台",
+          "desc": "未受託の依頼。拾うとクエストを受託。"
+        },
+        "inspiration_bloom": {
+          "name": "インスピレーション花",
+          "desc": "記憶やアイデアの開花。拾うとブレインストーミングを依頼。"
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD を読み込みました（{count} 件の検証に合格）",
+      "failed": "GDD 検証失敗 — 現在の世界設定を維持します",
+      "revision": "世界リビジョン",
+      "errorsLabel": "エラー詳細",
+      "warningsLabel": "警告詳細",
+      "noGdd": "GDD はまだ読み込まれていません"
+    },
+    "glb": {
+      "statusProcedural": "アセット：プロシージャル形状",
+      "statusLoaded": "アセット：{count} 件をホットロード済み（rev {rev}）",
+      "statusFailed": "アセット：検証に失敗",
+      "errorsLabel": "アセット検証エラー",
+      "revisionLabel": "アセットのリビジョン"
+    },
+    "viewMode": {
+      "world3d": "3D オープンワールド",
+      "classic": "クラシック島",
+      "aria": "島の表示モード"
+    }
+  },
   "workspaces": {
     "projects": "プロジェクト",
     "createProject": "プロジェクトを作成",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "保存された成果物が破損しているか、記録されたチェックサムと一致しません。再公開するか、ダウンロードして確認してください。",
       "invalidContent": "ダウンロードした内容が成果物の種類と一致しません。",
       "failedDetail": "プレビューを再試行するか、ファイルをダウンロードしてください。"
+    },
+    "goal": {
+      "title": "ゴールの進捗",
+      "empty": "アクティブなゴールはありません。",
+      "loading": "ゴールの状態を読み込み中…",
+      "refresh": "ゴールの状態を更新",
+      "rounds": "ラウンド",
+      "tokens": "トークン",
+      "steps": "ステップ",
+      "actions": "ゴールの操作",
+      "pause": "一時停止",
+      "resume": "再開",
+      "complete": "完了",
+      "status": {
+        "active": "進行中",
+        "paused": "一時停止中",
+        "blocked": "ブロック中",
+        "completed": "完了"
+      }
+    },
+    "task": {
+      "title": "タスクの進行状況",
+      "subtitle": "タスクの実行中はステップがリアルタイムで更新されます。",
+      "empty": "進行中のタスクステップはありません。",
+      "refresh": "タスクステップを更新",
+      "steps": "ステップ",
+      "stepStatus": {
+        "pending": "待機中",
+        "in_progress": "進行中",
+        "done": "完了",
+        "failed": "失敗"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "プラグイン",
     "graph": "グラフ",
     "poker": "ポーカー",
-    "pet": "ペット"
+    "pet": "ペット",
+    "engine": "エンジン健全性",
+    "ops": "運用",
+    "terminal": "ターミナル",
+    "changelog": "変更履歴",
+    "games": "ゲーム",
+    "expert-center": "エキスパートセンター",
+    "editor": "エディター",
+    "browser-cockpit": "ブラウザコックピット",
+    "sandbox": "サンドボックス",
+    "device-twin": "デバイスツイン",
+    "pet-overlay": "ペットオーバーレイ",
+    "groupCountHint": "{group} の項目は {count} 件",
+    "groupWork": "ワーク",
+    "groupOperate": "運用",
+    "groupObserve": "観測",
+    "groupSettings": "設定",
+    "groupExtras": "エクストラ",
+    "control-center": "コントロールセンター",
+    "ssh-collab": "SSH コラボ",
+    "capabilities-hub": "ケイパビリティハブ",
+    "local-models": "ローカルモデル",
+    "knowledge": "ナレッジ",
+    "wallpaper": "壁紙",
+    "brain": "共有ブレイン"
   },
   "notFound": {
     "title": "ページが見つかりません",
@@ -258,6 +461,7 @@
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ",
     "toggleSidebar": "サイドバーを切り替え",
+    "zenMode": "禅モード",
     "resizeSidebar": "サイドバーの幅を変更",
     "sidebarWidthValue": "サイドバーの幅: {width}px、{preset}",
     "sidebarWidthLimitedValue": "サイドバーの幅: {width}px、{preset}（このウィンドウでは上限あり、設定値 {preference}px）",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "接続済み",
       "connecting": "接続中",
-      "disconnected": "切断済み"
+      "disconnected": "切断済み",
+      "ready": "準備完了",
+      "not_ready": "設定が必要"
     },
     "bgm": {
       "label": "BGM",
@@ -291,7 +497,15 @@
       "light": "ライト",
       "dark": "ダーク",
       "system": "システム"
-    }
+    },
+    "languageSwitchTitle": "言語：{name} — 表示言語を切り替え",
+    "modeBadge": "実行モード：{mode}",
+    "modeMenu": "実行モードメニュー",
+    "modeMenuTitle": "実行モード",
+    "modeMenuCurrent": "現在：{mode}",
+    "modeMenuOpenHub": "コントロールセンターを開く（モード管理）",
+    "modeSwitchFailed": "実行モードを切り替えられませんでした。",
+    "modeMatrix": "モード：強度 × 作業様式"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "インターフェースとチャンネルのシステム通知の表示言語です。ここにはすぐ反映され、ゲートウェイ全体の通知言語として保存されます。",
       "channelNoticeLocaleSyncPending": "インターフェースの言語は変更されましたが、チャンネルのシステム通知言語はまだ保存されていません。ゲートウェイの再接続時に再試行します。",
       "toolDetailsLabel": "ツール詳細のデフォルト表示",
+      "chatFontLabel": "チャットの文字サイズ",
+      "chatFontDesc": "チャット画面の文字サイズのみ変更します。サイドバーと設定は変わりません。",
+      "chatFontSmall": "小",
+      "chatFontDefault": "標準",
+      "chatFontLarge": "大",
+      "chatFontXlarge": "特大",
       "toolDetailsDesc": "自動はツール種別に従い、コンパクトは通常のツールを折りたたみ、展開はすべて開きます。エラーは既定で自動展開されますが、手動で折りたためます。",
       "toolDetailsAuto": "自動",
       "toolDetailsCompact": "コンパクト",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "現在のデスクトップ幅: {current}px。",
       "sidebarWidthClampedStatus": "保存値は {saved}px、現在のウィンドウでは {current}px です。",
       "sidebarWidthCompactStatus": "コンパクト表示では {current}px を使用します。デスクトップ設定の {saved}px は保持されます。",
-      "sidebarWidthDrawerStatus": "ドロワー表示では {current}px を使用します。デスクトップ設定の {saved}px は保持されます。"
+      "sidebarWidthDrawerStatus": "ドロワー表示では {current}px を使用します。デスクトップ設定の {saved}px は保持されます。",
+      "bootAnimationLabel": "起動スプラッシュ",
+      "bootAnimationDesc": "コンソール起動中に表示されるスプラッシュです。フルはエージェント星座オーケストラ（マーク・艦隊ノード・起動ログ）を再生、シンプルは静的なマークのみ、オフは表示しません。フルを選び直すと再再生できます。OS がモーション軽減を要求した場合は自動的に抑えられます。",
+      "bootAnimationFull": "フル",
+      "bootAnimationMinimal": "シンプル",
+      "bootAnimationOff": "オフ"
     },
     "dataMigration": {
       "title": "データとバックアップ",
@@ -732,7 +957,8 @@
       "pet": "Pet",
       "communityPlugins": "Community Plugins",
       "graph": "Graph",
-      "collabSsh": "Collab & SSH"
+      "collabSsh": "Collab & SSH",
+      "doctor": "ドクター"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "Collab & SSH",
         "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
         "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
-        "open": "Open Overview"
+        "open": "Open Overview",
+        "localNote": "Marguerite のゲートウェイはループバック（127.0.0.1）のみを待ち受けるため、マシン間の共同作業にはまずプライベートネットワークが必要です。",
+        "vpnTitle": "Radmin VPN でネットワークを構成する",
+        "step1": "両方のマシンに Radmin VPN をインストールし、ネットワークを作成します：",
+        "download": "Radmin VPN をダウンロード",
+        "step2": "もう一方のマシンから、ネットワーク名とパスワードで同じネットワークに参加します。",
+        "step3": "Radmin がこのマシンに割り当てた仮想 IP（26.x.x.x）を確認します。",
+        "step4": "ゲートウェイはループバックのままにし、公開せず SSH トンネル経由で到達します。",
+        "step5": "セッションを開始する前に対向機から接続できることを確認します。",
+        "copy": "コピー",
+        "copied": "コピーしました",
+        "securityTitle": "セキュリティ境界",
+        "sec1": "ゲートウェイは 127.0.0.1 のままです。プライベートネットワークが運ぶのは SSH であり、コンソールではありません。",
+        "sec2": "共同作業のためにゲートウェイを 0.0.0.0 にバインドしないでください。",
+        "sec3": "SSH は鍵認証を使い、パスワードやトークンをリポジトリに入れないでください。",
+        "docs": "Radmin VPN のドキュメント"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "一致するモデルがありません — 入力した値をそのまま使えます。",
       "modelListTruncated": "{total} 件中 {shown} 件を表示 — 入力を続けると絞り込めます。",
       "modelProvenance": "プロバイダーのライブ一覧 · 機能情報の出典：{sources}",
-      "modelMetadataProvenance": "プロバイダーのライブ一覧 · 公式値を優先し、ない場合はカタログ値を使用"
+      "modelMetadataProvenance": "プロバイダーのライブ一覧 · 公式値を優先し、ない場合はカタログ値を使用",
+      "emptyStep1": "最初のモデルプロバイダーを追加し、API キーを貼り付けて認証情報を確認します。",
+      "emptyStep2": "プロバイダーに接続して認証情報を確認し、利用可能なモデルを選択します。",
+      "emptyStep3": "アプリ全体で使用するモデルを選択します。"
     },
     "preset": {
       "summary": "ルーティングテンプレート: {label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "認証が必要なゲートウェイ向けのベアラートークンです。このタブにのみ保存されます。",
       "reconnect": "再接続",
       "connect": "接続",
-      "disconnect": "切断"
+      "disconnect": "切断",
+      "rbacBoundaryNote": "ロールベースのアクセス制御は誤操作の防止を目的としており、ゲートウェイ設定やプロセス自体を編集できるローカルの攻撃者からは保護しません。"
     },
     "runtime": {
       "title": "ランタイム",
@@ -1739,6 +1984,8 @@
       "reload": "再読み込み",
       "descReloadSuffix": "ページ更新後に有効になります。",
       "foldLabel": "新しいライブターン描画",
+      "autostartLabel": "サインイン時に起動",
+      "autostartDesc": "サインイン時に Marguerite を自動起動します（デスクトップ版のみ）。",
       "foldDesc": "順序付きイベントログからストリーミング中の作業カードを描画します。互換描画へ一時的に戻す場合のみオフにします。",
       "foldAria": "新しいライブターン描画（再読み込み後に有効）",
       "revealLabel": "回答の表示ウィンドウ（ミリ秒）",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "インストールおよび日次使用量テレメトリ、バックグラウンドの更新確認、公式 TokenRhythm HTTPS API にのみ送信されるセッション用の仮名識別子と、デフォルトで送信されるセッションをまたぐ任意の X-Marguerite-Install-Id ヘッダーを停止します。永続化されたインストール ID はローカルの MAC/IP データから派生する場合がありますが、生のアドレスは送信されません。CI/テスト環境および旧テレメトリ拒否設定でも抑制されますが、更新確認だけを無効にしても抑制されません。自分で開始したモデルリクエストはそのまま動作します。",
       "memoryAutoCaptureLabel": "自動メモリ",
       "memoryAutoCaptureDesc": "Marguerite が会話の有用な情報を長期メモリに保存することを許可します。",
-      "save": "プライバシーを保存"
+      "save": "プライバシーを保存",
+      "permissionBoundaryNotice": "本システムの権限は誤操作を防ぐためのものであり、ローカルの悪意あるユーザーから防御するものではありません。すべてのデータはローカルに保存されます。ループバック以外に公開する前に本認証を設定してください。"
     },
     "toast": {
       "loadFailed": "設定の読み込みに失敗しました: {error}",
@@ -2070,6 +2318,24 @@
           "Encoding AES キー。"
         ]
       }
+    },
+    "ops": {
+      "sshSession": "SSH セッション",
+      "terminal": "端末",
+      "exportDiagnostics": "診断をエクスポート",
+      "diagnosticsCopied": "診断をコピーしました",
+      "diagnosticsCopyFailed": "コピーに失敗しました：{error}",
+      "hostRequired": "先にホストを選択してください"
+    },
+    "doctor": {
+      "title": "ドクター",
+      "desc": "ゲートウェイの準備状態、能力の所見、CLI レシピ。読み取り専用——ここでは何も保存されません。",
+      "refresh": "更新",
+      "runDeep": "詳細チェックを実行",
+      "loading": "ヘルスチェックを実行中…",
+      "noFindings": "所見は返されませんでした。ゲートウェイは問題を報告していません。",
+      "errorTitle": "ヘルスレポートを読み込めませんでした",
+      "retry": "再試行"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "{time} に更新",
       "transcriptPreview": "トランスクリプトのプレビュー",
       "transcriptError": "トランスクリプトを読み込めませんでした。",
+      "workspaceBound": "プロジェクトにバインド済み",
+      "workspaceUnbound": "プロジェクト未バインド",
+      "workspaceMissing": "ディレクトリが見つかりません",
       "loadingTranscript": "トランスクリプトを読み込み中…",
       "loadEarlier": "前を読み込む",
       "loading": "読み込み中…",
@@ -2201,6 +2470,19 @@
       "abortDone": "実行を中止しました。",
       "abortNone": "中止できるアクティブな実行はありません。",
       "abortFailed": "中止に失敗しました。"
+    },
+    "reasoning": {
+      "effortLabel": "思考の強度",
+      "effortInherit": "グローバル設定を継承",
+      "effortOff": "オフ",
+      "effortNormal": "標準",
+      "effortDeep": "深い",
+      "effortMax": "最大",
+      "contextLabel": "コンテキスト長",
+      "contextPlaceholder": "継承",
+      "inheritHint": "空欄（コンテキスト長は 0）= グローバルモデル設定を継承",
+      "saveDone": "セッションの推論設定を保存しました。",
+      "saveFailed": "セッションの推論設定を保存できませんでした。"
     },
     "overview": {
       "title": "状態",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count} 個",
       "toolsLoading": "ツールカタログを読み込み中…",
       "baotaCredentials": "認証情報",
-      "baotaCredentialsTitle": "宝塔パネルのURL・ユーザー名・パスワードを設定（ツール呼び出し前に自動ログイン）"
+      "baotaCredentialsTitle": "宝塔パネルのURL・ユーザー名・パスワードを設定（ツール呼び出し前に自動ログイン）",
+      "mcpProbe": "ツールを検出",
+      "mcpProbing": "検出中…",
+      "mcpToolsCount": "ツール {count} 件",
+      "toolsPatchTitle": "ツールの有効／無効（パッチ層）",
+      "toolsPatchHint": "変更はエージェントの次ターンから有効（再起動不要）",
+      "toolsPatchEnable": "有効",
+      "toolsPatchDisable": "無効",
+      "toolsPatchInactive": "現在のツール面に存在しない名前：{names}"
     },
     "autoPropose": {
       "title": "自動提案の設定",
@@ -3481,7 +3771,9 @@
         "probing": "プローブ中",
         "paused": "アイドル上限に到達；次のメッセージを待機中",
         "stopped": "失敗後に停止"
-      }
+      },
+      "cacheHits": "キャッシュヒット",
+      "cacheHitsHint": "直近のリクエストでキャッシュから返されたトークン数"
     },
     "send": "送信",
     "sendQueues": "送信（現在の応答後にキューへ追加）",
@@ -3747,7 +4039,10 @@
       },
       "more": "ほか {count} 項目",
       "stale": "処理を継続中 — 最近の信号はありません",
-      "liveStep": "ステップ {n}"
+      "liveStep": "ステップ {n}",
+      "memoryRecall": "プロジェクト横断メモリの想起 · {count} 件ヒット",
+      "stepRound": "ツール呼び出し 第 {round} ラウンド",
+      "stepRoundDone": "第 {round} ラウンド終了 · {reason}"
     },
     "suggestedTasks": "おすすめのタスク",
     "greetingMorning": "おはようございます。",
@@ -3818,7 +4113,13 @@
         "settingsHint": "設定 > サンドボックス > ファイル保護でバックアップを有効にできます。",
         "unavailableTitle": "利用できるバックアップがありません",
         "unavailableBody": "この操作は復元できません。データの完全な消失を許容する場合のみ続行してください。"
-      }
+      },
+      "intent": "意図のプレビュー",
+      "intentAction": "操作",
+      "intentObject": "対象",
+      "intentScope": "影響範囲",
+      "intentIrreversible": "可逆性",
+      "intentIrreversibleYes": "不可逆"
     },
     "plan": {
       "label": "プラン",
@@ -3839,7 +4140,27 @@
       "actionFailed": "プラン操作に失敗しました：{error}",
       "revisionMissing": "このプランのリビジョン記録が失われています（セッションデータが消去された可能性があります）。プランを再生成してから再試行してください。",
       "revisePromptPlaceholder": "プランをどのように変更するか入力",
-      "reviseSend": "プランを修正"
+      "reviseSend": "プランを修正",
+      "editing": "編集中",
+      "dependsOn": "依存",
+      "renameStep": "名前を変更",
+      "removeStep": "ステップを削除",
+      "addStep": "ステップを追加",
+      "stepTitlePlaceholder": "ステップのタイトル",
+      "saveStep": "追加",
+      "cancel": "キャンセル",
+      "reuseLast": "前回の計画「{title}」を続行",
+      "cancelStep": "キャンセル",
+      "strategyLabel": "編成形態",
+      "rationaleLabel": "判断理由",
+      "revisionFull": "リビジョン {id}（完全な ID）",
+      "strategy": {
+        "solo": "単一エージェント",
+        "dual-leader": "デュアルリーダー",
+        "expert-team": "エキスパートチーム",
+        "cluster": "クラスター",
+        "pipeline": "デリバリーパイプライン"
+      }
     },
     "planRun": {
       "title": "プラン実行",
@@ -3874,7 +4195,14 @@
       "preflight": "実行前チェックリスト",
       "parallel": "並列サブタスク",
       "replanned": "再計画済み",
-      "replanDetail": "観察に基づき {steps} ステップに再分解 · 改訂 {revision}"
+      "replanDetail": "観察に基づき {steps} ステップに再分解 · 改訂 {revision}",
+      "eta": "残り約{eta}",
+      "elapsed": "{elapsed} 経過",
+      "replannedAhead": "先読みでスキップ",
+      "replanAdvanceDetail": "観察が後続ステップ「{step}」に一致 · {count} ステップをスキップ",
+      "parallelSimulated": "並列（シミュレーション）",
+      "parallelStepDuration": "所要時間 {duration}",
+      "parallelStepRetries": "{count} 回再試行"
     },
     "planMode": {
       "label": "プランモード",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "ファイル、ネットワーク、システムへ毎回確認せず直接アクセスできます。",
       "runModeFullUnavailable": "フルアクセスはセッションの所有者のみ利用できます。",
       "runModeLocked": "このセッションでタスクが実行中のため、実行モードは変更できません。",
-      "badgeNew": "NEW"
+      "badgeNew": "NEW",
+      "modelRoutingOmniDesc": "単一のオーケストレーションエージェントが毎ターン最適なモデルを調整します。",
+      "modelRoutingOmni": "オムニエージェント",
+      "runModePanel": "実行モードとルーティング",
+      "thinking": "ディープシンキング",
+      "modeShort": {
+        "safe": "セーフ",
+        "full": "フル",
+        "plan": "プラン",
+        "default": "デフォルト",
+        "off": "オフ",
+        "squilla": "ルーター",
+        "ensemble": "アンサンブル",
+        "bloom": "研磨",
+        "omni": "オムニ"
+      }
     },
     "pending": {
       "label": "保留中 {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "アンサンブルモデル"
     },
     "modelRouting": {
-      "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。"
+      "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。",
+      "effective": "モデルルーティングを切り替えました — 現在は {mode} です。",
+      "mismatch": "モデルルーティングが要求どおりに切り替わりませんでした：要求 {requested}、実際は {actual} です。"
     },
     "routeFeedback": {
       "up": "このターンのモデル選択は適切だった",
@@ -4170,6 +4515,115 @@
       "reject": "拒否",
       "empty": "ファイル変更はまだありません",
       "loadFailed": "ファイル変更の読み込みに失敗しました"
+    },
+    "persona": {
+      "current": "現在の専門家：{name}",
+      "newSession": "新しい専門家セッション"
+    },
+    "presets": {
+      "label": "モード",
+      "triggerHint": "作業モードを選択：強度 × 作業スタイル",
+      "lockedHint": "実行中はモードを切り替えできません（現在の設定は確認可）",
+      "advanced": "詳細",
+      "advancedHint": "モード / サンドボックス / ルーティングの全オプションを開く",
+      "autoModel": "自動モデル",
+      "autoModelOn": "全力",
+      "autoModelOff": "オフ",
+      "autoModelHint": "利用可能な最強モデルを自動選択し、タスクに応じて自動編成（融合 / スウォーム）"
+    },
+    "waitIndicator": {
+      "running": "実行中",
+      "toolRunning": "ツールの完了を待機中",
+      "approvalPending": "承認待ち",
+      "ensemble": "アンサンブル進行中"
+    },
+    "emptyLead": "エージェント、サブエージェント、ツール、記憶、知識 — ひとつのオーケストラで、トークンを抑え、より良いコードを。",
+    "orbit": {
+      "agent": "エージェント",
+      "subagent": "サブエージェント",
+      "tools": "ツール",
+      "memory": "記憶",
+      "knowledge": "知識"
+    },
+    "errors": {
+      "apiKeyMissing": "APIキーが設定されていません。設定を開き、プロバイダーのAPIキーを入力してください。",
+      "authFailed": "モデルプロバイダーが API キーを拒否しました。設定を開いて修正するか、再試行してください。",
+      "rateLimited": "モデルプロバイダーがリクエストを制限しています。しばらくして再試行してください。",
+      "network": "モデルプロバイダーに接続できませんでした（ネットワークエラーまたはタイムアウト）。再試行してください。",
+      "server": "モデルプロバイダーがサーバーエラーを返しました。後で再試行してください。",
+      "timeout": "モデルプロバイダーの応答がタイムアウトしました。再試行してください。",
+      "other": "モデルプロバイダーへのリクエストに失敗しました。再試行してください。",
+      "planStepFailed": "計画の「{step}」の手順が失敗しました。ログで詳細を確認するか、計画を修正して再試行してください。",
+      "planStepFailedGeneric": "計画のいずれかの手順が失敗しました。ログで詳細を確認するか、計画を修正して再試行してください。",
+      "planStepArtifactMissing": "計画の「{step}」の手順が、期待されたファイルを生成しませんでした。ログで詳細を確認するか、計画を修正して再試行してください。",
+      "planStepArtifactMissingGeneric": "計画のいずれかの手順が、期待されたファイルを生成しませんでした。ログで詳細を確認するか、計画を修正して再試行してください。",
+      "planCompletionBlocked": "計画は完了しましたが完了チェックを通過しなかったため、部分的完了として扱われます。ログで詳細を確認してください。",
+      "hostExited": "ホストプロセスが終了しました（終了コード {exit_code}、稼働 {uptime_ms}）。",
+      "hostExitedNoCode": "ホストプロセスがシグナルで強制終了されました（稼働 {uptime_ms}）。",
+      "hostExitedGeneric": "ホストプロセスが予期せず終了しました。",
+      "hostExitCodeLabel": "終了コード",
+      "hostExitUptimeLabel": "稼働時間",
+      "hostExitStderrLabel": "エラー出力（stderr）"
+    },
+    "errorActions": {
+      "viewLogs": "ログを表示",
+      "replan": "計画を修正",
+      "openSettings": "設定を開く",
+      "retry": "再試行"
+    },
+    "escalation": {
+      "title": "確認が必要です",
+      "requiredFor": "確認が必要です：{reason}",
+      "neededFor": "確認が必要です：{reason}",
+      "operation": "操作",
+      "suggestedAction": "推奨アクション",
+      "continue": "続行",
+      "abort": "中止",
+      "trigger": {
+        "high_impact_side_effect": "影響の大きい副作用",
+        "intent_ambiguity": "意図が不明瞭",
+        "timeout": "操作がタイムアウト",
+        "budget_exceeded": "予算超過"
+      }
+    },
+    "collapse": "折りたたむ",
+    "expand": "展開する",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "タスク",
+        "artifacts": "成果物",
+        "changes": "変更",
+        "tree": "ツリー"
+      },
+      "tasksEmpty": "メッセージを送信すると、タスクのステップがここに表示されます",
+      "artifactsDiagnostic": "未読み込みの成果物が {count} 件あります",
+      "artifactsEmptyLead": "このセッションではまだ成果物が生成されていません",
+      "artifactsEmptySub": "タスクを送信すると、Marguerite がドキュメント・表計算・コードを生成します",
+      "artifactsCompose": "タスクを送信",
+      "artifactsReload": "再読み込み",
+      "artifactsRunningHint": "実行中です。完了後に新しいタスクを開始できます",
+      "artifactOpenInApp": "Marguerite 内でプレビュー / 編集",
+      "artifactOpenSystem": "システムのアプリで開く",
+      "artifactMore": "その他の操作",
+      "artifactPreview": "プレビュー",
+      "artifactEdit": "編集",
+      "artifactSystemOpen": "システムで開く",
+      "artifactCopyPath": "パスをコピー",
+      "artifactCopied": "成果物のパスをコピーしました",
+      "artifactCopyFailed": "コピーに失敗しました。パスを手動でコピーしてください",
+      "statusReady": "準備完了",
+      "statusUpdating": "更新中",
+      "statusStale": "古い",
+      "changesEmpty": "ファイル変更（+/- 行）がここに表示されます",
+      "treeUpDir": "親ディレクトリ",
+      "treeRoot": "ワークスペースのルート",
+      "treeRefresh": "更新",
+      "treeLoading": "読み込み中…",
+      "treeEmptyDir": "（空のディレクトリ）",
+      "widen": "狭いパネル",
+      "narrow": "広いパネル",
+      "collapse": "パネルを折りたたむ",
+      "expand": "パネルを展開"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "設定を開く",
       "actionToggleTheme": "テーマを切り替え",
       "actionBgmEnable": "BGMを有効にする",
-      "actionBgmDisable": "BGMを無効にする"
+      "actionBgmDisable": "BGMを無効にする",
+      "actionModeSwitch": "モードを切り替え：{mode}",
+      "modeActive": "使用中"
     },
     "toast": {
       "dismiss": "通知を閉じる"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "選択分を削除",
       "bulkDeleteDone": "{count} 件のセッションを削除しました",
       "bulkDeletePartial": "{count} 件のセッションを削除できませんでした",
-      "bulkDeleteFailed": "選択したセッションを削除できませんでした"
+      "bulkDeleteFailed": "選択したセッションを削除できませんでした",
+      "showMore": "さらに {count} 件を表示",
+      "showLess": "折りたたむ"
     },
     "setupBanner": {
       "ariaLabel": "ゲートウェイのセットアップが必要です",
@@ -4379,7 +4837,425 @@
       "window_focus": "ウィンドウをフォーカス",
       "cursor_pos": "カーソル位置",
       "key_state": "キーの状態",
-      "idle_time": "アイドル時間"
+      "idle_time": "アイドル時間",
+      "locate": "説明から特定"
+    },
+    "descriptionLabel": "対象の説明",
+    "descriptionPlaceholder": "例：右上の検索ボックス",
+    "visionLabel": "視覚グラウンディング",
+    "autoClickLabel": "特定後にクリック",
+    "patchLabel": "パッチ定位（高 DPI）",
+    "modeLabel": "取得範囲",
+    "maxEdgeLabel": "長辺の上限（px）",
+    "maxEdgePlaceholder": "0 = 元の解像度",
+    "captureMode": {
+      "primary": "メインディスプレイ",
+      "all": "すべてのディスプレイ",
+      "window": "アクティブウィンドウ"
+    },
+    "groundingTitle": "特定結果",
+    "groundingConfidence": "信頼度 {value}",
+    "groundingLowConfidence": "低信頼度",
+    "groundingDescription": "対象：{description}",
+    "visionUnavailable": "視覚モデルが未設定のため、何も実行していません。視覚対応モデルを選び API キーを設定して再実行してください。"
+  },
+  "boot": {
+    "orchestraAria": "Marguerite 起動中",
+    "orchestraTagline": "エージェント・サブエージェント・ツール・記憶・知識 — ひとつのオーケストラとして起動します。",
+    "enterWorkspace": "ワークスペースへ",
+    "pressEnter": "または Enter"
+  },
+  "island": {
+    "title": "アイランド・ワークスペース",
+    "subtitle": "エージェントの実行を島として眺める：工房はツール呼び出し、哨所はサブエージェント、灯台はルーティング戦略、桟橋は計画の進捗。",
+    "status": {
+      "idle": "待機中",
+      "running": "実行中",
+      "queued": "待ち行列",
+      "failed": "失敗",
+      "success": "完了",
+      "error": "エラー",
+      "waiting": "待機",
+      "offline": "未接続"
+    },
+    "quality": {
+      "high": "フル3D",
+      "low": "軽量3D",
+      "medium": "バランス3D",
+      "fallback": "簡易モード（2D）",
+      "fallbackNote": "この環境ではWebGLが利用できないため、2Dマップで表示しています（データは同一です）。",
+      "contextLost": "3Dコンテキストが失われたため、2Dマップに切り替えました。",
+      "specInvalid": "島の仕様が不正なため描画を拒否し、2Dマップを表示しています。"
+    },
+    "controls": {
+      "reset": "視点をリセット",
+      "focus": "フォーカス",
+      "autoDayNight": "昼夜の自動切替",
+      "daylight": "日照時刻",
+      "skin": "スキン",
+      "openInWorkbench": "ワークベンチで開く",
+      "hint": "ドラッグで回転 · ホイールでズーム · 右ドラッグ（Shift併用）で平行移動 · 建物をクリックで詳細 · ダブルクリックで注視 · キーボード：矢印で回転、Shift+矢印で平行移動、+/- でズーム、0 でリセット、Esc で詳細を閉じる"
+    },
+    "detail": {
+      "status": "状態",
+      "source": "詳細",
+      "progress": "進捗",
+      "openChat": "チャットで開く",
+      "empty": "建物をクリックするとリアルタイムデータを表示します",
+      "close": "閉じる",
+      "duration": "所要時間",
+      "flavor": "工房の型",
+      "toolId": "ツールID",
+      "childKey": "子セッション",
+      "artifactKind": "成果物の種類",
+      "artifactId": "成果物ID",
+      "sessionKey": "セッション",
+      "taskTitle": "タスク",
+      "strategy": "編成方針",
+      "members": "融合メンバー",
+      "steps": "計画ステップ",
+      "recallQuery": "想起クエリ",
+      "recallHits": "想起件数",
+      "recallTopScore": "最高類似度",
+      "reinforced": "強化されたシナプス",
+      "memoryIds": "記憶エントリ",
+      "stage": "工程",
+      "floors": "階数"
+    },
+    "flavor": {
+      "mill": "作業場",
+      "forge": "炉",
+      "library": "書庫",
+      "observatory": "観測所"
+    },
+    "legend": {
+      "title": "島の状況",
+      "plan": "計画の桟橋"
+    },
+    "empty": {
+      "hint": "まだ実行データがありません。タスクを開始すると島が形成されます。"
+    },
+    "kind": {
+      "core": "中央の城",
+      "workshop": "工房",
+      "outpost": "哨所",
+      "depot": "倉庫",
+      "beacon": "灯台",
+      "pier": "桟橋",
+      "athenaeum": "記憶の塔",
+      "construction": "工事現場"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "基礎",
+        "structure": "構造",
+        "frame": "フレーム",
+        "facade": "外壁",
+        "windows": "窓",
+        "interior": "内装",
+        "finished": "完工"
+      },
+      "timeline": "工事日",
+      "day": "日"
+    }
+  },
+  "sandbox": {
+    "title": "ミニチュア・サンドボックス",
+    "subtitle": "閉鎖ループの列車ダイヤをタスク実行のデジタルツインとして：発車、橋渡り、到着、停車、再発車。",
+    "kind": {
+      "train": "列車"
+    },
+    "train": {
+      "label": "列車 {n}"
+    },
+    "station": {
+      "A": "A 駅",
+      "B": "B 駅"
+    },
+    "phase": {
+      "dwell": "ホームで停車",
+      "departing": "発車",
+      "cruise": "区間運転",
+      "arriving": "駅に接近"
+    },
+    "controls": {
+      "play": "再生",
+      "pause": "一時停止",
+      "speed": "速度",
+      "timeline": "タイムライン",
+      "dayNight": "昼／夜",
+      "rain": "小雨",
+      "resetView": "最初に戻す"
+    },
+    "detail": {
+      "close": "閉じる"
+    },
+    "empty": {
+      "pickTrain": "列車をクリックすると、現在の動作と次の動作を表示します"
+    },
+    "quality": {
+      "fallbackNote": "この環境では WebGL が使えないため、ループを 2D 図で描きます — ダイヤは同じです。",
+      "contextLost": "3D コンテキストが失われました。2D 図に切り替えました。"
+    }
+  },
+  "task": {
+    "title": "タスクワークスペース",
+    "subtitle": "タスクの実行中、各ステップと成果物を順に確認できます。",
+    "empty": "実行中のタスクはありません。チャットからタスクを開始すると、ここに表示されます。",
+    "refresh": "タスクを更新",
+    "steps": "ステップ",
+    "deliverables": "成果物",
+    "status": "状態",
+    "mode": "モード",
+    "elapsed": "経過時間",
+    "artifacts": {
+      "empty": "成果物はまだありません。ファイルが作成されるとすぐにここに表示されます。"
+    },
+    "runStatus": {
+      "idle": "待機",
+      "running": "実行中",
+      "completed": "完了",
+      "partial": "一部完了",
+      "failed": "失敗"
+    },
+    "modeImpact": {
+      "title": "モードの影響",
+      "route": "ルート",
+      "strategy": "戦略"
+    },
+    "stepStatus": {
+      "pending": "待機中",
+      "in_progress": "進行中",
+      "done": "完了",
+      "failed": "失敗"
+    },
+    "gate": {
+      "title": "品質ゲート",
+      "searchValid": "検索結果は有効",
+      "artifactsComplete": "成果物が揃っています",
+      "missing": "不足: {items}",
+      "verdict": {
+        "pass": "合格",
+        "partial": "一部合格",
+        "fail": "不合格"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "Marguerite へようこそ",
+      "welcomeSubtitle": "モデルプロバイダーを接続してチャットを始めましょう。設定は約 30 秒です。",
+      "featureLocal": "ローカル実行 — データはお使いの端末に留まります",
+      "featureMultiProvider": "OpenAI、Anthropic、DeepSeek、OpenRouter などに対応",
+      "featureAgent": "プラン、アンサンブル、ブルームのマルチモードエージェント",
+      "getStarted": "始める",
+      "exploreSettings": "設定を確認",
+      "chooseProvider": "プロバイダーを選択",
+      "chooseProviderHint": "API キーをお持ちのプロバイダーを選択してください。後で変更できます。",
+      "loadingProviders": "プロバイダーを読み込み中...",
+      "seeAllProviders": "設定ですべてのプロバイダーを表示",
+      "configureProvider": "{provider} の設定",
+      "apiKey": "API キー",
+      "apiKeyPlaceholder": "API キーをここに貼り付け",
+      "apiKeyOrEnvHint": "キーを貼り付け、または {envKey} 環境変数を使用",
+      "useEnvInstead": "代わりに環境変数を使用",
+      "modelPlaceholder": "例: gpt-4o、deepseek-chat",
+      "verifyAndSave": "確認して保存",
+      "verifying": "確認中...",
+      "ready": "設定完了！",
+      "readyHint": "プロバイダーが設定・確認されました。新しいチャットを始めてご利用ください。",
+      "savedButProbeFailed": "保存済み — 確認保留中",
+      "savedButProbeFailedHint": "認証情報は保存されました。確認プローブがプロバイダーに接続できませんでした（ネットワークまたはレート制限）。チャットで確認してください。",
+      "startUsing": "Marguerite を使う",
+      "openSettings": "設定を開く",
+      "advancedSettings": "詳細設定",
+      "back": "戻る",
+      "errors": {
+        "configure": "プロバイダー設定を保存できませんでした。再試行するか、設定を使用してください。"
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "初期化中",
+    "gatewayLoading": "ゲートウェイがランタイム設定を読み込んでいます...",
+    "setupNeeded": "設定が必要",
+    "setupNeededHint": "ゲートウェイは接続済みですが設定未完了です。モデルプロバイダーを設定してください。",
+    "gotoTopbarBadge": "モードは上部バーのバッジから切り替えられます",
+    "bloomParallelOff": "スウォーム並列は現在オフです。Bloom モードに切り替えると有効になります。"
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "極小・相談",
+      "minimal_plan": "極小・計画",
+      "minimal_doit": "極小・実行",
+      "standard_ask": "標準・相談",
+      "standard_plan": "標準・計画",
+      "standard_doit": "標準・実行",
+      "extreme_ask": "極限・相談",
+      "extreme_plan": "極限・計画",
+      "extreme_doit": "極限・実行"
+    },
+    "userModeHint": {
+      "minimal_ask": "手軽な回答・低コスト",
+      "minimal_plan": "軽量プランニング",
+      "minimal_doit": "単一エージェントで直接実行",
+      "standard_ask": "日常の Q&A",
+      "standard_plan": "構造化された計画",
+      "standard_doit": "マルチモデル融合",
+      "extreme_ask": "深いリサーチ回答",
+      "extreme_plan": "エキスパートチームによる分解",
+      "extreme_doit": "スウォーム協調・深掘り"
+    },
+    "alias": {
+      "plan": "セーフ探索",
+      "agent": "日常協働",
+      "ensemble": "マルチ候補融合",
+      "bloom": "深掘り研磨",
+      "omni-transcend": "全知超越"
+    },
+    "hint": {
+      "plan": "読み取り専用の探索 · 先に計画を出し、承認後に実行",
+      "agent": "既定モード · 読み取りは自由、書き込みは確認を求める",
+      "ensemble": "複数候補を並列 · MAX 四段階で融合・選抜",
+      "bloom": "宣言的な思考深度と検証回数",
+      "omni-transcend": "全知超越 · クロスモーダル統合推論"
+    },
+    "intensity": {
+      "minimal": "極小",
+      "standard": "標準",
+      "extreme": "極限"
+    },
+    "working": {
+      "ask": "相談",
+      "plan": "計画",
+      "doit": "実行"
+    }
+  },
+  "deviceTwin": {
+    "title": "デバイス 3D ツイン",
+    "teaching": "教育用シミュレーション・実測ではありません",
+    "demo": "デモデータ・実デバイス未接続",
+    "viewLabel": "ビュー状態",
+    "state": {
+      "product": "全体",
+      "open": "オープン",
+      "explode": "分解",
+      "section": "断面",
+      "cycle": "サイクル",
+      "inspect": "詳細"
+    },
+    "fallback": "簡易モード: WebGL 利用不可、2D 図を表示",
+    "partInfo": "部品アーカイブ",
+    "selectHint": "部品をクリックして表示",
+    "thermal": "熱シミュレーション（教育用）",
+    "cabTemp": "庫内温度",
+    "condTemp": "凝縮器温度",
+    "compressor": "コンプレッサー",
+    "on": "運転",
+    "off": "停止",
+    "energy": "累積消費電力"
+  },
+  "plugins": {
+    "title": "プラグインとスキル",
+    "subtitle": "PluginSlot 統一レジストリ — ツール / スキル / MCP / コマンドの発見・呼び出し・作成をまとめて管理します。",
+    "searchPlaceholder": "プラグインを検索…",
+    "refresh": "更新",
+    "createSkill": "スキルを作成",
+    "openInWorkbench": "ワークベンチで開く",
+    "empty": "一致するプラグインがありません",
+    "loadFailed": "プラグインを読み込めませんでした：{error}",
+    "skill": {
+      "formTitle": "新しいスキルを作成",
+      "nameLabel": "スキル識別子（英語）",
+      "namePlaceholder": "例：my-skill",
+      "descriptionLabel": "説明",
+      "descriptionPlaceholder": "スキルの簡単な説明",
+      "triggersLabel": "トリガーワード（カンマ区切り、任意）",
+      "triggersPlaceholder": "例：translate,translation",
+      "promptLabel": "プロンプトテンプレート（text などの変数を利用できます）",
+      "promptPlaceholder": "あなたはプロの翻訳者です。次のテキストを英語に翻訳してください：[[text]]",
+      "cancel": "キャンセル",
+      "save": "スキルを保存",
+      "saving": "保存中…",
+      "requiredFields": "必須項目をすべて入力してください",
+      "createFailed": "スキルを作成できませんでした：{error}"
+    },
+    "assembly": {
+      "title": "プラグインのアセンブリ状況（plugins.status · 起動時アセンブリ）",
+      "refresh": "アセンブリを再取得",
+      "summary": "インストール済み {installed} 件中 {assembled} 件をアセンブリ · patch {patches}（applied {applied}、skipped {skipped}、errors {errors}）",
+      "statusFailed": "アセンブリ状況を読み込めませんでした：{error}",
+      "columnManifest": "マニフェスト",
+      "columnMode": "モード",
+      "columnStatus": "アセンブリ状態",
+      "columnSlot": "元スロット",
+      "modeDeclarative": "宣言のみ · 未アセンブリ",
+      "modeNative": "ネイティブ",
+      "assembled": "アセンブリ済み",
+      "notAssembled": "未アセンブリ",
+      "patchReport": "patch アセンブリレポート"
+    },
+    "market": {
+      "title": "プラグインマーケット（DSH エコシステム + サードパーティ取り込み）",
+      "auditAll": "一括セキュリティ監査",
+      "installAll": "すべてのプラグインをインストール",
+      "auditFailed": "監査に失敗しました",
+      "auditDone": "監査が完了しました：{count} 件、レッドライン疑い {suspects} 件 / 高リスク機能 {risks} 件",
+      "noFindings": "レッドライン・高リスクの指摘はありません",
+      "columnPlugin": "プラグイン",
+      "columnVersion": "バージョン",
+      "columnVerdict": "判定",
+      "columnCapabilities": "機能 / フック",
+      "columnFindings": "監査結果",
+      "tabAll": "すべて",
+      "tabPlugin": "プラグイン",
+      "tabSkill": "スキル",
+      "tabHarness": "Harness エコシステム",
+      "catalogTitle": "ローカルマニフェスト一覧（{count} 件、market.list）",
+      "kindPlugin": "プラグイン",
+      "kindSkill": "スキル",
+      "declarativeOnly": "宣言のみ · 未アセンブリ",
+      "declarativeOnlyHint": "宣言済みだが実行時にはアセンブリされていません（マニフェストに entry がありません）：機能は登録されていますが有効になりません。",
+      "install": "インストール",
+      "export": "エクスポート",
+      "importSuccess": "{name} v{version} を取り込みました — {message}",
+      "importFailed": "取り込みに失敗しました：{error}",
+      "exportSuccess": "マニフェスト {name} をエクスポートしました（内容は下のテキストボックスに入ったのでコピーして共有できます）",
+      "exportFailed": "エクスポートに失敗しました",
+      "batchResult": "一括インストール：{total} 件中 {ok} 件が成功しました（実行時の登録はゲートウェイの再起動後に反映されます）"
+    },
+    "harness": {
+      "catalogTitle": "DeepSeek Harness エコシステム（上流リポジトリ {count} 件 · 蒸留設計図、market.harness）",
+      "distillTarget": "蒸留先",
+      "aligned": "DeepSeek エコシステムと整合"
+    },
+    "sources": {
+      "title": "ダウンロード元（deepseek harness エコシステム · market.sources）",
+      "refresh": "ダウンロード元を更新",
+      "kindExternalRepo": "サードパーティリポジトリ",
+      "kindCatalog": "マニフェストカタログ",
+      "importTitle": "プラグインマニフェストの取り込み（サード / フォースパーティエコシステム。レッドライン項目は既定で拒否されます）",
+      "importPlaceholder": "plugin.json の内容を貼り付けてください（name・version・description を宣言したマニフェストの例）",
+      "importAck": "レッドライン項目のリスクを確認しました（ack）",
+      "importAction": "取り込む",
+      "refreshMarket": "マーケットを更新"
+    },
+    "verdict": {
+      "clean": "合格",
+      "warn": "警告",
+      "broken": "破損"
+    },
+    "ecosystem": {
+      "computerUse": "Computer Use",
+      "harness": "Harness"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "ウィンドウを最小化",
+      "maximize": "ウィンドウを最大化",
+      "restore": "ウィンドウを元のサイズに戻す",
+      "close": "ウィンドウを閉じる"
     }
   }
 }

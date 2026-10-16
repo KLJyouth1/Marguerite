@@ -7,6 +7,7 @@
   >
     <div class="chat-header__identity">
       <h1 class="chat-header__title chat-label" :title="sessionKey">{{ title }}</h1>
+      <AgentPersonaBadge />
       <button
         v-if="layout === 'wide'"
         ref="wideCopyRef"
@@ -23,6 +24,7 @@
     </div>
 
     <div v-if="layout === 'wide'" class="chat-header__actions">
+      <ExpertSessionPicker />
       <button
         v-if="deliverableCount > 0"
         ref="wideDeliverablesRef"
@@ -189,6 +191,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import AgentPersonaBadge from '@/components/chat/AgentPersonaBadge.vue'
+import ExpertSessionPicker from '@/components/chat/ExpertSessionPicker.vue'
 import { useDialogLayer } from '@/composables/useDialogA11y'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import type { IconName } from '@/utils/icons'

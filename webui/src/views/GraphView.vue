@@ -67,6 +67,45 @@
       </div>
       <div class="graph-detail__legend">图例：共现 灰 · 是 蓝 · 使用 绿 · 实现 橙 · 提供 青</div>
     </section>
+
+    <!-- 项目级关系图谱（一项目一图） -->
+    <section class="graph-project">
+      <div class="graph-project__title">项目级关系图谱（一项目一图）</div>
+      <p class="graph-project__hint">每个项目文件夹只有一份图谱：离线静态分析（模块 / 依赖 / 主题），供智能体理解、识别、剖析项目；重复分析覆盖同项目旧图。</p>
+      <div class="graph-project__row">
+        <input v-model="projectPath" class="graph-input graph-project__input" placeholder="项目文件夹绝对路径（例如 /path/to/your/project）" @keyup.enter="analyzeProject" />
+        <button class="btn btn--primary" :disabled="busy || !projectPath.trim()" @click="analyzeProject">分析</button>
+        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="saveProjectGraph">保存项目图谱</button>
+        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="deleteCurrentProjectGraph">删除项目图谱</button>
+      </div>
+      <div v-if="projectNote" class="graph-project__note">{{ projectNote }}</div>
+      <div v-if="projectGraph" class="graph-project__graph">
+        <div class="graph-project__cols">
+          <div class="graph-project__col">
+            <div class="graph-project__sub">节点（{{ projectGraph.nodes.length }}）</div>
+            <div class="graph-project__pills">
+              <span v-for="n in projectGraph.nodes" :key="n.id" class="graph-project__pill" :data-kind="n.kind" :title="n.id">{{ n.label || n.id }}</span>
+            </div>
+          </div>
+          <div class="graph-project__col">
+            <div class="graph-project__sub">关系（{{ projectGraph.edges.length }}）</div>
+            <ul class="graph-project__edges">
+              <li v-for="(e, i) in projectGraph.edges" :key="i"><code>{{ e.from }}</code><span class="graph-project__ekind">{{ e.kind }}</span><code>{{ e.to }}</code></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="graph-project__saved">
+        <div v-if="savedProjects.length" class="graph-project__saved-title">已保存的项目图谱（{{ savedProjects.length }}）</div>
+        <div v-else class="graph-project__saved-empty">暂无已保存的项目图谱 — 分析后点「保存项目图谱」落盘（每项目唯一）</div>
+        <div v-for="s in savedProjects" :key="s.key" class="graph-project__saved-row">
+          <code class="graph-project__saved-path" :title="s.project">{{ s.project }}</code>
+          <span class="graph-project__saved-meta">{{ s.nodes }} 节点 / {{ s.edges }} 边</span>
+          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="loadProjectGraph(s.project)">加载</button>
+          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="removeProjectGraph(s.project)">删除</button>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -157,6 +196,81 @@ async function pick(id: string) {
 }
 
 onMounted(load)
+
+interface ProjectNode { id: string; kind: string; label?: string | null }
+interface ProjectEdge { from: string; to: string; kind: string }
+interface ProjectGraphPayload { project: string; nodes: ProjectNode[]; edges: ProjectEdge[]; summary?: string; ok?: boolean; error?: string }
+interface SavedProject { key: string; project: string; nodes: number; edges: number }
+
+const projectPath = ref('')
+const projectGraph = ref<ProjectGraphPayload | null>(null)
+const projectNote = ref('')
+const savedProjects = ref<SavedProject[]>([])
+const busy = ref(false)
+
+async function loadSavedProjects() {
+  try {
+    const r = await rpc.call<{ items: SavedProject[]; total: number }>('graph.project.list', {})
+    savedProjects.value = r.items ?? []
+  } catch { /* 静默 */ }
+}
+
+async function analyzeProject() {
+  const p = projectPath.value.trim()
+  if (!p) return
+  busy.value = true
+  projectNote.value = ''
+  try {
+    const r = await rpc.call<ProjectGraphPayload>('graph.project.analyze', { project: p, maxFiles: 200 })
+    if (r.ok === false) {
+      projectNote.value = r.error ?? '分析失败'
+    } else {
+      projectGraph.value = r
+      projectNote.value = r.summary ?? `分析完成：${r.nodes.length} 节点 / ${r.edges.length} 边（尚未保存）`
+    }
+  } catch (e) {
+    projectNote.value = e instanceof Error ? e.message : String(e)
+  } finally { busy.value = false }
+}
+
+async function saveProjectGraph() {
+  const g = projectGraph.value
+  if (!g) return
+  busy.value = true
+  try {
+    const r = await rpc.call<{ ok: boolean; error?: string }>('graph.project.save', { project: g.project, nodes: g.nodes, edges: g.edges })
+    projectNote.value = r.ok ? '已保存（一项目一图：同项目旧图已覆盖）' : (r.error ?? '保存失败')
+    if (r.ok) await loadSavedProjects()
+  } catch (e) {
+    projectNote.value = e instanceof Error ? e.message : String(e)
+  } finally { busy.value = false }
+}
+
+async function loadProjectGraph(project: string) {
+  busy.value = true
+  projectPath.value = project
+  try {
+    const r = await rpc.call<ProjectGraphPayload>('graph.project.view', { project })
+    if (r.ok === false) { projectNote.value = r.error ?? '加载失败' } else { projectGraph.value = r; projectNote.value = '已加载该项目的唯一图谱' }
+  } catch (e) { projectNote.value = e instanceof Error ? e.message : String(e) } finally { busy.value = false }
+}
+
+async function deleteCurrentProjectGraph() {
+  if (!projectGraph.value) return
+  await removeProjectGraph(projectGraph.value.project)
+}
+
+async function removeProjectGraph(project: string) {
+  busy.value = true
+  try {
+    const r = await rpc.call<{ ok: boolean; error?: string }>('graph.project.delete', { project })
+    projectNote.value = r.ok ? '项目图谱已删除' : (r.error ?? '删除失败')
+    if (r.ok && projectGraph.value?.project === project) projectGraph.value = null
+    await loadSavedProjects()
+  } catch (e) { projectNote.value = e instanceof Error ? e.message : String(e) } finally { busy.value = false }
+}
+
+onMounted(() => { void loadSavedProjects() })
 </script>
 
 <style scoped>
@@ -178,4 +292,29 @@ onMounted(load)
 .graph-detail__tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .graph-detail__tag { font-size: 11px; padding: 3px 8px; border-radius: var(--radius-pill); background: var(--bg-hover); border: 1px solid var(--hairline); cursor: pointer; }
 .graph-detail__legend { font-size: 10px; color: var(--text-dim); margin-top: 10px; }
+.graph-project { margin-top: 16px; padding: 16px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); }
+.graph-project__title { font-size: 13px; font-weight: 700; }
+.graph-project__hint { margin: 6px 0 0; font-size: 11px; color: var(--text-dim); }
+.graph-project__row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.graph-project__input { flex: 1; min-width: 260px; }
+.graph-project__note { margin-top: 8px; font-size: 12px; color: var(--accent); word-break: break-all; }
+.graph-project__graph { margin-top: 12px; border-top: 1px solid var(--hairline); padding-top: 12px; }
+.graph-project__cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.graph-project__sub { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+.graph-project__pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.graph-project__pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; background: var(--bg-hover); border: 1px solid var(--hairline); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-project__pill[data-kind="project"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.graph-project__pill[data-kind="module"] { color: var(--info); }
+.graph-project__pill[data-kind="dependency"] { color: var(--ok); }
+.graph-project__pill[data-kind="topic"] { color: var(--warn); }
+.graph-project__edges { margin: 0; padding: 0; list-style: none; font-size: 11px; max-height: 260px; overflow: auto; }
+.graph-project__edges li { display: flex; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--hairline); }
+.graph-project__edges code { font-family: var(--font-mono); word-break: break-all; }
+.graph-project__ekind { color: var(--text-dim); font-size: 10px; }
+.graph-project__saved { margin-top: 12px; border-top: 1px solid var(--hairline); padding-top: 10px; }
+.graph-project__saved-title { font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+.graph-project__saved-empty { font-size: 11px; color: var(--text-dim); }
+.graph-project__saved-row { display: flex; gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--hairline); font-size: 12px; }
+.graph-project__saved-path { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-project__saved-meta { color: var(--text-dim); white-space: nowrap; }
 </style>

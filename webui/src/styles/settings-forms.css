@@ -48,7 +48,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: var(--sp-1) var(--sp-2);
 }
 
@@ -73,7 +73,7 @@
 /* First column shows the human tier label ("Balanced default (c1)") rather than
    the bare c-code. The label keeps the canonical id in parentheses. */
 .setup-tier-table__tier {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.25;
 }
 
@@ -96,7 +96,7 @@
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: var(--sp-1) var(--sp-2);
   transition: border-color var(--dur-fast) var(--ease-out);
 }
@@ -112,7 +112,7 @@
   border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   min-width: 0;
   overflow: hidden;
   padding: var(--sp-1) var(--sp-2);
@@ -164,7 +164,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   min-width: 0;
   padding: var(--sp-1) var(--sp-2);
 }
@@ -201,67 +201,6 @@
 
 .setup-mini__env-command {
   margin-bottom: var(--sp-2);
-}
-
-/* CLI command groups (readiness disclosure) */
-.setup-cli {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
-
-.setup-cli__group {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.setup-cli__group-head {
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-  padding: var(--sp-3) var(--sp-4);
-}
-
-.setup-cli__row {
-  align-items: center;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-}
-
-.setup-cli__row:last-child {
-  border-bottom: none;
-}
-
-/* Config summary grid (readiness disclosure) */
-.setup-summary {
-  display: grid;
-  gap: var(--sp-3);
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-}
-
-.setup-summary > div {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  padding: var(--sp-3);
-  border-radius: var(--radius-md);
-}
-
-.setup-summary span {
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.setup-summary strong {
-  color: var(--text);
-  font-size: var(--fs-sm);
 }
 
 /* Responsive */

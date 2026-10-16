@@ -4,9 +4,11 @@ import type {
   CollaborationSnapshot,
   PlanCardAction,
   PlanCardActionTarget,
+  PlanReuseCandidate,
   PlanRevisionRequest,
   PlanRevisionSnapshot,
   PlanRunSnapshot,
+  PlanRunTiming,
 } from '@/types/plans'
 import type { SessionMessagesSubscribeResponse } from '@/types/rpc'
 import { createClientRequestId } from '@/utils/chat/messageIdentity'
@@ -37,6 +39,22 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+/** D-05/T08：从事件信封里取复用候选（snake/camel 双写，对齐 core 负载）。 */
+function reuseCandidateFrom(value: unknown): PlanReuseCandidate | undefined {
+  const source = objectRecord(value)
+  if (!source) return undefined
+  const raw = objectRecord(source.reuse_candidate ?? source.reuseCandidate)
+  if (!raw) return undefined
+  const revisionId = String(raw.revisionId ?? raw.revision_id ?? '').trim()
+  if (!revisionId) return undefined
+  const createdAtRaw = Number(raw.createdAt ?? raw.created_at)
+  return {
+    revisionId,
+    title: String(raw.title ?? '').trim() || revisionId,
+    ...(Number.isFinite(createdAtRaw) ? { createdAt: createdAtRaw } : {}),
+  }
 }
 
 function collaborationRevisionFrom(value: unknown): number | undefined {
@@ -180,6 +198,12 @@ export function useChatPlans(options: UseChatPlansOptions) {
   )
   const currentPlan = ref<PlanRevisionSnapshot | null>(null)
   const activePlanRun = ref<PlanRunSnapshot | null>(null)
+  // v3.3：当前步骤的任务类型徽章（step_progress 事件携带；编码/文档/对话…）
+  const activeStepKind = ref<string>('')
+  // v3.3.1：产物生成进度（artifact_progress 事件；PPT 逐页等）
+  const artifactProgress = ref<{ detail: string; percent: number; ts: number } | null>(null)
+  // M2-C3：计划运行实时时序（真实事件驱动：elapsedMs/etaMs 来自 core runner 实测）
+  const runTiming = ref<PlanRunTiming | null>(null)
   const modeBusy = ref(false)
   const pendingAction = ref<PlanCardAction | 'cancel-run' | 'revise' | null>(null)
   const modeAppliesNextTurn = ref(false)
@@ -199,6 +223,7 @@ export function useChatPlans(options: UseChatPlansOptions) {
     collaboration.value = { mode: 'default', revision: 0 }
     currentPlan.value = null
     activePlanRun.value = null
+    runTiming.value = null
     modeBusy.value = false
     pendingAction.value = null
     modeAppliesNextTurn.value = false
@@ -269,7 +294,14 @@ export function useChatPlans(options: UseChatPlansOptions) {
       collaborationRevisionFrom(envelope),
       collaboration.value.revision,
     )) return false
-    currentPlan.value = { ...plan, current: true }
+    // D-05/T08：复用候选随事件信封（reuse_candidate）下发，**不静默复用**——
+    // 透传到 plan 供 PlanCard 显示「继续上次计划」按钮。
+    const reuseCandidate = reuseCandidateFrom(envelope)
+    currentPlan.value = {
+      ...plan,
+      current: true,
+      ...(reuseCandidate ? { reuseCandidate } : {}),
+    }
     if (
       activePlanRun.value
       && activePlanRun.value.planRevisionId !== plan.revisionId
@@ -346,6 +378,44 @@ export function useChatPlans(options: UseChatPlansOptions) {
     applyPlanRun(payload)
   }
 
+  /** v3.3：步骤进度事件 → 更新任务类型徽章（step 开始置新值，结束/终态清空） */
+  function applyStepProgressEvent(raw: unknown) {
+    const payload = raw as import('@/types/plans').StepProgressPayload
+    if (!payload || payload.kind !== 'step_progress') return
+    if (!payloadBelongsToSession(payload, options.sessionKey.value)) return
+    if (payload.phase === 'started') activeStepKind.value = String(payload.taskKind || '')
+    else activeStepKind.value = ''
+    // M2-C3：实时时序（elapsedMs/etaMs/avgStepMs 由 core runner 实测发布）
+    if (typeof payload.elapsedMs === 'number' && Number.isFinite(payload.elapsedMs)) {
+      runTiming.value = {
+        elapsedMs: payload.elapsedMs,
+        etaMs: typeof payload.etaMs === 'number' && payload.etaMs >= 0 ? payload.etaMs : undefined,
+        avgStepMs:
+          typeof payload.avgStepMs === 'number' && payload.avgStepMs >= 0
+            ? payload.avgStepMs
+            : undefined,
+        stepIndex: payload.stepIndex,
+        stepsTotal: payload.stepsTotal,
+        phase: payload.phase,
+        stepTitle: payload.stepTitle,
+        // N1：记录本地收报时刻，UI 在事件之间按秒续算「已用」。
+        atMs: Date.now(),
+      }
+    }
+  }
+
+  /** v3.3.1：产物生成进度事件（PPT 逐页等）→ 暴露给 UI 渲染生成中状态 */
+  function applyArtifactProgressEvent(raw: unknown) {
+    const payload = raw as { kind?: string; detail?: string; percent?: number }
+    if (!payload || payload.kind !== 'artifact_progress') return
+    if (!payloadBelongsToSession(payload, options.sessionKey.value)) return
+    artifactProgress.value = {
+      detail: String(payload.detail || ''),
+      percent: Number(payload.percent || 0),
+      ts: Date.now(),
+    }
+  }
+
   function applyCollaborationEvent(payload: unknown) {
     if (!payloadBelongsToSession(payload, options.sessionKey.value)) return
     if (!acceptEpoch(payload)) return
@@ -360,6 +430,11 @@ export function useChatPlans(options: UseChatPlansOptions) {
       options.rpc.on('plan_revision', applyPlanRevisionEvent),
       options.rpc.on('session.event.plan_run', applyPlanRunEvent),
       options.rpc.on('plan_run', applyPlanRunEvent),
+      // v3.3：步骤进度（任务类型徽章）
+      options.rpc.on('session.event.progress', applyStepProgressEvent),
+      // v3.3.1：产物生成进度（PPT 逐页等）
+      options.rpc.on('artifact.progress', applyArtifactProgressEvent),
+      options.rpc.on('session.event.artifact_progress', applyArtifactProgressEvent),
     ]
     return () => unsubs.forEach(unsubscribe => unsubscribe())
   }
@@ -550,6 +625,61 @@ export function useChatPlans(options: UseChatPlansOptions) {
     }
   }
 
+  async function stepEdit(
+    kind: 'plans.step.add' | 'plans.step.remove' | 'plans.step.update',
+    params: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!options.sessionKey.value || modeBusy.value || pendingAction.value) return false
+    const key = options.sessionKey.value
+    const epoch = acceptedEpoch
+    const owner = Symbol('plan-step-edit')
+    actionMutationOwner = owner
+    pendingAction.value = 'revise'
+    try {
+      const response = await options.rpc.call<PlanMutationResponse>(kind, {
+        sessionKey: key,
+        ...params,
+        clientRequestId: createClientRequestId(),
+      })
+      if (key !== options.sessionKey.value || epoch !== acceptedEpoch) return false
+      applyResponse(response)
+      options.onMutationAccepted?.()
+      return true
+    } catch (error) {
+      if (
+        actionMutationOwner === owner
+        && key === options.sessionKey.value
+        && epoch === acceptedEpoch
+      ) {
+        options.notifyError(error instanceof Error ? error.message : String(error))
+      }
+      return false
+    } finally {
+      if (actionMutationOwner === owner) {
+        actionMutationOwner = null
+        pendingAction.value = null
+      }
+    }
+  }
+
+  /** M2-C2：执行前在计划卡中新增子任务（必须有 planRevisionId 上下文） */
+  function stepEditAdd(step: { stepTitle: string; details?: string; deps?: string[] }): Promise<boolean> {
+    if (!currentPlanRevisionId.value) return Promise.resolve(false)
+    return stepEdit('plans.step.add', { planRevisionId: currentPlanRevisionId.value, ...step })
+  }
+
+  /** M2-C2：执行前在计划卡中删除子任务（清理依赖边由 core 端 handle） */
+  function stepEditRemove(stepId: string): Promise<boolean> {
+    if (!currentPlanRevisionId.value) return Promise.resolve(false)
+    return stepEdit('plans.step.remove', { planRevisionId: currentPlanRevisionId.value, stepId })
+  }
+
+  /** M2-C2：执行前在计划卡中修改子任务标题/详情/依赖 */
+  function stepEditUpdate(step: { stepId: string; stepTitle: string; details?: string; deps?: string[] }): Promise<boolean> {
+    if (!currentPlanRevisionId.value) return Promise.resolve(false)
+    return stepEdit('plans.step.update', { planRevisionId: currentPlanRevisionId.value, ...step })
+  }
+
   reset()
 
   return {
@@ -558,6 +688,9 @@ export function useChatPlans(options: UseChatPlansOptions) {
     currentPlan,
     currentPlanRevisionId,
     activePlanRun,
+    activeStepKind,
+    artifactProgress,
+    runTiming,
     modeBusy,
     modeAppliesNextTurn,
     pendingAction,
@@ -573,5 +706,8 @@ export function useChatPlans(options: UseChatPlansOptions) {
     revise,
     implement,
     cancelRun,
+    stepEditAdd,
+    stepEditRemove,
+    stepEditUpdate,
   }
 }

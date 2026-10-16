@@ -405,7 +405,8 @@ test.describe('Live assistant activity lifecycle', () => {
     await page.goto(
       CONTROL_URL + 'chat?session=' + encodeURIComponent(LIFECYCLE_SESSION_KEY),
     )
-    await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 10000 })
 
     await page.locator('.chat-textarea').fill('Inspect, draft, verify, and answer.')
     await page.locator('.chat-send-btn[aria-label="Send"]').click()
@@ -524,7 +525,8 @@ test.describe('Live assistant activity lifecycle', () => {
     await page.goto(
       CONTROL_URL + 'chat?session=' + encodeURIComponent(LIFECYCLE_SESSION_KEY),
     )
-    await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 10000 })
 
     await page.locator('.chat-textarea').fill('Inspect, draft, verify, and answer.')
     await page.locator('.chat-send-btn[aria-label="Send"]').click()

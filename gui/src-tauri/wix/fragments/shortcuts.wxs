@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <!--
+    WiX fragment for Marguerite MSI shortcuts and cleanup.
+    Addresses known MSI packaging issues:
+    1. Desktop shortcut with correct icon (matches installed executable)
+    2. Start Menu shortcut
+    3. Program Files directory cleanup on uninstall (remove data subdirs)
+    4. Registry cleanup on uninstall
+  -->
+
+  <Fragment>
+    <!-- Desktop shortcut -->
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*" KeyPath="yes">
+        <Shortcut Id="DesktopShortcut"
+                  Name="Marguerite"
+                  Description="Marguerite Workbench"
+                  Target="[INSTALLDIR]Marguerite.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="ProductIcon"
+                  IconIndex="0"
+                  Show="normal"
+                  Advertise="no" />
+        <RemoveFolder Id="DesktopShortcutRemove" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Start Menu shortcut (nested under Marguerite folder) -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcut" Guid="*" KeyPath="yes">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Marguerite"
+                  Description="Marguerite Workbench"
+                  Target="[INSTALLDIR]Marguerite.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="ProductIcon"
+                  IconIndex="0"
+                  Show="normal"
+                  Advertise="no" />
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Feature references for shortcuts -->
+    <ComponentGroup Id="MargueriteShortcuts">
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </ComponentGroup>
+
+    <!--
+      Registry entries for per-user data path (APPDATA-based).
+      The application uses %APPDATA%\Marguerite\data for writable data,
+      so Program Files is read-only. The data directory is NOT removed
+      on uninstall (user data preservation), but we register the path
+      so future upgrades can reference it.
+    -->
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="AppDataRegistry" Guid="*" KeyPath="yes">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Marguerite\Install"
+                       Name="DataPath"
+                       Value="[LocalAppDataFolder]Marguerite\data"
+                       Type="string" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Marguerite\Install"
+                       Name="InstallPath"
+                       Value="[INSTALLDIR]"
+                       Type="string" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Marguerite\Install"
+                       Name="Version"
+                       Value="0.2.0"
+                       Type="string" />
+        <!-- Remove registry on uninstall -->
+        <RemoveRegistryKey Root="HKCU" Key="Software\Marguerite" Action="removeOnUninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <!--
+      开机自启动清理：应用运行时会经 autostart_set 在
+      HKCU\Software\Microsoft\Windows\CurrentVersion\Run 写入一条名为 `Marguerite`
+      的值（见 gui/src-tauri/src/lib.rs）。卸载时必须删掉它，否则会残留一条
+      指向已删除 exe 的自启动项。
+
+      为什么**不能**用标准的 RemoveRegistryValue / RemoveRegistryKey（已查 WiX 3 官方 XSD）：
+      - `RemoveRegistryValue` 只在**安装时**删值，且官方原文写明「没有标准方式在卸载时删单个
+        注册表值」——用它会在每次安装/升级时抹掉用户已开启的自启动设置（功能看起来是开的，
+        实际不会自启）；
+      - `RemoveRegistryKey` 只能删**整个键及其所有子键/值**，而 `…\CurrentVersion\Run` 是
+        多应用**共享键**（本机实测已有 Steam / QQNT / doubao 等十条），删它等于连别人的
+        自启动项一起删。
+      因此改用 deferred 自定义动作，在卸载时精确删除这一个值。
+      `Return="ignore"`：该值不存在（用户从未开启）时不算失败；`Impersonate="yes"`：
+      HKCU 必须在调用者身份下写，不能用系统身份。
+
+      两处形状由 candle 编译器（CNDL0037 / CNDL0004）实测纠正，不是猜的：
+      - `ExeCommand` 型 CA 必须显式给出 `Directory`（运行目录），且 exe 路径要写成属性形式
+        `"[SystemFolder]reg.exe"`，不能只写裸命令；
+      - `Custom` 元素不吃 `Condition` 属性，条件必须写成子元素内容。
+    -->
+    <CustomAction Id="RemoveAutostartValue"
+                  Directory="TARGETDIR"
+                  ExeCommand='"[SystemFolder]reg.exe" delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Marguerite /f'
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RemoveAutostartValue" After="RemoveRegistryValues">
+        <![CDATA[REMOVE="ALL"]]>
+      </Custom>
+    </InstallExecuteSequence>
+
+    <!--
+      Cleanup: remove empty leftover directories on uninstall.
+      Since we use %APPDATA% for data, ProgramFiles only contains binaries.
+      The RemoveFolder elements above handle standard cleanup.
+      Additional custom action for thorough cleanup is deferred to Tauri's
+      default uninstaller behavior, which removes the INSTALLDIR tree.
+    -->
+  </Fragment>
+</Wix>

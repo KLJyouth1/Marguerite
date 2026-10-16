@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useAppStore, type ThemeMode } from '@/stores/app'
+import { useAppStore, type ThemeMode, type BootAnimationMode } from '@/stores/app'
 import { themePickerOptions } from '@/themes/registry'
 import { SUPPORTED_LOCALES, type LocaleCode } from '@/i18n'
 import Icon from '@/components/Icon.vue'
@@ -13,6 +13,11 @@ import {
   type ToolDetailDisplayMode,
   useToolDetailPreference,
 } from '@/composables/useToolDetailPreference'
+import {
+  CHAT_FONT_SCALES,
+  useChatFontScale,
+  type ChatFontScale,
+} from '@/composables/useChatFontScale'
 import { useRouterVisualEffectsPreference } from '@/composables/useRouterVisualEffectsPreference'
 import { useComposerFloatingPreference } from '@/composables/useComposerFloatingPreference'
 import {
@@ -46,10 +51,23 @@ const LOCALE_LABELS: Record<LocaleCode, string> = {
   es: 'Español',
 }
 const localeOptions = SUPPORTED_LOCALES.map((code) => ({ code, label: LOCALE_LABELS[code] }))
+// 对话页字号档位（rem 制字号 token 随根 font-size 级联，见 useChatFontScale）。
+const chatFontOptions = CHAT_FONT_SCALES.map(scale => ({
+  scale,
+  labelKey: `settings.appearance.chatFont${scale[0].toUpperCase()}${scale.slice(1)}`,
+}))
 const toolDetailOptions = TOOL_DETAIL_DISPLAY_MODES.map(mode => ({
   mode,
   labelKey: `settings.appearance.toolDetails${mode[0].toUpperCase()}${mode.slice(1)}`,
 }))
+
+// Splash tiers, most-visible first. Kept explicit (not a mapped enum) because the
+// order is a product choice: Full → Minimal → Off reads as "turn it down".
+const bootAnimationOptions: Array<{ mode: BootAnimationMode; labelKey: string }> = [
+  { mode: 'full', labelKey: 'settings.appearance.bootAnimationFull' },
+  { mode: 'minimal', labelKey: 'settings.appearance.bootAnimationMinimal' },
+  { mode: 'off', labelKey: 'settings.appearance.bootAnimationOff' },
+]
 
 function pickTheme(mode: ThemeMode) {
   appStore.setTheme(mode)
@@ -63,6 +81,7 @@ const {
   mode: toolDetailDisplayMode,
   setMode: setToolDetailDisplayMode,
 } = useToolDetailPreference()
+const { scale: chatFontScale, setScale: setChatFontScale } = useChatFontScale()
 const {
   enabled: routerVisualEffectsEnabled,
   setEnabled: setRouterVisualEffectsEnabled,
@@ -72,8 +91,16 @@ const {
   setEnabled: setComposerFxEnabled,
 } = useComposerFloatingPreference()
 
+function pickChatFontScale(next: ChatFontScale) {
+  setChatFontScale(next)
+}
+
 function pickToolDetailDisplay(mode: ToolDetailDisplayMode) {
   setToolDetailDisplayMode(mode)
+}
+
+function pickBootAnimation(mode: BootAnimationMode) {
+  appStore.setBootAnimation(mode)
 }
 
 // Background-music feature gate (off by default). Same singleton the topbar
@@ -330,6 +357,72 @@ onBeforeUnmount(stopCustomStepRepeat)
               :checked="toolDetailDisplayMode === option.mode"
               :data-testid="`settings-tool-details-${option.mode}`"
               @change="pickToolDetailDisplay(option.mode)"
+            >
+            <span>{{ t(option.labelKey) }}</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="control-row control-row--stack">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('settings.appearance.chatFontLabel') }}</span>
+        <span class="control-row__desc">{{ t('settings.appearance.chatFontDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <div
+          class="appearance-theme"
+          role="radiogroup"
+          :aria-label="t('settings.appearance.chatFontLabel')"
+          data-testid="settings-chat-font-group"
+        >
+          <label
+            v-for="option in chatFontOptions"
+            :key="option.scale"
+            class="appearance-theme__opt"
+            :class="{ 'is-active': chatFontScale === option.scale }"
+          >
+            <input
+              class="appearance-theme__radio"
+              type="radio"
+              name="appearance-chat-font"
+              :value="option.scale"
+              :checked="chatFontScale === option.scale"
+              :data-testid="`settings-chat-font-${option.scale}`"
+              @change="pickChatFontScale(option.scale)"
+            >
+            <span>{{ t(option.labelKey) }}</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="control-row control-row--stack">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('settings.appearance.bootAnimationLabel') }}</span>
+        <span class="control-row__desc">{{ t('settings.appearance.bootAnimationDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <div
+          class="appearance-theme"
+          role="radiogroup"
+          :aria-label="t('settings.appearance.bootAnimationLabel')"
+          data-testid="settings-boot-animation-group"
+        >
+          <label
+            v-for="option in bootAnimationOptions"
+            :key="option.mode"
+            class="appearance-theme__opt"
+            :class="{ 'is-active': appStore.bootAnimation === option.mode }"
+          >
+            <input
+              class="appearance-theme__radio"
+              type="radio"
+              name="appearance-boot-animation"
+              :value="option.mode"
+              :checked="appStore.bootAnimation === option.mode"
+              :data-testid="`settings-boot-animation-${option.mode}`"
+              @change="pickBootAnimation(option.mode)"
             >
             <span>{{ t(option.labelKey) }}</span>
           </label>

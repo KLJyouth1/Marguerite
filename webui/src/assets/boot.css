@@ -1,0 +1,344 @@
+/* Boot splash — cinematic constellation handoff.
+ *
+ * Lives INSIDE the app mount container in index.html and needs no JS to
+ * disappear: Vue's mount clears the container, so the handoff from splash to
+ * the real UI (and the optional BootOrchestra overlay) happens in one task.
+ *
+ * Mode is stamped on <html data-boot="full|minimal|off"> by the inline script
+ * in index.html. Colors / radii / durations come from the shared token
+ * vocabulary — enforced by check-webui-colors / -radius / -motion.
+ */
+
+#mq-boot {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-5);
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 42%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%),
+    radial-gradient(ellipse 90% 70% at 18% 88%, color-mix(in srgb, var(--info, var(--accent)) 12%, transparent), transparent 65%),
+    var(--bg);
+  color: var(--text);
+  font-family: var(--font-display);
+  pointer-events: none;
+  animation: mq-boot-enter var(--dur-enter) var(--ease-out) both;
+}
+
+html[data-boot='off'] #mq-boot {
+  display: none;
+}
+
+/* Atmosphere: soft grid + scan beam (full only). */
+.mq-boot-atmosphere {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mq-boot-grid {
+  position: absolute;
+  inset: -10%;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--text) 8%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--text) 8%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 72% 60% at 50% 44%, black 20%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 72% 60% at 50% 44%, black 20%, transparent 78%);
+}
+
+.mq-boot-scan {
+  position: absolute;
+  inset-inline: 0;
+  height: 28%;
+  top: -30%;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--accent) 10%, transparent) 45%,
+    color-mix(in srgb, var(--text) 8%, transparent) 50%,
+    color-mix(in srgb, var(--accent) 10%, transparent) 55%,
+    transparent
+  );
+  animation: mq-boot-scan var(--dur-pulse) var(--ease-in) 1 both;
+}
+
+.mq-boot-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 70% at 50% 45%, transparent 40%, color-mix(in srgb, var(--bg) 72%, transparent) 100%);
+}
+
+/* Constellation of agent / tool nodes around the brand. */
+.mq-boot-constellation {
+  position: absolute;
+  width: min(520px, 86vw);
+  height: min(520px, 86vw);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -52%);
+  pointer-events: none;
+}
+
+.mq-boot-orbit {
+  position: absolute;
+  inset: 12%;
+  border-radius: var(--radius-full);
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  animation: mq-boot-spin calc(var(--dur-pulse) * 4) linear infinite;
+}
+
+.mq-boot-orbit--inner {
+  inset: 28%;
+  opacity: 0.7;
+  animation-direction: reverse;
+  animation-duration: calc(var(--dur-pulse) * 3.2);
+}
+
+.mq-boot-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 64px;
+  animation: mq-boot-node-in var(--dur-enter) var(--ease-out) both;
+}
+
+.mq-boot-node:nth-child(1) { top: 6%; left: 42%; animation-delay: 80ms; }
+.mq-boot-node:nth-child(2) { top: 22%; right: 8%; animation-delay: 140ms; }
+.mq-boot-node:nth-child(3) { bottom: 28%; right: 10%; animation-delay: 200ms; }
+.mq-boot-node:nth-child(4) { bottom: 8%; left: 40%; animation-delay: 260ms; }
+.mq-boot-node:nth-child(5) { bottom: 26%; left: 6%; animation-delay: 320ms; }
+.mq-boot-node:nth-child(6) { top: 24%; left: 6%; animation-delay: 380ms; }
+
+.mq-boot-node__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  animation: mq-boot-breathe var(--dur-pulse) linear infinite;
+}
+
+.mq-boot-node:nth-child(2) .mq-boot-node__dot { background: var(--ok, var(--accent)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok, var(--accent)) 18%, transparent); }
+.mq-boot-node:nth-child(3) .mq-boot-node__dot { background: var(--info, var(--accent)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--info, var(--accent)) 18%, transparent); }
+.mq-boot-node:nth-child(4) .mq-boot-node__dot { background: var(--warn, var(--accent)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn, var(--accent)) 18%, transparent); }
+.mq-boot-node:nth-child(5) .mq-boot-node__dot { background: var(--accent); }
+.mq-boot-node:nth-child(6) .mq-boot-node__dot { background: var(--ok, var(--accent)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok, var(--accent)) 18%, transparent); }
+
+.mq-boot-node__label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--text) 55%, transparent);
+  white-space: nowrap;
+}
+
+/* Brand lockup — hero of the first paint. */
+.mq-boot-core {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.mq-boot-mark {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(circle at 30% 28%, color-mix(in srgb, var(--text) 28%, transparent), transparent 42%),
+    var(--accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 18px 48px -18px color-mix(in srgb, var(--accent) 65%, transparent);
+  animation: mq-boot-breathe var(--dur-pulse) linear infinite;
+}
+
+.mq-boot-wordmark {
+  display: flex;
+  gap: 0.02em;
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 1.2rem + 2vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.mq-boot-wordmark > span {
+  display: inline-block;
+  animation: mq-boot-letter var(--dur-enter) var(--ease-out) both;
+}
+
+.mq-boot-wordmark > span:nth-child(1) { animation-delay: 40ms; }
+.mq-boot-wordmark > span:nth-child(2) { animation-delay: 80ms; }
+.mq-boot-wordmark > span:nth-child(3) { animation-delay: 120ms; }
+.mq-boot-wordmark > span:nth-child(4) { animation-delay: 160ms; }
+.mq-boot-wordmark > span:nth-child(5) { animation-delay: 200ms; }
+.mq-boot-wordmark > span:nth-child(6) { animation-delay: 240ms; }
+.mq-boot-wordmark > span:nth-child(7) { animation-delay: 280ms; }
+.mq-boot-wordmark > span:nth-child(8) { animation-delay: 320ms; }
+.mq-boot-wordmark > span:nth-child(9) { animation-delay: 360ms; }
+.mq-boot-wordmark > span:nth-child(10) { animation-delay: 400ms; }
+
+.mq-boot-tagline {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--text) 48%, transparent);
+  animation: mq-boot-enter calc(var(--dur-enter) * 1.4) var(--ease-out) both;
+  animation-delay: 220ms;
+}
+
+.mq-boot-bar {
+  width: 168px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  animation: mq-boot-enter var(--dur-enter) var(--ease-out) both;
+  animation-delay: 280ms;
+}
+
+.mq-boot-bar > span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    var(--accent)
+  );
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: mq-boot-slide var(--dur-pulse) linear infinite;
+}
+
+.mq-boot-log {
+  position: absolute;
+  left: var(--sp-5);
+  bottom: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--text) 42%, transparent);
+  max-width: min(42ch, 46vw);
+}
+
+.mq-boot-log > li {
+  list-style: none;
+  opacity: 0;
+  transform: translateX(-6px);
+  animation: mq-boot-log-in var(--dur-base) var(--ease-out) both;
+}
+
+.mq-boot-log > li:nth-child(1) { animation-delay: 180ms; }
+.mq-boot-log > li:nth-child(2) { animation-delay: 360ms; }
+.mq-boot-log > li:nth-child(3) { animation-delay: 540ms; }
+.mq-boot-log > li:nth-child(4) { animation-delay: 720ms; }
+.mq-boot-log > li:nth-child(5) { animation-delay: 900ms; }
+
+.mq-boot-log__ok {
+  color: var(--ok, var(--accent));
+  margin-right: 6px;
+}
+
+/* minimal → static mark, no constellation / bar / motion. */
+html[data-boot='minimal'] .mq-boot-atmosphere,
+html[data-boot='minimal'] .mq-boot-constellation,
+html[data-boot='minimal'] .mq-boot-bar,
+html[data-boot='minimal'] .mq-boot-log,
+html[data-boot='minimal'] .mq-boot-tagline,
+html[data-boot='minimal'] .mq-boot-wordmark {
+  display: none;
+}
+
+html[data-boot='minimal'] .mq-boot-mark {
+  animation: none;
+}
+
+@keyframes mq-boot-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mq-boot-letter {
+  from { opacity: 0; transform: translateY(10px); filter: blur(6px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+@keyframes mq-boot-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.88; }
+  50% { transform: scale(1.07); opacity: 1; }
+}
+
+@keyframes mq-boot-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(340%); }
+}
+
+@keyframes mq-boot-scan {
+  from { top: -30%; opacity: 0; }
+  15% { opacity: 1; }
+  to { top: 110%; opacity: 0; }
+}
+
+@keyframes mq-boot-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes mq-boot-node-in {
+  from { opacity: 0; transform: scale(0.7); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes mq-boot-log-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #mq-boot,
+  .mq-boot-mark,
+  .mq-boot-bar > span,
+  .mq-boot-scan,
+  .mq-boot-orbit,
+  .mq-boot-node,
+  .mq-boot-node__dot,
+  .mq-boot-wordmark > span,
+  .mq-boot-tagline,
+  .mq-boot-bar,
+  .mq-boot-log > li {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+
+  .mq-boot-scan {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .mq-boot-log {
+    display: none;
+  }
+
+  .mq-boot-node__label {
+    display: none;
+  }
+}

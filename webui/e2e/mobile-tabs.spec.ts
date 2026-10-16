@@ -7,7 +7,8 @@ async function openMobileChat(page: Page) {
   await page.setViewportSize(MOBILE_VIEWPORT)
   await page.goto(CONTROL_URL + 'chat')
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
-  await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
 }
 
 test.describe('Mobile bottom tab bar', () => {

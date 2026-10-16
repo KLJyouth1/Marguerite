@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "Island Game",
+    "title": "Marguerite Isle",
+    "subtitle": "A living open-world island bound to the real engine state",
+    "controls": "WASD / Arrow keys to walk · camera follows",
+    "canvasAria": "3D island scene, walkable with WASD",
+    "engine": {
+      "online": "Gateway online",
+      "offline": "Gateway offline — engine state hidden",
+      "mode": "Mode",
+      "shards": "Shards",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "Clear",
+      "rain": "Rain",
+      "night": "Night",
+      "fog": "Fog"
+    },
+    "day": {
+      "day": "Day",
+      "night": "Night"
+    },
+    "tier": {
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "quest": {
+      "title": "Quest Board",
+      "advance": "Advance",
+      "turnIn": "Turn in",
+      "complete": "Complete",
+      "status": {
+        "posted": "Posted",
+        "accepted": "Accepted",
+        "in_progress": "In progress",
+        "verifying": "Ready",
+        "completed": "Done",
+        "failed": "Failed"
+      }
+    },
+    "titles": {
+      "title": "Titles",
+      "none": "No titles yet",
+      "zeroWarn": "Zero-Warning Knight",
+      "gateKeeper": "Gate Conqueror",
+      "nightOwl": "Night Owl",
+      "thrifty": "Thrifty Steward"
+    },
+    "party": {
+      "title": "Party",
+      "aria": "Companion elf slots",
+      "slotAria": "Toggle companion elf slot {n}",
+      "scout": "Scout Raven",
+      "smith": "Craft Bee",
+      "aegis": "Aegis Tortoise",
+      "gull": "Messenger Gull"
+    },
+    "theme": {
+      "verdant": "Verdant",
+      "blossom": "Blossom",
+      "twilight": "Twilight"
+    },
+    "region": {
+      "garden": "PSI Garden",
+      "atrium": "Daisy Sanctum",
+      "board": "Quest Board"
+    },
+    "worldgen": {
+      "title": "World Generator",
+      "label": "Describe a change to the island",
+      "placeholder": "e.g. a rainy blossom island with a hard dungeon",
+      "apply": "Generate",
+      "rollback": "Rollback",
+      "hint": "Validation fails → the previous world is kept"
+    },
+    "fallback": {
+      "aria": "2D fallback island map",
+      "note": "WebGL unavailable — showing the accessible 2D island."
+    },
+    "world3d": {
+      "canvasAria": "3D open-world island scene, walkable with WASD and mouse look",
+      "controls": "WASD / Arrow keys to walk · click to lock mouse · E to pick up",
+      "tierLabel": "Model Tier",
+      "tier": {
+        "flagship": "Flagship Reasoning",
+        "efficient": "Efficient Reasoning",
+        "sprint": "Sprint Production",
+        "omni": "Omni Pareto"
+      },
+      "connected": "Connected",
+      "offline": "Offline",
+      "pending": "pending",
+      "pickup": "Pick up",
+      "glow": "Glow",
+      "particles": "particles",
+      "npcDepth": "dialogue depth",
+      "npcTitle": "AI NPC Dialogue",
+      "npcPlaceholder": "Topic to discuss…",
+      "talk": "Talk",
+      "npcDisclaimer": "Deterministic template dialogue (not a live model response)",
+      "fallbackNote": "WebGL unavailable — showing the 2D fallback island.",
+      "prop": {
+        "code_crystal": {
+          "name": "Code Crystal",
+          "desc": "A crystallized tool output; picking it up requests analysis."
+        },
+        "doc_scroll": {
+          "name": "Document Scroll",
+          "desc": "A delivered document; picking it up requests an explanation."
+        },
+        "data_fruit": {
+          "name": "Data Fruit",
+          "desc": "Runtime metrics as fruit; picking it up requests insight."
+        },
+        "quest_beacon": {
+          "name": "Quest Beacon",
+          "desc": "A pending commission; picking it up claims the quest."
+        },
+        "inspiration_bloom": {
+          "name": "Inspiration Bloom",
+          "desc": "A memory or idea in bloom; picking it up requests brainstorming."
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD loaded ({count} checks passed)",
+      "failed": "GDD validation failed — keeping the current world config",
+      "revision": "World revision",
+      "errorsLabel": "Error details",
+      "warningsLabel": "Warning details",
+      "noGdd": "No GDD loaded yet"
+    },
+    "glb": {
+      "statusProcedural": "Assets: procedural geometry",
+      "statusLoaded": "Assets: {count} hot-loaded (rev {rev})",
+      "statusFailed": "Assets: validation failed",
+      "errorsLabel": "Asset errors",
+      "revisionLabel": "Asset revision"
+    },
+    "viewMode": {
+      "world3d": "3D Open World",
+      "classic": "Classic Isle",
+      "aria": "Island view mode"
+    }
+  },
   "workspaces": {
     "projects": "Projects",
     "createProject": "Create project",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "The saved artifact is damaged or no longer matches its recorded checksum. Republish or download it to verify.",
       "invalidContent": "The downloaded content does not match the artifact type.",
       "failedDetail": "Retry the preview or download the file."
+    },
+    "goal": {
+      "title": "Goal progress",
+      "empty": "No active goal is available.",
+      "loading": "Loading goal status…",
+      "refresh": "Refresh goal status",
+      "rounds": "Rounds",
+      "tokens": "Tokens",
+      "steps": "Steps",
+      "actions": "Goal actions",
+      "pause": "Pause",
+      "resume": "Resume",
+      "complete": "Complete",
+      "status": {
+        "active": "Active",
+        "paused": "Paused",
+        "blocked": "Blocked",
+        "completed": "Completed"
+      }
+    },
+    "task": {
+      "title": "Task progress",
+      "subtitle": "Steps update live as the task runs.",
+      "empty": "No active task steps yet.",
+      "refresh": "Refresh task steps",
+      "steps": "Steps",
+      "stepStatus": {
+        "pending": "Pending",
+        "in_progress": "In progress",
+        "done": "Done",
+        "failed": "Failed"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "Plugins",
     "graph": "Graph",
     "poker": "Poker",
-    "pet": "Pet"
+    "pet": "Pet",
+    "engine": "Engine Health",
+    "ops": "Ops",
+    "terminal": "Terminal",
+    "changelog": "Changelog",
+    "games": "Games",
+    "expert-center": "Expert Center",
+    "editor": "Editor",
+    "browser-cockpit": "Browser Cockpit",
+    "sandbox": "Sandbox",
+    "device-twin": "Device Twin",
+    "pet-overlay": "Pet Overlay",
+    "groupCountHint": "{count} destinations in {group}",
+    "groupWork": "Work",
+    "groupOperate": "Operate",
+    "groupObserve": "Observe",
+    "groupSettings": "Settings",
+    "groupExtras": "Extras",
+    "control-center": "Control Center",
+    "ssh-collab": "SSH Collab",
+    "capabilities-hub": "Capabilities Hub",
+    "local-models": "Local Models",
+    "knowledge": "Knowledge",
+    "wallpaper": "Wallpaper",
+    "brain": "Shared Brain"
   },
   "notFound": {
     "title": "Page not found",
@@ -258,6 +461,7 @@
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar",
     "toggleSidebar": "Toggle sidebar",
+    "zenMode": "Zen mode",
     "resizeSidebar": "Resize sidebar",
     "sidebarWidthValue": "Sidebar width: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Sidebar width: {width}px, {preset}; limited by this window (preferred {preference}px)",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "Connected",
       "connecting": "Connecting",
-      "disconnected": "Disconnected"
+      "disconnected": "Disconnected",
+      "ready": "Ready",
+      "not_ready": "Setup needed"
     },
     "bgm": {
       "label": "Background music",
@@ -291,7 +497,15 @@
       "light": "Light",
       "dark": "Dark",
       "system": "System"
-    }
+    },
+    "languageSwitchTitle": "Language: {name} — switch interface language",
+    "modeBadge": "Runtime mode: {mode}",
+    "modeMenu": "Runtime mode menu",
+    "modeMenuTitle": "Runtime mode",
+    "modeMenuCurrent": "Current: {mode}",
+    "modeMenuOpenHub": "Open the control center (full mode management)",
+    "modeSwitchFailed": "Could not switch the runtime mode.",
+    "modeMatrix": "Mode: intensity × working style"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "Display language for the interface and channel system notices. Applies instantly here and saves the Gateway-wide notice language.",
       "channelNoticeLocaleSyncPending": "The interface language changed, but the channel system-message language has not been saved yet. It will retry when the Gateway reconnects.",
       "toolDetailsLabel": "Tool details by default",
+      "chatFontLabel": "Chat font size",
+      "chatFontDesc": "Resizes text on the chat page only; the sidebar and settings are unaffected.",
+      "chatFontSmall": "Small",
+      "chatFontDefault": "Default",
+      "chatFontLarge": "Large",
+      "chatFontXlarge": "Extra large",
       "toolDetailsDesc": "Auto follows the tool type; Compact collapses ordinary tools; Expanded opens them. Errors open automatically by default and can still be collapsed.",
       "toolDetailsAuto": "Auto",
       "toolDetailsCompact": "Compact",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "Current desktop width: {current}px.",
       "sidebarWidthClampedStatus": "Saved {saved}px; this window currently uses {current}px.",
       "sidebarWidthCompactStatus": "Compact layout uses {current}px. Your desktop preference of {saved}px is preserved.",
-      "sidebarWidthDrawerStatus": "Drawer layout uses {current}px. Your desktop preference of {saved}px is preserved."
+      "sidebarWidthDrawerStatus": "Drawer layout uses {current}px. Your desktop preference of {saved}px is preserved.",
+      "bootAnimationLabel": "Startup splash",
+      "bootAnimationDesc": "The splash shown while the console boots. Full plays the agent constellation orchestra (mark, fleet nodes, boot log), Minimal keeps a static mark, Off skips it entirely. Choosing Full again replays the orchestra. Motion is reduced automatically when your system requests it.",
+      "bootAnimationFull": "Full",
+      "bootAnimationMinimal": "Minimal",
+      "bootAnimationOff": "Off"
     },
     "dataMigration": {
       "title": "Data & backups",
@@ -732,7 +957,8 @@
       "pet": "Pet",
       "communityPlugins": "Community Plugins",
       "graph": "Graph",
-      "collabSsh": "Collab & SSH"
+      "collabSsh": "Collab & SSH",
+      "doctor": "Doctor"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "Collab & SSH",
         "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
         "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
-        "open": "Open Overview"
+        "open": "Open Overview",
+        "localNote": "Marguerite's gateway listens on loopback only (127.0.0.1), so collaborating across machines needs a private network first.",
+        "vpnTitle": "Set up a Radmin VPN network",
+        "step1": "Install Radmin VPN on both machines and create a network:",
+        "download": "Download Radmin VPN",
+        "step2": "Join the same network from the other machine using its name and password.",
+        "step3": "Read the virtual IP Radmin assigned to this machine (26.x.x.x).",
+        "step4": "Keep the gateway loopback-bound and reach it through an SSH tunnel instead of exposing it.",
+        "step5": "Verify the peer can connect before starting a session.",
+        "copy": "Copy",
+        "copied": "Copied",
+        "securityTitle": "Security boundary",
+        "sec1": "The gateway stays on 127.0.0.1 — the private network carries SSH, not the console.",
+        "sec2": "Never bind the gateway to 0.0.0.0 to make collaboration work.",
+        "sec3": "Use key-based SSH auth; keep passwords and tokens out of the repository.",
+        "docs": "Radmin VPN docs"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "No matching models — you can keep what you typed.",
       "modelListTruncated": "Showing {shown} of {total} models — keep typing to narrow the list.",
       "modelProvenance": "Live provider list · capability source: {sources}",
-      "modelMetadataProvenance": "Live provider list · official values when available, catalog fallback otherwise"
+      "modelMetadataProvenance": "Live provider list · official values when available, catalog fallback otherwise",
+      "emptyStep1": "Add your first model provider and paste its API key to verify credentials.",
+      "emptyStep2": "Connect a provider to verify credentials and choose available models.",
+      "emptyStep3": "Pick the models you want to use across the app."
     },
     "preset": {
       "summary": "Routing template: {label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "Bearer token for gateways that require auth. Stored in this tab only.",
       "reconnect": "Reconnect",
       "connect": "Connect",
-      "disconnect": "Disconnect"
+      "disconnect": "Disconnect",
+      "rbacBoundaryNote": "Role-based access control guards against accidental misoperation, not against a local attacker who can edit the gateway configuration or the process itself."
     },
     "runtime": {
       "title": "Runtime",
@@ -1739,6 +1984,8 @@
       "reload": "reload",
       "descReloadSuffix": "take effect after a page refresh.",
       "foldLabel": "New live turn renderer",
+      "autostartLabel": "Launch at sign-in",
+      "autostartDesc": "Start Marguerite automatically when you sign in (desktop app only).",
       "foldDesc": "Build the streaming work card from an ordered event log. Turn off only to temporarily restore the compatibility renderer.",
       "foldAria": "New live turn renderer (takes effect after reload)",
       "revealLabel": "Answer reveal window (ms)",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "Stops install and daily usage telemetry, background update checks, pseudonymous session identifiers, and the optional cross-session X-Marguerite-Install-Id header sent by default only to the official TokenRhythm HTTPS API. That persisted ID may be derived from local MAC/IP data; raw addresses are never sent. CI/tests and the legacy telemetry opt-out also suppress it; the update-check opt-out alone does not. Your own model requests keep working.",
       "memoryAutoCaptureLabel": "Automatic memory capture",
       "memoryAutoCaptureDesc": "Allow Marguerite to save useful conversation highlights into long-term memory.",
-      "save": "Save privacy"
+      "save": "Save privacy",
+      "permissionBoundaryNotice": "These system permissions guard against accidental misoperation, not against local malicious users. All data stays on this machine; configure real authentication before exposing it beyond loopback."
     },
     "toast": {
       "loadFailed": "Failed to load settings: {error}",
@@ -2070,6 +2318,24 @@
           "Encoding AES key."
         ]
       }
+    },
+    "ops": {
+      "sshSession": "SSH session",
+      "terminal": "Terminal",
+      "exportDiagnostics": "Export diagnostics",
+      "diagnosticsCopied": "Diagnostics copied",
+      "diagnosticsCopyFailed": "Copy failed: {error}",
+      "hostRequired": "Select a host first"
+    },
+    "doctor": {
+      "title": "Doctor",
+      "desc": "Gateway readiness, capability findings, and CLI recipes. Read-only — nothing is saved here.",
+      "refresh": "Refresh",
+      "runDeep": "Run deep check",
+      "loading": "Running health checks…",
+      "noFindings": "No findings returned. The gateway reports no problems.",
+      "errorTitle": "Could not load the health report",
+      "retry": "Retry"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "updated {time}",
       "transcriptPreview": "Transcript preview",
       "transcriptError": "Could not load the transcript.",
+      "workspaceBound": "Bound to project dir",
+      "workspaceUnbound": "Not bound to a project",
+      "workspaceMissing": "Directory missing",
       "loadingTranscript": "Loading transcript…",
       "loadEarlier": "Load earlier",
       "loading": "Loading…",
@@ -2201,6 +2470,19 @@
       "abortDone": "Run aborted.",
       "abortNone": "No active run to abort.",
       "abortFailed": "Abort failed."
+    },
+    "reasoning": {
+      "effortLabel": "Thinking effort",
+      "effortInherit": "Inherit global",
+      "effortOff": "Off",
+      "effortNormal": "Normal",
+      "effortDeep": "Deep",
+      "effortMax": "Max",
+      "contextLabel": "Context window",
+      "contextPlaceholder": "Inherit",
+      "inheritHint": "Leave empty (or 0 for context window) = inherit the global model config",
+      "saveDone": "Session reasoning settings saved.",
+      "saveFailed": "Could not save session reasoning settings."
     },
     "overview": {
       "title": "Status",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count}",
       "toolsLoading": "Loading tool catalog…",
       "baotaCredentials": "Credentials",
-      "baotaCredentialsTitle": "Configure the Baota panel URL, username and password (auto-login before tool calls)"
+      "baotaCredentialsTitle": "Configure the Baota panel URL, username and password (auto-login before tool calls)",
+      "mcpProbe": "Probe tools",
+      "mcpProbing": "Probing…",
+      "mcpToolsCount": "{count} tools",
+      "toolsPatchTitle": "Tool switches (patch layer)",
+      "toolsPatchHint": "Takes effect on the agent's next turn — no restart needed",
+      "toolsPatchEnable": "Enabled",
+      "toolsPatchDisable": "Disabled",
+      "toolsPatchInactive": "Not present in the current tool surface: {names}"
     },
     "autoPropose": {
       "title": "Auto-Propose Settings",
@@ -3481,7 +3771,9 @@
         "probing": "Probing",
         "paused": "Idle limit reached; waiting for the next message",
         "stopped": "Stopped after a miss or error"
-      }
+      },
+      "cacheHits": "Cache hits",
+      "cacheHitsHint": "Tokens served from cache on the last request"
     },
     "send": "Send",
     "sendQueues": "Send (queues for after current response)",
@@ -3747,7 +4039,10 @@
       },
       "more": "{count} more",
       "stale": "Still working — no recent signal",
-      "liveStep": "step {n}"
+      "liveStep": "step {n}",
+      "memoryRecall": "Recalled cross-project memory · {count} hits",
+      "stepRound": "Tool round {round}",
+      "stepRoundDone": "Tool round {round} finished · {reason}"
     },
     "suggestedTasks": "Suggested tasks",
     "greetingMorning": "Good morning.",
@@ -3818,7 +4113,13 @@
         "settingsHint": "Turn on backups in Settings > Sandbox > File safety.",
         "unavailableTitle": "No backup is available",
         "unavailableBody": "This action cannot be recovered. Continue only if you accept permanent data loss."
-      }
+      },
+      "intent": "Intent preview",
+      "intentAction": "Operation",
+      "intentObject": "Target",
+      "intentScope": "Scope",
+      "intentIrreversible": "Reversibility",
+      "intentIrreversibleYes": "Irreversible"
     },
     "plan": {
       "label": "Plan",
@@ -3839,7 +4140,27 @@
       "actionFailed": "Plan action failed: {error}",
       "revisionMissing": "This plan's revision record is no longer available (session data may have been cleared). Ask the model to regenerate the plan, then try again.",
       "revisePromptPlaceholder": "Describe how the plan should change",
-      "reviseSend": "Revise plan"
+      "reviseSend": "Revise plan",
+      "reuseLast": "Continue last plan “{title}”",
+      "cancelStep": "Cancel",
+      "editing": "Editing plan",
+      "dependsOn": "Depends on",
+      "stepTitlePlaceholder": "Step title",
+      "renameStep": "Rename",
+      "removeStep": "Remove",
+      "addStep": "Add step",
+      "saveStep": "Save",
+      "cancel": "Cancel",
+      "strategyLabel": "Orchestration form",
+      "rationaleLabel": "Decision rationale",
+      "revisionFull": "Revision {id} (full id)",
+      "strategy": {
+        "solo": "Single agent",
+        "dual-leader": "Dual-leader",
+        "expert-team": "Expert team",
+        "cluster": "Cluster",
+        "pipeline": "Delivery pipeline"
+      }
     },
     "planRun": {
       "title": "Plan execution",
@@ -3874,7 +4195,14 @@
       "preflight": "Pre-flight checklist",
       "parallel": "Parallel subtasks",
       "replanned": "Replanned",
-      "replanDetail": "Re-decomposed into {steps} steps from observations · revision {revision}"
+      "replanDetail": "Re-decomposed into {steps} steps from observations · revision {revision}",
+      "eta": "~{eta} left",
+      "elapsed": "{elapsed} elapsed",
+      "replannedAhead": "Skipped ahead",
+      "replanAdvanceDetail": "Observation matched a later step “{step}” · skipped {count} steps",
+      "parallelSimulated": "Parallel (simulated)",
+      "parallelStepDuration": "Step took {duration}",
+      "parallelStepRetries": "Retried {count}×"
     },
     "planMode": {
       "label": "Plan mode",
@@ -3936,7 +4264,7 @@
       "modelRoutingSquillaRouterDesc": "AI selects one suitable model per turn to lower cost.",
       "modelRoutingEnsemble": "AI-powered ensemble router",
       "modelRoutingEnsembleDesc": "AI coordinates multiple models to improve capability on complex tasks.",
-      "modelRoutingBloomEnsemble": "Bloom fusion routing",
+      "modelRoutingBloomEnsemble": "Deep fusion routing",
       "modelRoutingBloomEnsembleDesc": "Fusion routing + AI auto-orchestration (Solo Agent / MAX Dual-Leader / Expert Team) for complex tasks.",
       "runMode": "Execution mode",
       "runModeSafe": "Safe",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "Allows direct access to files, the network, and the system without asking each time.",
       "runModeFullUnavailable": "Full Access is only available to the session owner.",
       "runModeLocked": "Run mode cannot be changed while this session has active work.",
-      "badgeNew": "NEW"
+      "badgeNew": "NEW",
+      "modelRoutingOmniDesc": "One orchestrated agent coordinates the best available models on every turn.",
+      "modelRoutingOmni": "Extreme orchestration",
+      "runModePanel": "Run mode & routing",
+      "thinking": "Deep thinking",
+      "modeShort": {
+        "safe": "Safe",
+        "full": "Full",
+        "plan": "Plan",
+        "default": "Default",
+        "off": "Off",
+        "squilla": "Router",
+        "ensemble": "Ensemble",
+        "bloom": "Bloom",
+        "omni": "Omni"
+      }
     },
     "pending": {
       "label": "Pending {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "Ensemble models"
     },
     "modelRouting": {
-      "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again."
+      "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again.",
+      "effective": "Model routing switched — now on {mode}.",
+      "mismatch": "Model routing didn't switch as requested: requested {requested}, but {actual} took effect."
     },
     "routeFeedback": {
       "up": "Right model choice for this turn",
@@ -4170,6 +4515,115 @@
       "reject": "Reject",
       "empty": "No file changes yet",
       "loadFailed": "Failed to load file changes"
+    },
+    "persona": {
+      "current": "Current expert: {name}",
+      "newSession": "New expert session"
+    },
+    "presets": {
+      "label": "Mode",
+      "triggerHint": "Pick a working mode: intensity × working style",
+      "lockedHint": "Mode is locked while running (you can still inspect)",
+      "advanced": "Advanced",
+      "advancedHint": "Open the full mode / sandbox / routing options",
+      "autoModel": "Auto model",
+      "autoModelOn": "Unleashed",
+      "autoModelOff": "Off",
+      "autoModelHint": "Automatically use the strongest available model and orchestrate per task (fusion / swarm)"
+    },
+    "waitIndicator": {
+      "running": "Still running",
+      "toolRunning": "Waiting for a tool to finish",
+      "approvalPending": "Waiting for your approval",
+      "ensemble": "Ensemble in progress"
+    },
+    "emptyLead": "Agents, subagents, tools, memory, and knowledge — one orchestra, fewer tokens, sharper code.",
+    "orbit": {
+      "agent": "Agent",
+      "subagent": "Subagent",
+      "tools": "Tools",
+      "memory": "Memory",
+      "knowledge": "Knowledge"
+    },
+    "errors": {
+      "apiKeyMissing": "No API key configured. Open Settings and add your provider API key to start chatting.",
+      "authFailed": "The model provider rejected your API key. Open Settings to fix it, or retry.",
+      "rateLimited": "The model provider is rate-limiting requests. Please retry shortly.",
+      "network": "Could not reach the model provider (network error or timeout). Please retry.",
+      "server": "The model provider returned a server error. Please retry later.",
+      "timeout": "The model provider did not respond in time. Please retry.",
+      "other": "The request to the model provider failed. Please retry.",
+      "planStepFailed": "Step “{step}” of the plan failed. Open the logs for details, or revise the plan and retry.",
+      "planStepFailedGeneric": "A step of the plan failed. Open the logs for details, or revise the plan and retry.",
+      "planStepArtifactMissing": "Step “{step}” of the plan finished without producing its expected file. Open the logs for details, or revise the plan and retry.",
+      "planStepArtifactMissingGeneric": "A plan step finished without producing its expected file. Open the logs for details, or revise the plan and retry.",
+      "planCompletionBlocked": "The plan finished but did not pass the completion check, so it is marked as partial. Open the logs for details.",
+      "hostExited": "The host process exited with code {exit_code} after running for {uptime_ms}.",
+      "hostExitedNoCode": "The host process was terminated by a signal after running for {uptime_ms}.",
+      "hostExitedGeneric": "The host process exited unexpectedly.",
+      "hostExitCodeLabel": "Exit code",
+      "hostExitUptimeLabel": "Time alive",
+      "hostExitStderrLabel": "Error output (stderr)"
+    },
+    "errorActions": {
+      "viewLogs": "View logs",
+      "replan": "Revise plan",
+      "openSettings": "Open Settings",
+      "retry": "Retry"
+    },
+    "escalation": {
+      "title": "Needs your confirmation",
+      "requiredFor": "Confirmation needed: {reason}",
+      "neededFor": "Confirmation needed: {reason}",
+      "operation": "Operation",
+      "suggestedAction": "Suggested action",
+      "continue": "Continue",
+      "abort": "Abort",
+      "trigger": {
+        "high_impact_side_effect": "High-impact side effect",
+        "intent_ambiguity": "Intent ambiguous",
+        "timeout": "Operation timed out",
+        "budget_exceeded": "Cost over budget"
+      }
+    },
+    "collapse": "Collapse",
+    "expand": "Expand",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "Tasks",
+        "artifacts": "Artifacts",
+        "changes": "Changes",
+        "tree": "Tree"
+      },
+      "tasksEmpty": "Task steps will appear here as they run.",
+      "artifactsDiagnostic": "{count} unloaded artifacts detected",
+      "artifactsEmptyLead": "No artifacts have been produced in this session yet",
+      "artifactsEmptySub": "Send a task and Marguerite will produce documents, spreadsheets, or code",
+      "artifactsCompose": "Send a task",
+      "artifactsReload": "Reload",
+      "artifactsRunningHint": "Running — you can start a new task once this one finishes",
+      "artifactOpenInApp": "Preview / edit in Marguerite",
+      "artifactOpenSystem": "Open with system app",
+      "artifactMore": "More actions",
+      "artifactPreview": "Preview",
+      "artifactEdit": "Edit",
+      "artifactSystemOpen": "Open in system app",
+      "artifactCopyPath": "Copy path",
+      "artifactCopied": "Artifact path copied",
+      "artifactCopyFailed": "Copy failed, please copy the path manually",
+      "statusReady": "Ready",
+      "statusUpdating": "Updating",
+      "statusStale": "Stale",
+      "changesEmpty": "File changes (+/- lines) will appear here",
+      "treeUpDir": "Parent directory",
+      "treeRoot": "Workspace root",
+      "treeRefresh": "Refresh",
+      "treeLoading": "Loading…",
+      "treeEmptyDir": "(empty directory)",
+      "widen": "Narrow panel",
+      "narrow": "Wide panel",
+      "collapse": "Collapse panel",
+      "expand": "Expand panel"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "Open Settings",
       "actionToggleTheme": "Toggle theme",
       "actionBgmEnable": "Enable background music",
-      "actionBgmDisable": "Disable background music"
+      "actionBgmDisable": "Disable background music",
+      "actionModeSwitch": "Switch mode: {mode}",
+      "modeActive": "Active"
     },
     "toast": {
       "dismiss": "Dismiss notification"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "Delete selected",
       "bulkDeleteDone": "Deleted {count} tasks",
       "bulkDeletePartial": "{count} tasks failed to delete",
-      "bulkDeleteFailed": "Failed to delete selected tasks"
+      "bulkDeleteFailed": "Failed to delete selected tasks",
+      "showMore": "Show {count} more",
+      "showLess": "Show less"
     },
     "setupBanner": {
       "ariaLabel": "Gateway setup needed",
@@ -4379,7 +4837,425 @@
       "window_focus": "Focus window",
       "cursor_pos": "Cursor position",
       "key_state": "Key state",
-      "idle_time": "Idle time"
+      "idle_time": "Idle time",
+      "locate": "Locate by description"
+    },
+    "descriptionLabel": "Target description",
+    "descriptionPlaceholder": "e.g. the search box in the top-right corner",
+    "visionLabel": "Vision grounding",
+    "autoClickLabel": "Click after locating",
+    "patchLabel": "Patch grounding (high-DPI)",
+    "modeLabel": "Capture",
+    "maxEdgeLabel": "Max edge (px)",
+    "maxEdgePlaceholder": "0 = native",
+    "captureMode": {
+      "primary": "Primary display",
+      "all": "All displays",
+      "window": "Active window"
+    },
+    "groundingTitle": "Locate result",
+    "groundingConfidence": "Confidence {value}",
+    "groundingLowConfidence": "Low confidence",
+    "groundingDescription": "Target: {description}",
+    "visionUnavailable": "No vision model is configured, so nothing was executed. Pick a vision-capable model and set its API key, then run again."
+  },
+  "boot": {
+    "orchestraAria": "Marguerite starting up",
+    "orchestraTagline": "Agents, subagents, tools, memory, and knowledge — waking as one orchestra.",
+    "enterWorkspace": "Enter workspace",
+    "pressEnter": "or press Enter"
+  },
+  "island": {
+    "title": "Island Workspace",
+    "subtitle": "The agent run as an island: workshops are tool calls, outposts are subagents, the beacon is the routing strategy, the pier is plan progress.",
+    "status": {
+      "idle": "Idle",
+      "running": "Running",
+      "queued": "Queued",
+      "failed": "Failed",
+      "success": "Done",
+      "error": "Error",
+      "waiting": "Waiting",
+      "offline": "Offline"
+    },
+    "quality": {
+      "high": "Full 3D",
+      "low": "Light 3D",
+      "medium": "Balanced 3D",
+      "fallback": "Lite mode (2D)",
+      "fallbackNote": "WebGL is unavailable here, so the island is drawn as a 2D map — the data is exactly the same.",
+      "contextLost": "The 3D context was lost. Switched to the 2D map.",
+      "specInvalid": "The island spec is invalid, so rendering was refused and the 2D map is shown."
+    },
+    "controls": {
+      "reset": "Reset view",
+      "focus": "Focus",
+      "autoDayNight": "Auto day/night",
+      "daylight": "Daylight",
+      "skin": "Skin",
+      "openInWorkbench": "Open in workbench",
+      "hint": "Drag to orbit · wheel to zoom · right-drag (or Shift-drag) to pan · click a building for details · double-click to focus · keyboard: arrows orbit, Shift+arrows pan, +/- zoom, 0 reset, Esc close"
+    },
+    "detail": {
+      "status": "Status",
+      "source": "Detail",
+      "progress": "Progress",
+      "openChat": "Open in chat",
+      "empty": "Click a building to inspect its live data",
+      "close": "Close",
+      "duration": "Duration",
+      "flavor": "Station",
+      "toolId": "Tool ID",
+      "childKey": "Child session",
+      "artifactKind": "Artifact kind",
+      "artifactId": "Artifact ID",
+      "sessionKey": "Session",
+      "taskTitle": "Task",
+      "strategy": "Strategy",
+      "members": "Ensemble members",
+      "steps": "Plan steps",
+      "recallQuery": "Recall query",
+      "recallHits": "Memory hits",
+      "recallTopScore": "Top similarity",
+      "reinforced": "Reinforced synapses",
+      "memoryIds": "Memory entries",
+      "stage": "Stage",
+      "floors": "Floors"
+    },
+    "flavor": {
+      "mill": "Mill",
+      "forge": "Forge",
+      "library": "Library",
+      "observatory": "Observatory"
+    },
+    "legend": {
+      "title": "On the island",
+      "plan": "Plan pier"
+    },
+    "empty": {
+      "hint": "No run data yet — start a task and the island will build itself."
+    },
+    "kind": {
+      "core": "Main keep",
+      "workshop": "Workshop",
+      "outpost": "Outpost",
+      "depot": "Warehouse",
+      "beacon": "Beacon",
+      "pier": "Pier",
+      "athenaeum": "Memory tower",
+      "construction": "Construction site"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "Foundation",
+        "structure": "Structure",
+        "frame": "Frame",
+        "facade": "Facade",
+        "windows": "Windows",
+        "interior": "Interior",
+        "finished": "Completed"
+      },
+      "timeline": "Build day",
+      "day": "Day"
+    }
+  },
+  "sandbox": {
+    "title": "Miniature Sandbox",
+    "subtitle": "A closed-loop train diagram as a digital twin of task flow: depart, cross the bridge, arrive, dwell, depart again.",
+    "kind": {
+      "train": "Train"
+    },
+    "train": {
+      "label": "Train {n}"
+    },
+    "station": {
+      "A": "Station A",
+      "B": "Station B"
+    },
+    "phase": {
+      "dwell": "Dwell at platform",
+      "departing": "Departing",
+      "cruise": "Running the line",
+      "arriving": "Approaching station"
+    },
+    "controls": {
+      "play": "Play",
+      "pause": "Pause",
+      "speed": "Speed",
+      "timeline": "Timeline",
+      "dayNight": "Day / night",
+      "rain": "Light rain",
+      "resetView": "Reset time"
+    },
+    "detail": {
+      "close": "Close"
+    },
+    "empty": {
+      "pickTrain": "Click a train to inspect what it is doing now and next"
+    },
+    "quality": {
+      "fallbackNote": "WebGL is unavailable here, so the loop is drawn as a 2D diagram — the schedule is exactly the same.",
+      "contextLost": "The 3D context was lost. Switched to the 2D diagram."
+    }
+  },
+  "task": {
+    "title": "Task workspace",
+    "subtitle": "Follow each step and deliverable as the task runs.",
+    "empty": "No task is running yet. Start one from the chat and it will show up here.",
+    "refresh": "Refresh task",
+    "steps": "Steps",
+    "deliverables": "Deliverables",
+    "status": "Status",
+    "mode": "Mode",
+    "elapsed": "Elapsed",
+    "artifacts": {
+      "empty": "No deliverables yet. Generated files appear here as soon as they are written."
+    },
+    "runStatus": {
+      "idle": "Idle",
+      "running": "Running",
+      "completed": "Completed",
+      "partial": "Partial",
+      "failed": "Failed"
+    },
+    "modeImpact": {
+      "title": "Mode impact",
+      "route": "Route",
+      "strategy": "Strategy"
+    },
+    "stepStatus": {
+      "pending": "Pending",
+      "in_progress": "In progress",
+      "done": "Done",
+      "failed": "Failed"
+    },
+    "gate": {
+      "title": "Quality gate",
+      "searchValid": "Search results valid",
+      "artifactsComplete": "Deliverables complete",
+      "missing": "Missing: {items}",
+      "verdict": {
+        "pass": "Passed",
+        "partial": "Partial",
+        "fail": "Failed"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "Welcome to Marguerite",
+      "welcomeSubtitle": "Connect a model provider to start chatting. Setup takes about 30 seconds.",
+      "featureLocal": "Runs locally — your data stays on your machine",
+      "featureMultiProvider": "Supports OpenAI, Anthropic, DeepSeek, OpenRouter, and more",
+      "featureAgent": "Multi-mode agent with plan, ensemble, and bloom workflows",
+      "getStarted": "Get started",
+      "exploreSettings": "Explore settings",
+      "chooseProvider": "Choose a provider",
+      "chooseProviderHint": "Pick a provider you already have an API key for. You can change it later.",
+      "loadingProviders": "Loading providers...",
+      "seeAllProviders": "See all providers in Settings",
+      "configureProvider": "Configure {provider}",
+      "apiKey": "API key",
+      "apiKeyPlaceholder": "Paste your API key here",
+      "apiKeyOrEnvHint": "Paste a key or use the {envKey} environment variable",
+      "useEnvInstead": "Use an environment variable instead",
+      "modelPlaceholder": "e.g. gpt-4o, deepseek-chat",
+      "verifyAndSave": "Verify and save",
+      "verifying": "Verifying...",
+      "ready": "All set!",
+      "readyHint": "Your provider is configured and verified. Start a new chat to begin.",
+      "savedButProbeFailed": "Saved — verification pending",
+      "savedButProbeFailedHint": "Your credentials were saved. The verification probe could not reach the provider (network or rate limit). Send a message to confirm.",
+      "startUsing": "Start using Marguerite",
+      "openSettings": "Open settings",
+      "advancedSettings": "Advanced settings",
+      "back": "Back",
+      "errors": {
+        "configure": "Could not save the provider configuration. Retry, or finish in Settings."
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "Initializing",
+    "gatewayLoading": "The gateway is loading its runtime configuration...",
+    "setupNeeded": "Setup needed",
+    "setupNeededHint": "Gateway connected but not configured. Set up a model provider to start chatting.",
+    "gotoTopbarBadge": "Switch modes from the top-bar badge",
+    "bloomParallelOff": "Swarm parallel is off. Switch to Bloom mode to enable it."
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "Minimal · Ask",
+      "minimal_plan": "Minimal · Plan",
+      "minimal_doit": "Minimal · Act",
+      "standard_ask": "Standard · Ask",
+      "standard_plan": "Standard · Plan",
+      "standard_doit": "Standard · Act",
+      "extreme_ask": "Extreme · Ask",
+      "extreme_plan": "Extreme · Plan",
+      "extreme_doit": "Extreme · Act"
+    },
+    "userModeHint": {
+      "minimal_ask": "Quick answers at low cost",
+      "minimal_plan": "Lightweight planning",
+      "minimal_doit": "Single agent, direct execution",
+      "standard_ask": "Everyday Q&A",
+      "standard_plan": "Structured plans",
+      "standard_doit": "Multi-model fusion",
+      "extreme_ask": "Deep research answers",
+      "extreme_plan": "Expert team breakdown",
+      "extreme_doit": "Swarm collaboration, deep push"
+    },
+    "alias": {
+      "plan": "Plan",
+      "agent": "Agent",
+      "ensemble": "Ensemble",
+      "bloom": "Bloom",
+      "omni-transcend": "Omni Transcend"
+    },
+    "hint": {
+      "plan": "Read-only exploration · writes a plan for approval before acting",
+      "agent": "Default mode · free reads, write operations ask for confirmation",
+      "ensemble": "Parallel candidates · MAX four-phase fusion picks the best",
+      "bloom": "Declarative thinking depth and verification passes",
+      "omni-transcend": "Omniscient transcendence · cross-modal synthesis"
+    },
+    "intensity": {
+      "minimal": "Minimal",
+      "standard": "Standard",
+      "extreme": "Extreme"
+    },
+    "working": {
+      "ask": "Ask",
+      "plan": "Plan",
+      "doit": "Act"
+    }
+  },
+  "deviceTwin": {
+    "title": "Device 3D Twin",
+    "teaching": "Teaching simulation · not measured",
+    "demo": "Demo data · no real device connected",
+    "viewLabel": "View states",
+    "state": {
+      "product": "Whole",
+      "open": "Open",
+      "explode": "Explode",
+      "section": "Section",
+      "cycle": "Cycle",
+      "inspect": "Inspect"
+    },
+    "fallback": "Simplified mode: WebGL unavailable, showing 2D diagram",
+    "partInfo": "Part archive",
+    "selectHint": "Click a part to view its archive",
+    "thermal": "Thermal (teaching)",
+    "cabTemp": "Cabin temp",
+    "condTemp": "Condenser temp",
+    "compressor": "Compressor",
+    "on": "Running",
+    "off": "Stopped",
+    "energy": "Cumulative power"
+  },
+  "plugins": {
+    "title": "Plugins & skills",
+    "subtitle": "PluginSlot unified registry — one place to discover, invoke and create tools, skills, MCP servers and commands.",
+    "searchPlaceholder": "Search plugins…",
+    "refresh": "Refresh",
+    "createSkill": "Create skill",
+    "openInWorkbench": "Open in workbench",
+    "empty": "No matching plugins",
+    "loadFailed": "Could not load plugins: {error}",
+    "skill": {
+      "formTitle": "Create a new skill",
+      "nameLabel": "Skill identifier (English)",
+      "namePlaceholder": "e.g. my-skill",
+      "descriptionLabel": "Description",
+      "descriptionPlaceholder": "A short description of the skill",
+      "triggersLabel": "Trigger words (comma-separated, optional)",
+      "triggersPlaceholder": "e.g. translate,translation",
+      "promptLabel": "Prompt template (variables such as text are available)",
+      "promptPlaceholder": "You are a professional translation expert. Translate the following text into English: [[text]]",
+      "cancel": "Cancel",
+      "save": "Save skill",
+      "saving": "Saving…",
+      "requiredFields": "Please fill in every required field",
+      "createFailed": "Could not create the skill: {error}"
+    },
+    "assembly": {
+      "title": "Plugin assembly status (plugins.status · startup assembly)",
+      "refresh": "Refresh assembly",
+      "summary": "Assembled {assembled} of {installed} installed plugins · patch {patches} (applied {applied}, skipped {skipped}, errors {errors})",
+      "statusFailed": "Could not load the assembly status: {error}",
+      "columnManifest": "Manifest",
+      "columnMode": "Mode",
+      "columnStatus": "Assembly status",
+      "columnSlot": "Source slot",
+      "modeDeclarative": "Declarative · not assembled",
+      "modeNative": "Native",
+      "assembled": "Assembled",
+      "notAssembled": "Not assembled",
+      "patchReport": "Patch assembly report"
+    },
+    "market": {
+      "title": "Plugin market (DSH ecosystem + third-party imports)",
+      "auditAll": "Audit all",
+      "installAll": "Install all plugins",
+      "auditFailed": "Audit failed",
+      "auditDone": "Audit finished: {count} item(s), {suspects} red-line suspect(s), {risks} high-risk capability(ies)",
+      "noFindings": "No red-line or high-risk findings",
+      "columnPlugin": "Plugin",
+      "columnVersion": "Version",
+      "columnVerdict": "Verdict",
+      "columnCapabilities": "Capabilities / hooks",
+      "columnFindings": "Audit findings",
+      "tabAll": "All",
+      "tabPlugin": "Plugins",
+      "tabSkill": "Skills",
+      "tabHarness": "Harness ecosystem",
+      "catalogTitle": "Local manifest catalog ({count} item(s), market.list)",
+      "kindPlugin": "Plugin",
+      "kindSkill": "Skill",
+      "declarativeOnly": "Declarative · not assembled",
+      "declarativeOnlyHint": "Declared but not assembled at runtime (manifest has no entry): the capability is registered but not active.",
+      "install": "Install",
+      "export": "Export",
+      "importSuccess": "Imported {name} v{version} — {message}",
+      "importFailed": "Import failed: {error}",
+      "exportSuccess": "Exported manifest {name} (the content was placed in the box below, ready to copy and share)",
+      "exportFailed": "Export failed",
+      "batchResult": "Batch install: {ok} of {total} succeeded (runtime registration takes effect after the Gateway restarts)"
+    },
+    "harness": {
+      "catalogTitle": "DeepSeek Harness ecosystem ({count} upstream repos · distillation blueprint, market.harness)",
+      "distillTarget": "Distilled via",
+      "aligned": "Aligned with the DeepSeek ecosystem"
+    },
+    "sources": {
+      "title": "Download sources (deepseek harness ecosystem · market.sources)",
+      "refresh": "Refresh sources",
+      "kindExternalRepo": "Third-party repo",
+      "kindCatalog": "Manifest catalog",
+      "importTitle": "Import a plugin manifest (third / fourth-party ecosystem; red-line fields are rejected by default)",
+      "importPlaceholder": "Paste plugin.json content, for example a manifest declaring name, version and description",
+      "importAck": "I have reviewed the red-line field risks (ack)",
+      "importAction": "Import",
+      "refreshMarket": "Refresh market"
+    },
+    "verdict": {
+      "clean": "Passed",
+      "warn": "Warning",
+      "broken": "Broken"
+    },
+    "ecosystem": {
+      "computerUse": "Computer Use",
+      "harness": "Harness"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "Minimize window",
+      "maximize": "Maximize window",
+      "restore": "Restore window",
+      "close": "Close window"
     }
   }
 }

@@ -193,6 +193,114 @@ describe('plan payload normalization', () => {
     })
   })
 
+  it('keeps real per-step timing on parallel results, omitting absent/invalid values', () => {
+    const run = normalizePlanRunSnapshot({
+      plan_run: {
+        run_id: 'run-timing',
+        plan_revision_id: 'rev-1',
+        status: 'completed',
+        steps: [],
+        parallel_batch: {
+          status: 'completed',
+          successful: 3,
+          failed: 0,
+          total: 3,
+          results: [
+            // 真实耗时 + 重试：必须原样保留（前端据此显示单步耗时/重试徽标）
+            { step_id: 'a', title: 'A', status: 'completed', summary: 'ok', elapsed_ms: 1234, attempts: 3, timed_out: false },
+            // 只耗时、一次通过：attempts 如实保留（是否显示由 UI 决定，不在此处篡改）
+            { stepId: 'b', title: 'B', status: 'completed', summary: 'ok', elapsedMs: 900, attempts: 1 },
+            // 无有效耗时数据：耗时字段都不出现（绝不补 0 冒充），但超时标记独立保留
+            { stepId: 'c', title: 'C', status: 'failed', summary: 'boom', attempts: 0, elapsedMs: -5, timed_out: true },
+          ],
+        },
+      },
+    })
+
+    expect(run?.parallelBatch?.results).toEqual([
+      { stepId: 'a', title: 'A', status: 'completed', summary: 'ok', elapsedMs: 1234, attempts: 3 },
+      { stepId: 'b', title: 'B', status: 'completed', summary: 'ok', elapsedMs: 900, attempts: 1 },
+      { stepId: 'c', title: 'C', status: 'failed', summary: 'boom', timedOut: true },
+    ])
+  })
+
+  it('normalizes the lookahead replan (mode / skipped steps / best match)', () => {
+    const run = normalizePlanRunSnapshot({
+      plan_run: {
+        run_id: 'run-look',
+        plan_revision_id: 'rev-1',
+        status: 'running',
+        current_step_id: 's3',
+        steps: [{ step_id: 's3', title: 'Deploy', status: 'in_progress' }],
+        replan: {
+          mode: 'advance',
+          revision_id: 'rev-1',
+          plan_id: 'plan-1',
+          previous_revision_id: 'rev-1',
+          similarity: 0.04,
+          prompt: 'zulu yankee',
+          steps_changed: 2,
+          skipped_step_ids: ['s1', 's2', ''],
+          best_match: { step_id: 's3', title: 'Deploy', similarity: 0.91, distance: 2 },
+        },
+      },
+    })
+
+    expect(run?.replan).toEqual({
+      revisionId: 'rev-1',
+      planId: 'plan-1',
+      previousRevisionId: 'rev-1',
+      similarity: 0.04,
+      prompt: 'zulu yankee',
+      stepsChanged: 2,
+      mode: 'advance',
+      skippedStepIds: ['s1', 's2'],
+      bestMatch: { stepId: 's3', title: 'Deploy', similarity: 0.91, distance: 2 },
+    })
+
+    // 未知模式不冒充已知语义（缺 mode 即按旧契约渲染为「重新拆解」）
+    expect(normalizePlanRunSnapshot({
+      runId: 'run-x',
+      planRevisionId: 'rev-1',
+      status: 'running',
+      steps: [],
+      replan: { revisionId: 'r', planId: 'p', mode: 'invented' },
+    })?.replan?.mode).toBeUndefined()
+  })
+
+  it('accepts the run cost model only when it carries real samples', () => {
+    const base = {
+      runId: 'run-cost',
+      planRevisionId: 'rev-1',
+      status: 'running',
+      steps: [],
+    }
+    // 有实测样本 → 原样保留（前端据此在事件流缺位时兜底显示 ETA）
+    expect(normalizePlanRunSnapshot({
+      ...base,
+      cost: { remaining_steps: 2, sample_count: 3, avg_step_ms: 1500, estimated_remaining_ms: 3000 },
+    })?.cost).toEqual({
+      remainingSteps: 2,
+      sampleCount: 3,
+      avgStepMs: 1500,
+      estimatedRemainingMs: 3000,
+    })
+
+    // 无样本（引擎回传 null）→ ETA 必须归零为 null，绝不显示假进度
+    expect(normalizePlanRunSnapshot({
+      ...base,
+      cost: { remainingSteps: 2, sampleCount: 0, avgStepMs: null, estimatedRemainingMs: null },
+    })?.cost).toEqual({
+      remainingSteps: 2,
+      sampleCount: 0,
+      avgStepMs: null,
+      estimatedRemainingMs: null,
+    })
+
+    // 缺剩余步数/样本数 → 整块丢弃（不猜测）
+    expect(normalizePlanRunSnapshot({ ...base, cost: { remainingSteps: 2 } })?.cost).toBeUndefined()
+  })
+
   it('filters events to the active session while accepting payloads without a key', () => {
     expect(payloadBelongsToSession(
       { session_key: 'agent:main:webchat:one' },

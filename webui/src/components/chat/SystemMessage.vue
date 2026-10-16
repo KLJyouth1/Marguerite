@@ -15,6 +15,41 @@
           :disabled="resolving"
           @click="onResume"
         >{{ t('chat.sandboxPausedResume') }}</button>
+        <!-- P0-1c：鉴权失败（AUTH_FAILED）给出可操作引导——前往设置改 Key，或直接重试本轮。
+             真机实测（2026-09-28）：计划子步骤失败/超时这类最常见的失败此前**没有任何出口**
+             （只有 sandbox 暂停与鉴权失败有按钮），用户面对的是一条死路 —— 现在任何失败轮次
+             都能直接重试（重发最后一条用户消息）。 -->
+        <div v-if="showActions" class="msg-error-card__actions">
+          <button
+            v-if="showAuthActions"
+            type="button"
+            class="msg-error-card__action"
+            @click="emit('open-settings')"
+          >{{ t('chat.errorActions.openSettings') }}</button>
+          <button
+            v-if="showRetry"
+            type="button"
+            class="msg-error-card__action"
+            @click="emit('retry')"
+          >{{ t('chat.errorActions.retry') }}</button>
+        </div>
+        <!-- B2：失败轮次的次级出口 —— 看日志（该轮的技术细节在日志页）与
+             改计划（仅当会话里存在可修订的方案卡）。刻意用独立 class，与主
+             操作按钮区分：主操作是「复活本轮」，次级是「先看/先改再跑」。 -->
+        <div v-if="showViewLogs || showReplan" class="msg-error-card__links">
+          <button
+            v-if="showReplan"
+            type="button"
+            class="msg-error-card__link"
+            @click="emit('replan')"
+          >{{ t('chat.errorActions.replan') }}</button>
+          <button
+            v-if="showViewLogs"
+            type="button"
+            class="msg-error-card__link"
+            @click="emit('view-logs')"
+          >{{ t('chat.errorActions.viewLogs') }}</button>
+        </div>
       </div>
       <time v-if="timeIso" class="msg-error-card__time" :datetime="timeIso" :title="timeFull">{{ timeAbs }}</time>
     </div>
@@ -42,21 +77,45 @@ import Icon from '@/components/Icon.vue'
 import SubagentCard from '@/components/chat/SubagentCard.vue'
 import type { ChatRenderedMessage } from '@/types/chat'
 import { absoluteTime, fullTime, isoTime } from '@/utils/messageTime'
+import { AUTH_FAILED } from '@/utils/chat/errors'
 
 const { t } = useI18n()
 
-const props = defineProps<{ message: ChatRenderedMessage }>()
+const props = defineProps<{ message: ChatRenderedMessage; canReplan?: boolean }>()
 
 // Owner-driven recovery: a run paused by the sandbox denial ledger surfaces as a
 // terminal error carrying this code. Offer a Resume action that the parent wires
 // to the sandbox.resume RPC. Resume is idempotent, but we disable the button
 // after one click to avoid duplicate confirmations.
-const emit = defineEmits<{ resume: [] }>()
+const emit = defineEmits<{
+  resume: []
+  'open-settings': []
+  retry: []
+  replan: []
+  'view-logs': []
+}>()
 const resolving = ref(false)
 const showResume = computed(
   () =>
     props.message.displayRole === 'error' &&
     props.message.errorCode === 'sandbox_threshold_exceeded',
+)
+// P0-1c：鉴权失败时展示「前往设置」+「重试」。
+const showAuthActions = computed(
+  () =>
+    props.message.displayRole === 'error' &&
+    props.message.errorCode === AUTH_FAILED,
+)
+// 任何失败轮次都至少给一个出口：重发最后一条用户消息（ChatView.retryAuthFailure）。
+// 例外是 sandbox 暂停（它有自己的 Resume，重试语义不同）。
+const showRetry = computed(
+  () => props.message.displayRole === 'error' && !showResume.value,
+)
+const showActions = computed(() => showAuthActions.value || showRetry.value)
+// B2 次级出口：每次失败都能看日志；只有在会话里存在可修订方案卡时才提供改计划。
+const showViewLogs = computed(() => props.message.displayRole === 'error')
+const showReplan = computed(
+  () => props.message.displayRole === 'error' && props.canReplan === true && !showResume.value,
 )
 
 function onResume() {
@@ -183,7 +242,38 @@ const timeFull = computed(() => fullTime(props.message.ts))
   overflow-wrap: anywhere;
 }
 
-.msg-error-card__resume {
+.msg-error-card__actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+/* B2 次级出口：文本链接式，权重低于主操作按钮。 */
+.msg-error-card__links {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.msg-error-card__link {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color var(--dur-fast);
+}
+
+.msg-error-card__link:hover {
+  color: var(--danger);
+}
+
+.msg-error-card__resume,
+.msg-error-card__action {
   align-self: flex-start;
   margin-top: 0.25rem;
   padding: 0.3125rem 0.75rem;
@@ -197,7 +287,8 @@ const timeFull = computed(() => fullTime(props.message.ts))
   transition: background var(--dur-fast);
 }
 
-.msg-error-card__resume:hover:not(:disabled) {
+.msg-error-card__resume:hover:not(:disabled),
+.msg-error-card__action:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger) 20%, var(--bg-surface));
 }
 

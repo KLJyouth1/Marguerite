@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "note": "施工地块样例（数据驱动：加建筑 = 追加一份 plot，不改核心代码）。坐标沿用岛平面 x/z。",
+  "plots": [
+    {
+      "id": "plot:workshop-tower",
+      "x": -3.2,
+      "z": 4.1,
+      "rotation": 0.4,
+      "building": { "footprint": 2.6, "floorHeight": 0.9, "totalFloors": 6 },
+      "startDay": 0,
+      "endDay": 24,
+      "crew": 10,
+      "cranes": 1,
+      "vehicles": 2,
+      "deviceId": "device:tool-runner"
+    },
+    {
+      "id": "plot:depot-annex",
+      "x": 4.6,
+      "z": -2.4,
+      "rotation": -0.7,
+      "building": { "footprint": 2.0, "floorHeight": 0.8, "totalFloors": 2 },
+      "startDay": 6,
+      "endDay": 18,
+      "crew": 5,
+      "cranes": 1,
+      "vehicles": 1,
+      "deviceId": "device:artifact-pipeline"
+    },
+    {
+      "id": "plot:finished-kiosk",
+      "x": 1.8,
+      "z": -5.2,
+      "rotation": 1.2,
+      "building": { "footprint": 1.6, "floorHeight": 0.8, "totalFloors": 1 },
+      "startDay": -12,
+      "endDay": -2,
+      "crew": 0,
+      "cranes": 0,
+      "vehicles": 0
+    }
+  ]
+}

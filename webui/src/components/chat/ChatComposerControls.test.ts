@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import runModeSource from './ChatComposerRunMode.vue?raw'
 import modelRoutingSource from './ChatComposerModelRouting.vue?raw'
+import runModePanelSource from './RunModePanel.vue?raw'
 import composerSource from './ChatComposer.vue?raw'
 import viewSource from '../../views/ChatView.vue?raw'
 import runModeControllerSource from '../../composables/chat/useChatRunModeController.ts?raw'
@@ -17,13 +18,19 @@ describe('ChatComposer control hierarchy', () => {
   })
 
   it('threads the shield run-mode control through ChatComposer and ChatView', () => {
-    expect(composerSource).toContain('ChatComposerRunMode')
-    expect(composerSource).toContain('<Icon name="shield"')
-    expect(composerSource).toContain('chat-run-mode-btn--${runMode}')
+    // 三个维度现已合并进统一面板 RunModePanel（沙箱/协作/模型路由）
+    expect(composerSource).toContain('RunModePanel')
+    expect(runModePanelSource).toContain('ChatComposerRunMode')
+    expect(runModePanelSource).toContain('<Icon name="shield"')
     expect(composerSource).toContain(':run-mode="runMode"')
     expect(composerSource).toContain(':safe-setup-available="safeSetupAvailable"')
     expect(composerSource).toContain('@set-run-mode="emit(\'setRunMode\', $event)"')
     expect(composerSource).toContain('setRunMode: [mode: SandboxRunMode]')
+
+    // 会话锁定经 RunModePanel 透传给沙箱子组件
+    expect(composerSource).toContain(':run-mode-locked="runModeLocked"')
+    expect(composerSource).toContain(':run-mode-lock-message="runModeLockMessage"')
+    expect(runModePanelSource).toContain('run-mode-panel-lock-tip')
 
     expect(viewSource).toContain(':run-mode="runMode"')
     expect(viewSource).toContain(':allowed-run-modes="composerAllowedRunModes"')
@@ -37,10 +44,6 @@ describe('ChatComposer control hierarchy', () => {
     expect(runModeControllerSource).toContain('await setGlobalRunMode(mode)')
     expect(viewSource).toContain(':run-mode-locked="runModeLocked"')
     expect(viewSource).toContain('|| activeRunModeLock.value !== null')
-    expect(composerSource).toContain(':disabled="runModeLocked"')
-    expect(composerSource).toContain('chat-run-mode-lock-tip')
-    expect(composerSource).not.toContain('cursor: not-allowed')
-    expect(composerSource).toContain('cursor: default')
     expect(zhHans.chat.composer.runModeLocked).toBe('运行中，当前会话无法修改')
   })
 
@@ -107,12 +110,10 @@ describe('ChatComposer model routing contract', () => {
   })
 
   it('threads the independent model-routing control through ChatComposer and ChatView', () => {
-    expect(composerSource).toContain('ChatComposerModelRouting')
-    expect(composerSource).toContain('<Icon name="router"')
-    expect(composerSource).toContain('chat-model-routing-btn--${modelRoutingMode}')
-    expect(composerSource).toContain("'is-active': modelRoutingOpen || modelRoutingMode !== 'off'")
+    expect(composerSource).toContain('RunModePanel')
+    expect(runModePanelSource).toContain('ChatComposerModelRouting')
     expect(composerSource).toContain(':model-routing-mode="modelRoutingMode"')
-    expect(composerSource).toContain(':busy="modelRoutingSettingsBusy"')
+    expect(composerSource).toContain(':model-routing-settings-busy="modelRoutingSettingsBusy"')
     expect(composerSource).toContain('@set-model-routing-mode="emit(\'setModelRoutingMode\', $event)"')
     expect(composerSource).toContain('modelRoutingMode: ModelRoutingMode')
     expect(composerSource).toContain('setModelRoutingMode: [mode: ModelRoutingMode]')

@@ -122,6 +122,10 @@ function disconnect() {
       </div>
     </div>
 
+    <p class="conn-boundary-note" role="note">
+      {{ t('setup.connection.rbacBoundaryNote') }}
+    </p>
+
     <div class="conn-actions">
       <button type="button" class="btn btn--primary" @click="connect">
         {{ statusState === 'connected' ? t('setup.connection.reconnect') : t('setup.connection.connect') }}
@@ -196,6 +200,14 @@ function disconnect() {
   color: var(--text-dim);
   font-size: var(--fs-xs);
   font-weight: 400;
+}
+
+.conn-boundary-note {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  margin: var(--sp-1) 0 var(--sp-2);
+  max-width: 60ch;
 }
 
 .conn-actions {

@@ -95,6 +95,8 @@ import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useBgm } from '@/composables/useBgm'
 import { getWorkNavigationSection } from '@/router/nav'
 import { useRpcStore } from '@/stores/rpc'
+import { useActiveMode, switchActiveMode } from '@/composables/useActiveMode'
+import { requestTaskWorkbenchOpen } from '@/workbench/taskItems'
 import { highlightFtsSnippet } from '@/utils/searchSnippet'
 import type { SidebarSection } from '@/composables/useSessions'
 import type { IconName } from '@/utils/icons'
@@ -156,7 +158,7 @@ interface Command {
 
 // Stable group order for the rendered palette. Conversation groups sort below
 // the static nav/action groups so "go to page" stays the top, instant result.
-const GROUP_ORDER = ['Recents', 'Work', 'Observe', 'Actions', 'Conversations', 'Messages'] as const
+const GROUP_ORDER = ['Recents', 'Work', 'Observe', 'Actions', 'Modes', 'Conversations', 'Messages'] as const
 
 // Display label for a group id. Nav bands resolve through the same nav.* keys
 // the sidebar uses, so the palette and the rail always agree per locale.
@@ -165,6 +167,7 @@ const GROUP_LABEL_KEYS: Record<string, string> = {
   Work: 'shared.cmdp.groupWork',
   Observe: 'nav.groupMonitor',
   Actions: 'shared.cmdp.groupActions',
+  Modes: 'shared.cmdp.groupModes',
   Conversations: 'shared.cmdp.groupConversations',
   Messages: 'shared.cmdp.groupMessages',
 }
@@ -279,7 +282,55 @@ const allCommands = computed<Command[]>(() => {
       group: 'Actions',
       run: () => setBgmEnabled(!bgmEnabled.value),
     },
+    // Task-progress panel: docks the delivery-pipeline workbench panel beside
+    // the current view. This is the production caller for
+    // `createTaskWorkbenchItem` (Gap4) — distinct from the /task route, which is
+    // the full-page surface. Dispatches a window event the AppWorkbench listens
+    // for, mirroring the terminal/browser panel open paths.
+    {
+      id: 'action:open-task-panel',
+      title: t('task.title'),
+      icon: 'listChecks',
+      keywords: 'task progress workbench panel steps deliverables 任务 进度 交付物',
+      group: 'Actions',
+      run: () => {
+        requestTaskWorkbenchOpen()
+      },
+    },
   )
+
+  // Modes: switch the runtime mode from anywhere (upgrade-masterplan §6 阶段 D).
+  // Reads the shared activeMode so the current mode is always marked; switching
+  // goes through switchActiveMode, which the live `mode.changed` frame confirms
+  // app-wide.
+  //
+  // NOTE: `useActiveMode()` must be called during setup (not lazily inside a
+  // computed) — `activeMode` is a module-level computed that resolves the Pinia
+  // store on evaluation, and evaluating it outside a component instance throws
+  // "getActivePinia() was called but there was no active Pinia".
+  const activeModeRef = useActiveMode().activeMode
+  const currentMode = activeModeRef.value?.kind
+    ?? activeModeRef.value?.mode
+    ?? ''
+  const MODE_COMMANDS: Array<{ kind: string; label: string }> = [
+    { kind: 'plan', label: 'Plan' },
+    { kind: 'agent', label: 'Agent' },
+    { kind: 'ensemble', label: 'Ensemble' },
+    { kind: 'bloom', label: 'Bloom' },
+    { kind: 'omni-transcend', label: 'Omni Transcend' },
+  ]
+  for (const m of MODE_COMMANDS) {
+    const isActive = m.kind === currentMode
+    out.push({
+      id: `mode:${m.kind}`,
+      title: t('shared.cmdp.actionModeSwitch', { mode: m.label }),
+      icon: 'mode',
+      keywords: `mode switch ${m.label} ${m.kind} 模式 切换`.toLowerCase(),
+      group: 'Modes',
+      subtitle: isActive ? t('shared.cmdp.modeActive') : undefined,
+      run: () => void switchActiveMode(m.kind),
+    })
+  }
 
   return out
 })
@@ -515,8 +566,8 @@ function onBackdrop(e: MouseEvent) {
   position: fixed;
   inset: 0;
   /* Modal tier (above the fixed sidebar at 200) so the scrim dims the rail and
-     the palette reads as a true modal — matches the 300 used by other modals. */
-  z-index: 300;
+     the palette reads as a true modal — raised above Settings (300). */
+  z-index: 320;
   display: flex;
   align-items: flex-start;
   justify-content: center;

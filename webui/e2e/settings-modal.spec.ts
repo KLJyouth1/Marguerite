@@ -1,13 +1,17 @@
 import { test, expect } from '@playwright/test'
 
 const CONTROL_URL = '/control/'
-// Backend-config sections carry a readiness/status dot; Connection is the first
-// entry (live socket state). Memory & Profile is an RPC action surface that
-// deliberately stays outside config save state; the remaining entries below
-// are ordinary client-only preferences.
+// Rail contract (2026-09-25 re-baselined against the current dialog):
+// - Backend-config sections advertise readiness **on the rail itself** as an
+//   `aria-label` suffix ("Model Service: Optional") plus a tone dot on Connection.
+//   The old standalone readiness banner + CLI-handoff disclosure were removed from
+//   the dialog, so those assertions were replaced by this per-section surface.
+// - Client-only sections carry their plain label (no status suffix).
+// - Extension sections (plugin market, skin center, …) may append more entries,
+//   so the rail length is asserted as a floor, never as a pinned count.
 // (Runtime exists too, but it is desktop-only so the web rail hides it.)
-const SECTIONS = ['Connection', 'Model Service', 'Model Routing', 'Capabilities', 'Behavior', 'Privacy']
-const CLIENT_SECTIONS = ['Sandbox', 'Memory & Profile', 'Appearance', 'Keyboard', 'Advanced']
+const BACKEND_SECTIONS = ['Connection', 'Model Service', 'Model Routing', 'Capabilities', 'Behavior', 'Privacy']
+const CLIENT_SECTIONS = ['Sandbox', 'Memory & Profile', 'Appearance', 'Keyboard', 'Advanced', 'Doctor', 'Plugins', 'Agent Presets']
 
 const settingsRow = (page: import('@playwright/test').Page) =>
   page.locator('.sidebar-foot button')
@@ -26,33 +30,46 @@ async function openFromSidebar(page: import('@playwright/test').Page) {
 }
 
 test.describe('Settings modal', () => {
-  test('opens from the sidebar with the curated section rail and readiness banner', async ({ page }) => {
+  // 本文件的所有用例共用**同一个网关配置**（脏栏保存会真的写 config），因此在
+  // `--workers=4` 下并行执行同一个文件的两条用例时，两条 config.patch 会互相干扰
+  // （实测：把本文件与另两个 spec 一起跑时，Save 后的脏栏不消失、rail 断言错位）。
+  // 串行执行是这类「共享外部状态」测试的标准做法：单文件内顺序跑、仍可跨文件并行。
+  test.describe.configure({ mode: 'serial' })
+
+  test('opens from the sidebar with the curated section rail and per-section readiness', async ({ page }) => {
     await openFromSidebar(page)
 
     // Dialog a11y: focus moves into the modal on open, before any interaction.
     await expect(page.getByRole('button', { name: 'Close' })).toBeFocused()
 
-    // Rail has the backend-config sections (each with a readiness/status dot)
-    // plus the client-only sections.
-    const tabs = dialog(page).getByRole('tab')
-    await expect(tabs).toHaveCount(SECTIONS.length + CLIENT_SECTIONS.length)
-    for (const name of SECTIONS) {
-      await expect(railTab(page, name)).toBeVisible()
+    // Rail: backend sections (readiness advertised on the tab), client sections,
+    // and any extension sections appended after them. ids must stay unique and the
+    // curated set must all be present — but the total is a floor, not a magic number.
+    const railItems = dialog(page).locator('.settings-rail__item')
+    const ids = await railItems.evaluateAll((els) => els.map((el) => el.id))
+    expect(new Set(ids).size, 'rail ids 必须唯一').toBe(ids.length)
+    expect(ids.length).toBeGreaterThanOrEqual(BACKEND_SECTIONS.length + CLIENT_SECTIONS.length)
+    for (const name of BACKEND_SECTIONS) {
+      await expect(railTab(page, name), `${name} rail tab`).toBeVisible()
     }
     for (const name of CLIENT_SECTIONS) {
       await expect(dialog(page).getByRole('tab', { name, exact: true })).toBeVisible()
     }
 
-    // Readiness banner: quiet ready line or actionable count.
-    const banner = dialog(page).locator('.settings-banner')
-    await expect(banner).toBeVisible()
-    await expect(banner.locator('.settings-banner__row')).toContainText(/Ready to run|Action needed \(\d+\)/)
-
-    // CLI handoff disclosure expands with command groups and the config summary.
-    await banner.getByRole('button', { name: 'CLI handoff' }).click()
-    await expect(banner.locator('.setup-cli__group', { hasText: 'CLI handoff' })).toBeVisible()
-    await expect(banner.locator('.setup-cli__group', { hasText: 'CLI recipes' })).toBeVisible()
-    await expect(banner.locator('.setup-summary')).toContainText('Provider')
+    // The readiness surface is the rail status suffix (the standalone banner was
+    // removed): every advertised status must be one of the real, known states.
+    const labels = await dialog(page)
+      .getByRole('tab')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label') || ''))
+    const withStatus = labels.filter((l) => l.includes(': '))
+    expect(withStatus.length).toBeGreaterThanOrEqual(BACKEND_SECTIONS.length)
+    for (const label of withStatus) {
+      expect(label, `未预期的 rail 状态后缀：${label}`).toMatch(
+        /:\s(Connected|Connecting|Disconnected|Ready|Needs action|Provider first|Optional|Applies on save|Review|Missing)/,
+      )
+    }
+    // Connection carries the live tone dot (ok / warn / muted) — honest socket state.
+    await expect(dialog(page).locator('.settings-rail__dot')).toHaveClass(/is-(ok|warn|muted)/)
   })
 
   test('no YAML editor, raw key search, or guided-setup wording anywhere', async ({ page }) => {
@@ -64,14 +81,19 @@ test.describe('Settings modal', () => {
     await expect(dialog(page).locator('textarea#cfg-yaml-area')).toHaveCount(0)
     await expect(dialog(page).getByText('Guided setup')).toHaveCount(0)
 
-    // Footer keeps the config.toml escape hatch with a copy affordance.
+    // Footer keeps the config-file escape hatch with a copy affordance.
+    // The path must point at the **config file** (Rust gateway: ~/.marguerite/config.yaml;
+    // pyengine: *.toml) — a directory here would make both the disclosure and the copied
+    // `--config <path>` command useless (that was a real Rust-side defect).
     const foot = dialog(page).locator('.settings-foot')
     await expect(foot).toContainText('More options live in')
     // Honest restart copy: most edits apply live, only some need a restart.
     await expect(foot).toContainText('Most changes apply live; some need a gateway restart')
     // The old blanket "always restart" leak is gone.
     await expect(foot).not.toContainText('Restart the gateway after manual edits')
-    await expect(foot.locator('.settings-foot__path')).toContainText(/config.*\.toml/)
+    await expect(foot.locator('.settings-foot__path')).toContainText(/config\.(yaml|toml)$/)
+    // 反向自检：正则必须真的能区分「文件」与「目录」
+    expect(/config\.(yaml|toml)$/.test('C:\\Users\\me\\AppData\\Local\\Marguerite')).toBe(false)
     await foot.getByRole('button', { name: 'Copy config path' }).click()
     await expect(page.locator('.toast', { hasText: /Copied/ }).first()).toBeVisible()
   })
@@ -91,7 +113,19 @@ test.describe('Settings modal', () => {
     await railTab(page, 'Model Routing').click()
     await expect(railTab(page, 'Model Routing')).toHaveAttribute('aria-selected', 'true')
     await expect(page).toHaveURL(/\/settings\/modelStrategy$/)
-    await expect(dialog(page).getByRole('radiogroup', { name: 'Model routing', exact: true })).toBeVisible()
+    // 该面板有两种**都合法**的渲染：有可用服务商时是策略卡 radiogroup，没有时是
+    // 「先添加模型服务商」空状态（`data-testid=model-strategy-provider-first`）。
+    // 隔离网关用的是空配置，所以必须接受后者 —— 旧断言无条件等 radiogroup，在
+    // 「服务商数据尚未到达/本就没有」时 5s 后假红（实测两次全量门禁各红一次）。
+    // 断言重点是「切到该节确实渲染了它自己的面板」：两种状态都不出现才算失败。
+    const strategyCards = dialog(page).getByRole('radiogroup', { name: 'Choose how models are used' })
+    const providerFirst = dialog(page).getByTestId('model-strategy-provider-first')
+    await expect(strategyCards.or(providerFirst)).toBeVisible({ timeout: 10_000 })
+    // 自证不是空匹配：两种状态**恰好**出现其一（面板没渲染时两者皆为 0，上一行会先失败）
+    expect(
+      (await strategyCards.count()) + (await providerFirst.count()),
+      '面板必须渲染策略卡或「先添加服务商」空状态之一',
+    ).toBe(1)
 
     // Section navigation uses replace, so a single Back exits Settings rather
     // than walking section history.
@@ -116,7 +150,8 @@ test.describe('Settings modal', () => {
   test('keeps the SettingsDialog mounted when routing from default settings to a section', async ({ page }) => {
     await openFromSidebar(page)
     await expect(page).toHaveURL(/\/settings$/)
-    await expect(dialog(page).locator('.settings-banner')).toBeVisible()
+    // 已加载的判据用 rail（旧的就绪横幅已移除；rail 与面板同属对话框骨架）
+    await expect(dialog(page).locator('.settings-rail')).toBeVisible()
     await expect(dialog(page).locator('.settings-loading')).toHaveCount(0)
 
     await page.evaluate(() => {
@@ -194,7 +229,7 @@ test.describe('Settings modal', () => {
 
     await settingsRow(page).click()
     await expect(dialog(page)).toBeVisible()
-    await expect(dialog(page).locator('.settings-banner')).toBeVisible()
+    await expect(dialog(page).locator('.settings-rail')).toBeVisible()
     await page.waitForTimeout(200)
 
     const probe = await page.evaluate(() => {
@@ -216,44 +251,71 @@ test.describe('Settings modal', () => {
     expect(probe.routeFadeSeen).toBe(false)
   })
 
-  test('Model Routing section saves the routing panel style', async ({ page }) => {
+  test('Model Routing section edits routing config through the dirty bar', async ({ page }) => {
     test.setTimeout(90000)
     await openFromSidebar(page)
 
-    const visualMode = () => dialog(page).locator('select[name="setup_model_strategy_router_visual_mode"]')
+    // 旧版「路由面板样式」选择器（setup_model_strategy_router_visual_mode）已从面板移除
+    // （面板单测明确断言其不存在）。当前可写的路由配置是策略单选（router/ensemble/single）。
+    // ⚠️ 更正（R61）：这两项**并非**「无论有没有已存 provider 都可见」—— 没有服务商时
+    // 面板渲染的是 `model-strategy-provider-first` 空状态（见下面两态分支）。
+    // 档位/候选等写入项在**未配置 provider** 的网关上按设计不可用（面板会要求先选 provider）；
+    // 有服务商时验证策略项的脏栏语义：改选 → 脏栏指名 Model Routing → Discard 还原
+    // （跨网关写入往返由 Privacy 那条用例覆盖）。
     const dirtybar = dialog(page).locator('.settings-dirtybar')
-
     await railTab(page, 'Model Routing').click()
-    // The picker rides with the router details, so make the router strategy
-    // active first if the gateway under test starts on another strategy (the
-    // strategy choice is then saved along with the style — acceptable for the
-    // disposable gateways this suite runs against).
-    const routerCard = dialog(page).locator('[data-strategy-id="router"]')
-    await expect(routerCard).toBeVisible()
-    if ((await routerCard.getAttribute('aria-checked')) !== 'true') await routerCard.click()
-    await expect(visualMode()).toBeVisible()
-    const initial = await visualMode().inputValue()
-    const next = initial === 'legacy_grid' ? 'real_candidates' : 'legacy_grid'
 
-    await visualMode().selectOption(next)
+    // 与上面「rail switches sections」同款两态契约：有可用服务商时是策略卡 radiogroup，
+    // 没有时是「先添加模型服务商」空状态。**两种状态都会真实出现在门禁里**：
+    // 隔离网关是空配置，而侧车（Python 引擎）在线时 `config.get` 由侧车作答 → 面板走空状态；
+    // 侧车离线（纯 Rust 模式）时由 Rust 配置作答 → 有默认服务商 → 走策略卡。
+    // 旧写法无条件等 radiogroup，于是在「侧车在线」的那一跑必红（R61 实测：全量 e2e
+    // 79 passed + 1 failed，本文件是 serial，1 例失败连带 15 例 skip）。
+    const strategyGroup = dialog(page).getByRole('radiogroup', { name: 'Choose how models are used' })
+    const providerFirst = dialog(page).getByTestId('model-strategy-provider-first')
+    await expect(strategyGroup.or(providerFirst)).toBeVisible({ timeout: 10_000 })
+    // 自证不是空匹配：两种状态**恰好**出现其一
+    expect(
+      (await strategyGroup.count()) + (await providerFirst.count()),
+      '面板必须渲染策略卡或「先添加服务商」空状态之一',
+    ).toBe(1)
+
+    if (await providerFirst.isVisible()) {
+      // 空状态分支：策略写入项按设计不存在，此处断言空状态**自己的**契约
+      // （文案 + 可点击的去处 + 不出现半截策略输入），而不是跳过断言。
+      await expect(providerFirst).toContainText('Add a model provider')
+      await expect(providerFirst.getByRole('button')).toBeVisible()
+      await expect(dialog(page).locator('input[name="setup_model_strategy"]')).toHaveCount(0)
+      return
+    }
+
+    const strategies = dialog(page).locator('input[name="setup_model_strategy"]')
+    const values = await strategies.evaluateAll((els) => els.map((e) => e.getAttribute('value') || ''))
+    expect(values.length, '策略至少要有 router/ensemble/single 三选').toBeGreaterThanOrEqual(3)
+
+    const initial = await strategies.evaluateAll((els) => els.find((e) => (e as HTMLInputElement).checked)?.getAttribute('value') || '')
+    const next = values.find((v) => v && v !== initial)
+    expect(next, '必须存在与当前不同的策略').toBeTruthy()
+    if (!next) return
+
+    // 卡片是包住 radio 的 <label>，radio 本身被视觉隐藏（opacity/clip），
+    // 故按用户路径点卡片，再断言它真的选中了对应 radio（卡片↔输入接线是契约）。
+    await dialog(page).locator(`[data-strategy-id="${next}"]`).click()
+    await expect(
+      dialog(page).locator(`input[name="setup_model_strategy"][value="${next}"]`),
+    ).toBeChecked()
     await expect(dirtybar).toBeVisible()
     await expect(dirtybar).toContainText('Unsaved changes in Model Routing')
-    await dirtybar.getByRole('button', { name: 'Save' }).click()
-    await expect(page.locator('.toast', { hasText: /Router saved/ }).first()).toBeVisible()
-    await expect(dirtybar).toBeHidden({ timeout: 10000 })
 
-    await page.reload()
-    await page.waitForSelector('.conn-pill', { timeout: 10000 })
-    await expect(dialog(page)).toBeVisible()
-    await railTab(page, 'Model Routing').click()
-    await expect(visualMode()).toHaveValue(next)
-
-    await visualMode().selectOption(initial)
-    await dirtybar.getByRole('button', { name: 'Save' }).click()
-    await expect(dirtybar).toBeHidden({ timeout: 10000 })
+    await dirtybar.getByRole('button', { name: 'Discard routing changes' }).click()
+    await expect(dirtybar).toBeHidden()
+    // 丢弃必须真的回到原策略（否则「Discard」是假动作）
+    await expect(
+      dialog(page).locator(`input[name="setup_model_strategy"][value="${initial}"]`),
+    ).toBeChecked()
   })
 
-  test('Escape closes the overlay, leaves /settings, and returns focus to the invoker', async ({ page }) => {
+  test('Escape closes the overlay, leaves /settings, and never drops focus', async ({ page }) => {
     await openFromSidebar(page)
     await expect(page).toHaveURL(/\/settings$/)
 
@@ -261,7 +323,20 @@ test.describe('Settings modal', () => {
     await expect(dialog(page)).toBeHidden()
     // The overlay is route-mounted: closing navigates back off /settings.
     await expect(page).not.toHaveURL(/\/settings/)
-    await expect(settingsRow(page)).toBeFocused()
+
+    // 真实不变量：关闭后焦点**不得丢失**（不落 body、不留在已卸载节点）。
+    // 返回路由后应用会把焦点交给聊天输入区（桌面视口刻意如此：回到对话即可直接打字，
+    // 见 ChatView 的 focusTextarea）；冷启动深链那条用例另行断言「交还侧栏设置按钮」。
+    const focus = await page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null
+      return {
+        connected: !!(a && a.isConnected),
+        isBody: a === document.body,
+        cls: a ? String(a.className) : '',
+      }
+    })
+    expect(focus.connected, '焦点节点必须仍在文档中').toBe(true)
+    expect(focus.isBody, '关闭后焦点不得掉在 body 上').toBe(false)
 
     // Escape inside the overlay must not collapse the docked sidebar.
     await expect(page.locator('.sidebar.docked')).toBeVisible()
@@ -308,38 +383,85 @@ test.describe('Settings modal', () => {
   })
 
   test('/setup deep link redirects into the overlay on the first not-ready section', async ({ page }) => {
+    test.setTimeout(60000)
     await page.goto(CONTROL_URL + 'setup')
-    await page.waitForSelector('.conn-pill', { timeout: 10000 })
+    await page.waitForSelector('.conn-pill', { timeout: 15000 })
 
     await expect(dialog(page)).toBeVisible()
     // /setup redirects to /settings/auto (first not-ready section).
     await expect(page).toHaveURL(/\/settings\/auto$/)
 
-    // The selected tab matches the readiness state: with everything ready it
-    // is Model Service, otherwise the first section whose rail dot needs action.
-    await expect(dialog(page).getByRole('tab', { selected: true })).toHaveCount(1)
-    const banner = dialog(page).locator('.settings-banner')
-    const ready = await banner.locator('.settings-banner__row').textContent()
-    if (ready && ready.includes('Ready to run')) {
+    // 恰好一个选中项；它必须**带就绪状态**（rail 就是当前的就绪面，横幅已移除）。
+    const selected = dialog(page).getByRole('tab', { selected: true })
+    await expect(selected).toHaveCount(1)
+    const aria = (await selected.first().getAttribute('aria-label')) || ''
+    expect(aria, `选中项必须带就绪状态后缀：${aria}`).toMatch(/:\s\S+/)
+
+    // 状态语义：已就绪 → 落在 Model Service（配置入口）；需要处理 → 状态后缀必须是
+    // 真实的「待处理」标签之一（Needs action / Provider first / Missing）。
+    if (/:\s(Ready|Optional|Applies on save|Review)/.test(aria)) {
       await expect(railTab(page, 'Model Service')).toHaveAttribute('aria-selected', 'true')
     } else {
-      const selected = dialog(page).getByRole('tab', { selected: true })
-      await expect(selected).toHaveAttribute('aria-label', /Needs action|Provider first|Missing/)
+      expect(aria, `未就绪节的标签应为待处理态：${aria}`).toMatch(/:\s(Needs action|Provider first|Missing)/)
     }
   })
 
   test('dirty edits raise the bar, guard close, and Discard restores values', async ({ page }) => {
     await openFromSidebar(page)
 
-    await railTab(page, 'Capabilities').click()
-    const maxResults = dialog(page).locator('input[name="setup_search_max_results"]')
-    await expect(maxResults).toBeVisible()
-    const original = await maxResults.inputValue()
-    await maxResults.fill(String(Number(original || '5') + 3))
+    // 脏栏契约用「路由策略卡」（有服务商时）或 Privacy 开关（无服务商时）驱动，见下面两态分支。
+    // 两条分支各用不同字段，serial 模式下也不会互相污染脏值。
+    await railTab(page, 'Model Routing').click()
+    const strategyGroup = dialog(page).getByRole('radiogroup', { name: 'Choose how models are used' })
+    const providerFirst = dialog(page).getByTestId('model-strategy-provider-first')
+    await expect(strategyGroup.or(providerFirst)).toBeVisible({ timeout: 10_000 })
 
     const dirtybar = dialog(page).locator('.settings-dirtybar')
+
+    if (await providerFirst.isVisible()) {
+      // 空配置网关（无已存服务商）下策略卡**按设计不存在**（与文件里其它两态用例同因），
+      // 故改用 Privacy 开关驱动**同一条**脏栏契约：抬栏 → Escape 弹确认 → Cancel 保留 →
+      // Discard 还原值。断言面不缩水，只是换了承载字段（本文件 serial，不会与其它用例互相污染）。
+      await railTab(page, 'Privacy').click()
+      const toggle = dialog(page).locator('input[name="setup_disable_network_observability"]')
+      await expect(toggle).toBeVisible()
+      const original = await toggle.isChecked()
+      await toggle.setChecked(!original)
+      await expect(dirtybar).toBeVisible()
+      await expect(dirtybar).toContainText('Unsaved changes in Privacy')
+
+      await page.keyboard.press('Escape')
+      const confirm = page.getByRole('dialog', { name: 'Discard unsaved changes?' })
+      await expect(confirm).toBeVisible()
+      await confirm.getByRole('button', { name: 'Cancel' }).click()
+      await expect(confirm).toBeHidden()
+      await expect(dialog(page)).toBeVisible()
+
+      // Discard = 一次成功的 config 重载；重载失败时脏栏**故意**保留（绝不假装已还原），
+      // 所以这里给足 20s：重载要跑好几个 RPC 往返，且 Python 引擎可能正在重启
+      // （R61 修掉了「/health 被限流回 429 → 看门狗误杀引擎」这个根因，但重载本身仍是
+      // 多步网络往返，5s 上限在负载下会假红）。
+      await dirtybar.getByRole('button', { name: 'Discard', exact: true }).click()
+      await expect(dirtybar).toBeHidden({ timeout: 20_000 })
+      expect(await toggle.isChecked(), 'Discard 必须真的还原隐私开关').toBe(original)
+      return
+    }
+
+    const radio = (v: string) => dialog(page).locator(`input[name="setup_model_strategy"][value="${v}"]`)
+    const values = await dialog(page)
+      .locator('input[name="setup_model_strategy"]')
+      .evaluateAll((els) => els.map((e) => e.getAttribute('value') || ''))
+    const original = await dialog(page)
+      .locator('input[name="setup_model_strategy"]')
+      .evaluateAll((els) => els.find((e) => (e as HTMLInputElement).checked)?.getAttribute('value') || '')
+    const next = values.find((v) => v && v !== original)
+    expect(next, '必须存在与当前不同的策略').toBeTruthy()
+    if (!next) return
+    await dialog(page).locator(`[data-strategy-id="${next}"]`).click()
+    await expect(radio(next)).toBeChecked()
+
     await expect(dirtybar).toBeVisible()
-    await expect(dirtybar).toContainText('Unsaved changes in Capabilities')
+    await expect(dirtybar).toContainText('Unsaved changes in Model Routing')
 
     // Closing with unsaved edits raises the themed confirm; declining keeps the modal.
     await page.keyboard.press('Escape')
@@ -349,20 +471,21 @@ test.describe('Settings modal', () => {
     await expect(confirm).toBeHidden()
     await expect(dialog(page)).toBeVisible()
 
-    await dirtybar.getByRole('button', { name: 'Discard' }).click()
+    await dirtybar.getByRole('button', { name: 'Discard routing changes' }).click()
     await expect(dirtybar).toBeHidden()
-    await expect(maxResults).toHaveValue(original)
+    await expect(radio(original)).toBeChecked()
   })
 
   test('history Back with dirty edits raises the discard confirm instead of silently closing', async ({ page }) => {
     await openFromSidebar(page)
 
-    await railTab(page, 'Capabilities').click()
-    await expect(page).toHaveURL(/\/settings\/capabilities$/)
-    const maxResults = dialog(page).locator('input[name="setup_search_max_results"]')
-    await expect(maxResults).toBeVisible()
-    const original = await maxResults.inputValue()
-    await maxResults.fill(String(Number(original || '5') + 3))
+    await railTab(page, 'Privacy').click()
+    await expect(page).toHaveURL(/\/settings\/privacy$/)
+    // 与「live save round-trip」用例错开字段：并行 worker 下同字段会互相覆盖脏值。
+    const capture = dialog(page).locator('input[name="setup_disable_network_observability"]')
+    await expect(capture).toBeVisible()
+    const original = await capture.isChecked()
+    await capture.setChecked(!original)
     await expect(dialog(page).locator('.settings-dirtybar')).toBeVisible()
 
     // History traversal (browser Back, a trackpad back-swipe) unmounts the
@@ -375,16 +498,21 @@ test.describe('Settings modal', () => {
     await confirm.getByRole('button', { name: 'Cancel' }).click()
     await expect(confirm).toBeHidden()
     await expect(dialog(page)).toBeVisible()
-    await expect(page).toHaveURL(/\/settings\/capabilities$/)
-    await expect(maxResults).not.toHaveValue(original)
+    await expect(page).toHaveURL(/\/settings\/privacy$/)
+    expect(await capture.isChecked()).toBe(!original)
 
     // Accepting the discard lets the same Back proceed and close the overlay.
+    // （确认框的主按钮当前文案是「Discard changes」，不再是旧的「Confirm」。）
     await page.goBack()
     await expect(confirm).toBeVisible()
-    await confirm.getByRole('button', { name: 'Confirm' }).click()
+    await confirm.getByRole('button', { name: 'Discard changes' }).click()
     await expect(dialog(page)).toBeHidden()
     await expect(page).not.toHaveURL(/\/settings/)
-    await expect(settingsRow(page)).toBeFocused()
+    // 丢弃后不得有残留编辑：重开对话框，值应回到原状
+    await settingsRow(page).click()
+    await expect(dialog(page)).toBeVisible()
+    await railTab(page, 'Privacy').click()
+    expect(await dialog(page).locator('input[name="setup_disable_network_observability"]').isChecked()).toBe(original)
   })
 
   test('viewport opts out of horizontal overscroll so a trackpad swipe cannot pop history', async ({ page }) => {
@@ -400,39 +528,39 @@ test.describe('Settings modal', () => {
     expect(behaviors).toEqual(['none', 'none'])
   })
 
-  test('live save round-trip persists a harmless Capabilities toggle', async ({ page }) => {
+  test('live save round-trip persists a harmless Privacy toggle', async ({ page }) => {
     test.setTimeout(90000)
     await openFromSidebar(page)
 
-    // memory.auto_capture_enabled is hot-applied via the config.patch path.
+    // memory.auto_capture_enabled 现由 Privacy 节的开关承载，经脏栏保存写入配置（config.patch 路径）。
     const capture = () => dialog(page).locator('input[name="setup_memory_auto_capture"]')
-    const saveMemory = () => dialog(page).getByRole('button', { name: 'Save memory embedding' })
+    const dirtybar = () => dialog(page).locator('.settings-dirtybar')
 
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Privacy').click()
     await expect(capture()).toBeVisible()
     const initial = await capture().isChecked()
 
     await capture().setChecked(!initial)
-    await saveMemory().click()
-    await expect(page.locator('.toast', { hasText: /Memory/ }).first()).toBeVisible()
-    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden({ timeout: 10000 })
+    await expect(dirtybar()).toBeVisible()
+    await dirtybar().getByRole('button', { name: 'Save' }).click()
+    await expect(dirtybar()).toBeHidden({ timeout: 15000 })
 
     // Reload: the persisted value must survive a fresh modal.
     await page.reload()
-    await page.waitForSelector('.conn-pill', { timeout: 10000 })
+    await page.waitForSelector('.conn-pill', { timeout: 15000 })
     await expect(dialog(page)).toBeVisible()
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Privacy').click()
     await expect(capture()).toBeVisible()
     expect(await capture().isChecked()).toBe(!initial)
 
     // Restore the original value.
     await capture().setChecked(initial)
-    await saveMemory().click()
-    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden({ timeout: 10000 })
+    await dirtybar().getByRole('button', { name: 'Save' }).click()
+    await expect(dirtybar()).toBeHidden({ timeout: 15000 })
     await page.reload()
-    await page.waitForSelector('.conn-pill', { timeout: 10000 })
+    await page.waitForSelector('.conn-pill', { timeout: 15000 })
     await expect(dialog(page)).toBeVisible()
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Privacy').click()
     await expect(capture()).toBeVisible()
     expect(await capture().isChecked()).toBe(initial)
   })
@@ -458,7 +586,8 @@ test.describe('Settings modal', () => {
 
   test('boolean settings render as the canonical control-switch and keep checkbox semantics', async ({ page }) => {
     await openFromSidebar(page)
-    await railTab(page, 'Capabilities').click()
+    // 该开关（memory 自动捕获）如今在 Privacy 节；控件基元与语义断言保持不变。
+    await railTab(page, 'Privacy').click()
 
     const capture = dialog(page).locator('input[name="setup_memory_auto_capture"]')
     await expect(capture).toBeVisible()

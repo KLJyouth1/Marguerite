@@ -93,6 +93,15 @@ export function useChatRunModeController(
     void chatPlans.implement(target, true)
   }
 
+  /**
+   * D-05/T08「继续上次计划」：`target.revisionId` 是复用候选 revision，
+   * 直接复用既有实施入口（`plans.implement`）在其上启动——**复用而非新建**。
+   */
+  function reuseLastPlan(target: PlanCardActionTarget) {
+    if (liveSendBlockedReason.value) return
+    void chatPlans.implement(target, false)
+  }
+
   function beginPlanRevision(target: PlanCardActionTarget) {
     if (pendingAttachments.value.length > 0) {
       pushToast(t('chat.plan.attachmentsUnavailable'), { tone: 'warn' })
@@ -197,6 +206,7 @@ export function useChatRunModeController(
   return {
     implementCurrentPlan,
     implementPlanInNewTask,
+    reuseLastPlan,
     beginPlanRevision,
     cancelPlanRevision,
     cancelActivePlanRun,

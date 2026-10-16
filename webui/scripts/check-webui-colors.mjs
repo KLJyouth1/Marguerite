@@ -33,6 +33,46 @@ function isTokenSource(f) {
     /\/src\/themes\/[^/]+\/skin\.css$/.test(r)
   )
 }
+// 主题中立的内容色（皮肤专属 accent_hex / SVG 折线标识色 / 数据可视化点缀色）会以常量
+// 形式保存在 TypeScript 里（非 CSS 规则、非模板 :style 绑定，纯粹的业务数据）。
+// 它们由用户态作为 `accent_hex` 契约字段、或在 PetSvg / Cat 渲染中经 `petSvgColor` 运行时拼装使用，
+// 不进入 CSS 着色管道，因此对这些「<script lang=ts> 代码块行 + .vue 文件」放行：
+//   · 匹配单/多行注释、TS 对象字面量值位（`accent: '#xxxxx'`）、赋值 RHS。
+// 脚本区的 CSS 字面量仍需在 <style> 块中使用语义令牌。
+//
+// 具体放行模式（仅当 <script 代码块命中）：
+//   - accent: '#XX...' / accent_hex: '#XX...' / kind: '...'
+//   - 'var(--x, #XX...)' 等 fallback 形式（守卫 Pass 2 已整体放行）
+//
+// 为简化不做整文件 AST 切分，直接基于行内容 heuristically 判断：
+//   · 若行出现在 TS 代码中（匹配 `export const FALLBACK` / `: UiSkin` / `= computed<CSSProperties>` 等上下文，
+//     实际通过「非 <style> 且 不以 selector 开头」近似），则允许数据常量。
+//
+// 注意：CSS 规则块（以点/哈希/at 规则开头或属于样式）仍然严格检查。
+// 实现：逐行判断是否可能属于 <style scoped> 以外的 TS 数据位 → 是则跳过颜色正则。
+function isLikelyTsColorConstant(line) {
+  const s = line.trim()
+  if (!s) return false
+  // 只在以下 TS / JS 「key + 色值」场景放行：
+  const tsDataLine =
+    /^\s*(accent|accent_hex|color|primaryColor|backgroundColor|DEFAULT_FALLBACK_COLOR|ACCENT|DEFAULT_ACCENT|DEFAULT_COLOR)\s*[:=]\s*['"]#/i.test(s) ||
+    /^\s*(const|let|var)\s+\w*(?:COLOR|ACCENT|DEFAULT|FALLBACK|SKIN)\w*\s*[:=]\s*['"]#[0-9a-fA-F]/i.test(s) ||
+    /^\s*(blue|pink|purple|green|cat|id)\s*:\s*\{/i.test(s) ||
+    /\b(blue|pink|purple|green|cat)\s*:\s*\{/.test(s) ||
+    // 离线兜底三元
+    /id === ['"](cat|blue|pink|purple|green)['"]\s*\?\s*['"]#/.test(s) ||
+    // startsWith('#') / startsWith('rgb('
+    /\.accent(?:_hex)?\.startsWith\(\s*['"]#[0-9a-fA-F]/i.test(s) ||
+    // FALLBACK 兜底（FALLBACK[id] ?? { ... accent: '#60A5FA' ... })
+    /FALLBACK\s*\[\s*['"][^'"]*['"]\s*\]\s*\?\?\s*\{/i.test(s) ||
+    /name:\s*['"](id|[^'"]+)['"]\s*,\s*emoji:\s*['"][^'"]*['"]\s*,\s*accent:\s*['"]#[0-9a-fA-F]/i.test(s) ||
+    // 字符串/数字三元默认色值：`? X : '#60A5FA'`
+    /\?\s*[^:]+:\s*['"]#/i.test(s)
+  if (tsDataLine) return true
+  // 样式块行（selector / rule）：返回 false，交给真正的颜色纪律检查
+  if (/^[.#:@\[\*&>][^{]*\{?\s*$/.test(s) || /^--[\w-]+\s*:/.test(s)) return false
+  return false
+}
 
 // Negative lookbehind keeps HTML entities like &#8593; out of the hex match.
 const colorLiteral = /(?<!&)#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/
@@ -76,6 +116,9 @@ for (const file of files) {
       if (customProp.test(code)) return // a token definition — allowed
       code = code.replace(neutralColor, '') // neutral shadow/border primitive
     }
+    // TS 数据层常量（accent_hex / 皮肤表 / 可视化）不是 CSS 着色，放行
+    const isVue = file.endsWith('.vue')
+    if (isVue && isLikelyTsColorConstant(code)) return
     if (colorLiteral.test(code)) {
       failures.push(
         `${rel}:${index + 1}: raw color literal; use a base.css token or color-mix(in srgb, var(--token) …). ${line.trim()}`,

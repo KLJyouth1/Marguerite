@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://marguerite.local/schemas/prop_asset.schema.json",
+  "title": "Marguerite PropAsset",
+  "description": "道具资产规格（AI 生成 → bpy 建模 → glTF 导出）。字段与 webui/src/components/island/world3d/propsSpec.ts 的 PropGeometry/PropSpec 对齐。运行时真相源是 blender/asset_pipeline.py 的 validate_spec()，本 schema 供 IDE/AI 生成器做静态校验。",
+  "type": "object",
+  "required": ["id", "name", "kind", "geometry"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$",
+      "description": "资产标识（小写字母/数字/下划线）。导出对象命名规范：marguerite_<id>。"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "人类可读名称（用于清单/文档）。"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["code_crystal", "doc_scroll", "data_fruit", "quest_beacon", "inspiration_bloom"],
+      "description": "道具种类，对齐 propsSpec.ts 的 PropKind（5 种可交互道具语义）。"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "资产规格版本（可选，用于热加载 diff/回滚）。"
+    },
+    "geometry": {
+      "$ref": "#/definitions/geometry",
+      "description": "程序化几何参数（对齐 PropGeometry）。"
+    },
+    "material": {
+      "$ref": "#/definitions/material",
+      "description": "PBR 材质（可选，缺省用引擎默认材质）。"
+    },
+    "lod": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/lod" },
+      "description": "LOD 变体（可选）。level 严格递增、targetFaces 严格递减（validate_spec 运行时强制；JSON Schema 无法表达跨元素单调性，仅供静态检查）。"
+    }
+  },
+  "definitions": {
+    "geometry": {
+      "type": "object",
+      "required": ["main", "detail", "scale"],
+      "additionalProperties": false,
+      "properties": {
+        "main": {
+          "type": "string",
+          "enum": ["octahedron", "cone", "sphere", "tower", "flower"],
+          "description": "主体 primitive，对齐 PropGeometry.main。"
+        },
+        "accent": {
+          "type": "string",
+          "enum": ["prism", "scroll", "berry", "lamp", "petal"],
+          "description": "装饰 primitive（可选），对齐 PropGeometry.accent。"
+        },
+        "detail": {
+          "type": "integer",
+          "enum": [1, 2, 3],
+          "description": "低多边形面数档（1=极简 8 面，2=标准 32 面，3=精细 64 面）。"
+        },
+        "scale": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "主体缩放基数，必须 > 0。"
+        }
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "材质名（可选，导出时统一为 marguerite_<id>_mat）。"
+        },
+        "color": {
+          "$ref": "#/definitions/color",
+          "description": "基础色 [r, g, b]，每分量 [0, 1]。"
+        },
+        "metallic": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "金属度 [0, 1]。"
+        },
+        "roughness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "粗糙度 [0, 1]。"
+        },
+        "emissive": {
+          "$ref": "#/definitions/color",
+          "description": "自发光颜色 [r, g, b]，每分量 [0, 1]。"
+        },
+        "emissiveStrength": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "自发光强度 [0, 4]（允许 >1 支持 HDR 辉光，如灯/结晶）。"
+        }
+      }
+    },
+    "color": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number", "minimum": 0, "maximum": 1 },
+      "description": "RGB 颜色三元组，每分量 [0, 1]。"
+    },
+    "lod": {
+      "type": "object",
+      "required": ["level", "targetFaces"],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "LOD 级别（0=最高精度）。"
+        },
+        "targetFaces": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "目标面数（随级别单调递减，运行时强制）。"
+        },
+        "decimateRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "减面比例 (0, 1]，供 Decimate 修改器使用。"
+        }
+      }
+    }
+  }
+}

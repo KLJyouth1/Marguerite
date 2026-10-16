@@ -6,6 +6,7 @@ import {
   localizedRelativeTime,
   messageDate,
   relativeTime,
+  sessionRelativeTime,
 } from './messageTime'
 
 const MS_2026 = Date.UTC(2026, 5, 23, 4, 10, 23) // 1750648223000, well above 1e12
@@ -87,6 +88,33 @@ describe('localizedRelativeTime', () => {
 
   it('falls back to English for an invalid locale tag', () => {
     expect(localizedRelativeTime(now - 5 * 60_000, '!!bad!!', now)).toBe('5 minutes ago')
+  })
+})
+
+describe('sessionRelativeTime (single source for session rows)', () => {
+  const now = MS_2026
+
+  it('is empty for missing or invalid timestamps', () => {
+    expect(sessionRelativeTime(null, now)).toBe('')
+    expect(sessionRelativeTime('garbage', now)).toBe('')
+  })
+
+  it('renders relative labels within the last 24h', () => {
+    expect(sessionRelativeTime(now - 5_000, now)).toBe('just now')
+    expect(sessionRelativeTime(now - 5 * 60_000, now)).toBe('5m ago')
+    expect(sessionRelativeTime(now - 2 * 3_600_000, now)).toBe('2h ago')
+    expect(sessionRelativeTime(now - 23 * 3_600_000, now)).toBe('23h ago')
+  })
+
+  it('switches to an absolute short date once the age passes 24h', () => {
+    // The R65 rule: relative under a day, absolute beyond it — no drifting "Nd ago".
+    const label = sessionRelativeTime(now - 3 * 86_400_000, now)
+    expect(label).not.toMatch(/ago/)
+    expect(label).toMatch(/\d/)
+  })
+
+  it('clamps a future timestamp to "just now" instead of a negative age', () => {
+    expect(sessionRelativeTime(now + 3_600_000, now)).toBe('just now')
   })
 })
 

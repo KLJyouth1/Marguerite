@@ -118,9 +118,9 @@
 [data-theme="light"] {
   --font-sans: var(--font-sans-default);
   --font-display: var(--font-display-default);
-  /* Lark keeps corners flat and uniform — one 8px radius from controls up to
-     dialogs, rather than a 8/12/16/20 ladder that made panels and modals read
-     as soft pillows. */
+  /* Corner tiers stay the shared foundation ladder (foundation.css: control 10 /
+     card 14 / panel 18 / modal 24) — the light theme only aliases roles to it,
+     never re-tunes the ladder itself. */
   --radius-control: var(--radius-md);
   --radius-card: var(--radius-lg);
   --radius-panel: var(--radius-xl);

@@ -6,8 +6,10 @@ import i18n from './i18n'
 import { migrateLegacyStorageKeys } from './utils/storageMigration'
 import { useAppStore } from './stores/app'
 import { useRpcStore } from './stores/rpc'
+import { startBootWatchdog } from './shell/boot/watchdog'
 import 'katex/dist/katex.min.css'
 import './assets/base.css'
+import './assets/boot.css' // boot splash: first-paint → mount handoff
 import './themes/tokens' // eagerly bundles every value theme's token block
 import './styles/control-visual-system.css'
 import './styles/route-fx.css'
@@ -40,3 +42,9 @@ router.afterEach(() => {
 appStore.initLocale().finally(() => {
   app.mount('#app')
 })
+
+// Safety net: if the app never mounts (failed locale chunk, a throwing import, a
+// half-served bundle), replace the stuck splash with a recovery card instead of
+// leaving the user on a dead screen. Armed synchronously right after the mount
+// attempt is queued, so it cannot race the normal path.
+startBootWatchdog()

@@ -137,6 +137,31 @@ describe('useChatPlans', () => {
     expect(api.collaboration.value).toEqual({ mode: 'plan', revision: 6 })
   })
 
+  it('attaches the reuse candidate from the plan_revision envelope (D-05/T08)', () => {
+    const { api, handlers } = harness()
+    api.subscribe()
+
+    handlers.get('session.event.plan_revision')?.({
+      session_key: SESSION_ONE,
+      plan_revision: revision('revision-3'),
+      reuse_candidate: { revision_id: 'rev-old', title: '上次的登录计划', created_at: 111 },
+    })
+
+    expect(api.currentPlan.value?.revisionId).toBe('revision-3')
+    expect(api.currentPlan.value?.reuseCandidate).toEqual({
+      revisionId: 'rev-old',
+      title: '上次的登录计划',
+      createdAt: 111,
+    })
+
+    // 无候选的事件不得携带残留候选（换轮清空）。
+    handlers.get('session.event.plan_revision')?.({
+      session_key: SESSION_ONE,
+      plan_revision: revision('revision-4', { generation: 4, createdAt: 400 }),
+    })
+    expect(api.currentPlan.value?.reuseCandidate).toBeUndefined()
+  })
+
   it('does not let an older plan generation or collaboration revision replace current state', () => {
     const { api, handlers } = harness()
     api.subscribe()
@@ -661,5 +686,68 @@ describe('useChatPlans', () => {
     newRequest.resolve({ planRun: run('cancelled') })
     await newMutation
     expect(api.pendingAction.value).toBeNull()
+  })
+
+  it('M2-C3: drives runTiming from real step_progress pressure (elapsedMs/etaMs) on the event bus', () => {
+    const { api, handlers } = harness()
+    api.subscribe()
+
+    handlers.get('session.event.progress')?.({
+      session_key: SESSION_ONE,
+      kind: 'step_progress',
+      phase: 'started',
+      taskKind: '编码',
+      elapsedMs: 1250,
+      etaMs: 42000,
+      avgStepMs: 9000,
+      stepIndex: 0,
+      stepsTotal: 6,
+      stepTitle: 'Inspect',
+    })
+
+    expect(api.activeStepKind.value).toBe('编码')
+    expect(api.runTiming.value).toMatchObject({
+      phase: 'started',
+      elapsedMs: 1250,
+      etaMs: 42000,
+      avgStepMs: 9000,
+      stepIndex: 0,
+      stepsTotal: 6,
+    })
+
+    // 终态事件：清任务徽章，同时时序最后计数保留供 UI 标尺
+    handlers.get('session.event.progress')?.({
+      session_key: SESSION_ONE,
+      kind: 'step_progress',
+      phase: 'finished',
+      taskKind: '编码',
+      elapsedMs: 16240,
+      stepIndex: 0,
+      stepsTotal: 6,
+      stepTitle: 'Inspect',
+    })
+
+    expect(api.activeStepKind.value).toBe('')
+    expect(api.runTiming.value?.phase).toBe('finished')
+    expect(api.runTiming.value?.elapsedMs).toBe(16240)
+  })
+
+  it('M2-C3: ignores step_progress from another session (no cross-session leak)', () => {
+    const { api, handlers } = harness()
+    api.subscribe()
+
+    handlers.get('session.event.progress')?.({
+      session_key: SESSION_TWO,
+      kind: 'step_progress',
+      phase: 'started',
+      taskKind: '编码',
+      elapsedMs: 999,
+      stepIndex: 0,
+      stepsTotal: 2,
+      stepTitle: 'Other',
+    })
+
+    expect(api.runTiming.value).toBeNull()
+    expect(api.activeStepKind.value).toBe('')
   })
 })

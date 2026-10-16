@@ -221,6 +221,7 @@ describe('useSessionArtifacts', () => {
   })
 
   it('keeps a previous same-session index when a refresh fails transiently', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     let fail = false
     const { api } = makeHarness({
       call: async () => {
@@ -235,6 +236,12 @@ describe('useSessionArtifacts', () => {
 
     expect(api.artifacts.value.map(artifact => artifact.id)).toEqual(['art-index'])
     expect(api.indexAvailable.value).toBe(false)
+    // The failure must not be silent: log the method + reason for diagnosis.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('artifacts.list failed'),
+      'temporary disconnect',
+    )
+    warn.mockRestore()
   })
 
   it('keeps a previous same-session index when a bounded page request times out', async () => {

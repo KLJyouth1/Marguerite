@@ -89,7 +89,12 @@ export function activeTaskGroupRunState(payload: SessionEventPayload = {}, activ
   }
 }
 
-export function sessionChangeIsTerminal(
+/**
+ * Strong terminal signals on a `sessions.changed` payload: an explicit terminal
+ * `reason`/lifecycle `status`, or a failed/timeout/cancelled/interrupted
+ * `run_status`. These are authoritative regardless of `occasion`.
+ */
+export function sessionChangeIsStrongTerminal(
   payload: SessionEventPayload,
   normalizeRunStatus: NormalizeRunStatus,
 ): boolean {
@@ -99,6 +104,40 @@ export function sessionChangeIsTerminal(
   if (['done', 'failed', 'killed', 'timeout'].includes(lifecycle)) return true
   const runStatus = normalizeRunStatus(String(payload?.run_status || payload?.runStatus || ''))
   return ['failed', 'timeout', 'cancelled', 'interrupted'].includes(runStatus)
+}
+
+/**
+ * The gateway's explicit turn-end hint from `Envelope::sessions_changed`:
+ * `occasion: 'turn_end'` or a settled `run_status: 'idle'`.
+ *
+ * Deliberately weaker than [`sessionChangeIsStrongTerminal`] — `session.event.done`
+ * is still the primary completion path. Callers must apply extra liveness guards
+ * (a concrete task already bound, no pending approval) before collapsing a live
+ * turn. Not recognising this at all left a turn whose `session.event.done` was
+ * lost (WS reconnect, `task_id` mismatch, buffered-then-dropped terminal) stuck
+ * showing "thinking" until the 630s idle watchdog — the "turn finished but still
+ * streaming" bug.
+ */
+export function sessionChangeIsTurnEndSignal(
+  payload: SessionEventPayload,
+  normalizeRunStatus: NormalizeRunStatus,
+): boolean {
+  if (String(payload?.occasion || '').toLowerCase() === 'turn_end') return true
+  // Only an *explicit* `run_status` counts: `normalizeRunStatus('')` folds
+  // unknown/absent values to `idle`, so a recents-only `sessions.changed`
+  // (title change, no run state at all) must not be mistaken for a turn end.
+  const rawRunStatus = payload?.run_status ?? payload?.runStatus
+  if (rawRunStatus == null || rawRunStatus === '') return false
+  const runStatus = normalizeRunStatus(String(rawRunStatus))
+  return runStatus === 'idle'
+}
+
+export function sessionChangeIsTerminal(
+  payload: SessionEventPayload,
+  normalizeRunStatus: NormalizeRunStatus,
+): boolean {
+  return sessionChangeIsStrongTerminal(payload, normalizeRunStatus)
+    || sessionChangeIsTurnEndSignal(payload, normalizeRunStatus)
 }
 
 export function taskTerminalStatus(event: string): string {

@@ -14,7 +14,7 @@ const confirmAction = vi.fn()
 vi.mock('@/composables/setup/useSetupCatalog', () => ({
   SETTINGS_SECTIONS: [
     { id: 'behavior', label: 'Behavior', icon: 'chat', group: 'preferences' },
-    { id: 'capabilities', label: 'Capabilities', icon: 'star', group: 'capabilities' },
+    { id: 'capabilities', label: 'Capabilities', icon: 'capabilities', group: 'capabilities' },
   ],
   useSetupCatalog: () => catalogApi,
 }))

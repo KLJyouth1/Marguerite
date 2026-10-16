@@ -70,7 +70,7 @@ useDialogA11y(modalRef, isOpen, onCancel, { initialFocus: cancelBtn })
   position: fixed;
   right: 0;
   top: 0;
-  z-index: 1100;
+  z-index: 1110; /* Layer: modal-dialog */
 }
 
 .modal {

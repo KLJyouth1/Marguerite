@@ -1,7 +1,7 @@
 {
   "name": "marguerite-webui",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,8 +10,10 @@
     "verify:dist": "node scripts/verify-dist.mjs",
     "verify:release-dist": "node scripts/verify-dist.mjs --forbid-personal-bgm",
     "preview": "vite preview",
-    "check:architecture": "node scripts/check-architecture.mjs && node scripts/check-chat-security.mjs && node scripts/check-webui-colors.mjs && node scripts/check-webui-motion.mjs && node scripts/check-webui-radius.mjs && node scripts/check-theme-contract.mjs && node scripts/check-theme-scope.mjs && node scripts/check-cross-surface-tokens.mjs && node scripts/check-i18n.mjs && node scripts/check-channel-catalog-i18n.mjs",
+    "check:architecture": "node scripts/check-architecture.mjs && node scripts/check-chat-security.mjs && node scripts/check-webui-colors.mjs && node scripts/check-webui-motion.mjs && node scripts/check-webui-radius.mjs && node scripts/check-theme-contract.mjs && node scripts/check-theme-scope.mjs && node scripts/check-cross-surface-tokens.mjs && node scripts/check-i18n.mjs && node scripts/check-channel-catalog-i18n.mjs && node scripts/check-rpc-contract.mjs && node scripts/check-index-injection-contract.mjs",
     "check:readme-locales": "node scripts/check-readme-locales.mjs",
+    "security:audit": "npm audit --audit-level=moderate",
+    "deps:lockfile-sync": "npm ci --dry-run",
     "typecheck": "npm run check:architecture && vue-tsc --noEmit",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
@@ -24,12 +26,14 @@
   },
   "dependencies": {
     "@types/dompurify": "^3.0.5",
+    "@types/three": "^0.185.4",
     "dompurify": "^3.4.12",
     "highlight.js": "^11.11.1",
     "html-to-image": "^1.11.13",
     "katex": "^0.17.0",
     "marked": "^18.0.4",
     "pinia": "^2.1.7",
+    "three": "^0.185.1",
     "vue": "^3.5.0",
     "vue-i18n": "^11.4.6",
     "vue-router": "^4.3.0"
@@ -37,6 +41,7 @@
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@vitejs/plugin-vue": "^6.0.7",
+    "axe-core": "^4.13.0",
     "happy-dom": "^20.10.6",
     "typescript": "^5.4.5",
     "vite": "^8.0.16",

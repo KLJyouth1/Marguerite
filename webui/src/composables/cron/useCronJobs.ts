@@ -98,6 +98,26 @@ export function useCronJobs() {
 
   const loadData = refresh
 
+  /**
+   * 冷加载竞态守卫：CronView 激活（含硬刷新首次显示）时 WS 可能仍在
+   * `connecting`。此时直接 `refresh()` 会把
+   * `Cannot call cron.list: not connected (state: connecting)` 经 useRpcCall 的
+   * `toastOnError` 弹成原始错误 toast（用户 100% 可感知）。
+   * 先等连接就绪再静默刷新；未就绪超时则直接返回，交给组件自身的骨架 / 错误态
+   * 呈现，绝不弹原始内部串。
+   */
+  async function loadDataWhenConnected(): Promise<void> {
+    if (!rpc.isConnected) {
+      try {
+        await rpc.waitForConnection(10_000)
+      } catch {
+        pushToast(t('cronSkills.jobs.toastConnectionRetry'), { tone: 'warn' })
+        return
+      }
+    }
+    await loadData()
+  }
+
   function scheduleReload() {
     void refresh()
     if (reloadTimer) clearTimeout(reloadTimer)
@@ -184,7 +204,7 @@ export function useCronJobs() {
   }
 
   onActivated(() => {
-    void loadData()
+    void loadDataWhenConnected()
     tickInterval = setInterval(() => { now.value = Date.now() }, 1000)
     unsubRunFinished = rpc.on('cron.run.finished', onRunFinished)
   })

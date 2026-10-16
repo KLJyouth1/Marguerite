@@ -1,7 +1,9 @@
 import 'vue-router'
 
-/** Stable route taxonomy used by navigation and settings surfaces. */
-export type NavGroup = 'Work' | 'Operate' | 'Observe' | 'Settings'
+/** Stable route taxonomy used by navigation and settings surfaces.
+ *  Extras isolates entertainment surfaces (poker, games, pet, wallpaper)
+ *  away from the working rail. */
+export type NavGroup = 'Work' | 'Operate' | 'Observe' | 'Settings' | 'Extras'
 
 declare module 'vue-router' {
   interface RouteMeta {

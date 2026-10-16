@@ -121,6 +121,12 @@ export interface RawSessionItem {
   forked_from_parent?: boolean
   forkedFromParent?: boolean
   cron?: RawSessionCron
+  /** 会话级思考强度（'off'|'normal'|'deep'|'max'）；null/缺省 = 继承全局模型配置 */
+  reasoningEffort?: string | null
+  reasoning_effort?: string | null
+  /** 会话级上下文长度；null/缺省 = 继承全局模型配置 */
+  contextWindow?: number | null
+  context_window?: number | null
 }
 
 export type RawSessionListEntry = RawSessionItem | string
@@ -128,6 +134,21 @@ export type RawSessionListEntry = RawSessionItem | string
 export interface SessionsListResponse {
   sessions?: RawSessionListEntry[]
   keys?: RawSessionListEntry[]
+}
+
+/** sessions.get 返回：session 为完整会话行（含 reasoning/contextWindow 双 key） */
+export interface SessionsGetResponse {
+  ok?: boolean
+  session?: RawSessionItem | null
+}
+
+/** sessions.patch 返回：三态语义 patch 后的持久化结果 */
+export interface SessionsPatchResponse {
+  ok?: boolean
+  session?: string
+  title?: string | null
+  reasoningEffort?: string | null
+  contextWindow?: number | null
 }
 
 export interface ProjectWorkspaceItem {
@@ -253,6 +274,16 @@ export interface StreamEventEnvelope {
   [key: string]: unknown
 }
 
+/** Turn boundary carried by the gateway's `sessions.changed` envelope. */
+export type SessionChangeOccasion = 'turn_start' | 'turn_end'
+
+/**
+ * Canonical run-status literals used by `Envelope::sessions_changed`
+ * (`running` / `idle` / `error`). Kept open (`| (string & {})`) so the
+ * task-level vocabularies (queued/…, approval_pending, …) still assign cleanly.
+ */
+export type SessionChangeRunStatus = 'running' | 'idle' | 'error'
+
 export interface SessionEventPayload extends StreamEventEnvelope {
   task_id?: string
   taskId?: string
@@ -262,8 +293,12 @@ export interface SessionEventPayload extends StreamEventEnvelope {
   emitted_at?: number
   reason?: string
   status?: string
-  run_status?: string
-  runStatus?: string
+  run_status?: SessionChangeRunStatus | (string & {})
+  runStatus?: SessionChangeRunStatus | (string & {})
+  // Gateway `Envelope::sessions_changed` carries the turn boundary explicitly:
+  // `turn_start` when a run begins, `turn_end` when it settles. Optional because
+  // legacy/other `sessions.changed` producers omit it.
+  occasion?: SessionChangeOccasion
   terminal_message?: string
   terminal_reason?: string
   message?: string
@@ -445,6 +480,19 @@ export interface ChatSendParams {
   forkBeforeMessageId?: string
   displayText?: string
   attachments?: ChatSendAttachmentPayload[]
+  /**
+   * 深度思考开关（DeepSeek thinking/reasoning 模式）。
+   * 为 true 时请求编排层开启模型推理链，并在多轮对话中回传 reasoning_content
+   * （DeepSeek 要求回传否则 API 400，见 core/src/agent/runtime.rs）。
+   * 缺省时由当前模式/编排深度（thinking_depth）决定。
+   * 保留 boolean 兼容旧调用方；新代码优先用 reasoningEffort 档位。
+   */
+  thinking?: boolean
+  /**
+   * 思考强度档位（'off'|'normal'|'deep'|'max'，chat.send 的 effort 参数）。
+   * 与 thinking 兼容：显式传档位时优先，缺省回落 thinking/会话持久化配置。
+   */
+  reasoningEffort?: 'off' | 'normal' | 'deep' | 'max' | (string & {})
   [key: string]: unknown
 }
 
@@ -492,9 +540,9 @@ export interface MetaDraftDiscardResponse {
 export interface SessionSteerV2Params {
   key: string
   message: string
-  expected_turn_id: string
-  client_request_id: string
-  client_message_id: string
+  expected_turn_id?: string
+  client_request_id?: string
+  client_message_id?: string
   surface_id?: string
   _source?: { elevated?: string; runMode?: 'safe' | 'full' }
 }
@@ -625,6 +673,77 @@ export interface ChatHistoryTurnOutcome {
   outcome?: Record<string, unknown>
 }
 
+/* ── Task workspace contract ───────────────────────────────────────────
+ * Types shared by the delivery-pipeline router payload (`decision.subtasks`)
+ * and the task workbench panel. The backend emits these on
+ * `session.event.router_decision` (and, later, `task.contract.get`). Every
+ * field is optional on the wire so an older gateway degrades cleanly and the
+ * UI renders no steps rather than fabricating them.
+ */
+export type DeliverableKind =
+  | 'Research'
+  | 'HtmlPage'
+  | 'Presentation'
+  | 'Document'
+  | 'Spreadsheet'
+  | 'Other'
+
+export type TaskStepStatus = 'pending' | 'in_progress' | 'done' | 'failed'
+
+/** One planned deliverable/step of a compound task (mirrors `DeliverableSpec`). */
+export interface TaskStep {
+  id: string
+  role: string
+  title: string
+  kind: DeliverableKind
+  /** Declared output path, or null for a pure research step. */
+  targetPath: string | null
+  /** Ids of steps this one depends on (empty for the first step). */
+  dependsOn: string[]
+  status: TaskStepStatus
+  elapsedMs?: number
+  tools?: string[]
+  /** Path of the artifact produced by this step once it lands on disk. */
+  artifactPath?: string | null
+}
+
+export type TaskGateVerdict = 'pass' | 'partial' | 'fail'
+
+/** Terminal quality-gate verdict for a task (search validity + artifact completeness). */
+export interface TaskGate {
+  searchValid: boolean
+  artifactsComplete: boolean
+  missing: string[]
+  verdict: TaskGateVerdict
+}
+
+/**
+ * The `decision` object carried by `session.event.router_decision`. Every field
+ * is optional and the index signature keeps unknown backend fields readable, so
+ * adding `subtasks`/`pipeline` stays backward compatible with older payloads.
+ */
+export interface RouterDecision {
+  intent?: string
+  complexity?: string
+  needsLlm?: boolean
+  needs_llm?: boolean
+  /** True when the router chose the compound delivery pipeline. */
+  pipeline?: boolean
+  rationale?: string
+  /** Ordered deliverable steps; absent/empty for single-intent turns. */
+  subtasks?: TaskStep[]
+  [key: string]: unknown
+}
+
+export interface RouterDecisionPersona {
+  agent_id?: string
+  agentId?: string
+  name?: string
+  description?: string
+  is_builtin?: boolean
+  isBuiltin?: boolean
+}
+
 export interface RouterDecisionPayload extends SessionEventPayload {
   tier?: string
   model?: string
@@ -633,7 +752,47 @@ export interface RouterDecisionPayload extends SessionEventPayload {
   routing_applied?: boolean
   /** Bloom 融合路由的 AI 自动编排形态（Solo Agent / MAX Dual-Leader / Expert Team / Cluster）。 */
   strategy?: string
-  decision?: unknown
+  decision?: RouterDecision
+  /**
+   * P0-2: the expert persona active for this session (`agent:{agentId}:...`).
+   * Omitted (never null) for non-expert sessions and for disabled experts.
+   */
+  persona?: RouterDecisionPersona | null
+}
+
+/* ── T04：补订此前被前端丢弃的 3 类 Rust 事件 ─────────────────────────
+ * `memory_recall`（core/src/memory/cross_project.rs 仅命中时发布）、
+ * `step_start` / `step_finish`（agent 工具回路 `{round[,reason]}`，交付流水线形态
+ * `{task_step_id,index,total,title,role,kind,target_path,status[,elapsed_ms]}`）。
+ * 两处 step 发布点字段不同，故载荷用可选字段兼容两种形态。
+ */
+export interface MemoryRecallPayload extends SessionEventPayload {
+  query?: string
+  hits?: number
+  topScore?: number
+  top_score?: number
+  ids?: string[]
+  reinforced?: number
+}
+
+export interface StepLoopPayload extends SessionEventPayload {
+  /** agent 工具回路轮次（orchestration 单轮路径）。 */
+  round?: number
+  /** 该轮结束原因（runner 自有稳定 token）。 */
+  reason?: string
+  /** 交付流水线形态字段。 */
+  task_step_id?: string
+  taskStepId?: string
+  index?: number
+  total?: number
+  title?: string
+  role?: string
+  kind?: string
+  target_path?: string
+  targetPath?: string
+  status?: string
+  elapsed_ms?: number
+  elapsedMs?: number
 }
 
 /* ── LLM ensemble progress ─────────────────────────────────────────────
@@ -821,4 +980,8 @@ export interface RpcEventMap {
   'session.event.meta_run_announced': MetaRunAnnouncedPayload
   'session.event.meta_step_state': MetaStepStatePayload
   'session.event.meta_run_completed': MetaRunCompletedPayload
+  // T04：补订此前被前端丢弃的 3 类 Rust 事件。
+  'session.event.memory_recall': MemoryRecallPayload
+  'session.event.step_start': StepLoopPayload
+  'session.event.step_finish': StepLoopPayload
 }

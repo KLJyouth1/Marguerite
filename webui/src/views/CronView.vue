@@ -190,13 +190,6 @@
       @payload-kind-change="cronForm.onPayloadKindChange"
       @session-target-change="cronForm.onSessionTargetChange"
     />
-
-    <CronDeleteDialog
-      :open="deleteModalOpen"
-      :job="deleteTarget"
-      @cancel="closeDeleteDialog"
-      @confirm="confirmDelete"
-    />
   </div>
 </template>
 
@@ -207,7 +200,6 @@ import { useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
-import CronDeleteDialog from '@/components/cron/CronDeleteDialog.vue'
 import CronJobList from '@/components/cron/CronJobList.vue'
 import CronJobPanel from '@/components/cron/CronJobPanel.vue'
 import CronRunHistory from '@/components/cron/CronRunHistory.vue'
@@ -215,6 +207,7 @@ import { useCronForm } from '@/composables/cron/useCronForm'
 import { useCronJobs } from '@/composables/cron/useCronJobs'
 import { useCronRuns } from '@/composables/cron/useCronRuns'
 import { useToasts } from '@/composables/useToasts'
+import { useConfirm } from '@/composables/useConfirm'
 import type { CronJob, CronPanelTemplate } from '@/types/cron'
 import type { IconName } from '@/utils/icons'
 import { humanCountdown } from '@/utils/cron/time'
@@ -223,9 +216,8 @@ import { localizedCronJobName, localizedCronTemplate } from '@/utils/cron/templa
 const router = useRouter()
 const { t } = useI18n()
 const { pushToast } = useToasts()
+const { confirm } = useConfirm()
 const selectedId = ref<string | null>(null)
-const deleteModalOpen = ref(false)
-const deleteTarget = ref<CronJob | null>(null)
 const templateGalleryOpen = ref(false)
 const overviewOpen = ref(false)
 const bulkMode = ref(false)
@@ -488,26 +480,20 @@ function openRunChat(sessionKey: string) {
   router.push('/chat?session=' + encodeURIComponent(sessionKey))
 }
 
-function deleteJob(job: CronJob) {
-  deleteTarget.value = job
-  deleteModalOpen.value = true
-}
-
-function closeDeleteDialog() {
-  deleteModalOpen.value = false
-  deleteTarget.value = null
-}
-
-async function confirmDelete() {
-  if (!deleteTarget.value) return
+async function deleteJob(job: CronJob) {
+  const confirmed = await confirm({
+    title: t('cronSkills.deleteDialog.title'),
+    body: t('cronSkills.deleteDialog.body', { name: job.name || job.id }),
+    primaryLabel: t('cronSkills.deleteDialog.confirm'),
+    primaryClass: 'btn--danger',
+  })
+  if (!confirmed) return
   try {
-    const id = deleteTarget.value.id
+    const id = job.id
     await cronJobs.removeJob(id)
     if (selectedId.value === id) selectedId.value = null
   } catch (err) {
     pushToast(t('cronSkills.view.deleteFailed', { error: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
-  } finally {
-    closeDeleteDialog()
   }
 }
 </script>
@@ -635,7 +621,7 @@ async function confirmDelete() {
   justify-content: center;
   padding: 28px;
   position: fixed;
-  z-index: 1100;
+  z-index: 1104; /* Layer: modal-dialog */
 }
 
 .automation-overview-modal__panel {
@@ -1960,7 +1946,7 @@ async function confirmDelete() {
   justify-content: center;
   padding: 24px;
   position: fixed;
-  z-index: 1000;
+  z-index: 1000; /* Layer: view-drawer */
 }
 
 .cron-panel__scrim {
@@ -2249,7 +2235,7 @@ async function confirmDelete() {
   position: fixed;
   right: 0;
   top: 0;
-  z-index: 1100;
+  z-index: 1105; /* Layer: modal-dialog */
 }
 
 .modal {

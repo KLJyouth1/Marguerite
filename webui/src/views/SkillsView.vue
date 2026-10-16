@@ -134,10 +134,25 @@
                 v-for="server in mcpServers"
                 :key="server.name"
                 class="sk-tools__mcp-chip"
-                :title="server.url || server.command || ''"
-              >{{ server.name }}</span>
+                :title="mcpChipTitle(server)"
+              >{{ server.name }}<span
+                v-if="mcpToolCount(server.name) !== null"
+                class="sk-tools__mcp-count"
+              >{{ t('cronSkills.skillsView.mcpToolsCount', { count: mcpToolCount(server.name) }) }}</span></span>
+              <button
+                class="sk-tools__mcp-probe"
+                type="button"
+                data-testid="mcp-probe"
+                :disabled="mcpProbing"
+                @click="probeMcpTools"
+              >
+                {{ mcpProbing
+                  ? t('cronSkills.skillsView.mcpProbing')
+                  : t('cronSkills.skillsView.mcpProbe') }}
+              </button>
             </template>
             <span v-else class="sk-tools__mcp-empty">{{ t('cronSkills.skillsView.mcpEmpty') }}</span>
+            <span v-if="mcpProbeError" class="sk-tools__mcp-error" data-testid="mcp-probe-error">{{ mcpProbeError }}</span>
           </div>
           <div class="sk-tools__grid">
             <div v-if="toolGroups.baota.length" class="sk-tools-card" data-testid="tools-baota">
@@ -177,6 +192,41 @@
             <div v-if="toolsLoading && !toolsCatalog.length" class="sk-tools-card sk-tools-card--loading">
               <span class="sk-tools-card__body"><span>{{ t('cronSkills.skillsView.toolsLoading') }}</span></span>
             </div>
+          </div>
+
+          <!-- 工具启停（补丁层）：写 tool_patch.json，智能体下一轮生效，无需重启守护进程 -->
+          <div v-if="toolsCatalog.length" class="sk-patch" data-testid="tools-patch">
+            <div class="sk-patch__head">
+              <span class="sk-patch__title">{{ t('cronSkills.skillsView.toolsPatchTitle') }}</span>
+              <span class="sk-patch__hint">{{ t('cronSkills.skillsView.toolsPatchHint') }}</span>
+            </div>
+            <p v-if="patchError" class="sk-patch__error" data-testid="tools-patch-error">{{ patchError }}</p>
+            <ul class="sk-patch__list">
+              <li
+                v-for="tool in toolsCatalog"
+                :key="tool.name"
+                class="sk-patch__row"
+                :class="{ 'is-off': tool.enabled === false }"
+              >
+                <span class="sk-patch__name">{{ tool.name }}</span>
+                <span class="sk-patch__desc" :title="tool.description">{{ tool.description }}</span>
+                <button
+                  class="sk-patch__toggle"
+                  :class="{ 'is-off': tool.enabled === false }"
+                  type="button"
+                  :aria-pressed="tool.enabled !== false"
+                  :disabled="patchBusy"
+                  @click="toggleTool(tool)"
+                >
+                  {{ tool.enabled !== false
+                    ? t('cronSkills.skillsView.toolsPatchEnable')
+                    : t('cronSkills.skillsView.toolsPatchDisable') }}
+                </button>
+              </li>
+            </ul>
+            <p v-if="patchInactive.length" class="sk-patch__inactive" data-testid="tools-patch-inactive">
+              {{ t('cronSkills.skillsView.toolsPatchInactive', { names: patchInactive.join(', ') }) }}
+            </p>
           </div>
         </section>
 
@@ -330,6 +380,8 @@ import { useSkillDetailController } from '@/composables/skills/useSkillDetailCon
 import { useSkillRegistry } from '@/composables/skills/useSkillRegistry'
 import { skillLayerHelp, skillLayerLabel, useSkillsCatalog } from '@/composables/skills/useSkillsCatalog'
 import { useToasts } from '@/composables/useToasts'
+import { applyDisabled, computeNextDisabled, disabledNames } from '@/utils/tools/toolPatch'
+import { refreshToolSources } from '@/composables/useToolSources'
 import { usePlatform } from '@/platform'
 import { useRpcStore } from '@/stores/rpc'
 import type { Proposal, Skill } from '@/types/skills'
@@ -401,11 +453,23 @@ function launchShortcut(key: LaunchKey) {
 // 工具与能力：网关注册的内置工具目录（tools.catalog）+ 已配置的 MCP 服务器
 // （config.get → mcp.servers）。宝塔 baota.*（内置）与 baota_*（btpanel-mcp）
 // 与 Computer Use（system_control）单独成卡展示，其余工具折叠为明细。
-interface CatalogTool { name: string; description: string; source?: string; server?: string }
+interface CatalogTool {
+  name: string
+  description: string
+  source?: string
+  server?: string
+  /** 工具面 patch 层状态；缺省（旧后端）视为启用 */
+  enabled?: boolean
+}
 interface McpServerRow { name: string; command?: string; url?: string }
 const toolsLoading = ref(false)
 const toolsCatalog = ref<CatalogTool[]>([])
 const mcpServers = ref<McpServerRow[]>([])
+// 工具启停（补丁层）：patchBusy 防连点，patchError 如实展示后端错误，
+// patchInactive 是「补丁里写了、但当前工具面没有」的名字（打错字时不静默）。
+const patchBusy = ref(false)
+const patchError = ref('')
+const patchInactive = ref<string[]>([])
 function isBaotaTool(name: string): boolean {
   return name.startsWith('baota.') || name.startsWith('baota_')
 }
@@ -426,10 +490,91 @@ async function loadTools() {
     toolsCatalog.value = catalog?.items || []
     const cfg = await rpc.call<{ mcp?: { servers?: McpServerRow[] } }>('config.get')
     mcpServers.value = cfg?.mcp?.servers || []
+    await loadToolPatch()
   } catch {
     // 工具目录是补充信息：加载失败保持空态，不打扰主流程
   } finally {
     toolsLoading.value = false
+  }
+}
+
+/** 读取补丁状态：`inactive` 与读取错误都要如实展示，不做静默兜底。 */
+async function loadToolPatch() {
+  try {
+    const res = await rpc.call<{ ok?: boolean; inactive?: string[]; error?: string | null }>(
+      'tools.patch.get',
+    )
+    patchInactive.value = res?.inactive || []
+    patchError.value = res?.ok === false ? String(res?.error || '') : ''
+  } catch {
+    // 补丁状态是补充信息，读取失败不影响工具目录展示
+  }
+}
+
+// ── MCP 工具清单 ──────────────────────────────────────────────────────────
+// `tools.catalog` 只覆盖本地工具，MCP 工具要连服务器才知道。这里是**显式探测**
+// （不带 cachedOnly），与聊天渲染路径的「只读缓存」区分开：渲染不产生网络副作用。
+interface McpServerTools { name: string; ok: boolean; count?: number | null; error?: string | null }
+const mcpProbing = ref(false)
+const mcpServerTools = ref<McpServerTools[]>([])
+const mcpProbeError = ref('')
+
+async function probeMcpTools() {
+  if (mcpProbing.value) return
+  mcpProbing.value = true
+  mcpProbeError.value = ''
+  try {
+    const res = await rpc.call<{ ok?: boolean; servers?: McpServerTools[] }>('mcp.tools.list')
+    mcpServerTools.value = res?.servers || []
+    // 失败的服务器如实列出（一个连不上不影响其它服务器，但绝不静默）
+    const bad = mcpServerTools.value.filter(s => !s.ok)
+    if (bad.length) mcpProbeError.value = bad.map(s => `${s.name}: ${s.error || ''}`).join('；')
+    // 探测成功后让聊天里的工具来源徽标立即可用（否则要刷新页面才生效）
+    await refreshToolSources()
+  } catch (e) {
+    mcpProbeError.value = String(e)
+  } finally {
+    mcpProbing.value = false
+  }
+}
+
+/** 某服务器提供的工具数；未探测 / 探测失败时返回 null（不显示，也不填 0 冒充）。 */
+function mcpToolCount(name: string): number | null {
+  const hit = mcpServerTools.value.find(s => s.name === name)
+  if (!hit || !hit.ok || typeof hit.count !== 'number') return null
+  return hit.count
+}
+
+function mcpChipTitle(server: McpServerRow): string {
+  const hit = mcpServerTools.value.find(s => s.name === server.name)
+  if (hit && !hit.ok) return String(hit.error || '')
+  return server.url || server.command || ''
+}
+
+/** 切换单个工具的启停：整体覆盖写补丁，成功后本地同步（不做乐观更新，避免与后端不一致）。 */
+async function toggleTool(tool: CatalogTool) {
+  if (patchBusy.value) return
+  patchBusy.value = true
+  try {
+    const nextEnabled = tool.enabled === false
+    const disabled = computeNextDisabled(disabledNames(toolsCatalog.value), tool.name, nextEnabled)
+    const res = await rpc.call<{
+      ok?: boolean
+      disabled?: string[]
+      inactive?: string[]
+      error?: string
+    }>('tools.patch.set', { disabled })
+    if (res?.ok === false) {
+      patchError.value = String(res.error || '')
+      return
+    }
+    patchError.value = ''
+    patchInactive.value = res?.inactive || []
+    toolsCatalog.value = applyDisabled(toolsCatalog.value, res?.disabled || [])
+  } catch (e) {
+    patchError.value = String(e)
+  } finally {
+    patchBusy.value = false
   }
 }
 
@@ -630,7 +775,7 @@ async function uninstallSkillAndClose(name: string) {
   justify-content: center;
   padding: 24px;
   position: fixed;
-  z-index: 1100;
+  z-index: 1101; /* Layer: modal-dialog */
 }
 
 .sk-overview-modal__panel {
@@ -885,6 +1030,38 @@ async function uninstallSkillAndClose(name: string) {
   font-size: 11px;
   padding: 2px 9px;
 }
+.sk-tools__mcp-count {
+  color: var(--text-dim);
+  margin-left: 5px;
+}
+.sk-tools__mcp-probe {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: var(--radius-full);
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 10px;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.sk-tools__mcp-probe:hover {
+  border-color: var(--accent);
+}
+.sk-tools__mcp-probe:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: 0;
+}
+.sk-tools__mcp-probe:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.sk-tools__mcp-error {
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 18px;
+  width: 100%;
+}
 .sk-tools__mcp-empty {
   color: var(--text-muted);
   font-size: 12px;
@@ -976,6 +1153,97 @@ async function uninstallSkillAndClose(name: string) {
 }
 @media (max-width: 920px) {
   .sk-tools__grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 工具启停（补丁层）：每行一个工具 + 一个开关 */
+.sk-patch {
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+}
+.sk-patch__head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.sk-patch__title {
+  font-size: var(--fs-sm);
+  font-weight: 650;
+}
+.sk-patch__hint {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+.sk-patch__error {
+  color: var(--danger);
+  font-size: var(--fs-xs);
+  margin: 0 0 var(--sp-2);
+}
+.sk-patch__list {
+  display: grid;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 0;
+}
+.sk-patch__row {
+  align-items: center;
+  border-radius: var(--radius-xs);
+  display: grid;
+  gap: var(--sp-2);
+  grid-template-columns: minmax(96px, max-content) minmax(0, 1fr) auto;
+  padding: 3px 6px;
+}
+.sk-patch__row.is-off {
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.sk-patch__name {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sk-patch__desc {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sk-patch__toggle {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--ok) 50%, var(--border));
+  border-radius: var(--radius-pill);
+  color: var(--ok);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  padding: 1px 10px;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.sk-patch__toggle.is-off {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+  color: var(--warn);
+}
+.sk-patch__toggle:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: 0;
+}
+.sk-patch__toggle:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.sk-patch__inactive {
+  color: var(--warn);
+  font-size: var(--fs-xs);
+  margin: var(--sp-2) 0 0;
 }
 
 /* Tabs */

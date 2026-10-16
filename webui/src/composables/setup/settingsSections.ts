@@ -18,12 +18,16 @@ export const SETTINGS_SECTIONS = [
   // update controls. It is client-like (no readiness/RPC state, never dirty) and hidden on
   // web, where the host does not own a gateway process.
   { id: 'runtime', label: 'Runtime', icon: 'monitor', client: true, desktopOnly: true, group: 'gateway' },
+  // Doctor is a read-only health surface backed by doctor.status. It renders
+  // before config loads (client-like, no readiness/dirty bar, no save) and is
+  // available on web and desktop, where a matching deep link resolves.
+  { id: 'doctor', label: 'Doctor', icon: 'gauge', client: true, desktopOnly: false, group: 'gateway' },
   // --- AI configuration: Model Service -> Model Routing ---
-  { id: 'provider', label: 'Model Service', icon: 'agents', client: false, desktopOnly: false, group: 'ai' },
+  { id: 'provider', label: 'Model Service', icon: 'model', client: false, desktopOnly: false, group: 'ai' },
   { id: 'modelStrategy', label: 'Model Routing', icon: 'router', client: false, desktopOnly: false, group: 'ai' },
-  { id: 'capabilities', label: 'Capabilities', icon: 'skills', client: false, desktopOnly: false, group: 'capabilities' },
+  { id: 'capabilities', label: 'Capabilities', icon: 'capabilities', client: false, desktopOnly: false, group: 'capabilities' },
   // --- Preferences: assistant behaviour + local app settings ---
-  { id: 'behavior', label: 'Behavior', icon: 'chat', client: false, desktopOnly: false, group: 'preferences' },
+  { id: 'behavior', label: 'Behavior', icon: 'sparkles', client: false, desktopOnly: false, group: 'preferences' },
   { id: 'privacy', label: 'Privacy', icon: 'shield', client: false, desktopOnly: false, group: 'preferences' },
   // Sandbox policy is versioned independently from the main config form and
   // owns its own conflict-aware save controls.
@@ -40,15 +44,15 @@ export const SETTINGS_SECTIONS = [
   { id: 'advanced', label: 'Advanced', icon: 'gauge', client: true, desktopOnly: false, group: 'preferences' },
   // --- 扩展与能力中心：插件/预设/市场/皮肤/宠物/图谱/协同/SSH 统一收纳 ---
   // 全部 client 型：本地浏览偏好，不入 readiness/dirty 栏。
-  { id: 'plugins', label: 'Plugins', icon: 'blocks', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'plugins', label: 'Plugins', icon: 'plugin', client: true, desktopOnly: false, group: 'extensions' },
   { id: 'agentPresets', label: 'Agent Presets', icon: 'agents', client: true, desktopOnly: false, group: 'extensions' },
-  { id: 'pluginMarket', label: 'Plugin Market', icon: 'skills', client: true, desktopOnly: false, group: 'extensions' },
-  { id: 'webUiPlugins', label: 'Web UI Plugins', icon: 'monitor', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'pluginMarket', label: 'Plugin Market', icon: 'plugin', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'webUiPlugins', label: 'Web UI Plugins', icon: 'appWindow', client: true, desktopOnly: false, group: 'extensions' },
   { id: 'skinCenter', label: 'Skin Center', icon: 'sun', client: true, desktopOnly: false, group: 'extensions' },
-  { id: 'pet', label: 'Pet', icon: 'sparkles', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'pet', label: 'Pet', icon: 'pet', client: true, desktopOnly: false, group: 'extensions' },
   { id: 'communityPlugins', label: 'Community Plugins', icon: 'boxes', client: true, desktopOnly: false, group: 'extensions' },
   { id: 'graph', label: 'Graph', icon: 'gitBranch', client: true, desktopOnly: false, group: 'extensions' },
-  { id: 'collabSsh', label: 'Collab & SSH', icon: 'terminal', client: true, desktopOnly: false, group: 'extensions' },
+  { id: 'collabSsh', label: 'Collab & SSH', icon: 'collab', client: true, desktopOnly: false, group: 'extensions' },
 ] as const
 
 // Data maintenance is a nested Advanced destination rather than a first-level

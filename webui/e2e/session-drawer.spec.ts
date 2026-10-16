@@ -6,7 +6,8 @@ const RAW_KEY_PATTERN = /agent:[a-z0-9_-]+:[a-z0-9_-]+:/i
 async function openHub(page: Page) {
   await page.goto(CONTROL_URL + 'sessions')
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
-  await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
   // Let the session ledger settle before inspecting it.
   await page.waitForTimeout(800)
   await expect(page.locator('.hub-ledger, .hub-state').first()).toBeVisible()

@@ -24,6 +24,21 @@ export type ToolPartState =
  * two sub-kinds keep a single renderer and registry entry while carrying their
  * distinct payloads.
  */
+/**
+ * M2-C1 Intent Preview（动作确认卡）：core `tool_intent::ToolIntention`
+ * 的结构化前端投影。可选字段，缺失时卡片回退到既有 displayKind/displayTarget
+ * 渲染，保持对旧网关事件的后向兼容。
+ */
+export interface ChatIntentPreview {
+  kind?: string            // IntentKind 原始串（delete/reset/terminate/execute/network/write/read/unknown）
+  target?: string          // 目标对象（如被删路径/被终止 pid）
+  scope?: string           // 影响范围描述
+  irreversible?: boolean   // 是否不可逆
+  destructive?: boolean    // 是否破坏性
+  high_risk?: boolean      // 是否命中 HighRisk 拦截（提级 Risk::High）
+  side_effects?: string[]  // 预估副作用逐条说明
+}
+
 export interface InterruptApprovalData {
   approvalId: string
   namespace: string                       // 'exec' | plugin ns
@@ -37,6 +52,7 @@ export interface InterruptApprovalData {
   destructive?: boolean
   irreversible?: boolean
   backupState?: string
+  intent?: ChatIntentPreview
   agent: string
   sessionKey: string
   deadline: number                        // epoch seconds the request expires; 0 when unknown

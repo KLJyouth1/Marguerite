@@ -3,10 +3,14 @@ import { test, expect, type Page } from '@playwright/test'
 const CONTROL_URL = '/control/'
 const FLAG_KEY = 'marguerite.logs.runTrace'
 
+/** Bounded window for the Logs view to poll in its first line. */
+const LINES_TIMEOUT_MS = 15000
+
 async function openLogs(page: Page) {
   await page.goto(CONTROL_URL + 'logs')
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
-  await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
   // The stream polls in; wait for at least one line or the honest empty state.
   await expect(page.locator('.lg-line, .lg-display__placeholder').first())
     .toBeVisible({ timeout: 10000 })
@@ -14,7 +18,24 @@ async function openLogs(page: Page) {
 
 async function firstLine(page: Page) {
   const lines = page.locator('.lg-line')
-  test.skip((await lines.count()) === 0, 'No log lines on this gateway; seed logs to exercise the drawer')
+  // Bounded wait first: the gateway's log file is created by the Python sidecar a
+  // few seconds AFTER boot (logs.tail reads pyengine's debug.log), so counting the
+  // instant the placeholder appears races the view's first poll.
+  await expect(lines.first())
+    .toBeVisible({ timeout: LINES_TIMEOUT_MS })
+    .catch(() => {})
+  const count = await lines.count()
+  if (count === 0) {
+    // Skip as a last resort, but ANNOTATE it so the reason is visible in the
+    // report instead of looking like "nothing to check". A silent skip deletes
+    // every assertion below from the run — and a skip is not a pass.
+    const reason =
+      `The Logs view rendered no lines within ${LINES_TIMEOUT_MS}ms. ` +
+      'Gateway log file (logs.tail -> pyengine debug.log) is missing or empty; ' +
+      'seed a log line or fix the environment.'
+    test.info().annotations.push({ type: 'skip-reason', description: reason })
+    test.skip(true, reason)
+  }
   return lines.first()
 }
 

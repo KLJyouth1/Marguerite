@@ -131,7 +131,7 @@ useDialogA11y(modalRef, isOpen, () => emit('close'), { initialFocus: cancelBtn }
   position: fixed;
   right: 0;
   top: 0;
-  z-index: 1100;
+  z-index: 1109; /* Layer: modal-dialog */
 }
 
 .modal {

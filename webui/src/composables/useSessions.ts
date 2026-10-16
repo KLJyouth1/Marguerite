@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, getCurrentScope, onScopeDispose } from 'vue'
 import i18n from '@/i18n'
 import {
   waitForSessionRpcConnection,
@@ -11,12 +11,36 @@ import type {
   RawSessionTask,
   SessionEventPayload,
   SessionsListResponse,
+  SessionsPatchResponse,
 } from '@/types/rpc'
 import type { ProjectWorkspaceItem } from '@/types/rpc'
 import { normalizeTurnOutcome, turnOutcomePresentation } from '@/utils/chat/turnOutcome'
+import { normalizeRunStatus as normalizeRunStatusValue } from '@/utils/chat/runStatus'
 import type { SessionTaskAttention } from '@/composables/useSessionTaskAttention'
 
 export const SESSION_LIST_VIEW = 'session-list-v1'
+
+/**
+ * 会话列表初次读失败后的有界自愈退避（毫秒）。
+ *
+ * 冷启动/首次安装后的瞬时不可用（网关仍在预热、请求超时）不该把侧栏钉死在
+ * 「无法加载任务」+ 手动重载上：用户截图里那一屏错误就是这么留下来的。重连路径
+ * 由 `useSessionListSubscription` 的 `_state === 'connected'` 兜底，这里补齐
+ * 「连接从未掉线、读请求自身失败」这一窗口。预算耗尽后仍保留手动重试按钮。
+ */
+export const SESSION_LIST_RETRY_DELAYS_MS = [1_000, 3_000, 8_000] as const
+
+/**
+ * How many *consecutive* successful `sessions.list` refreshes must omit a
+ * locally-known session before it is dropped from the sidebar.
+ *
+ * A single short/degraded response (cold cache, a page that raced a refresh, a
+ * reconnect that returned fewer rows) must never make rows the user is looking
+ * at disappear. Only after this many consecutive misses do we treat the absence
+ * as authoritative. Counters reset when the key reappears, when a read error
+ * recovers (reconnect/outage boundary) and when the owning scope is disposed.
+ */
+export const SESSION_LIST_MISSING_TOLERANCE = 2
 
 export type { RawSessionItem } from '@/types/rpc'
 
@@ -46,6 +70,10 @@ export interface SessionItem {
   provisional?: boolean
   /** True when this session was forked from its parent's transcript. */
   forkedFromParent: boolean
+  /** 会话级思考强度（'off'|'normal'|'deep'|'max'）；null/缺省 = 继承全局模型配置 */
+  reasoningEffort?: string | null
+  /** 会话级上下文长度；null/缺省 = 继承全局模型配置 */
+  contextWindow?: number | null
   contractGaps: string[]
   raw: RawSessionItem
 }
@@ -77,12 +105,10 @@ function numberValue(value: unknown): number | null {
 }
 
 export function normalizeRunStatus(status: string | undefined): string {
-  const value = String(status || '').toLowerCase()
-  if (value === 'abandoned') return 'interrupted'
-  if (value === 'killed') return 'cancelled'
-  if (['succeeded', 'success', 'complete'].includes(value)) return 'idle'
-  if (['queued', 'running', 'interrupted', 'failed', 'timeout', 'cancelled', 'idle'].includes(value)) return value
-  return 'idle'
+  // 单一事实源：utils/chat/runStatus.ts（F-06）。此前与
+  // `chat/useChatRunStatus.normalizeRunStatus` 是复制粘贴关系，`error → failed`
+  // / `approval_pending` 两处已出现分叉风险；现两入口共用同一词表。
+  return normalizeRunStatusValue(status)
 }
 
 function stoppedTaskDurationSeconds(row: RawSessionItem | undefined): number | null {
@@ -139,6 +165,9 @@ export function sessionRunStatus(row: RawSessionItem): string {
 export function sessionVisualStatus(row: Pick<SessionItem, 'status' | 'runStatus'>): string {
   if (row.runStatus === 'failed' || row.runStatus === 'timeout') return row.runStatus
   if (row.runStatus === 'cancelled' || row.runStatus === 'interrupted') return 'killed'
+  // approval_pending 是活跃态（等待用户批准），侧栏按运行中呈现；收口前它被
+  // 折成 idle，与 useChatRunStatus 的词表分叉（F-06）。
+  if (row.runStatus === 'approval_pending') return 'running'
   if (row.runStatus === 'queued' || row.runStatus === 'running' || row.runStatus === 'idle') return row.runStatus
   return String(row.status || 'unknown').toLowerCase()
 }
@@ -324,6 +353,10 @@ export function normalizeSessionItem(item: unknown): SessionItem | null {
   const thread = raw.thread && typeof raw.thread === 'object' ? raw.thread : null
   const threadLabel = thread?.kind && thread?.id ? `${thread.kind} ${thread.id}` : ''
   const channelContext = raw.channelContext && typeof raw.channelContext === 'object' ? raw.channelContext : null
+  // 会话级 thinking 强度 / 上下文长度：双 key 归一（camelCase 优先），null/缺省 = 继承全局模型配置
+  const reasoningEffortRaw = textValue(raw.reasoningEffort) || textValue(raw.reasoning_effort)
+  const reasoningEffort = reasoningEffortRaw ? reasoningEffortRaw : null
+  const contextWindow = numberValue(raw.contextWindow) ?? numberValue(raw.context_window)
 
   return {
     key,
@@ -348,6 +381,8 @@ export function normalizeSessionItem(item: unknown): SessionItem | null {
     updatedAt,
     interactive: raw.interactive === true,
     forkedFromParent: raw.forkedFromParent === true || raw.forked_from_parent === true,
+    reasoningEffort,
+    contextWindow,
     contractGaps: Array.from(new Set(gaps)),
     raw,
   }
@@ -777,7 +812,85 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
 
   const groupedSessions = computed((): SessionGroup[] => groupSessions(allSessions.value))
 
+  // 有界自愈预算（每次失败一个预算，成功后复位；耗尽则只剩手动重试按钮）。
+  let sessionListRetryTimer: ReturnType<typeof setTimeout> | null = null
+  let sessionListRetryAttempt = 0
+
+  // session key → consecutive successful refreshes that omitted the row. See
+  // SESSION_LIST_MISSING_TOLERANCE: a row is only dropped once this reaches the
+  // tolerance. Instance-scoped; cleared on scope dispose and on the first
+  // successful read after an error (the reconnect/outage boundary).
+  const missingRefreshCounts = new Map<string, number>()
+
+  function cancelPendingSessionListRetry() {
+    if (!sessionListRetryTimer) return
+    clearTimeout(sessionListRetryTimer)
+    sessionListRetryTimer = null
+  }
+
+  function scheduleSessionListRetry() {
+    if (
+      sessionListRetryTimer
+      || sessionListRetryAttempt >= SESSION_LIST_RETRY_DELAYS_MS.length
+    ) return
+    const delay = SESSION_LIST_RETRY_DELAYS_MS[sessionListRetryAttempt]
+    sessionListRetryAttempt += 1
+    sessionListRetryTimer = setTimeout(() => {
+      sessionListRetryTimer = null
+      void loadSessions()
+    }, delay)
+  }
+
+  // 作用域销毁（视图卸载）即停掉待执行的重试；无作用域时（纯函数式调用）不注册。
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      cancelPendingSessionListRetry()
+      sessionListRetryAttempt = 0
+      missingRefreshCounts.clear()
+    })
+  }
+
+  /**
+   * Merge a `sessions.list` response into the current list instead of replacing
+   * it wholesale.
+   *
+   * Rule (see SESSION_LIST_MISSING_TOLERANCE): rows present in the response are
+   * authoritative and replace their local entry. A local row absent from this
+   * response is *kept* — its miss counter increments and it is only removed once
+   * it has been missing for SESSION_LIST_MISSING_TOLERANCE consecutive
+   * successful refreshes. This stops a shorter/degraded response (or a reconnect
+   * that returns fewer rows) from making the sidebar "lose" conversations that
+   * the user can still see; the polling refresh re-adds them if they truly exist.
+   */
+  function mergeSessionsList(returned: RawSessionListEntry[]) {
+    const seen = new Set<string>()
+    const merged: RawSessionListEntry[] = []
+    for (const entry of returned) {
+      const key = itemKey(entry)
+      if (!key) continue
+      seen.add(key)
+      missingRefreshCounts.delete(key)
+      merged.push(entry)
+    }
+    for (const local of sessionsList.value) {
+      const key = itemKey(local)
+      if (!key || seen.has(key)) continue
+      const misses = (missingRefreshCounts.get(key) || 0) + 1
+      if (misses >= SESSION_LIST_MISSING_TOLERANCE) {
+        missingRefreshCounts.delete(key)
+        continue
+      }
+      missingRefreshCounts.set(key, misses)
+      merged.push(local)
+    }
+    sessionsList.value = merged
+  }
+
   async function loadSessions() {
+    cancelPendingSessionListRetry()
+    // A read that follows a failure marks the reconnect/outage boundary: reset
+    // the miss counters so rows are not evicted from pre-outage counts.
+    const recoveredFromError = sessionListError.value
     isLoading.value = true
     sessionListError.value = false
     try {
@@ -790,11 +903,14 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
             readCallOptions,
           )
         : await rpc.call<SessionsListResponse>('sessions.list', params)
-      const raw = data?.sessions || data?.keys || []
-      sessionsList.value = raw.filter(s => !!itemKey(s))
+      const raw = (data?.sessions || data?.keys || []).filter(s => !!itemKey(s))
+      if (recoveredFromError) missingRefreshCounts.clear()
+      mergeSessionsList(raw)
+      sessionListRetryAttempt = 0
     } catch (err: unknown) {
       console.error('[useSessions] sessions.list error:', err instanceof Error ? err.message : err)
       sessionListError.value = true
+      scheduleSessionListRetry()
     } finally {
       isLoading.value = false
     }
@@ -812,7 +928,13 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
     const key = String(raw.session_key || raw.sessionKey || raw.key || raw.session || '')
     if (!key) return false
     const idx = sessionsList.value.findIndex(entry => itemKey(entry) === key)
-    if (idx < 0) return false
+    if (idx < 0) {
+      // The row is not in the local list yet (short/degraded list response, a
+      // brand-new session not polled in). Previously a silent `return false`,
+      // which made "live pill never updated" impossible to diagnose — log it.
+      console.warn('[useSessions] applySessionRunStatus: no local row for session', key, `event=${event}`)
+      return false
+    }
 
     const entry = sessionsList.value[idx]
     const prev = (typeof entry === 'string' ? { key: entry } : entry) as RawSessionItem
@@ -862,5 +984,38 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
     allSessions,
     loadSessions,
     applySessionRunStatus,
+  }
+}
+
+/**
+ * 会话级 thinking 强度 / 上下文长度持久化（sessions.patch 三态语义）。
+ *
+ * - 字段缺省（不传）= 不改动该字段；
+ * - 字段为 `null` = 清除会话级覆盖（回落到全局模型配置）；
+ * - 字段为值 = 设置覆盖（contextWindow 传 0 同样按清除处理，Rust 侧 `filter(|x| *x > 0)`）。
+ *
+ * 独立于 `useSessions()` 组合式函数（抽屉里没有列表实例也能调），内部自取 rpc store。
+ */
+export async function patchReasoningSettings(
+  sessionId: string,
+  patch: {
+    reasoningEffort?: string | null
+    contextWindow?: number | null
+  },
+): Promise<{ reasoningEffort: string | null; contextWindow: number | null }> {
+  const rpc = useRpcStore()
+  // 只把显式出现的字段放进 patch 参数，缺省字段完全不传（= 不动）
+  const params: Record<string, unknown> = { key: sessionId }
+  if ('reasoningEffort' in patch) params.reasoningEffort = patch.reasoningEffort
+  if ('contextWindow' in patch) {
+    // 0 / 负数 / 非法值统一归一为清除覆盖（null）
+    const n = numberValue(patch.contextWindow)
+    params.contextWindow = n != null && n > 0 ? n : null
+  }
+  const data = await rpc.call<SessionsPatchResponse>('sessions.patch', params)
+  const effort = textValue(data?.reasoningEffort)
+  return {
+    reasoningEffort: effort ? effort : null,
+    contextWindow: numberValue(data?.contextWindow),
   }
 }

@@ -260,6 +260,10 @@ export function useSessionArtifacts(options: UseSessionArtifactsOptions) {
       // A missing or transiently failed index must never blank the legacy
       // history/live sources. Keep a previous same-session index on refresh
       // errors; crossed Sessions were already cleared synchronously above.
+      console.warn(
+        `[useSessionArtifacts] ${ARTIFACTS_LIST_METHOD} failed:`,
+        error instanceof Error ? error.message : error,
+      )
       indexAvailable.value = false
       return false
     } finally {

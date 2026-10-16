@@ -3,7 +3,11 @@ import i18n from '@/i18n'
 import { useToasts } from '@/composables/useToasts'
 import type { ChatRouterTierConfig } from '@/types/chat'
 import type { ModelRoutingMode } from '@/types/modelRouting'
-import { normalizeModelRoutingMode } from '@/types/modelRouting'
+import {
+  normalizeModelRoutingMode,
+  toGatewayRoutingMode,
+  toRuntimeModeKind,
+} from '@/types/modelRouting'
 import { normalizeRouterTier, sortRouterTiers } from '@/utils/chat/routerTiers'
 import { encodeRouterShape, decodeRouterShape } from '@/utils/chat/routerShapeCache'
 import {
@@ -69,7 +73,7 @@ interface ChatFeatureConfig {
 }
 
 interface ModelRoutingSnapshot {
-  mode?: 'direct' | 'router' | 'ensemble' | 'bloom'
+  mode?: 'direct' | 'router' | 'ensemble' | 'bloom' | 'omni'
   selection_mode?: string
 }
 
@@ -87,6 +91,7 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
   const codingModeSettingsBusy = ref(false)
   const llmEnsembleEnabled = ref(false)
   const bloomEnsembleEnabled = ref(false)
+  const omniEnabled = ref(false)
   const llmEnsembleSelectionMode = ref('')
   const llmEnsembleSettingsBusy = ref(false)
   const modelRoutingSettingsBusy = ref(false)
@@ -95,6 +100,7 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
   const routerTierConfigs = ref<Record<string, ChatRouterTierConfig>>({})
 
   const modelRoutingMode = computed<ModelRoutingMode>(() => {
+    if (omniEnabled.value) return 'omni_agent'
     if (bloomEnsembleEnabled.value) return 'bloom_ensemble'
     if (llmEnsembleEnabled.value) return 'llm_ensemble'
     return routerEnabled.value ? 'squilla_router' : 'off'
@@ -103,13 +109,14 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
   function applyModelRoutingSnapshot(snapshot: ModelRoutingSnapshot | undefined) {
     const mode = snapshot?.mode
     if (!mode) return false
+    omniEnabled.value = mode === 'omni'
     bloomEnsembleEnabled.value = mode === 'bloom'
     llmEnsembleEnabled.value = mode === 'ensemble' || mode === 'bloom'
-    // The product control remains one four-state selector. The existing
+    // The product control remains one four-/five-state selector. The existing
     // routerEnabled ref means "routing feature active" to ChatView, so Ensemble
     // remains active here even when its static selection mode bypasses the
     // SquillaRouter implementation internally.
-    routerEnabled.value = mode !== 'direct'
+    routerEnabled.value = mode !== 'direct' && mode !== 'omni'
     if (typeof snapshot.selection_mode === 'string') {
       llmEnsembleSelectionMode.value = snapshot.selection_mode
     }
@@ -258,28 +265,31 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
     const previousRouter = routerEnabled.value
     const previousEnsemble = llmEnsembleEnabled.value
     const previousBloom = bloomEnsembleEnabled.value
+    const previousOmni = omniEnabled.value
     const nextEnsemble = nextMode === 'llm_ensemble' || nextMode === 'bloom_ensemble'
 
     // This is only optimistic presentation. The Gateway owns the actual
-    // direct/router/ensemble/bloom transition (including ensemble dependency
+    // direct/router/ensemble/bloom/omni transition (including ensemble dependency
     // rules) and the post-write config refresh remains authoritative.
-    routerEnabled.value = nextMode !== 'off'
+    routerEnabled.value = nextMode !== 'off' && nextMode !== 'omni_agent'
     llmEnsembleEnabled.value = nextEnsemble
     bloomEnsembleEnabled.value = nextMode === 'bloom_ensemble'
+    omniEnabled.value = nextMode === 'omni_agent'
     modelRoutingSettingsBusy.value = true
     routerSettingsBusy.value = true
     llmEnsembleSettingsBusy.value = true
     try {
       await options.rpc.waitForConnection()
+      // 词表桥接走 `types/modelRouting` 的单一事实源（曾经这里手写了三遍三元链，
+      // 一旦漂移就是「界面显示已切换、后端实际没变」的静默失效）。
       await options.rpc.call('models.routing.set', {
-        mode: nextMode === 'off'
-          ? 'direct'
-          : nextMode === 'squilla_router' ? 'router'
-          : nextMode === 'bloom_ensemble' ? 'bloom' : 'ensemble',
+        mode: toGatewayRoutingMode(nextMode),
       })
-      // 后端运行时模式联动：bloom_ensemble → mode.switch{kind:'bloom'}（Bloom 并行
-      // 编排即刻生效，无需重启）；其余 → agent。best-effort，失败不阻断主流程。
-      const runtimeKind = nextMode === 'bloom_ensemble' ? 'bloom' : 'agent'
+      // 后端运行时模式联动：
+      //  - bloom_ensemble → mode.switch{kind:'bloom'}（Bloom 并行编排即刻生效）
+      //  - omni_agent     → mode.switch{kind:'omni-transcend'}（全谱超模编排即刻生效）
+      //  - 其余           → agent。best-effort，失败不阻断主流程。
+      const runtimeKind = toRuntimeModeKind(nextMode)
       const modeSupported = options.rpc.supportsMethod?.('mode.switch')
       if (modeSupported) {
         try {
@@ -289,10 +299,26 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
         }
       }
       await loadFeatureToggles()
+      // 生效回执：用服务端权威快照对比请求，杜绝「切了但执行没变」的静默失效。
+      // 请求侧就是 UI 档位本身 —— 原实现那个三元链每个分支都映射到自身（还有个死
+      // 默认分支），是恒等函数，已删除。
+      const expectedRouting: ModelRoutingMode = nextMode
+      if (modelRoutingMode.value === expectedRouting) {
+        pushToast(i18n.global.t('chat.modelRouting.effective', { mode: expectedRouting }), { tone: 'ok' })
+      } else {
+        pushToast(
+          i18n.global.t('chat.modelRouting.mismatch', {
+            requested: expectedRouting,
+            actual: modelRoutingMode.value,
+          }),
+          { tone: 'danger' },
+        )
+      }
     } catch (err) {
       routerEnabled.value = previousRouter
       llmEnsembleEnabled.value = previousEnsemble
       bloomEnsembleEnabled.value = previousBloom
+      omniEnabled.value = previousOmni
       console.warn('Failed to update model routing:', err instanceof Error ? err.message : String(err))
       pushToast(i18n.global.t('chat.modelRouting.updateFailed'), { tone: 'danger' })
     } finally {

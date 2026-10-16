@@ -264,7 +264,7 @@ test.describe('Artifact deliverable cards', () => {
       if (url.pathname === '/api/v1/artifacts/art-card-html/open') {
         nativeOpenCount += 1
         expect(request.method()).toBe('POST')
-        expect(request.headers()['x-opensquilla-session-key']).toBe(SESSION_KEY)
+        expect(request.headers()['x-Marguerite-session-key']).toBe(SESSION_KEY)
         await route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -319,7 +319,7 @@ test.describe('Artifact deliverable cards', () => {
       const request = route.request()
       requests.push({
         authorization: request.headers().authorization,
-        sessionKey: request.headers()['x-opensquilla-session-key'],
+        sessionKey: request.headers()['x-Marguerite-session-key'],
       })
       return route.fulfill({
         status: 200,
@@ -381,7 +381,7 @@ test.describe('Artifact deliverable cards', () => {
       const request = route.request()
       requests.push({
         authorization: request.headers().authorization,
-        sessionKey: request.headers()['x-opensquilla-session-key'],
+        sessionKey: request.headers()['x-Marguerite-session-key'],
       })
       return route.fulfill({
         status: 200,

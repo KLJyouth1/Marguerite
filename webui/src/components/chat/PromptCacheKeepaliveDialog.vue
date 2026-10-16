@@ -145,6 +145,21 @@
                   {{ formatTime(status.idleExpiresAt) }}
                 </span>
               </p>
+
+              <div
+                v-if="draftEnabled && status"
+                class="keepalive-dialog__cache-hits"
+                role="note"
+              >
+                <Icon name="zap" :size="15" aria-hidden="true" />
+                <span>
+                  <strong>{{ t('chat.promptCacheKeepalive.cacheHits') }}</strong>
+                  <span class="keepalive-dialog__cache-hits-value">
+                    {{ formatTokens(status?.lastCacheHitTokens || 0) }}
+                  </span>
+                  <small>{{ t('chat.promptCacheKeepalive.cacheHitsHint') }}</small>
+                </span>
+              </div>
             </template>
             <p v-if="error" class="keepalive-dialog__error" role="alert">{{ error }}</p>
           </div>
@@ -234,6 +249,14 @@ function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** 把 token 数格式化为带千分位/单位的紧凑字符串（如 12.3k）。 */
+function formatTokens(value: number): string {
+  const n = Number(value) || 0
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
 async function load() {
   if (!props.open || !props.sessionKey) return
   loading.value = true
@@ -315,7 +338,7 @@ useDialogA11y(dialogRef, computed(() => props.open), close, {
   justify-content: center;
   padding: var(--sp-4);
   position: fixed;
-  z-index: 1100;
+  z-index: 1111; /* Layer: modal-dialog */
 }
 
 .keepalive-dialog {
@@ -430,6 +453,22 @@ useDialogA11y(dialogRef, computed(() => props.open), close, {
 .keepalive-dialog__warning { align-items: flex-start; color: var(--warn); display: flex; font-size: var(--fs-xs); gap: var(--sp-2); }
 .keepalive-dialog__validation { color: var(--danger); font-size: var(--fs-xs); margin: calc(var(--sp-2) * -1) 0 0; }
 .keepalive-dialog__status { color: var(--text-muted); font-size: var(--fs-xs); margin: 0; }
+.keepalive-dialog__cache-hits {
+  align-items: flex-start;
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--fs-xs);
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 0;
+}
+.keepalive-dialog__cache-hits > :deep(svg) { color: var(--accent); flex: 0 0 auto; margin-top: 1px; }
+.keepalive-dialog__cache-hits-value {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  margin: 0 var(--sp-1);
+}
+.keepalive-dialog__cache-hits small { display: block; margin-top: 2px; }
 .keepalive-dialog__error { color: var(--danger); font-size: var(--fs-sm); margin: 0; }
 .modal-enter-active, .modal-leave-active { transition: opacity var(--dur-base); }
 .modal-enter-from, .modal-leave-to { opacity: 0; }

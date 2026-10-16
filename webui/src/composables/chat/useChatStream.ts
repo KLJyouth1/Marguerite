@@ -114,6 +114,8 @@ export function useChatStream(options: UseChatStreamOptions) {
   const openToolGroups = ref<Set<string>>(new Set())
   const openToolItems = ref<Set<string>>(new Set())
   let streamToolGroupSeq = 0
+  /** 无 id 帧的兜底身份计数（单调，绝不用时钟：时钟会吞并同毫秒同名调用） */
+  let streamToolCallSeq = 0
   let checkpointedRaw = ''
   let checkpointedAcrossToolBoundary = false
   let activeStreamTurnId = ''
@@ -128,6 +130,12 @@ export function useChatStream(options: UseChatStreamOptions) {
 
   const streamActivity = ref({ label: 'Sending', key: 'Sending', startedAt: 0 })
   const streamActivityTick = ref(0)
+  // Single source of truth for the LIVE TURN's wall clock (N1). The activity
+  // head's elapsed chip used to restart to `0s` on every phase change while the
+  // reasoning fold's "Thinking · Ns" kept counting from the turn start, so the
+  // two readouts contradicted each other in the same frame ("正在工作 · 0s" vs
+  // "思考中 · 63 秒"). It is set once per turn and never reset mid-turn.
+  const streamTurnStartedAt = ref(0)
   let streamActivityTimer: ReturnType<typeof setInterval> | null = null
   const streamRound = ref(1)
   const lastSignalAt = ref(0)
@@ -170,9 +178,20 @@ export function useChatStream(options: UseChatStreamOptions) {
       // silence duration ticks here, out of the announced sentence.
       return `${Math.floor((now - lastSignalAt.value) / 1000)}s`
     }
-    const startedAt = streamActivity.value.startedAt || now
+    // N1: count from the TURN start, not from the last phase change — a chip
+    // that resets to `0s` mid-turn would contradict "Thinking · Ns" beside it.
+    // Fall back to the phase start only before the turn clock is armed.
+    const startedAt = streamTurnStartedAt.value || streamActivity.value.startedAt || now
     const seconds = Math.max(0, Math.floor((now - startedAt) / 1000))
     return `${seconds}s`
+  })
+
+  /** Live turn elapsed in whole seconds (single source of truth, N1). */
+  const streamTurnElapsedSeconds = computed(() => {
+    streamActivityTick.value
+    const startedAt = streamTurnStartedAt.value
+    if (!startedAt) return 0
+    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
   })
 
   // A step in progress, not a bare round counter.
@@ -344,6 +363,10 @@ export function useChatStream(options: UseChatStreamOptions) {
     checkpointedAcrossToolBoundary = false
     activeStreamTurnId = ''
     isStreaming.value = true
+    // 通知桌宠：任务开始（window 在单测/node 环境不存在，须守卫）
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('pet-task', { detail: { state: 'working' } }))
+    }
     const currentRunStatus = options.runStatus?.value
     const activeTask = currentRunStatus
       && ['queued', 'running', 'approval_pending'].includes(currentRunStatus.status)
@@ -359,7 +382,9 @@ export function useChatStream(options: UseChatStreamOptions) {
     openToolGroups.value = new Set()
     openToolItems.value = new Set()
     streamToolGroupSeq = 0
+    streamToolCallSeq = 0
     streamRound.value = 1
+    streamTurnStartedAt.value = Date.now()
     noteStreamSignal()
     streamBubble.value = true
     streamShowHeader.value = options.lastHeaderRole.value !== 'assistant'
@@ -429,6 +454,12 @@ export function useChatStream(options: UseChatStreamOptions) {
 
     streamBubble.value = false
     isStreaming.value = false
+    // 通知桌宠：任务结束（成功/中断/失败）
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('pet-task', {
+        detail: { state: wasAborted ? 'cancelled' : 'done' },
+      }))
+    }
     resetStreamState()
     checkpointedRaw = ''
     checkpointedAcrossToolBoundary = false
@@ -473,6 +504,7 @@ export function useChatStream(options: UseChatStreamOptions) {
   function resetStreamForRouterReplay() {
     resetStreamState()
     streamToolGroupSeq = 0
+    streamToolCallSeq = 0
     streamBubble.value = true
     streamShowHeader.value = options.lastHeaderRole.value !== 'assistant'
     setStreamActivity('Switching model')
@@ -703,7 +735,14 @@ export function useChatStream(options: UseChatStreamOptions) {
     if (isInternalToolName(name)) return null
     if (!isStreaming.value) startStreaming()
     const input = normalizeToolInputText(payload)
-    const toolId = payload.tool_use_id || payload.toolUseId || payload.id || `${name}:${payload.stream_seq || Date.now()}`
+    // 身份优先级：① 后端带来的真实调用 id（模型 tool_call id，精确配对）；
+    // ② 流内单调计数兜底。**不得用时钟当身份** —— `name:Date.now()` 有两个反向病：
+    // 同毫秒的同名调用会被吞并成一条，而跨毫秒的结果帧又会另起一条、把原记录永远挂在 running。
+    const toolId =
+      payload.tool_use_id ||
+      payload.toolUseId ||
+      payload.id ||
+      `${name}:live-${++streamToolCallSeq}`
 
     const existing = streamToolCalls.value.find(tc => tc.toolId === toolId)
     if (existing) {
@@ -762,6 +801,10 @@ export function useChatStream(options: UseChatStreamOptions) {
     // frame creates the call in the fold without a clock.
     if (useReducer.value && optionsArg.running) {
       appendFrame({ kind: 'tool-start', toolId, name, input, at: Date.now() })
+      // 通知桌宠：工具调用（偶尔触发互动动作）
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('pet-tool', { detail: { name } }))
+      }
     }
     return call
   }
@@ -807,7 +850,19 @@ export function useChatStream(options: UseChatStreamOptions) {
     const content = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2)
     const toolId = payload.tool_use_id || payload.toolUseId || payload.id || ''
 
-    const tc = streamToolCalls.value.find(t => t.toolId === toolId) || ensureStreamToolCall(payload, { running: false })
+    // 配对优先级：① 显式 id；② **同名的最早未定案调用**（FIFO，与后端顺序执行一致）；
+    // ③ 兜底才新建。历史缺陷：后端 tool_call/tool_result 帧不带 id 时，此处拿到空串，
+    // `find(t => t.toolId === '')` 必然落空 → 每次结果都新建一条，而原来那条 running
+    // 记录永不收敛（秒数一直涨、卡片一直堆），前端就会连出十几行「正在使用工具 · 1次工具调用 24s…」。
+    const pendingSameName = name
+      ? streamToolCalls.value.find(
+          t => t.isRunning && t.name === name && !t.status && !t.result,
+        )
+      : undefined
+    const tc =
+      (toolId ? streamToolCalls.value.find(t => t.toolId === toolId) : undefined) ||
+      pendingSameName ||
+      ensureStreamToolCall(payload, { running: false })
     if (tc) {
       const input = normalizeToolInputText(payload)
       if (input) {
@@ -927,6 +982,8 @@ export function useChatStream(options: UseChatStreamOptions) {
     streamBubble.value = true
     streamShowHeader.value = options.lastHeaderRole.value !== 'assistant'
     isStreaming.value = true
+    // Arm the turn clock if an interrupt opened the turn (N1 single clock).
+    if (!streamTurnStartedAt.value) streamTurnStartedAt.value = Date.now()
   }
 
   function reconcileFinalText(finalText: string | null | undefined) {
@@ -1001,6 +1058,7 @@ export function useChatStream(options: UseChatStreamOptions) {
     streamActivityStale,
     streamPhaseLabel,
     streamPhaseElapsed,
+    streamTurnElapsedSeconds,
     streamStepLabel,
     streamToolElapsedText,
     streamIdleTimeoutMs,

@@ -52,6 +52,19 @@
                   })
                 : runStatusLabel }}
             </span>
+            <!-- v3.3：任务类型徽章（编码/文档/检索/对话…），随 step_progress 事件更新 -->
+            <span
+              v-if="stepKind"
+              class="plan-run__task-kind"
+              role="status"
+            >{{ stepKind }}</span>
+            <!-- M2-C3：实时时序（真实事件流：已耗时/预计剩余，基于 core runner 实测） -->
+            <span
+              v-if="timingEtaText"
+              class="plan-run__timing"
+              role="status"
+              :aria-label="timingEtaText"
+            >{{ timingEtaText }}</span>
             <span
               v-if="!isRunning"
               class="plan-run__summary-count"
@@ -141,7 +154,7 @@
                 </ol>
               </section>
 
-              <!-- B4 并行子任务：确定性扇出聚合结果 -->
+              <!-- B4 并行子任务：真执行聚合结果（离线回退时 simulated 徽标如实声明） -->
               <section
                 v-if="parallelBatch && parallelBatch.results.length"
                 class="plan-run__b4"
@@ -152,6 +165,13 @@
                   <span class="plan-run__b4-title">{{ t('chat.planRun.parallel') }}</span>
                   <span class="plan-run__b4-count">
                     {{ parallelBatch.successful }}/{{ parallelBatch.total }}
+                  </span>
+                  <span
+                    v-if="parallelBatch.simulated"
+                    class="plan-run__b4-simulated"
+                    :title="t('chat.planRun.parallelSimulated')"
+                  >
+                    {{ t('chat.planRun.parallelSimulated') }}
                   </span>
                 </header>
                 <ol class="plan-run__parallel">
@@ -172,19 +192,36 @@
                         {{ result.summary }}
                       </span>
                     </span>
+                    <!-- 真实耗时/重试次数（core runner 实测回传）；无数据即不显示，绝不补 0 冒充 -->
+                    <span class="plan-run__parallel-meta">
+                      <span
+                        v-if="result.elapsedMs !== undefined"
+                        class="plan-run__parallel-chip"
+                        :title="t('chat.planRun.parallelStepDuration', { duration: formatDuration(result.elapsedMs) })"
+                      >
+                        {{ formatDuration(result.elapsedMs) }}
+                      </span>
+                      <span
+                        v-if="result.attempts !== undefined && result.attempts > 1"
+                        class="plan-run__parallel-chip plan-run__parallel-chip--retry"
+                        :title="t('chat.planRun.parallelStepRetries', { count: result.attempts })"
+                      >
+                        {{ t('chat.planRun.parallelStepRetries', { count: result.attempts }) }}
+                      </span>
+                    </span>
                   </li>
                 </ol>
               </section>
 
-              <!-- B4 动态重规划：偏离观测后的新修订 diff -->
+              <!-- B4 动态重规划：偏离观测后的新修订 diff / 前瞻跳步 -->
               <section
                 v-if="hasReplan"
                 class="plan-run__b4"
-                :aria-label="t('chat.planRun.replanned')"
+                :aria-label="replanTitleLabel"
               >
                 <header class="plan-run__b4-head">
                   <Icon name="refresh" :size="14" aria-hidden="true" />
-                  <span class="plan-run__b4-title">{{ t('chat.planRun.replanned') }}</span>
+                  <span class="plan-run__b4-title">{{ replanTitleLabel }}</span>
                   <span v-if="replanInfo" class="plan-run__b4-count">
                     {{ replanSimilarityPercent }}
                   </span>
@@ -246,7 +283,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import ExecutionTodoMarker from '@/components/chat/ExecutionTodoMarker.vue'
@@ -257,6 +294,7 @@ import type {
   PlanRunSnapshot,
   PlanRunStatus,
   PlanRunStepStatus,
+  PlanRunTiming,
 } from '@/types/plans'
 
 const props = withDefaults(defineProps<{
@@ -264,6 +302,10 @@ const props = withDefaults(defineProps<{
   defaultOpen?: boolean
   cancelBusy?: boolean
   disabled?: boolean
+  /** v3.3：当前步骤任务类型徽章（编码/文档/对话…，空串不显示） */
+  stepKind?: string
+  /** M2-C3：计划运行实时时序（真实事件流：elapsedMs/etaMs） */
+  timing?: PlanRunTiming | null
 }>(), {
   defaultOpen: false,
   cancelBusy: false,
@@ -291,6 +333,24 @@ let lastPointerType = ''
 let suppressNextFocusOpen = false
 const stepsId = `plan-run-steps-${useId()}`
 const isRunning = computed(() => props.run.status === 'running')
+
+// N1：`timing.elapsedMs` 只在 step_progress 事件到达时更新，事件之间会「冻结」
+// （真机截图：思考已 173s，进度条仍显示「已用 1m16s」）。这里以事件携带的
+// `atMs`（本地收报时刻）为基准做本地续算，让「已用」按秒真实走动。
+const nowTick = ref(Date.now())
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+function stopElapsedTicker() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
+}
+watch(isRunning, (running) => {
+  if (running && !elapsedTimer) {
+    nowTick.value = Date.now()
+    elapsedTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+  } else if (!running) {
+    stopElapsedTicker()
+  }
+}, { immediate: true })
+onBeforeUnmount(stopElapsedTicker)
 const hasSteps = computed(() => props.run.steps.length > 0)
 const inspectableStatuses = new Set<PlanRunStatus>([
   'queued',
@@ -544,6 +604,50 @@ const liveStatusLabel = computed(() =>
   isRunning.value ? summaryTitle.value : runStatusLabel.value,
 )
 
+/** N1：以事件收报时刻（atMs）续算「已用」，避免事件之间冻结。 */
+const liveElapsedMs = computed<number | undefined>(() => {
+  const timing = props.timing
+  const live = timing?.phase === 'started' ? timing : undefined
+  if (!live) return undefined
+  return live.atMs
+    ? live.elapsedMs + Math.max(0, nowTick.value - live.atMs)
+    : live.elapsedMs
+})
+
+/** M2-C3：实时时序文案（running 时展示；事件流缺位则用运行快照的实测代价模型兜底） */
+const timingEtaText = computed(() => {
+  if (!isRunning.value) return ''
+  const timing = props.timing
+  const live = timing?.phase === 'started' ? timing : undefined
+  // 页面重载 / 会话切换后 `step_progress` 事件流缺位，此时 ETA 只能来自运行快照
+  // 的代价模型（同一份实测样本口径）——否则进度条会退化成「只有百分比没有剩余」。
+  const snapshotEta = props.run.cost?.estimatedRemainingMs
+  const etaMs = live?.etaMs !== undefined && live.etaMs > 0
+    ? live.etaMs
+    : snapshotEta !== null && snapshotEta !== undefined && snapshotEta > 0
+      ? snapshotEta
+      : undefined
+  const eta = etaMs !== undefined
+    ? String(t('chat.planRun.eta', { eta: formatDuration(etaMs) }))
+    : ''
+  const elapsed = liveElapsedMs.value !== undefined
+    ? String(t('chat.planRun.elapsed', { elapsed: formatDuration(liveElapsedMs.value) }))
+    : ''
+  if (eta && elapsed) return `${eta} · ${elapsed}`
+  return eta || elapsed
+})
+
+/** M2-C3：毫秒 → 人类可读时长（<1m 按秒，<1h 按分秒，否则时+分） */
+function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round((ms || 0) / 1000))
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
 const staticTodoStatus = computed<PlanRunStepStatus>(() => {
   const statuses: Record<Exclude<PlanRunStatus, 'running'>, PlanRunStepStatus> = {
     queued: 'pending',
@@ -575,16 +679,28 @@ const checkedChecklistCount = computed(() =>
 const parallelBatch = computed<PlanParallelBatch | null>(() => props.run.parallelBatch ?? null)
 const replanInfo = computed<PlanReplanInfo | null>(() => props.run.replan ?? null)
 const hasReplan = computed(() => replanInfo.value !== null)
+/** 前瞻跳步（观测命中后续步骤）与「重新拆解」是两种截然不同的判定，文案必须分开。 */
+const isReplanAdvance = computed(() => replanInfo.value?.mode === 'advance')
+const replanTitleLabel = computed(() => String(t(
+  isReplanAdvance.value ? 'chat.planRun.replannedAhead' : 'chat.planRun.replanned',
+)))
 const replanSimilarityPercent = computed(() => {
   if (!replanInfo.value) return ''
   const pct = Math.round(replanInfo.value.similarity * 100)
   return `${Math.max(0, Math.min(100, pct))}%`
 })
 const replanDetailLabel = computed(() => {
-  if (!replanInfo.value) return ''
+  const info = replanInfo.value
+  if (!info) return ''
+  if (info.mode === 'advance') {
+    return String(t('chat.planRun.replanAdvanceDetail', {
+      step: info.bestMatch?.title || info.bestMatch?.stepId || '',
+      count: info.skippedStepIds?.length ?? info.stepsChanged,
+    }))
+  }
   return String(t('chat.planRun.replanDetail', {
-    steps: replanInfo.value.stepsChanged,
-    revision: replanInfo.value.revisionId,
+    steps: info.stepsChanged,
+    revision: info.revisionId,
   }))
 })
 
@@ -730,6 +846,29 @@ const replanDetailLabel = computed(() => {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* v3.3：任务类型徽章（编码/文档/检索/对话…）——accent 弱底 + 圆角胶囊 */
+.plan-run__task-kind {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 999px;
+  color: var(--accent);
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+/* M2-C3：实时时序（已耗时/预计剩余）——弱化辅助展示，随事件流刷新 */
+.plan-run__timing {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .plan-run__static-status {
@@ -931,6 +1070,18 @@ const replanDetailLabel = computed(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 离线回退的确定性标记：如实声明未真正执行（v19 真执行化配套） */
+.plan-run__b4-simulated {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .plan-run__checklist,
 .plan-run__parallel {
   display: grid;
@@ -981,7 +1132,7 @@ const replanDetailLabel = computed(() => {
 
 .plan-run__parallel-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   min-width: 0;
   align-items: center;
   gap: 9px;
@@ -991,6 +1142,29 @@ const replanDetailLabel = computed(() => {
 
 .plan-run__parallel-item--failed .plan-run__parallel-title {
   color: var(--danger);
+}
+
+/* 真实耗时 / 重试次数徽标（core runner 实测回传，无数据即整块不渲染） */
+.plan-run__parallel-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.plan-run__parallel-chip {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.plan-run__parallel-chip--retry {
+  border-color: color-mix(in srgb, var(--warn) 54%, var(--border));
+  color: var(--warn);
 }
 
 .plan-run__parallel-copy {

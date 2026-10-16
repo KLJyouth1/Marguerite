@@ -29,11 +29,71 @@
         } catch (e) {
           /* private-mode / disabled storage: fall through to the :root default */
         }
+        // Boot splash mode — mirrors the app store's 'marguerite-boot-animation'
+        // key ('system'/absent → 'full'). prefers-reduced-motion always wins and
+        // downgrades to 'minimal', so motion-sensitive users never see the
+        // animation even before the store loads. Stamped before first paint so
+        // src/assets/boot.css can branch on it.
+        try {
+          var b = localStorage.getItem('marguerite-boot-animation')
+          if (b !== 'off' && b !== 'minimal' && b !== 'full') b = 'full'
+          if (b === 'full' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            b = 'minimal'
+          }
+          document.documentElement.setAttribute('data-boot', b)
+        } catch (e) {
+          document.documentElement.setAttribute('data-boot', 'minimal')
+        }
       })()
     </script>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- Boot splash (P2 切片 1). Painted from the very first frame; removed
+           automatically on mount (the app clears this container), so the handoff
+           is atomic — no JS removal, no flash. Styles: src/assets/boot.css.
+           ⚠️ Do NOT quote the app mount tag, the gateway-injected data-div id, or
+           the base-href tag VERBATIM anywhere in this file. maybe_inject_index()
+           (core/src/gateway/server.rs) keys on their exact literal text: it injects
+           the data div only while the mount tag is present AND the data id is
+           absent, then substitutes the mount tag (replace-all). Repeating either
+           literal in a comment silently disables the whole injection (locale +
+           base href + html lang) and white-screens every deep route (>=2 path
+           segments). Cost 9 e2e failures to learn — see
+           artifacts/verify-r66-batch1.log. -->
+      <div id="mq-boot" role="status" aria-live="polite" aria-label="Marguerite">
+        <div class="mq-boot-atmosphere" aria-hidden="true">
+          <div class="mq-boot-grid"></div>
+          <div class="mq-boot-scan"></div>
+          <div class="mq-boot-vignette"></div>
+        </div>
+        <div class="mq-boot-constellation" aria-hidden="true">
+          <div class="mq-boot-orbit"></div>
+          <div class="mq-boot-orbit mq-boot-orbit--inner"></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Agent</span></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Subagent</span></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Tools</span></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Memory</span></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Retrieval</span></div>
+          <div class="mq-boot-node"><span class="mq-boot-node__dot"></span><span class="mq-boot-node__label">Knowledge</span></div>
+        </div>
+        <div class="mq-boot-core">
+          <div class="mq-boot-mark" aria-hidden="true"></div>
+          <div class="mq-boot-wordmark" aria-hidden="true">
+            <span>M</span><span>a</span><span>r</span><span>g</span><span>u</span><span>e</span><span>r</span><span>i</span><span>t</span><span>e</span>
+          </div>
+          <p class="mq-boot-tagline">Orchestra of delegated agents</p>
+          <div class="mq-boot-bar" aria-hidden="true"><span></span></div>
+        </div>
+        <ul class="mq-boot-log" aria-hidden="true">
+          <li><span class="mq-boot-log__ok">ok</span> dual-engine core online</li>
+          <li><span class="mq-boot-log__ok">ok</span> agent fleet linked</li>
+          <li><span class="mq-boot-log__ok">ok</span> memory + retrieval warm</li>
+          <li><span class="mq-boot-log__ok">ok</span> tool runtime attached</li>
+          <li><span class="mq-boot-log__ok">ok</span> knowledge graph ready</li>
+        </ul>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

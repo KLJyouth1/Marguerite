@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "岛屿游戏",
+    "title": "玛格丽特小岛",
+    "subtitle": "一座绑定真实引擎状态的开放世界活岛",
+    "controls": "WASD / 方向键行走 · 相机跟随",
+    "canvasAria": "3D 岛场景，可用 WASD 漫游",
+    "engine": {
+      "online": "网关在线",
+      "offline": "网关离线 — 引擎状态隐藏",
+      "mode": "模式",
+      "shards": "分片",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "晴",
+      "rain": "雨",
+      "night": "夜",
+      "fog": "雾"
+    },
+    "day": {
+      "day": "昼",
+      "night": "夜"
+    },
+    "tier": {
+      "high": "高",
+      "medium": "中",
+      "low": "低"
+    },
+    "quest": {
+      "title": "委托板",
+      "advance": "推进",
+      "turnIn": "交付",
+      "complete": "完成",
+      "status": {
+        "posted": "可接",
+        "accepted": "已接",
+        "in_progress": "进行中",
+        "verifying": "可交付",
+        "completed": "完成",
+        "failed": "失败"
+      }
+    },
+    "titles": {
+      "title": "称号",
+      "none": "暂无称号",
+      "zeroWarn": "零警告骑士",
+      "gateKeeper": "门禁征服者",
+      "nightOwl": "夜猫子",
+      "thrifty": "勤俭持家"
+    },
+    "party": {
+      "title": "编队",
+      "aria": "伙伴精灵槽位",
+      "slotAria": "切换伙伴精灵槽 {n}",
+      "scout": "侦察鸦",
+      "smith": "匠蜂",
+      "aegis": "盾龟",
+      "gull": "信鸥"
+    },
+    "theme": {
+      "verdant": "青翠",
+      "blossom": "花见",
+      "twilight": "暮色"
+    },
+    "region": {
+      "garden": "秘境花园",
+      "atrium": "雏菊圣殿",
+      "board": "委托板"
+    },
+    "worldgen": {
+      "title": "世界生成",
+      "label": "描述对岛的改动",
+      "placeholder": "例：一座下雨的花岛，带一个困难副本",
+      "apply": "生成",
+      "rollback": "回滚",
+      "hint": "校验失败 → 保留上一个世界"
+    },
+    "fallback": {
+      "aria": "2D 降级岛图",
+      "note": "WebGL 不可用 — 显示可访问的 2D 岛。"
+    },
+    "world3d": {
+      "canvasAria": "3D 开放世界岛屿场景，支持 WASD 行走与鼠标视角",
+      "controls": "WASD / 方向键行走 · 点击锁定鼠标 · E 拾取",
+      "tierLabel": "模型档位",
+      "tier": {
+        "flagship": "旗舰推理",
+        "efficient": "高效推理",
+        "sprint": "极速产出",
+        "omni": "全模态帕累托"
+      },
+      "connected": "已连接",
+      "offline": "离线",
+      "pending": "待发",
+      "pickup": "拾取",
+      "glow": "辉光",
+      "particles": "粒子",
+      "npcDepth": "对话深度",
+      "npcTitle": "AI NPC 对话",
+      "npcPlaceholder": "想要讨论的话题…",
+      "talk": "对话",
+      "npcDisclaimer": "确定性模板对话（非实时模型输出）",
+      "fallbackNote": "WebGL 不可用 — 显示 2D 降级岛屿。",
+      "prop": {
+        "code_crystal": {
+          "name": "代码结晶",
+          "desc": "工具产出的结晶；拾取后请求分析。"
+        },
+        "doc_scroll": {
+          "name": "文档卷轴",
+          "desc": "已交付的文档；拾取后请求讲解。"
+        },
+        "data_fruit": {
+          "name": "数据果实",
+          "desc": "运行数据结出的果实；拾取后请求洞察。"
+        },
+        "quest_beacon": {
+          "name": "任务灯塔",
+          "desc": "待认领的委托；拾取后认领任务。"
+        },
+        "inspiration_bloom": {
+          "name": "灵感花",
+          "desc": "记忆或创意的绽放；拾取后请求头脑风暴。"
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD 已加载（{count} 项校验通过）",
+      "failed": "GDD 校验失败，保持当前世界配置",
+      "revision": "世界修订号",
+      "errorsLabel": "错误明细",
+      "warningsLabel": "警告明细",
+      "noGdd": "尚未加载 GDD"
+    },
+    "glb": {
+      "statusProcedural": "资产：程序化几何",
+      "statusLoaded": "资产：已热加载 {count} 件（rev {rev}）",
+      "statusFailed": "资产：校验失败",
+      "errorsLabel": "资产校验错误",
+      "revisionLabel": "资产修订号"
+    },
+    "viewMode": {
+      "world3d": "3D 开放世界",
+      "classic": "经典岛屿",
+      "aria": "岛屿视图模式"
+    }
+  },
   "workspaces": {
     "projects": "项目",
     "createProject": "创建项目",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "已保存的产物已损坏或与记录的校验值不一致，请重新发布或下载核查。",
       "invalidContent": "下载的内容与产物类型不一致。",
       "failedDetail": "请重试预览，或下载文件。"
+    },
+    "goal": {
+      "title": "目标进度",
+      "empty": "暂无活动目标。",
+      "loading": "正在加载目标状态…",
+      "refresh": "刷新目标状态",
+      "rounds": "轮次",
+      "tokens": "令牌",
+      "steps": "步骤",
+      "actions": "目标操作",
+      "pause": "暂停",
+      "resume": "继续",
+      "complete": "完成",
+      "status": {
+        "active": "进行中",
+        "paused": "已暂停",
+        "blocked": "已阻塞",
+        "completed": "已完成"
+      }
+    },
+    "task": {
+      "title": "任务进度",
+      "subtitle": "任务运行时步骤会实时更新。",
+      "empty": "暂无进行中的任务步骤。",
+      "refresh": "刷新任务步骤",
+      "steps": "步骤",
+      "stepStatus": {
+        "pending": "待处理",
+        "in_progress": "进行中",
+        "done": "已完成",
+        "failed": "失败"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "插件",
     "graph": "关系图谱",
     "poker": "德州扑克",
-    "pet": "鲸鱼娘"
+    "pet": "鲸鱼娘",
+    "engine": "引擎健康",
+    "ops": "运维",
+    "terminal": "终端",
+    "changelog": "更新日志",
+    "games": "游戏",
+    "expert-center": "专家中心",
+    "editor": "编辑器",
+    "browser-cockpit": "浏览器驾驶舱",
+    "sandbox": "沙箱",
+    "device-twin": "设备孪生",
+    "pet-overlay": "桌宠浮层",
+    "groupCountHint": "{group} 组共 {count} 个入口",
+    "groupWork": "工作",
+    "groupOperate": "运营",
+    "groupObserve": "观测",
+    "groupSettings": "设置",
+    "groupExtras": "扩展",
+    "control-center": "智能中枢",
+    "ssh-collab": "SSH 协同",
+    "capabilities-hub": "能力中心",
+    "local-models": "本地模型中心",
+    "knowledge": "知识库",
+    "wallpaper": "壁纸",
+    "brain": "共享大脑"
   },
   "notFound": {
     "title": "页面未找到",
@@ -258,6 +461,7 @@
     "expandSidebar": "展开侧边栏",
     "collapseSidebar": "收起侧边栏",
     "toggleSidebar": "切换侧边栏",
+    "zenMode": "禅模式",
     "resizeSidebar": "调整侧边栏宽度",
     "sidebarWidthValue": "侧边栏宽度：{width}px，{preset}",
     "sidebarWidthLimitedValue": "侧边栏宽度：{width}px，{preset}；受当前窗口限制（偏好 {preference}px）",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "已连接",
       "connecting": "连接中",
-      "disconnected": "已断开"
+      "disconnected": "已断开",
+      "ready": "就绪",
+      "not_ready": "需配置"
     },
     "bgm": {
       "label": "背景音乐",
@@ -291,7 +497,15 @@
       "light": "浅色",
       "dark": "深色",
       "system": "跟随系统"
-    }
+    },
+    "languageSwitchTitle": "语言：{name} — 切换界面语言",
+    "modeBadge": "运行时模式：{mode}",
+    "modeMenu": "运行时模式菜单",
+    "modeMenuTitle": "运行时模式",
+    "modeMenuCurrent": "当前：{mode}",
+    "modeMenuOpenHub": "打开智能中枢（完整模式管理）",
+    "modeSwitchFailed": "无法切换运行时模式。",
+    "modeMatrix": "模式：强度档 × 工作态"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "界面和渠道系统提示的显示语言。此处立即生效，并保存网关范围内的提示语言。",
       "channelNoticeLocaleSyncPending": "界面语言已切换，但渠道系统提示语言尚未保存。网关重新连接后会自动重试。",
       "toolDetailsLabel": "工具详情默认显示",
+      "chatFontLabel": "对话字号",
+      "chatFontDesc": "只调整对话页的字号；侧栏与设置页不受影响。",
+      "chatFontSmall": "小",
+      "chatFontDefault": "标准",
+      "chatFontLarge": "大",
+      "chatFontXlarge": "特大",
       "toolDetailsDesc": "自动模式按工具类型显示；紧凑模式折叠普通工具；展开模式打开全部工具。错误默认自动展开，仍可手动折叠。",
       "toolDetailsAuto": "自动",
       "toolDetailsCompact": "紧凑",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "当前桌面端宽度：{current}px。",
       "sidebarWidthClampedStatus": "已保存 {saved}px；当前窗口使用 {current}px。",
       "sidebarWidthCompactStatus": "紧凑布局使用 {current}px。已保留桌面端偏好 {saved}px。",
-      "sidebarWidthDrawerStatus": "抽屉布局使用 {current}px。已保留桌面端偏好 {saved}px。"
+      "sidebarWidthDrawerStatus": "抽屉布局使用 {current}px。已保留桌面端偏好 {saved}px。",
+      "bootAnimationLabel": "启动画面",
+      "bootAnimationDesc": "控制台启动期间显示的启动画面。完全：播放智能体星座编排（标记、舰队节点、启动日志）；简洁：仅保留静态标记；关闭：完全跳过。再次选择「完全」可重播编排。系统要求减少动态效果时会自动降级。",
+      "bootAnimationFull": "完全",
+      "bootAnimationMinimal": "简洁",
+      "bootAnimationOff": "关闭"
     },
     "dataMigration": {
       "title": "数据与备份",
@@ -732,7 +957,8 @@
       "pet": "宠物",
       "communityPlugins": "社区插件",
       "graph": "关系图谱",
-      "collabSsh": "企业协同与 SSH"
+      "collabSsh": "企业协同与 SSH",
+      "doctor": "医生"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "企业协同与 SSH",
         "desc": "企业级远程协同（Track G CRDT）与 SSH 部署能力。",
         "hint": "协同由 yrs CRDT 引擎（awareness + RBAC）驱动；SSH 经网关与 CLI 提供部署/隧道/批命令执行。",
-        "open": "打开总览"
+        "open": "打开总览",
+        "localNote": "Marguerite 的网关只监听回环地址（127.0.0.1），因此跨机协同需要先建一条私有网络。",
+        "vpnTitle": "用 Radmin VPN 组网",
+        "step1": "在两台机器上安装 Radmin VPN 并创建一个网络：",
+        "download": "下载 Radmin VPN",
+        "step2": "在另一台机器上用网络名称与密码加入同一网络。",
+        "step3": "查看 Radmin 分配给本机的虚拟 IP（26.x.x.x）。",
+        "step4": "保持网关只绑回环，通过 SSH 隧道访问，不要把它暴露出去。",
+        "step5": "开始会话前先确认对端能连上。",
+        "copy": "复制",
+        "copied": "已复制",
+        "securityTitle": "安全边界",
+        "sec1": "网关始终留在 127.0.0.1 —— 私有网络只承载 SSH，不承载控制台。",
+        "sec2": "不要为了让协同能用就把网关绑到 0.0.0.0。",
+        "sec3": "使用密钥认证；密码与令牌不要进入仓库。",
+        "docs": "Radmin VPN 文档"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "没有匹配的模型 — 可以直接使用输入的内容。",
       "modelListTruncated": "显示 {total} 个模型中的 {shown} 个 — 继续输入以缩小范围。",
       "modelProvenance": "服务商实时列表 · 能力来源：{sources}",
-      "modelMetadataProvenance": "服务商实时列表 · 官网参数优先，缺失时使用目录值"
+      "modelMetadataProvenance": "服务商实时列表 · 官网参数优先，缺失时使用目录值",
+      "emptyStep1": "添加你的第一个模型提供商，并粘贴其 API Key 以验证凭据。",
+      "emptyStep2": "连接提供商以验证凭据并选择可用模型。",
+      "emptyStep3": "选择你希望在全应用范围内使用的模型。"
     },
     "preset": {
       "summary": "路由模板：{label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "用于需要鉴权的网关的 Bearer 令牌。仅存储在此标签页中。",
       "reconnect": "重新连接",
       "connect": "连接",
-      "disconnect": "断开"
+      "disconnect": "断开",
+      "rbacBoundaryNote": "角色访问控制用于防止误操作，但无法防御可修改网关配置或进程本身的本地恶意用户。"
     },
     "runtime": {
       "title": "运行时",
@@ -1739,6 +1984,8 @@
       "reload": "重新加载",
       "descReloadSuffix": "的项目会在刷新页面后生效。",
       "foldLabel": "新版实时回合渲染",
+      "autostartLabel": "开机自启动",
+      "autostartDesc": "登录系统后自动启动 Marguerite（仅桌面端可用）。",
       "foldDesc": "根据有序事件日志渲染流式工作卡片；仅在需要临时回退兼容渲染时关闭。",
       "foldAria": "新版实时回合渲染（重新加载后生效）",
       "revealLabel": "答案显示窗口（毫秒）",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "停止安装与每日用量遥测、后台更新检查，以及仅发往官方 TokenRhythm HTTPS API 的会话级伪匿名标识和默认发送的可选跨会话 X-Marguerite-Install-Id 请求头。该持久化安装 ID 可能由本机 MAC/IP 派生，但绝不发送原始地址；CI/测试环境与旧遥测退出开关也会抑制它，单独关闭更新检查则不会。你主动发起的模型请求不受影响。",
       "memoryAutoCaptureLabel": "自动记忆",
       "memoryAutoCaptureDesc": "允许 Marguerite 将对话中有用的信息保存到长期记忆。",
-      "save": "保存隐私设置"
+      "save": "保存隐私设置",
+      "permissionBoundaryNotice": "本系统权限用于防止误操作，不用于防御本地恶意用户。所有数据存储在本机，离开回环网络前请先配置真实认证。"
     },
     "toast": {
       "loadFailed": "加载设置失败：{error}",
@@ -2070,6 +2318,24 @@
           "Encoding AES key。"
         ]
       }
+    },
+    "ops": {
+      "sshSession": "SSH 会话",
+      "terminal": "终端",
+      "exportDiagnostics": "导出诊断",
+      "diagnosticsCopied": "诊断已复制",
+      "diagnosticsCopyFailed": "复制失败：{error}",
+      "hostRequired": "需先选择主机"
+    },
+    "doctor": {
+      "title": "医生",
+      "desc": "网关就绪状态、能力发现项与 CLI 修复命令。只读——此处不保存任何内容。",
+      "refresh": "刷新",
+      "runDeep": "运行深度检查",
+      "loading": "正在运行健康检查…",
+      "noFindings": "未返回任何发现项。网关未报告任何问题。",
+      "errorTitle": "无法加载健康报告",
+      "retry": "重试"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "更新于 {time}",
       "transcriptPreview": "记录预览",
       "transcriptError": "无法加载记录。",
+      "workspaceBound": "已绑定项目目录",
+      "workspaceUnbound": "未绑定项目目录",
+      "workspaceMissing": "目录不存在",
       "loadingTranscript": "正在加载记录…",
       "loadEarlier": "加载更早",
       "loading": "加载中…",
@@ -2201,6 +2470,19 @@
       "abortDone": "运行已中止。",
       "abortNone": "没有可中止的运行。",
       "abortFailed": "中止失败。"
+    },
+    "reasoning": {
+      "effortLabel": "思考强度",
+      "effortInherit": "继承全局配置",
+      "effortOff": "关闭",
+      "effortNormal": "普通",
+      "effortDeep": "深度",
+      "effortMax": "极限",
+      "contextLabel": "上下文长度",
+      "contextPlaceholder": "继承",
+      "inheritHint": "留空（或上下文长度填 0）= 继承全局模型配置",
+      "saveDone": "会话推理设置已保存。",
+      "saveFailed": "保存会话推理设置失败。"
     },
     "overview": {
       "title": "状态",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count} 个",
       "toolsLoading": "正在加载工具目录…",
       "baotaCredentials": "配置凭据",
-      "baotaCredentialsTitle": "配置宝塔面板地址、账号与密码，调用前自动登录"
+      "baotaCredentialsTitle": "配置宝塔面板地址、账号与密码，调用前自动登录",
+      "mcpProbe": "探测工具",
+      "mcpProbing": "探测中…",
+      "mcpToolsCount": "{count} 个工具",
+      "toolsPatchTitle": "工具启停（补丁层）",
+      "toolsPatchHint": "改动在智能体的下一轮生效，无需重启",
+      "toolsPatchEnable": "已启用",
+      "toolsPatchDisable": "已停用",
+      "toolsPatchInactive": "以下名字在当前工具面不存在：{names}"
     },
     "autoPropose": {
       "title": "自动提议设置",
@@ -3481,7 +3771,9 @@
         "probing": "正在探测",
         "paused": "空闲超时，等待下一条消息",
         "stopped": "未命中或出错后已停止"
-      }
+      },
+      "cacheHits": "缓存命中",
+      "cacheHitsHint": "上一次请求命中缓存的 token 数"
     },
     "send": "发送",
     "sendQueues": "发送（排队等待当前回复结束）",
@@ -3747,7 +4039,10 @@
       },
       "more": "另有 {count} 项",
       "stale": "仍在工作 —— 暂无新信号",
-      "liveStep": "第 {n} 步"
+      "liveStep": "第 {n} 步",
+      "memoryRecall": "跨项目记忆召回 · {count} 条命中",
+      "stepRound": "第 {round} 轮工具调用",
+      "stepRoundDone": "第 {round} 轮工具调用结束 · {reason}"
     },
     "suggestedTasks": "推荐任务",
     "greetingMorning": "早上好。",
@@ -3818,7 +4113,13 @@
         "settingsHint": "可前往“设置 > 沙箱 > 文件安全”开启备份。",
         "unavailableTitle": "当前没有可用备份",
         "unavailableBody": "此操作将无法恢复。只有在你接受永久丢失数据时才继续。"
-      }
+      },
+      "intent": "意图预览",
+      "intentAction": "操作类型",
+      "intentObject": "目标对象",
+      "intentScope": "影响范围",
+      "intentIrreversible": "可逆性",
+      "intentIrreversibleYes": "不可逆"
     },
     "plan": {
       "label": "实施方案",
@@ -3839,7 +4140,27 @@
       "actionFailed": "方案操作失败：{error}",
       "revisionMissing": "该方案记录已失效（会话数据可能被清理），请让模型重新生成方案后再操作。",
       "revisePromptPlaceholder": "说明方案需要如何调整",
-      "reviseSend": "修改方案"
+      "reviseSend": "修改方案",
+      "editing": "编辑中",
+      "dependsOn": "依赖",
+      "renameStep": "重命名",
+      "removeStep": "删除步骤",
+      "addStep": "添加步骤",
+      "stepTitlePlaceholder": "步骤标题",
+      "saveStep": "添加",
+      "cancel": "取消",
+      "reuseLast": "继续上次计划《{title}》",
+      "cancelStep": "取消",
+      "strategyLabel": "编排形态",
+      "rationaleLabel": "决策理由",
+      "revisionFull": "版本 {id}（完整标识）",
+      "strategy": {
+        "solo": "单 Agent",
+        "dual-leader": "双领队",
+        "expert-team": "专家团队",
+        "cluster": "集群",
+        "pipeline": "交付流水线"
+      }
     },
     "planRun": {
       "title": "方案执行",
@@ -3874,7 +4195,14 @@
       "preflight": "执行前清单",
       "parallel": "并行子任务",
       "replanned": "已重新规划",
-      "replanDetail": "基于观测重新拆解为 {steps} 步 · 新修订 {revision}"
+      "replanDetail": "基于观测重新拆解为 {steps} 步 · 新修订 {revision}",
+      "eta": "约剩 {eta}",
+      "elapsed": "已用 {elapsed}",
+      "replannedAhead": "已前瞻跳步",
+      "replanAdvanceDetail": "观测命中后续步骤「{step}」· 已跳过 {count} 步",
+      "parallelSimulated": "并行（模拟）",
+      "parallelStepDuration": "本步耗时 {duration}",
+      "parallelStepRetries": "重试 {count} 次"
     },
     "planMode": {
       "label": "Plan 模式",
@@ -3936,8 +4264,8 @@
       "modelRoutingSquillaRouterDesc": "由 AI 为每轮智能选择一个合适模型，优先降低成本。",
       "modelRoutingEnsemble": "AI 智能融合路由",
       "modelRoutingEnsembleDesc": "由 AI 协调多个模型协同生成，优先提升复杂任务能力。",
-      "modelRoutingBloomEnsemble": "Bloom 融合路由",
-      "modelRoutingBloomEnsembleDesc": "融合路由 + AI 自动编排形态（Solo Agent / MAX 双带队 / 专家团队），优先提升复杂任务能力。",
+      "modelRoutingBloomEnsemble": "深度融合路由",
+      "modelRoutingBloomEnsembleDesc": "融合路由 + AI 自动编排形态（单智能体 / 双领队 / 专家团队），优先提升复杂任务能力。",
       "runMode": "执行模式",
       "runModeSafe": "安全模式",
       "runModeSafeDesc": "在沙箱中运行，并遵循你的安全规则。",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "允许直接访问文件、网络和系统，不再逐次询问。",
       "runModeFullUnavailable": "完全访问仅供会话所有者使用。",
       "runModeLocked": "运行中，当前会话无法修改",
-      "badgeNew": "新"
+      "badgeNew": "新",
+      "modelRoutingOmniDesc": "由单一编排智能体在每一轮协调当前最优的可用模型。",
+      "modelRoutingOmni": "极致编排路由",
+      "runModePanel": "运行模式与路由",
+      "thinking": "深度思考",
+      "modeShort": {
+        "safe": "安全",
+        "full": "完全",
+        "plan": "计划",
+        "default": "默认",
+        "off": "关",
+        "squilla": "路由",
+        "ensemble": "融合",
+        "bloom": "打磨",
+        "omni": "全谱"
+      }
     },
     "pending": {
       "label": "待发送 {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "参与融合的模型"
     },
     "modelRouting": {
-      "updateFailed": "切换模型路由失败，已恢复原设置。请检查网关连接后重试。"
+      "updateFailed": "切换模型路由失败，已恢复原设置。请检查网关连接后重试。",
+      "effective": "模型路由已切换 — 当前生效 {mode}。",
+      "mismatch": "模型路由未按请求切换：请求 {requested}，实际生效 {actual}。"
     },
     "routeFeedback": {
       "up": "这次路由选对了",
@@ -4170,6 +4515,115 @@
       "reject": "拒绝",
       "empty": "暂无文件更改",
       "loadFailed": "文件更改加载失败"
+    },
+    "persona": {
+      "current": "当前专家：{name}",
+      "newSession": "新专家会话"
+    },
+    "presets": {
+      "label": "模式",
+      "triggerHint": "选择工作模式：强度档 × 工作态",
+      "lockedHint": "运行中不可切换模式（仍可查看当前档位）",
+      "advanced": "高级",
+      "advancedHint": "展开完整模式 / 沙箱 / 路由选项",
+      "autoModel": "自动模型",
+      "autoModelOn": "破甲",
+      "autoModelOff": "关闭",
+      "autoModelHint": "自动选用当前最强可用模型，并按任务自动编排（含融合 / 蜂群）"
+    },
+    "waitIndicator": {
+      "running": "仍在运行",
+      "toolRunning": "等待工具执行完成",
+      "approvalPending": "等待你的审批",
+      "ensemble": "多候选融合进行中"
+    },
+    "emptyLead": "智能体、子代理、工具、记忆与知识库 — 同一编排，更省 token，代码更高质量。",
+    "orbit": {
+      "agent": "智能体",
+      "subagent": "子代理",
+      "tools": "工具",
+      "memory": "记忆",
+      "knowledge": "知识库"
+    },
+    "errors": {
+      "apiKeyMissing": "未配置 API Key。请打开设置并填写服务商 API Key 后再开始对话。",
+      "authFailed": "上游模型服务拒绝了你的 API Key。请前往设置修复，或直接重试。",
+      "rateLimited": "上游模型服务正在限流，请稍后重试。",
+      "network": "无法连接上游模型服务（网络错误或超时），请重试。",
+      "server": "上游模型服务返回服务器错误，请稍后重试。",
+      "timeout": "上游模型服务响应超时，请重试。",
+      "other": "请求上游模型服务失败，请重试。",
+      "planStepFailed": "计划的「{step}」这一步执行失败。可查看日志了解详情，或调整方案后重试。",
+      "planStepFailedGeneric": "计划中的某一步执行失败。可查看日志了解详情，或调整方案后重试。",
+      "planStepArtifactMissing": "计划的「{step}」这一步没有产出预期的文件。可查看日志了解详情，或调整方案后重试。",
+      "planStepArtifactMissingGeneric": "计划中的某一步没有产出预期的文件。可查看日志了解详情，或调整方案后重试。",
+      "planCompletionBlocked": "计划已执行结束，但未通过完成检查，已标记为部分完成。可查看日志了解详情。",
+      "hostExited": "宿主进程已退出，退出码 {exit_code}，存活 {uptime_ms}。",
+      "hostExitedNoCode": "宿主进程被信号终止，存活 {uptime_ms}。",
+      "hostExitedGeneric": "宿主进程意外退出。",
+      "hostExitCodeLabel": "退出码",
+      "hostExitUptimeLabel": "存活时长",
+      "hostExitStderrLabel": "错误输出（stderr）"
+    },
+    "errorActions": {
+      "viewLogs": "查看日志",
+      "replan": "改计划",
+      "openSettings": "前往设置",
+      "retry": "重试"
+    },
+    "escalation": {
+      "title": "需要您确认",
+      "requiredFor": "需要确认：{reason}",
+      "neededFor": "需要确认：{reason}",
+      "operation": "操作",
+      "suggestedAction": "建议操作",
+      "continue": "继续执行",
+      "abort": "中止",
+      "trigger": {
+        "high_impact_side_effect": "高影响副作用",
+        "intent_ambiguity": "意图存在歧义",
+        "timeout": "操作超时",
+        "budget_exceeded": "成本超预算"
+      }
+    },
+    "collapse": "收起",
+    "expand": "展开",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "任务",
+        "artifacts": "产物",
+        "changes": "更改",
+        "tree": "树"
+      },
+      "tasksEmpty": "发送消息后，任务步骤将实时显示在这里",
+      "artifactsDiagnostic": "检测到 {count} 个未载入产物",
+      "artifactsEmptyLead": "本次会话还没有生成产物",
+      "artifactsEmptySub": "发送任务，让 Marguerite 为你产出文档、表格或代码",
+      "artifactsCompose": "发送任务",
+      "artifactsReload": "重新载入",
+      "artifactsRunningHint": "运行中，任务完成后即可开始新任务",
+      "artifactOpenInApp": "在 Marguerite 内预览 / 编辑",
+      "artifactOpenSystem": "用系统程序打开",
+      "artifactMore": "更多操作",
+      "artifactPreview": "预览",
+      "artifactEdit": "编辑",
+      "artifactSystemOpen": "系统打开",
+      "artifactCopyPath": "复制路径",
+      "artifactCopied": "已复制产物路径",
+      "artifactCopyFailed": "复制失败，请手动复制路径",
+      "statusReady": "就绪",
+      "statusUpdating": "更新中",
+      "statusStale": "已过期",
+      "changesEmpty": "更改（+/- 行数）将显示在这里",
+      "treeUpDir": "上级目录",
+      "treeRoot": "工作区根目录",
+      "treeRefresh": "刷新",
+      "treeLoading": "加载中…",
+      "treeEmptyDir": "（空目录）",
+      "widen": "窄栏",
+      "narrow": "宽栏",
+      "collapse": "折叠侧边栏",
+      "expand": "展开侧边栏"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "打开设置",
       "actionToggleTheme": "切换主题",
       "actionBgmEnable": "开启背景音乐",
-      "actionBgmDisable": "关闭背景音乐"
+      "actionBgmDisable": "关闭背景音乐",
+      "actionModeSwitch": "切换模式：{mode}",
+      "modeActive": "当前"
     },
     "toast": {
       "dismiss": "关闭通知"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "删除已选",
       "bulkDeleteDone": "已删除 {count} 个任务",
       "bulkDeletePartial": "{count} 个任务删除失败",
-      "bulkDeleteFailed": "删除已选任务失败"
+      "bulkDeleteFailed": "删除已选任务失败",
+      "showMore": "显示更多（还有 {count} 条）",
+      "showLess": "收起"
     },
     "setupBanner": {
       "ariaLabel": "需要设置网关",
@@ -4379,7 +4837,425 @@
       "window_focus": "窗口聚焦",
       "cursor_pos": "光标位置",
       "key_state": "按键状态",
-      "idle_time": "空闲时间"
+      "idle_time": "空闲时间",
+      "locate": "按描述定位"
+    },
+    "descriptionLabel": "目标描述",
+    "descriptionPlaceholder": "例如：右上角的搜索框",
+    "visionLabel": "视觉定位",
+    "autoClickLabel": "定位后自动点击",
+    "patchLabel": "分块定位（高 DPI）",
+    "modeLabel": "采集范围",
+    "maxEdgeLabel": "长边上限（像素）",
+    "maxEdgePlaceholder": "0 = 原始分辨率",
+    "captureMode": {
+      "primary": "主显示器",
+      "all": "全部显示器",
+      "window": "活动窗口"
+    },
+    "groundingTitle": "定位结果",
+    "groundingConfidence": "置信度 {value}",
+    "groundingLowConfidence": "低置信度",
+    "groundingDescription": "目标：{description}",
+    "visionUnavailable": "当前未配置视觉模型，本次未执行任何动作。请选择支持视觉的模型并填写 API Key 后重试。"
+  },
+  "boot": {
+    "orchestraAria": "Marguerite 正在启动",
+    "orchestraTagline": "智能体、子代理、工具、记忆与知识库 — 同一编排面苏醒。",
+    "enterWorkspace": "进入工作台",
+    "pressEnter": "或按 Enter"
+  },
+  "island": {
+    "title": "岛屿工作台",
+    "subtitle": "把智能体运行看成一座岛：工坊是工具调用，哨所是子代理，灯塔是路由策略，栈桥是计划进度。",
+    "status": {
+      "idle": "空闲",
+      "running": "运行中",
+      "queued": "排队中",
+      "failed": "失败",
+      "success": "已完成",
+      "error": "出错",
+      "waiting": "等待中",
+      "offline": "未连接"
+    },
+    "quality": {
+      "high": "完整 3D",
+      "low": "轻量 3D",
+      "medium": "均衡 3D",
+      "fallback": "精简模式（2D）",
+      "fallbackNote": "当前环境没有 WebGL，已切换为 2D 示意图（数据完全一致）。",
+      "contextLost": "3D 上下文已丢失，已切换为 2D 示意图。",
+      "specInvalid": "岛屿规格非法，已拒绝渲染并切换为 2D 示意图。"
+    },
+    "controls": {
+      "reset": "复位视角",
+      "focus": "聚焦",
+      "autoDayNight": "自动昼夜",
+      "daylight": "日照时刻",
+      "skin": "皮肤",
+      "openInWorkbench": "在工作台打开",
+      "hint": "拖拽旋转 · 滚轮缩放 · 右键（或 Shift）拖拽平移 · 点击建筑看详情 · 双击聚焦 · 键盘：方向键绕行、Shift+方向键平移、+/- 缩放、0 复位、Esc 关详情"
+    },
+    "detail": {
+      "status": "状态",
+      "source": "详情",
+      "progress": "进度",
+      "openChat": "在对话中打开",
+      "empty": "点击建筑查看它的实时数据",
+      "close": "关闭",
+      "duration": "耗时",
+      "flavor": "工位形态",
+      "toolId": "工具 ID",
+      "childKey": "子会话",
+      "artifactKind": "产物类型",
+      "artifactId": "产物 ID",
+      "sessionKey": "会话",
+      "taskTitle": "任务",
+      "strategy": "编排策略",
+      "members": "融合成员",
+      "steps": "计划步骤",
+      "recallQuery": "召回查询",
+      "recallHits": "命中记忆",
+      "recallTopScore": "最高相似度",
+      "reinforced": "强化突触",
+      "memoryIds": "记忆条目",
+      "stage": "工序",
+      "floors": "楼层"
+    },
+    "flavor": {
+      "mill": "作坊",
+      "forge": "熔炉",
+      "library": "书库",
+      "observatory": "观象台"
+    },
+    "legend": {
+      "title": "岛上现状",
+      "plan": "计划栈桥"
+    },
+    "empty": {
+      "hint": "还没有运行数据 —— 开始一个任务，岛屿会自己长出来。"
+    },
+    "kind": {
+      "core": "中央主堡",
+      "workshop": "工坊",
+      "outpost": "哨所",
+      "depot": "仓库",
+      "beacon": "灯塔",
+      "pier": "栈桥",
+      "athenaeum": "记忆塔",
+      "construction": "施工地块"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "地基",
+        "structure": "结构",
+        "frame": "框架",
+        "facade": "外墙",
+        "windows": "窗户",
+        "interior": "装修",
+        "finished": "完工"
+      },
+      "timeline": "施工日",
+      "day": "日"
+    }
+  },
+  "sandbox": {
+    "title": "微缩沙盘",
+    "subtitle": "把闭环列车运行图做成任务流转的数字孪生：始发、越江、终到、停站、再发车。",
+    "kind": {
+      "train": "列车"
+    },
+    "train": {
+      "label": "列车 {n}"
+    },
+    "station": {
+      "A": "A 站",
+      "B": "B 站"
+    },
+    "phase": {
+      "dwell": "站台停靠",
+      "departing": "始发出站",
+      "cruise": "区间运行",
+      "arriving": "进站减速"
+    },
+    "controls": {
+      "play": "播放",
+      "pause": "暂停",
+      "speed": "倍速",
+      "timeline": "时间轴",
+      "dayNight": "昼夜",
+      "rain": "小雨",
+      "resetView": "回到起点"
+    },
+    "detail": {
+      "close": "关闭"
+    },
+    "empty": {
+      "pickTrain": "点击列车，查看它现在在做什么、下一步做什么"
+    },
+    "quality": {
+      "fallbackNote": "当前环境不可用 WebGL，环线以 2D 示意图呈现 —— 运行图数据完全一致。",
+      "contextLost": "3D 上下文已丢失，已切换为 2D 示意图。"
+    }
+  },
+  "task": {
+    "title": "任务工作区",
+    "subtitle": "任务运行时，逐步查看每个步骤与交付物。",
+    "empty": "当前没有正在运行的任务。从对话页发起一个任务后，此处会自动跟踪。",
+    "refresh": "刷新任务",
+    "steps": "步骤",
+    "deliverables": "交付物",
+    "status": "状态",
+    "mode": "模式",
+    "elapsed": "耗时",
+    "artifacts": {
+      "empty": "暂无交付物。文件生成后会立即显示在这里。"
+    },
+    "runStatus": {
+      "idle": "空闲",
+      "running": "运行中",
+      "completed": "已完成",
+      "partial": "部分完成",
+      "failed": "失败"
+    },
+    "modeImpact": {
+      "title": "模式影响",
+      "route": "路由",
+      "strategy": "策略"
+    },
+    "stepStatus": {
+      "pending": "待处理",
+      "in_progress": "进行中",
+      "done": "已完成",
+      "failed": "失败"
+    },
+    "gate": {
+      "title": "质量门禁",
+      "searchValid": "检索结果有效",
+      "artifactsComplete": "交付物齐全",
+      "missing": "缺少：{items}",
+      "verdict": {
+        "pass": "通过",
+        "partial": "部分通过",
+        "fail": "未通过"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "欢迎使用 Marguerite",
+      "welcomeSubtitle": "连接一个模型提供商即可开始对话。配置约需 30 秒。",
+      "featureLocal": "本地运行 — 数据始终留在你的机器上",
+      "featureMultiProvider": "支持 OpenAI、Anthropic、DeepSeek、OpenRouter 等",
+      "featureAgent": "多模式智能体，支持计划、集成与绽放工作流",
+      "getStarted": "开始配置",
+      "exploreSettings": "浏览设置",
+      "chooseProvider": "选择提供商",
+      "chooseProviderHint": "选择你已有 API Key 的提供商。后续可随时更换。",
+      "loadingProviders": "正在加载提供商列表...",
+      "seeAllProviders": "在设置中查看全部提供商",
+      "configureProvider": "配置 {provider}",
+      "apiKey": "API 密钥",
+      "apiKeyPlaceholder": "在此粘贴你的 API Key",
+      "apiKeyOrEnvHint": "粘贴 Key 或使用 {envKey} 环境变量",
+      "useEnvInstead": "改用环境变量",
+      "modelPlaceholder": "例如 gpt-4o、deepseek-chat",
+      "verifyAndSave": "验证并保存",
+      "verifying": "正在验证...",
+      "ready": "配置完成！",
+      "readyHint": "你的提供商已配置并通过验证。开始新对话即可使用。",
+      "savedButProbeFailed": "已保存 — 验证待确认",
+      "savedButProbeFailedHint": "凭据已保存。验证探测未能连接提供商（网络或限流）。请尝试发送一条消息确认。",
+      "startUsing": "开始使用 Marguerite",
+      "openSettings": "打开设置",
+      "advancedSettings": "高级设置",
+      "back": "返回",
+      "errors": {
+        "configure": "无法保存提供商配置。请重试或通过设置页面完成。"
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "初始化中",
+    "gatewayLoading": "网关正在加载运行时配置，请稍候...",
+    "setupNeeded": "需要配置",
+    "setupNeededHint": "网关已连接但未完成配置。请设置模型提供商以开始对话。",
+    "gotoTopbarBadge": "顶栏徽标可切换模式",
+    "bloomParallelOff": "蜂群并行当前关闭。切换到 Bloom 模式即可启用。"
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "极简·咨询",
+      "minimal_plan": "极简·方案",
+      "minimal_doit": "极简·执行",
+      "standard_ask": "标准·咨询",
+      "standard_plan": "标准·方案",
+      "standard_doit": "标准·执行",
+      "extreme_ask": "极致·咨询",
+      "extreme_plan": "极致·方案",
+      "extreme_doit": "极致·执行"
+    },
+    "userModeHint": {
+      "minimal_ask": "快问快答·低成本",
+      "minimal_plan": "轻量规划",
+      "minimal_doit": "单智能体直做",
+      "standard_ask": "常规问答",
+      "standard_plan": "结构化方案",
+      "standard_doit": "多模型融合",
+      "extreme_ask": "深度研答",
+      "extreme_plan": "专家团协作拆解",
+      "extreme_doit": "蜂群协同·深推"
+    },
+    "alias": {
+      "plan": "安全探索",
+      "agent": "日常协作",
+      "ensemble": "多候选融合",
+      "bloom": "深度打磨",
+      "omni-transcend": "全知超验"
+    },
+    "hint": {
+      "plan": "只读探索 · 先出书面计划，审批后才执行",
+      "agent": "默认模式 · 只读自由，写操作请求确认",
+      "ensemble": "多候选并行 · MAX 四阶段融合择优",
+      "bloom": "声明式思考深度与验证遍数",
+      "omni-transcend": "全知超验 · 跨模态综合推理"
+    },
+    "intensity": {
+      "minimal": "极简",
+      "standard": "标准",
+      "extreme": "极致"
+    },
+    "working": {
+      "ask": "咨询",
+      "plan": "方案",
+      "doit": "执行"
+    }
+  },
+  "deviceTwin": {
+    "title": "设备 3D 数字孪生",
+    "teaching": "教学模拟 · 非实测",
+    "demo": "演示数据 · 未连接真实设备",
+    "viewLabel": "视图状态",
+    "state": {
+      "product": "整机",
+      "open": "开合",
+      "explode": "爆炸",
+      "section": "剖面",
+      "cycle": "循环",
+      "inspect": "特写"
+    },
+    "fallback": "精简模式：WebGL 不可用，显示 2D 示意图",
+    "partInfo": "部件档案",
+    "selectHint": "点击部件查看档案",
+    "thermal": "热仿真（教学）",
+    "cabTemp": "箱内温度",
+    "condTemp": "冷凝器温度",
+    "compressor": "压缩机",
+    "on": "运行",
+    "off": "停机",
+    "energy": "累计耗电"
+  },
+  "plugins": {
+    "title": "插件与技能",
+    "subtitle": "PluginSlot 统一注册槽 — 工具 / 技能 / MCP / 命令的统一发现、调用与创建",
+    "searchPlaceholder": "搜索插件…",
+    "refresh": "刷新",
+    "createSkill": "创建技能",
+    "openInWorkbench": "在工作台打开",
+    "empty": "无匹配插件",
+    "loadFailed": "加载失败：{error}",
+    "skill": {
+      "formTitle": "创建新技能",
+      "nameLabel": "技能标识（英文）",
+      "namePlaceholder": "如 my-skill",
+      "descriptionLabel": "描述",
+      "descriptionPlaceholder": "技能的简短描述",
+      "triggersLabel": "触发词（逗号分隔，可选）",
+      "triggersPlaceholder": "如 翻译,translation",
+      "promptLabel": "Prompt 模板（可用 text 等变量）",
+      "promptPlaceholder": "你是一个专业的翻译专家。请将以下文本翻译为英文：[[text]]",
+      "cancel": "取消",
+      "save": "保存技能",
+      "saving": "创建中…",
+      "requiredFields": "请填写所有必填字段",
+      "createFailed": "创建失败：{error}"
+    },
+    "assembly": {
+      "title": "插件装配状态（plugins.status · 启动装配）",
+      "refresh": "刷新装配",
+      "summary": "已装配 {assembled} / 已安装 {installed} 个插件 · patch {patches}（applied {applied}，skipped {skipped}，errors {errors}）",
+      "statusFailed": "装配状态加载失败：{error}",
+      "columnManifest": "清单",
+      "columnMode": "模式",
+      "columnStatus": "装配状态",
+      "columnSlot": "来源槽位",
+      "modeDeclarative": "声明式·未装配",
+      "modeNative": "原生",
+      "assembled": "已装配",
+      "notAssembled": "未装配",
+      "patchReport": "patch 装配报告"
+    },
+    "market": {
+      "title": "插件市场（DSH 生态 + 第三方导入）",
+      "auditAll": "批量安全审计",
+      "installAll": "批量安装全部插件",
+      "auditFailed": "审计失败",
+      "auditDone": "批量审计完成：{count} 项，红线可疑 {suspects} / 高危能力 {risks}",
+      "noFindings": "无红线/高危项",
+      "columnPlugin": "插件",
+      "columnVersion": "版本",
+      "columnVerdict": "判定",
+      "columnCapabilities": "能力/钩子",
+      "columnFindings": "审计结论",
+      "tabAll": "全部",
+      "tabPlugin": "插件",
+      "tabSkill": "技能",
+      "tabHarness": "Harness 生态",
+      "catalogTitle": "本地清单目录（{count} 项，market.list）",
+      "kindPlugin": "插件",
+      "kindSkill": "技能",
+      "declarativeOnly": "声明式 · 未装配",
+      "declarativeOnlyHint": "已声明但尚未装配到运行期（manifest 无 entry）：能力已登记，运行期不生效",
+      "install": "安装",
+      "export": "导出",
+      "importSuccess": "导入成功：{name} v{version} — {message}",
+      "importFailed": "导入失败：{error}",
+      "exportSuccess": "已导出清单 {name}（内容已填入下方文本框，可复制分享）",
+      "exportFailed": "导出失败",
+      "batchResult": "批量安装 {ok}/{total} 成功（运行期注册随网关重启生效）"
+    },
+    "harness": {
+      "catalogTitle": "DeepSeek Harness 生态（{count} 个上游仓库 · 蒸馏蓝图，market.harness）",
+      "distillTarget": "蒸馏去向",
+      "aligned": "DeepSeek 生态对齐"
+    },
+    "sources": {
+      "title": "下载源（deepseek harness 生态 · market.sources）",
+      "refresh": "刷新下载源",
+      "kindExternalRepo": "第三方仓库",
+      "kindCatalog": "清单目录",
+      "importTitle": "导入插件清单（第三方 / 第四方生态；红线字段默认拒绝）",
+      "importPlaceholder": "粘贴 plugin.json 内容，例如声明 name、version 与 description 的清单",
+      "importAck": "我已确认红线字段风险（ack）",
+      "importAction": "导入",
+      "refreshMarket": "刷新市场"
+    },
+    "verdict": {
+      "clean": "通过",
+      "warn": "警告",
+      "broken": "损坏"
+    },
+    "ecosystem": {
+      "computerUse": "计算机操作",
+      "harness": "Harness 生态"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "最小化窗口",
+      "maximize": "最大化窗口",
+      "restore": "还原窗口",
+      "close": "关闭窗口"
     }
   }
 }

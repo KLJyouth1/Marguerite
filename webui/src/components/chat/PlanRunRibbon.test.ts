@@ -31,6 +31,8 @@ const i18n = createI18n({
           cancelling: 'Cancelling…',
           endPlan: 'End plan',
           endingPlan: 'Ending plan…',
+          eta: 'About {eta} left',
+          elapsed: '{elapsed} elapsed',
           status: {
             queued: 'Queued',
             running: 'Running',
@@ -49,8 +51,12 @@ const i18n = createI18n({
           },
           preflight: 'Pre-flight checklist',
           parallel: 'Parallel subtasks',
+          parallelStepDuration: 'Step took {duration}',
+          parallelStepRetries: 'Retried {count}×',
           replanned: 'Replanned',
           replanDetail: 'Re-decomposed into {steps} steps from observations · revision {revision}',
+          replannedAhead: 'Skipped ahead',
+          replanAdvanceDetail: 'Observation matched a later step “{step}” · skipped {count} steps',
         },
       },
     },
@@ -838,6 +844,51 @@ describe('PlanRunRibbon', () => {
     expect(items[1]?.textContent).toContain('Build failed')
   })
 
+  it('shows real per-step duration and retry chips only when the runner reported them', async () => {
+    const host = mountRibbon(run({
+      parallelBatch: {
+        status: 'completed',
+        successful: 2,
+        failed: 0,
+        total: 2,
+        results: [
+          // 真实耗时 + 发生过重试 → 两个徽标都在
+          { stepId: 'inspect', title: 'Inspect', status: 'completed', summary: 'Done', elapsedMs: 12340, attempts: 3 },
+          // 无耗时数据 → 不渲染任何徽标（绝不补 0 冒充）
+          { stepId: 'build', title: 'Build', status: 'completed', summary: 'Done' },
+        ],
+      },
+    }), true)
+    await nextTick()
+
+    const items = host.querySelectorAll<HTMLElement>('.plan-run__parallel-item')
+    const chips = items[0]?.querySelectorAll('.plan-run__parallel-chip') ?? []
+    expect(chips).toHaveLength(2)
+    expect(chips[0]?.textContent.trim()).toBe('12s')
+    expect(chips[1]?.textContent.trim()).toBe('Retried 3×')
+    expect(chips[1]?.getAttribute('title')).toBe('Retried 3×')
+    expect(items[1]?.querySelectorAll('.plan-run__parallel-chip')).toHaveLength(0)
+  })
+
+  it('omits the retry chip for a single-attempt step (attempts = 1 is not a retry)', async () => {
+    const host = mountRibbon(run({
+      parallelBatch: {
+        status: 'completed',
+        successful: 1,
+        failed: 0,
+        total: 1,
+        results: [
+          { stepId: 'inspect', title: 'Inspect', status: 'completed', summary: 'Done', elapsedMs: 4000, attempts: 1 },
+        ],
+      },
+    }), true)
+    await nextTick()
+
+    const chips = host.querySelectorAll<HTMLElement>('.plan-run__parallel-item .plan-run__parallel-chip')
+    expect(chips).toHaveLength(1)
+    expect(chips[0]?.textContent.trim()).toBe('4s')
+  })
+
   it('renders the B4 replan diff with similarity and new revision', async () => {
     const host = mountRibbon(run({
       replan: {
@@ -859,6 +910,65 @@ describe('PlanRunRibbon', () => {
     expect(host.textContent).toContain('revision-3')
   })
 
+  it('renders the lookahead replan as a skip-ahead, not a re-decomposition', async () => {
+    const host = mountRibbon(run({
+      replan: {
+        revisionId: 'revision-2',
+        planId: 'plan-1',
+        previousRevisionId: 'revision-2',
+        similarity: 0.04,
+        prompt: 'zulu yankee xray',
+        stepsChanged: 2,
+        mode: 'advance',
+        skippedStepIds: ['inspect', 'build'],
+        bestMatch: { stepId: 'verify', title: 'Verify behavior', similarity: 0.93, distance: 2 },
+      },
+    }), true)
+    await nextTick()
+
+    expect(host.querySelector('.plan-run__b4')?.getAttribute('aria-label')).toBe('Skipped ahead')
+    expect(host.textContent).toContain('Observation matched a later step “Verify behavior” · skipped 2 steps')
+    // 跳步不是「新修订」：不得复用重新拆解的文案
+    expect(host.textContent).not.toContain('Re-decomposed into')
+  })
+
+  it('falls back to the snapshot cost model for ETA when no step event arrived', async () => {
+    // 页面重载后事件流缺位：只有运行快照的实测代价模型 → 仍须显示剩余时间
+    const snapshotOnly = mountRibbon(run({
+      cost: { remainingSteps: 2, sampleCount: 3, avgStepMs: 60000, estimatedRemainingMs: 120000 },
+    }))
+    await nextTick()
+    expect(snapshotOnly.querySelector('.plan-run__timing')?.textContent.trim())
+      .toBe('About 2m 0s left')
+
+    // 无实测样本（sampleCount=0 → eta 为 null）→ 不显示任何剩余时间（不虚报）
+    const noSamples = mountRibbon(run({
+      cost: { remainingSteps: 2, sampleCount: 0, avgStepMs: null, estimatedRemainingMs: null },
+    }))
+    await nextTick()
+    expect(noSamples.querySelector('.plan-run__timing')).toBeNull()
+
+    // 事件流在场时以事件为准（快照值只是兜底）
+    const withEvent = mountRibbon(
+      run({ cost: { remainingSteps: 2, sampleCount: 3, avgStepMs: 60000, estimatedRemainingMs: 120000 } }),
+      false,
+      {
+        timing: {
+          elapsedMs: 30000,
+          etaMs: 45000,
+          avgStepMs: 30000,
+          stepIndex: 1,
+          stepsTotal: 3,
+          phase: 'started',
+          stepTitle: 'Build the feature',
+        },
+      },
+    )
+    await nextTick()
+    expect(withEvent.querySelector('.plan-run__timing')?.textContent.trim())
+      .toBe('About 45s left · 30s elapsed')
+  })
+
   it('hides B4 sections when the run carries no enrichments', async () => {
     const host = mountRibbon(run(), true)
     await nextTick()
@@ -866,5 +976,31 @@ describe('PlanRunRibbon', () => {
     expect(host.querySelector('.plan-run__checklist')).toBeNull()
     expect(host.querySelector('.plan-run__parallel')).toBeNull()
     expect(host.querySelector('.plan-run__replan-prompt')).toBeNull()
+  })
+
+  it('N1: keeps the elapsed readout ticking between step_progress events', async () => {
+    vi.useFakeTimers()
+    try {
+      const at = Date.now()
+      const host = mountRibbon(run(), false, {
+        timing: {
+          elapsedMs: 76_000,
+          etaMs: 0,
+          stepIndex: 1,
+          stepsTotal: 3,
+          phase: 'started',
+          stepTitle: 'Build the feature',
+          atMs: at,
+        },
+      })
+      await nextTick()
+      expect(host.querySelector('.plan-run__timing')?.textContent).toContain('1m 16s elapsed')
+      // 事件之间本地续算：5 秒后「已用」必须走动（旧实现会冻结在 1m16s）。
+      vi.advanceTimersByTime(5_000)
+      await nextTick()
+      expect(host.querySelector('.plan-run__timing')?.textContent).toContain('1m 21s elapsed')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "Insel-Spiel",
+    "title": "Marguerite-Insel",
+    "subtitle": "Eine lebendige Open-World-Insel, die an den echten Engine-Zustand gebunden ist",
+    "controls": "WASD / Pfeiltasten zum Gehen · Kamera folgt",
+    "canvasAria": "3D-Inselszene, mit WASD begehbar",
+    "engine": {
+      "online": "Gateway online",
+      "offline": "Gateway offline — Engine-Zustand verborgen",
+      "mode": "Modus",
+      "shards": "Shards",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "Klar",
+      "rain": "Regen",
+      "night": "Nacht",
+      "fog": "Nebel"
+    },
+    "day": {
+      "day": "Tag",
+      "night": "Nacht"
+    },
+    "tier": {
+      "high": "Hoch",
+      "medium": "Mittel",
+      "low": "Niedrig"
+    },
+    "quest": {
+      "title": "Questtafel",
+      "advance": "Weiter",
+      "turnIn": "Abgeben",
+      "complete": "Abschließen",
+      "status": {
+        "posted": "Ausstehend",
+        "accepted": "Angenommen",
+        "in_progress": "In Arbeit",
+        "verifying": "Bereit",
+        "completed": "Fertig",
+        "failed": "Fehlgeschlagen"
+      }
+    },
+    "titles": {
+      "title": "Titel",
+      "none": "Noch keine Titel",
+      "zeroWarn": "Ritter der null Warnungen",
+      "gateKeeper": "Tor-Eroberer",
+      "nightOwl": "Nachteule",
+      "thrifty": "Sparsame Hand"
+    },
+    "party": {
+      "title": "Gruppe",
+      "aria": "Begleiter-Elfen-Slots",
+      "slotAria": "Begleiter-Slot {n} umschalten",
+      "scout": "Späherrabe",
+      "smith": "Handwerksbiene",
+      "aegis": "Schildkröte",
+      "gull": "Botenmöwe"
+    },
+    "theme": {
+      "verdant": "Grün",
+      "blossom": "Blüte",
+      "twilight": "Dämmerung"
+    },
+    "region": {
+      "garden": "PSI-Garten",
+      "atrium": "Gänseblümchen-Heiligtum",
+      "board": "Questtafel"
+    },
+    "worldgen": {
+      "title": "Weltgenerator",
+      "label": "Beschreibe eine Änderung der Insel",
+      "placeholder": "z. B. eine regnerische Blüteninsel mit hartem Dungeon",
+      "apply": "Erzeugen",
+      "rollback": "Zurück",
+      "hint": "Validierung fehlschlägt → vorherige Welt bleibt"
+    },
+    "fallback": {
+      "aria": "2D-Fallback-Inselkarte",
+      "note": "WebGL nicht verfügbar — barrierefreie 2D-Insel."
+    },
+    "world3d": {
+      "canvasAria": "3D-Open-World-Inselszene, mit WASD und Maus begehbar",
+      "controls": "WASD / Pfeiltasten zum Gehen · klicken zum Maus-Sperren · E zum Aufheben",
+      "tierLabel": "Modellstufe",
+      "tier": {
+        "flagship": "Flaggschiff-Reasoning",
+        "efficient": "Effizientes Reasoning",
+        "sprint": "Sprint-Produktion",
+        "omni": "Omni-Pareto"
+      },
+      "connected": "Verbunden",
+      "offline": "Offline",
+      "pending": "ausstehend",
+      "pickup": "Aufheben",
+      "glow": "Leuchten",
+      "particles": "Partikel",
+      "npcDepth": "Dialogtiefe",
+      "npcTitle": "KI-NPC-Dialog",
+      "npcPlaceholder": "Zu diskutierendes Thema…",
+      "talk": "Sprechen",
+      "npcDisclaimer": "Deterministischer Vorlagendialog (keine Live-Modellausgabe)",
+      "fallbackNote": "WebGL nicht verfügbar — 2D-Fallback-Insel wird angezeigt.",
+      "prop": {
+        "code_crystal": {
+          "name": "Codekristall",
+          "desc": "Kristallisierte Werkzeugausgabe; Aufheben fordert Analyse an."
+        },
+        "doc_scroll": {
+          "name": "Dokumentenrolle",
+          "desc": "Geliefertes Dokument; Aufheben fordert Erklärung an."
+        },
+        "data_fruit": {
+          "name": "Datenfrucht",
+          "desc": "Laufzeitmetriken als Frucht; Aufheben fordert Einblick an."
+        },
+        "quest_beacon": {
+          "name": "Quest-Leuchtfeuer",
+          "desc": "Ausstehender Auftrag; Aufheben übernimmt die Quest."
+        },
+        "inspiration_bloom": {
+          "name": "Inspirationsblüte",
+          "desc": "Erinnerung oder Idee in Blüte; Aufheben fordert Brainstorming an."
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD geladen ({count} Prüfungen bestanden)",
+      "failed": "GDD-Validierung fehlgeschlagen — aktuelle Weltkonfiguration bleibt erhalten",
+      "revision": "Weltrevision",
+      "errorsLabel": "Fehlerdetails",
+      "warningsLabel": "Warndetails",
+      "noGdd": "Noch kein GDD geladen"
+    },
+    "glb": {
+      "statusProcedural": "Assets: prozedurale Geometrie",
+      "statusLoaded": "Assets: {count} hot-geladen (Rev. {rev})",
+      "statusFailed": "Assets: Validierung fehlgeschlagen",
+      "errorsLabel": "Asset-Fehler",
+      "revisionLabel": "Asset-Revision"
+    },
+    "viewMode": {
+      "world3d": "3D-Open-World",
+      "classic": "Klassische Insel",
+      "aria": "Insel-Ansichtsmodus"
+    }
+  },
   "workspaces": {
     "projects": "Projekte",
     "createProject": "Projekt erstellen",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "Das gespeicherte Artefakt ist beschädigt oder stimmt nicht mehr mit seiner Prüfsumme überein. Veröffentlichen Sie es erneut oder laden Sie es zur Prüfung herunter.",
       "invalidContent": "Der heruntergeladene Inhalt entspricht nicht dem Artefakttyp.",
       "failedDetail": "Versuchen Sie die Vorschau erneut oder laden Sie die Datei herunter."
+    },
+    "goal": {
+      "title": "Zielfortschritt",
+      "empty": "Kein aktives Ziel vorhanden.",
+      "loading": "Zielstatus wird geladen…",
+      "refresh": "Zielstatus aktualisieren",
+      "rounds": "Runden",
+      "tokens": "Token",
+      "steps": "Schritte",
+      "actions": "Zielaktionen",
+      "pause": "Pausieren",
+      "resume": "Fortsetzen",
+      "complete": "Abschließen",
+      "status": {
+        "active": "Aktiv",
+        "paused": "Pausiert",
+        "blocked": "Blockiert",
+        "completed": "Abgeschlossen"
+      }
+    },
+    "task": {
+      "title": "Aufgabenfortschritt",
+      "subtitle": "Die Schritte werden während der Ausführung live aktualisiert.",
+      "empty": "Noch keine aktiven Aufgabenschritte.",
+      "refresh": "Aufgabenschritte aktualisieren",
+      "steps": "Schritte",
+      "stepStatus": {
+        "pending": "Ausstehend",
+        "in_progress": "Läuft",
+        "done": "Fertig",
+        "failed": "Fehlgeschlagen"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "Plugins",
     "graph": "Graph",
     "poker": "Poker",
-    "pet": "Haustier"
+    "pet": "Haustier",
+    "engine": "Engine-Status",
+    "ops": "Betrieb",
+    "terminal": "Terminal",
+    "changelog": "Änderungsprotokoll",
+    "games": "Spiele",
+    "expert-center": "Expertenzentrum",
+    "editor": "Editor",
+    "browser-cockpit": "Browser-Cockpit",
+    "sandbox": "Sandbox",
+    "device-twin": "Gerätezwilling",
+    "pet-overlay": "Pet-Overlay",
+    "groupCountHint": "{count} Ziele in {group}",
+    "groupWork": "Arbeit",
+    "groupOperate": "Betreiben",
+    "groupObserve": "Beobachten",
+    "groupSettings": "Einstellungen",
+    "groupExtras": "Extras",
+    "control-center": "Kontrollzentrum",
+    "ssh-collab": "SSH-Kollaboration",
+    "capabilities-hub": "Fähigkeits-Hub",
+    "local-models": "Lokale Modelle",
+    "knowledge": "Wissen",
+    "wallpaper": "Hintergrundbild",
+    "brain": "Gemeinsames Gehirn"
   },
   "notFound": {
     "title": "Seite nicht gefunden",
@@ -258,6 +461,7 @@
     "expandSidebar": "Seitenleiste erweitern",
     "collapseSidebar": "Seitenleiste einklappen",
     "toggleSidebar": "Seitenleiste umschalten",
+    "zenMode": "Zen-Modus",
     "resizeSidebar": "Breite der Seitenleiste ändern",
     "sidebarWidthValue": "Seitenleistenbreite: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Seitenleistenbreite: {width}px, {preset}; durch dieses Fenster begrenzt (bevorzugt: {preference}px)",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "Verbunden",
       "connecting": "Wird verbunden",
-      "disconnected": "Getrennt"
+      "disconnected": "Getrennt",
+      "ready": "Bereit",
+      "not_ready": "Einrichtung nötig"
     },
     "bgm": {
       "label": "Hintergrundmusik",
@@ -291,7 +497,15 @@
       "light": "Hell",
       "dark": "Dunkel",
       "system": "System"
-    }
+    },
+    "languageSwitchTitle": "Sprache: {name} — Oberflächensprache wechseln",
+    "modeBadge": "Laufzeitmodus: {mode}",
+    "modeMenu": "Menü „Laufzeitmodus“",
+    "modeMenuTitle": "Laufzeitmodus",
+    "modeMenuCurrent": "Aktuell: {mode}",
+    "modeMenuOpenHub": "Control Center öffnen (vollständige Modusverwaltung)",
+    "modeSwitchFailed": "Der Laufzeitmodus konnte nicht gewechselt werden.",
+    "modeMatrix": "Modus: Intensität × Arbeitsstil"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "Anzeigesprache der Oberfläche und der Systemhinweise in Kanälen. Sie gilt hier sofort und speichert die Hinweis-Sprache gatewayweit.",
       "channelNoticeLocaleSyncPending": "Die Oberflächensprache wurde geändert, aber die Sprache der Kanal-Systemhinweise ist noch nicht gespeichert. Beim erneuten Verbinden mit dem Gateway wird es erneut versucht.",
       "toolDetailsLabel": "Werkzeugdetails standardmäßig anzeigen",
+      "chatFontLabel": "Chat-Schriftgröße",
+      "chatFontDesc": "Ändert die Schriftgröße nur auf der Chatseite; Seitenleiste und Einstellungen bleiben unverändert.",
+      "chatFontSmall": "Klein",
+      "chatFontDefault": "Standard",
+      "chatFontLarge": "Groß",
+      "chatFontXlarge": "Sehr groß",
       "toolDetailsDesc": "Automatisch folgt dem Werkzeugtyp; Kompakt klappt normale Werkzeuge ein; Ausgeklappt öffnet sie. Fehler werden standardmäßig automatisch geöffnet und können manuell eingeklappt werden.",
       "toolDetailsAuto": "Automatisch",
       "toolDetailsCompact": "Kompakt",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "Aktuelle Desktop-Breite: {current}px.",
       "sidebarWidthClampedStatus": "Gespeichert sind {saved}px; dieses Fenster verwendet derzeit {current}px.",
       "sidebarWidthCompactStatus": "Das kompakte Layout verwendet {current}px. Deine Desktop-Einstellung von {saved}px bleibt erhalten.",
-      "sidebarWidthDrawerStatus": "Das Schubladenlayout verwendet {current}px. Deine Desktop-Einstellung von {saved}px bleibt erhalten."
+      "sidebarWidthDrawerStatus": "Das Schubladenlayout verwendet {current}px. Deine Desktop-Einstellung von {saved}px bleibt erhalten.",
+      "bootAnimationLabel": "Startbildschirm",
+      "bootAnimationDesc": "Der Startbildschirm, der beim Start der Konsole angezeigt wird. Voll spielt das Agenten-Konstellationsorchester (Marke, Flottenknoten, Boot-Log), Minimal zeigt nur eine statische Marke, Aus überspringt ihn ganz. Erneutes Wählen von Voll spielt das Orchester erneut. Bei systemseitig reduzierter Bewegung wird die Animation automatisch zurückgenommen.",
+      "bootAnimationFull": "Voll",
+      "bootAnimationMinimal": "Minimal",
+      "bootAnimationOff": "Aus"
     },
     "dataMigration": {
       "title": "Daten & Sicherungen",
@@ -732,7 +957,8 @@
       "pet": "Pet",
       "communityPlugins": "Community Plugins",
       "graph": "Graph",
-      "collabSsh": "Collab & SSH"
+      "collabSsh": "Collab & SSH",
+      "doctor": "Arzt"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "Collab & SSH",
         "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
         "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
-        "open": "Open Overview"
+        "open": "Open Overview",
+        "localNote": "Das Gateway von Marguerite lauscht nur auf Loopback (127.0.0.1); für maschinenübergreifende Zusammenarbeit ist zuerst ein privates Netzwerk nötig.",
+        "vpnTitle": "Ein Radmin-VPN-Netzwerk einrichten",
+        "step1": "Installieren Sie Radmin VPN auf beiden Rechnern und erstellen Sie ein Netzwerk:",
+        "download": "Radmin VPN herunterladen",
+        "step2": "Treten Sie vom anderen Rechner mit Namen und Passwort demselben Netzwerk bei.",
+        "step3": "Lesen Sie die virtuelle IP, die Radmin diesem Rechner zugewiesen hat (26.x.x.x).",
+        "step4": "Belassen Sie das Gateway auf Loopback und erreichen Sie es über einen SSH-Tunnel, statt es offenzulegen.",
+        "step5": "Prüfen Sie vor dem Start einer Sitzung, ob der Peer sich verbinden kann.",
+        "copy": "Kopieren",
+        "copied": "Kopiert",
+        "securityTitle": "Sicherheitsgrenze",
+        "sec1": "Das Gateway bleibt auf 127.0.0.1 — das private Netzwerk transportiert SSH, nicht die Konsole.",
+        "sec2": "Binden Sie das Gateway niemals an 0.0.0.0, um Zusammenarbeit zu ermöglichen.",
+        "sec3": "Nutzen Sie SSH-Schlüsselauthentifizierung; Passwörter und Tokens gehören nicht ins Repository.",
+        "docs": "Radmin-VPN-Dokumentation"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "Keine passenden Modelle — die Eingabe kann trotzdem verwendet werden.",
       "modelListTruncated": "{shown} von {total} Modellen — weitertippen zum Eingrenzen.",
       "modelProvenance": "Live-Anbieterliste · Funktionsquelle: {sources}",
-      "modelMetadataProvenance": "Live-Anbieterliste · offizielle Werte bevorzugt, sonst Katalogwerte"
+      "modelMetadataProvenance": "Live-Anbieterliste · offizielle Werte bevorzugt, sonst Katalogwerte",
+      "emptyStep1": "Fügen Sie Ihren ersten Modellanbieter hinzu und fügen Sie seinen API-Schlüssel ein, um die Anmeldedaten zu prüfen.",
+      "emptyStep2": "Verbinden Sie einen Anbieter, um die Anmeldedaten zu prüfen und verfügbare Modelle auszuwählen.",
+      "emptyStep3": "Wählen Sie die Modelle, die Sie in der gesamten App verwenden möchten."
     },
     "preset": {
       "summary": "Routing-Vorlage: {label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "Bearer-Token für Gateways, die eine Authentifizierung erfordern. Wird nur in diesem Tab gespeichert.",
       "reconnect": "Erneut verbinden",
       "connect": "Verbinden",
-      "disconnect": "Trennen"
+      "disconnect": "Trennen",
+      "rbacBoundaryNote": "Die rollenbasierte Zugriffskontrolle schützt vor versehentlichem Fehlbedienen, nicht vor einem lokalen Angreifer, der die Gateway-Konfiguration oder den Prozess selbst ändern kann."
     },
     "runtime": {
       "title": "Laufzeit",
@@ -1739,6 +1984,8 @@
       "reload": "neu laden",
       "descReloadSuffix": "werden nach einer Seitenaktualisierung wirksam.",
       "foldLabel": "Neue Live-Turn-Darstellung",
+      "autostartLabel": "Beim Anmelden starten",
+      "autostartDesc": "Marguerite beim Anmelden automatisch starten (nur Desktop-App).",
       "foldDesc": "Erstellt die gestreamte Arbeitskarte aus einem geordneten Ereignisprotokoll. Nur zur vorübergehenden Rückkehr zur kompatiblen Darstellung ausschalten.",
       "foldAria": "Neue Live-Turn-Darstellung (wird nach dem Neuladen wirksam)",
       "revealLabel": "Antwort-Anzeigefenster (ms)",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "Stoppt Installations- und tägliche Nutzungstelemetrie, Updateprüfungen im Hintergrund sowie pseudonyme Sitzungskennungen und den standardmäßig gesendeten optionalen sitzungsübergreifenden Header X-Marguerite-Install-Id, die ausschließlich an die offizielle TokenRhythm-HTTPS-API gesendet werden. Die persistierte Installationskennung kann aus lokalen MAC-/IP-Daten abgeleitet werden; Rohadressen werden nie gesendet. CI/Tests und der alte Telemetrie-Opt-out unterdrücken sie ebenfalls, der reine Update-Opt-out dagegen nicht. Ihre eigenen Modellanfragen funktionieren weiterhin.",
       "memoryAutoCaptureLabel": "Automatisches Speichern",
       "memoryAutoCaptureDesc": "Marguerite darf nützliche Gesprächsinhalte im Langzeitspeicher sichern.",
-      "save": "Datenschutz speichern"
+      "save": "Datenschutz speichern",
+      "permissionBoundaryNotice": "Die Systemberechtigungen dienen dem Schutz vor Fehlbedienung, nicht der Abwehr lokaler böswilliger Nutzer. Alle Daten liegen lokal; richten Sie echte Authentifizierung ein, bevor Sie den Zugang über Loopback hinaus freigeben."
     },
     "toast": {
       "loadFailed": "Einstellungen konnten nicht geladen werden: {error}",
@@ -2070,6 +2318,24 @@
           "Encoding-AES-Key."
         ]
       }
+    },
+    "ops": {
+      "sshSession": "SSH-Sitzung",
+      "terminal": "Terminal",
+      "exportDiagnostics": "Diagnose exportieren",
+      "diagnosticsCopied": "Diagnose kopiert",
+      "diagnosticsCopyFailed": "Kopieren fehlgeschlagen: {error}",
+      "hostRequired": "Zuerst einen Host auswählen"
+    },
+    "doctor": {
+      "title": "Arzt",
+      "desc": "Gateway-Bereitschaft, Fähigkeitsbefunde und CLI-Rezepte. Schreibgeschützt — hier wird nichts gespeichert.",
+      "refresh": "Aktualisieren",
+      "runDeep": "Tiefenprüfung ausführen",
+      "loading": "Integritätsprüfungen werden ausgeführt…",
+      "noFindings": "Keine Befunde zurückgegeben. Das Gateway meldet keine Probleme.",
+      "errorTitle": "Integritätsbericht konnte nicht geladen werden",
+      "retry": "Erneut versuchen"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "aktualisiert {time}",
       "transcriptPreview": "Transkriptvorschau",
       "transcriptError": "Das Transkript konnte nicht geladen werden.",
+      "workspaceBound": "An Projektordner gebunden",
+      "workspaceUnbound": "Nicht an ein Projekt gebunden",
+      "workspaceMissing": "Verzeichnis fehlt",
       "loadingTranscript": "Transkript wird geladen…",
       "loadEarlier": "Frühere laden",
       "loading": "Wird geladen…",
@@ -2201,6 +2470,19 @@
       "abortDone": "Lauf abgebrochen.",
       "abortNone": "Kein aktiver Lauf zum Abbrechen.",
       "abortFailed": "Abbruch fehlgeschlagen."
+    },
+    "reasoning": {
+      "effortLabel": "Denkintensität",
+      "effortInherit": "Global erben",
+      "effortOff": "Aus",
+      "effortNormal": "Normal",
+      "effortDeep": "Tief",
+      "effortMax": "Maximum",
+      "contextLabel": "Kontextfenster",
+      "contextPlaceholder": "Erben",
+      "inheritHint": "Leer (oder 0 für das Kontextfenster) = globale Modellkonfiguration erben",
+      "saveDone": "Begründungseinstellungen der Sitzung gespeichert.",
+      "saveFailed": "Begründungseinstellungen der Sitzung konnten nicht gespeichert werden."
     },
     "overview": {
       "title": "Status",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count}",
       "toolsLoading": "Tool-Katalog wird geladen…",
       "baotaCredentials": "Anmeldedaten",
-      "baotaCredentialsTitle": "Baota-Panel-URL, Benutzername und Passwort konfigurieren (Auto-Login vor Tool-Aufrufen)"
+      "baotaCredentialsTitle": "Baota-Panel-URL, Benutzername und Passwort konfigurieren (Auto-Login vor Tool-Aufrufen)",
+      "mcpProbe": "Werkzeuge ermitteln",
+      "mcpProbing": "Ermittle…",
+      "mcpToolsCount": "{count} Tools",
+      "toolsPatchTitle": "Werkzeug-Schalter (Patch-Ebene)",
+      "toolsPatchHint": "Wirkt ab dem nächsten Agenten-Durchgang — kein Neustart nötig",
+      "toolsPatchEnable": "Aktiviert",
+      "toolsPatchDisable": "Deaktiviert",
+      "toolsPatchInactive": "Im aktuellen Werkzeugumfang nicht vorhanden: {names}"
     },
     "autoPropose": {
       "title": "Einstellungen für automatische Vorschläge",
@@ -3481,7 +3771,9 @@
         "probing": "Prüfung läuft",
         "paused": "Leerlauflimit erreicht; wartet auf nächste Nachricht",
         "stopped": "Nach Fehlschlag gestoppt"
-      }
+      },
+      "cacheHits": "Cache-Treffer",
+      "cacheHitsHint": "Aus dem Cache bediente Token der letzten Anfrage"
     },
     "send": "Senden",
     "sendQueues": "Senden (wird nach der aktuellen Antwort in die Warteschlange gestellt)",
@@ -3747,7 +4039,10 @@
       },
       "more": "{count} weitere",
       "stale": "Arbeitet weiter — kein aktuelles Signal",
-      "liveStep": "Schritt {n}"
+      "liveStep": "Schritt {n}",
+      "memoryRecall": "Projektübergreifende Erinnerung abgerufen · {count} Treffer",
+      "stepRound": "Tool-Runde {round}",
+      "stepRoundDone": "Tool-Runde {round} beendet · {reason}"
     },
     "suggestedTasks": "Vorgeschlagene Aufgaben",
     "greetingMorning": "Guten Morgen.",
@@ -3818,7 +4113,13 @@
         "settingsHint": "Aktivieren Sie Backups unter Einstellungen > Sandbox > Dateisicherheit.",
         "unavailableTitle": "Kein Backup ist verfügbar",
         "unavailableBody": "Diese Aktion kann nicht wiederhergestellt werden. Fahren Sie nur fort, wenn Sie dauerhaften Datenverlust akzeptieren."
-      }
+      },
+      "intent": "Absichtsvorschau",
+      "intentAction": "Vorgang",
+      "intentObject": "Ziel",
+      "intentScope": "Umfang",
+      "intentIrreversible": "Umkehrbarkeit",
+      "intentIrreversibleYes": "Unumkehrbar"
     },
     "plan": {
       "label": "Plan",
@@ -3839,7 +4140,27 @@
       "actionFailed": "Planaktion fehlgeschlagen: {error}",
       "revisionMissing": "Der Revisionsdatensatz dieses Plans ist nicht mehr verfügbar (Sitzungsdaten wurden möglicherweise gelöscht). Lassen Sie den Plan neu generieren und versuchen Sie es erneut.",
       "revisePromptPlaceholder": "Beschreiben Sie, wie der Plan geändert werden soll",
-      "reviseSend": "Plan überarbeiten"
+      "reviseSend": "Plan überarbeiten",
+      "editing": "Bearbeiten",
+      "dependsOn": "Hängt ab von",
+      "renameStep": "Umbenennen",
+      "removeStep": "Schritt entfernen",
+      "addStep": "Schritt hinzufügen",
+      "stepTitlePlaceholder": "Schritttitel",
+      "saveStep": "Hinzufügen",
+      "cancel": "Abbrechen",
+      "reuseLast": "Letzten Plan „{title}“ fortsetzen",
+      "cancelStep": "Abbrechen",
+      "strategyLabel": "Orchestrierungsform",
+      "rationaleLabel": "Entscheidungsbegründung",
+      "revisionFull": "Revision {id} (vollständige ID)",
+      "strategy": {
+        "solo": "Einzelagent",
+        "dual-leader": "Doppel-Lead",
+        "expert-team": "Expertenteam",
+        "cluster": "Cluster",
+        "pipeline": "Lieferpipeline"
+      }
     },
     "planRun": {
       "title": "Planausführung",
@@ -3874,7 +4195,14 @@
       "preflight": "Checkliste vor Ausführung",
       "parallel": "Parallele Teilaufgaben",
       "replanned": "Neu geplant",
-      "replanDetail": "Aus der Beobachtung in {steps} Schritte neu zerlegt · Revision {revision}"
+      "replanDetail": "Aus der Beobachtung in {steps} Schritte neu zerlegt · Revision {revision}",
+      "eta": "~{eta} übrig",
+      "elapsed": "{elapsed} vergangen",
+      "replannedAhead": "Schritte übersprungen",
+      "replanAdvanceDetail": "Beobachtung passt zu späterem Schritt „{step}“ · {count} Schritte übersprungen",
+      "parallelSimulated": "Parallel (simuliert)",
+      "parallelStepDuration": "Dauer {duration}",
+      "parallelStepRetries": "{count}× wiederholt"
     },
     "planMode": {
       "label": "Planmodus",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "Greift ohne einzelne Rückfragen direkt auf Dateien, Netzwerk und System zu.",
       "runModeFullUnavailable": "Vollzugriff ist nur für den Eigentümer der Sitzung verfügbar.",
       "runModeLocked": "Der Ausführungsmodus kann nicht geändert werden, solange diese Sitzung aktiv ist.",
-      "badgeNew": "NEW"
+      "badgeNew": "NEW",
+      "modelRoutingOmniDesc": "Ein orchestrierender Agent koordiniert in jedem Durchlauf die besten verfügbaren Modelle.",
+      "modelRoutingOmni": "Omni-Agent",
+      "runModePanel": "Ausführungsmodus & Routing",
+      "thinking": "Tiefes Denken",
+      "modeShort": {
+        "safe": "Sicher",
+        "full": "Voll",
+        "plan": "Plan",
+        "default": "Standard",
+        "off": "Aus",
+        "squilla": "Router",
+        "ensemble": "Ensemble",
+        "bloom": "Feinschliff",
+        "omni": "Omni"
+      }
     },
     "pending": {
       "label": "Ausstehend {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "Ensemble-Modelle"
     },
     "modelRouting": {
-      "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Prüfen Sie die Gateway-Verbindung und versuchen Sie es erneut."
+      "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Prüfen Sie die Gateway-Verbindung und versuchen Sie es erneut.",
+      "effective": "Modell-Routing umgeschaltet – jetzt auf {mode}.",
+      "mismatch": "Modell-Routing wurde nicht wie angefordert umgeschaltet: angefordert {requested}, tatsächlich {actual}."
     },
     "routeFeedback": {
       "up": "Richtige Modellwahl für diesen Zug",
@@ -4170,6 +4515,115 @@
       "reject": "Ablehnen",
       "empty": "Noch keine Dateiänderungen",
       "loadFailed": "Dateiänderungen konnten nicht geladen werden"
+    },
+    "persona": {
+      "current": "Aktueller Experte: {name}",
+      "newSession": "Neue Experten-Sitzung"
+    },
+    "presets": {
+      "label": "Modus",
+      "triggerHint": "Arbeitsmodus wählen: Intensität × Arbeitsstil",
+      "lockedHint": "Modus ist während der Ausführung gesperrt (Ansicht möglich)",
+      "advanced": "Erweitert",
+      "advancedHint": "Alle Optionen für Modus / Sandbox / Routing öffnen",
+      "autoModel": "Auto-Modell",
+      "autoModelOn": "Entfesselt",
+      "autoModelOff": "Aus",
+      "autoModelHint": "Wählt automatisch das stärkste verfügbare Modell und orchestriert je nach Aufgabe (Fusion / Schwarm)"
+    },
+    "waitIndicator": {
+      "running": "Läuft weiter",
+      "toolRunning": "Warten auf ein Tool",
+      "approvalPending": "Warten auf Ihre Freigabe",
+      "ensemble": "Ensemble läuft"
+    },
+    "emptyLead": "Agenten, Unteragenten, Werkzeuge, Speicher und Wissen — ein Orchester, weniger Tokens, schärferer Code.",
+    "orbit": {
+      "agent": "Agent",
+      "subagent": "Unteragent",
+      "tools": "Werkzeuge",
+      "memory": "Speicher",
+      "knowledge": "Wissen"
+    },
+    "errors": {
+      "apiKeyMissing": "Kein API-Schlüssel konfiguriert. Öffnen Sie die Einstellungen und fügen Sie Ihren Anbieter-API-Schlüssel hinzu, um zu chatten.",
+      "authFailed": "Der Modellanbieter hat Ihren API-Schlüssel abgelehnt. Öffnen Sie die Einstellungen oder versuchen Sie es erneut.",
+      "rateLimited": "Der Modellanbieter begrenzt die Anfragen. Bitte versuchen Sie es gleich erneut.",
+      "network": "Der Modellanbieter ist nicht erreichbar (Netzwerkfehler oder Zeitüberschreitung). Bitte erneut versuchen.",
+      "server": "Der Modellanbieter meldet einen Serverfehler. Bitte später erneut versuchen.",
+      "timeout": "Der Modellanbieter hat nicht rechtzeitig geantwortet (Zeitüberschreitung). Bitte erneut versuchen.",
+      "other": "Die Anfrage an den Modellanbieter ist fehlgeschlagen. Bitte erneut versuchen.",
+      "planStepFailed": "Schritt „{step}“ des Plans ist fehlgeschlagen. Öffne die Protokolle für Details oder überarbeite den Plan und versuche es erneut.",
+      "planStepFailedGeneric": "Ein Schritt des Plans ist fehlgeschlagen. Öffne die Protokolle für Details oder überarbeite den Plan und versuche es erneut.",
+      "planStepArtifactMissing": "Schritt „{step}“ des Plans wurde beendet, ohne die erwartete Datei zu erzeugen. Öffne die Protokolle für Details oder überarbeite den Plan und versuche es erneut.",
+      "planStepArtifactMissingGeneric": "Ein Schritt des Plans wurde beendet, ohne die erwartete Datei zu erzeugen. Öffne die Protokolle für Details oder überarbeite den Plan und versuche es erneut.",
+      "planCompletionBlocked": "Der Plan ist beendet, hat aber die Abschlussprüfung nicht bestanden und gilt daher als teilweise abgeschlossen. Öffne die Protokolle für Details.",
+      "hostExited": "Der Host-Prozess wurde nach {uptime_ms} mit Exit-Code {exit_code} beendet.",
+      "hostExitedNoCode": "Der Host-Prozess wurde nach {uptime_ms} durch ein Signal beendet.",
+      "hostExitedGeneric": "Der Host-Prozess wurde unerwartet beendet.",
+      "hostExitCodeLabel": "Exit-Code",
+      "hostExitUptimeLabel": "Laufzeit",
+      "hostExitStderrLabel": "Fehlerausgabe (stderr)"
+    },
+    "errorActions": {
+      "viewLogs": "Protokoll anzeigen",
+      "replan": "Plan überarbeiten",
+      "openSettings": "Einstellungen öffnen",
+      "retry": "Erneut versuchen"
+    },
+    "escalation": {
+      "title": "Ihre Bestätigung erforderlich",
+      "requiredFor": "Bestätigung erforderlich: {reason}",
+      "neededFor": "Bestätigung erforderlich: {reason}",
+      "operation": "Operation",
+      "suggestedAction": "Empfohlene Aktion",
+      "continue": "Fortsetzen",
+      "abort": "Abbrechen",
+      "trigger": {
+        "high_impact_side_effect": "Nebenwirkung mit großer Auswirkung",
+        "intent_ambiguity": "Absicht mehrdeutig",
+        "timeout": "Zeitüberschreitung",
+        "budget_exceeded": "Budget überschritten"
+      }
+    },
+    "collapse": "Einklappen",
+    "expand": "Ausklappen",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "Aufgaben",
+        "artifacts": "Artefakte",
+        "changes": "Änderungen",
+        "tree": "Baum"
+      },
+      "tasksEmpty": "Aufgabenschritte erscheinen hier, sobald ein Auftrag läuft.",
+      "artifactsDiagnostic": "{count} nicht geladene Artefakte erkannt",
+      "artifactsEmptyLead": "In dieser Sitzung wurden noch keine Artefakte erzeugt",
+      "artifactsEmptySub": "Sende einen Auftrag und Marguerite erstellt Dokumente, Tabellen oder Code",
+      "artifactsCompose": "Auftrag senden",
+      "artifactsReload": "Neu laden",
+      "artifactsRunningHint": "Läuft – ein neuer Auftrag ist nach Abschluss möglich",
+      "artifactOpenInApp": "In Marguerite ansehen / bearbeiten",
+      "artifactOpenSystem": "Mit System-App öffnen",
+      "artifactMore": "Weitere Aktionen",
+      "artifactPreview": "Vorschau",
+      "artifactEdit": "Bearbeiten",
+      "artifactSystemOpen": "In System-App öffnen",
+      "artifactCopyPath": "Pfad kopieren",
+      "artifactCopied": "Artefaktpfad kopiert",
+      "artifactCopyFailed": "Kopieren fehlgeschlagen, bitte Pfad manuell kopieren",
+      "statusReady": "Bereit",
+      "statusUpdating": "Aktualisierung",
+      "statusStale": "Veraltet",
+      "changesEmpty": "Dateiänderungen (+/- Zeilen) erscheinen hier",
+      "treeUpDir": "Übergeordnetes Verzeichnis",
+      "treeRoot": "Arbeitsbereichs-Wurzel",
+      "treeRefresh": "Aktualisieren",
+      "treeLoading": "Wird geladen…",
+      "treeEmptyDir": "(leeres Verzeichnis)",
+      "widen": "Schmales Panel",
+      "narrow": "Breites Panel",
+      "collapse": "Panel einklappen",
+      "expand": "Panel ausklappen"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "Einstellungen öffnen",
       "actionToggleTheme": "Design umschalten",
       "actionBgmEnable": "Hintergrundmusik aktivieren",
-      "actionBgmDisable": "Hintergrundmusik deaktivieren"
+      "actionBgmDisable": "Hintergrundmusik deaktivieren",
+      "actionModeSwitch": "Modus wechseln: {mode}",
+      "modeActive": "Aktiv"
     },
     "toast": {
       "dismiss": "Benachrichtigung schließen"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "Ausgewählte löschen",
       "bulkDeleteDone": "{count} Sitzungen gelöscht",
       "bulkDeletePartial": "{count} Sitzungen konnten nicht gelöscht werden",
-      "bulkDeleteFailed": "Ausgewählte Sitzungen konnten nicht gelöscht werden"
+      "bulkDeleteFailed": "Ausgewählte Sitzungen konnten nicht gelöscht werden",
+      "showMore": "Weitere {count} anzeigen",
+      "showLess": "Weniger anzeigen"
     },
     "setupBanner": {
       "ariaLabel": "Gateway-Einrichtung erforderlich",
@@ -4379,7 +4837,425 @@
       "window_focus": "Fenster fokussieren",
       "cursor_pos": "Cursorposition",
       "key_state": "Tastenzustand",
-      "idle_time": "Leerlaufzeit"
+      "idle_time": "Leerlaufzeit",
+      "locate": "Per Beschreibung finden"
+    },
+    "descriptionLabel": "Zielbeschreibung",
+    "descriptionPlaceholder": "z. B. das Suchfeld oben rechts",
+    "visionLabel": "Visuelles Grounding",
+    "autoClickLabel": "Nach dem Finden klicken",
+    "patchLabel": "Patch-Grounding (hohe DPI)",
+    "modeLabel": "Aufnahme",
+    "maxEdgeLabel": "Maximale Kante (px)",
+    "maxEdgePlaceholder": "0 = nativ",
+    "captureMode": {
+      "primary": "Hauptbildschirm",
+      "all": "Alle Bildschirme",
+      "window": "Aktives Fenster"
+    },
+    "groundingTitle": "Ergebnis der Lokalisierung",
+    "groundingConfidence": "Konfidenz {value}",
+    "groundingLowConfidence": "Geringe Konfidenz",
+    "groundingDescription": "Ziel: {description}",
+    "visionUnavailable": "Es ist kein visuelles Modell konfiguriert, daher wurde nichts ausgeführt. Wähle ein vision-fähiges Modell, hinterlege dessen API-Schlüssel und starte erneut."
+  },
+  "boot": {
+    "orchestraAria": "Marguerite startet",
+    "orchestraTagline": "Agenten, Unteragenten, Werkzeuge, Speicher und Wissen — ein Orchester erwacht.",
+    "enterWorkspace": "Arbeitsbereich öffnen",
+    "pressEnter": "oder Enter drücken"
+  },
+  "island": {
+    "title": "Insel-Arbeitsbereich",
+    "subtitle": "Der Agentenlauf als Insel: Werkstätten sind Tool-Aufrufe, Außenposten Subagenten, der Leuchtturm die Routing-Strategie, der Steg der Planfortschritt.",
+    "status": {
+      "idle": "Leerlauf",
+      "running": "Läuft",
+      "queued": "In Warteschlange",
+      "failed": "Fehlgeschlagen",
+      "success": "Fertig",
+      "error": "Fehler",
+      "waiting": "Wartend",
+      "offline": "Offline"
+    },
+    "quality": {
+      "high": "Volles 3D",
+      "low": "Leichtes 3D",
+      "medium": "Ausgeglichenes 3D",
+      "fallback": "Sparmodus (2D)",
+      "fallbackNote": "WebGL ist hier nicht verfügbar – die Insel wird als 2D-Karte gezeigt, mit genau denselben Daten.",
+      "contextLost": "Der 3D-Kontext ging verloren. Wechsel zur 2D-Karte.",
+      "specInvalid": "Die Insel-Spezifikation ist ungültig – Rendering abgelehnt, 2D-Karte wird gezeigt."
+    },
+    "controls": {
+      "reset": "Ansicht zurücksetzen",
+      "focus": "Fokussieren",
+      "autoDayNight": "Tag/Nacht automatisch",
+      "daylight": "Tageslicht",
+      "skin": "Skin",
+      "openInWorkbench": "Im Arbeitsbereich öffnen",
+      "hint": "Ziehen zum Drehen · Rad zum Zoomen · Rechtsziehen (oder Umschalt) zum Verschieben · Klick auf ein Gebäude für Details · Doppelklick zum Fokussieren · Tastatur: Pfeile drehen, Umschalt+Pfeile verschieben, +/- zoomen, 0 zurücksetzen, Esc schließt"
+    },
+    "detail": {
+      "status": "Status",
+      "source": "Detail",
+      "progress": "Fortschritt",
+      "openChat": "Im Chat öffnen",
+      "empty": "Klicke ein Gebäude an, um seine Live-Daten zu sehen",
+      "close": "Schließen",
+      "duration": "Dauer",
+      "flavor": "Werkbank",
+      "toolId": "Tool-ID",
+      "childKey": "Kind-Sitzung",
+      "artifactKind": "Artefakt-Art",
+      "artifactId": "Artefakt-ID",
+      "sessionKey": "Sitzung",
+      "taskTitle": "Aufgabe",
+      "strategy": "Strategie",
+      "members": "Ensemble-Mitglieder",
+      "steps": "Plan-Schritte",
+      "recallQuery": "Abruf-Anfrage",
+      "recallHits": "Erinnerungstreffer",
+      "recallTopScore": "Höchste Ähnlichkeit",
+      "reinforced": "Verstärkte Synapsen",
+      "memoryIds": "Erinnerungseinträge",
+      "stage": "Bauphase",
+      "floors": "Stockwerke"
+    },
+    "flavor": {
+      "mill": "Werkstatt",
+      "forge": "Esse",
+      "library": "Bibliothek",
+      "observatory": "Observatorium"
+    },
+    "legend": {
+      "title": "Auf der Insel",
+      "plan": "Plansteg"
+    },
+    "empty": {
+      "hint": "Noch keine Laufdaten – starte eine Aufgabe, dann wächst die Insel."
+    },
+    "kind": {
+      "core": "Zentraler Bergfried",
+      "workshop": "Werkstatt",
+      "outpost": "Außenposten",
+      "depot": "Lagerhaus",
+      "beacon": "Leuchtturm",
+      "pier": "Steg",
+      "athenaeum": "Gedächtnisturm",
+      "construction": "Baustelle"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "Fundament",
+        "structure": "Rohbau",
+        "frame": "Rahmen",
+        "facade": "Fassade",
+        "windows": "Fenster",
+        "interior": "Ausbau",
+        "finished": "Fertig"
+      },
+      "timeline": "Bautag",
+      "day": "Tag"
+    }
+  },
+  "sandbox": {
+    "title": "Miniatur-Modellbahn",
+    "subtitle": "Ein geschlossener Ringfahrplan als digitaler Zwilling des Task-Flusses: Abfahrt, Brücke, Ankunft, Aufenthalt, Abfahrt.",
+    "kind": {
+      "train": "Zug"
+    },
+    "train": {
+      "label": "Zug {n}"
+    },
+    "station": {
+      "A": "Bahnhof A",
+      "B": "Bahnhof B"
+    },
+    "phase": {
+      "dwell": "Aufenthalt am Bahnsteig",
+      "departing": "Fährt ab",
+      "cruise": "Auf der Strecke",
+      "arriving": "Nähert sich dem Bahnhof"
+    },
+    "controls": {
+      "play": "Abspielen",
+      "pause": "Pause",
+      "speed": "Tempo",
+      "timeline": "Zeitleiste",
+      "dayNight": "Tag / Nacht",
+      "rain": "Leichter Regen",
+      "resetView": "Zurücksetzen"
+    },
+    "detail": {
+      "close": "Schließen"
+    },
+    "empty": {
+      "pickTrain": "Klicken Sie einen Zug an, um seine aktuelle und nächste Tätigkeit zu sehen"
+    },
+    "quality": {
+      "fallbackNote": "WebGL ist hier nicht verfügbar, daher wird der Ring als 2D-Schema gezeichnet — der Fahrplan ist derselbe.",
+      "contextLost": "Der 3D-Kontext wurde beendet. Zum 2D-Schema gewechselt."
+    }
+  },
+  "task": {
+    "title": "Task-Arbeitsbereich",
+    "subtitle": "Verfolgen Sie jeden Schritt und jedes Ergebnis während der Aufgabenausführung.",
+    "empty": "Derzeit läuft keine Aufgabe. Starten Sie eine im Chat — sie erscheint dann hier.",
+    "refresh": "Aufgabe aktualisieren",
+    "steps": "Schritte",
+    "deliverables": "Ergebnisse",
+    "status": "Status",
+    "mode": "Modus",
+    "elapsed": "Dauer",
+    "artifacts": {
+      "empty": "Noch keine Ergebnisse. Erzeugte Dateien erscheinen hier, sobald sie geschrieben werden."
+    },
+    "runStatus": {
+      "idle": "Inaktiv",
+      "running": "Läuft",
+      "completed": "Abgeschlossen",
+      "partial": "Teilweise",
+      "failed": "Fehlgeschlagen"
+    },
+    "modeImpact": {
+      "title": "Auswirkung des Modus",
+      "route": "Route",
+      "strategy": "Strategie"
+    },
+    "stepStatus": {
+      "pending": "Ausstehend",
+      "in_progress": "Läuft",
+      "done": "Fertig",
+      "failed": "Fehlgeschlagen"
+    },
+    "gate": {
+      "title": "Qualitätsprüfung",
+      "searchValid": "Suchergebnisse gültig",
+      "artifactsComplete": "Ergebnisse vollständig",
+      "missing": "Fehlt: {items}",
+      "verdict": {
+        "pass": "Bestanden",
+        "partial": "Teilweise",
+        "fail": "Fehlgeschlagen"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "Willkommen bei Marguerite",
+      "welcomeSubtitle": "Verbinden Sie einen Modellanbieter, um zu chatten. Einrichtung dauert ca. 30 Sekunden.",
+      "featureLocal": "Lokale Ausführung — Ihre Daten bleiben auf Ihrem Gerät",
+      "featureMultiProvider": "Unterstützt OpenAI, Anthropic, DeepSeek, OpenRouter und mehr",
+      "featureAgent": "Multimodus-Agent mit Plan-, Ensemble- und Bloom-Workflows",
+      "getStarted": "Loslegen",
+      "exploreSettings": "Einstellungen erkunden",
+      "chooseProvider": "Anbieter wählen",
+      "chooseProviderHint": "Wählen Sie einen Anbieter mit API-Key. Später änderbar.",
+      "loadingProviders": "Anbieter werden geladen...",
+      "seeAllProviders": "Alle Anbieter in den Einstellungen anzeigen",
+      "configureProvider": "{provider} konfigurieren",
+      "apiKey": "API-Key",
+      "apiKeyPlaceholder": "API-Key hier einfügen",
+      "apiKeyOrEnvHint": "Key einfügen oder Umgebungsvariable {envKey} verwenden",
+      "useEnvInstead": "Stattdessen Umgebungsvariable verwenden",
+      "modelPlaceholder": "z.B. gpt-4o, deepseek-chat",
+      "verifyAndSave": "Prüfen und speichern",
+      "verifying": "Wird geprüft...",
+      "ready": "Alles bereit!",
+      "readyHint": "Ihr Anbieter ist konfiguriert und geprüft. Starten Sie einen neuen Chat.",
+      "savedButProbeFailed": "Gespeichert — Prüfung ausstehend",
+      "savedButProbeFailedHint": "Ihre Anmeldedaten wurden gespeichert. Die Prüfsonde konnte den Anbieter nicht erreichen (Netzwerk oder Ratenlimit). Versuchen Sie einen Chat.",
+      "startUsing": "Marguerite verwenden",
+      "openSettings": "Einstellungen öffnen",
+      "advancedSettings": "Erweiterte Einstellungen",
+      "back": "Zurück",
+      "errors": {
+        "configure": "Anbieterkonfiguration konnte nicht gespeichert werden. Versuchen Sie es erneut oder verwenden Sie die Einstellungen."
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "Initialisierung",
+    "gatewayLoading": "Gateway lädt Laufzeitkonfiguration...",
+    "setupNeeded": "Einrichtung nötig",
+    "setupNeededHint": "Gateway verbunden, aber nicht konfiguriert. Richten Sie einen Modellanbieter ein, um zu chatten.",
+    "gotoTopbarBadge": "Modus über das Abzeichen in der oberen Leiste wechseln",
+    "bloomParallelOff": "Schwarm-Parallelität ist aus. Wechseln Sie in den Bloom-Modus, um sie zu aktivieren."
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "Minimal · Frage",
+      "minimal_plan": "Minimal · Plan",
+      "minimal_doit": "Minimal · Handlung",
+      "standard_ask": "Standard · Frage",
+      "standard_plan": "Standard · Plan",
+      "standard_doit": "Standard · Handlung",
+      "extreme_ask": "Extrem · Frage",
+      "extreme_plan": "Extrem · Plan",
+      "extreme_doit": "Extrem · Handlung"
+    },
+    "userModeHint": {
+      "minimal_ask": "Schnelle Antworten bei geringen Kosten",
+      "minimal_plan": "Leichte Planung",
+      "minimal_doit": "Ein Agent, direkte Ausführung",
+      "standard_ask": "Alltägliche Fragen",
+      "standard_plan": "Strukturierte Pläne",
+      "standard_doit": "Multi-Modell-Fusion",
+      "extreme_ask": "Tiefgehende Rechercheantworten",
+      "extreme_plan": "Zerlegung durch Expertenteam",
+      "extreme_doit": "Schwarm-Kooperation, tiefe Ausarbeitung"
+    },
+    "alias": {
+      "plan": "Sichere Erkundung",
+      "agent": "Alltag",
+      "ensemble": "Mehrfachkandidaten",
+      "bloom": "Tiefe Ausarbeitung",
+      "omni-transcend": "Allwissenheit"
+    },
+    "hint": {
+      "plan": "Nur-Lese-Erkundung · erst Plan, Ausführung nach Freigabe",
+      "agent": "Standardmodus · Lesen frei, Schreiben mit Bestätigung",
+      "ensemble": "Parallele Kandidaten · MAX-Vier-Phasen-Fusion",
+      "bloom": "Deklarative Denktiefe und Prüfrunden",
+      "omni-transcend": "Allwissenheit · modalitätsübergreifende Synthese"
+    },
+    "intensity": {
+      "minimal": "Minimal",
+      "standard": "Standard",
+      "extreme": "Extrem"
+    },
+    "working": {
+      "ask": "Frage",
+      "plan": "Plan",
+      "doit": "Handlung"
+    }
+  },
+  "deviceTwin": {
+    "title": "Geräte-3D-Zwilling",
+    "teaching": "Lehrsimulation · keine Messung",
+    "demo": "Demodaten · kein echtes Gerät verbunden",
+    "viewLabel": "Ansichtsstatus",
+    "state": {
+      "product": "Ganzes",
+      "open": "Offen",
+      "explode": "Explodiert",
+      "section": "Schnitt",
+      "cycle": "Zyklus",
+      "inspect": "Prüfen"
+    },
+    "fallback": "Vereinfacht: WebGL nicht verfügbar, 2D-Schema",
+    "partInfo": "Teilearchiv",
+    "selectHint": "Auf ein Teil klicken für Details",
+    "thermal": "Thermik (Lehre)",
+    "cabTemp": "Innentemperatur",
+    "condTemp": "Kondensatortemperatur",
+    "compressor": "Kompressor",
+    "on": "Läuft",
+    "off": "Stoppt",
+    "energy": "Kumulierter Verbrauch"
+  },
+  "plugins": {
+    "title": "Plugins und Skills",
+    "subtitle": "Einheitliches PluginSlot-Register — Werkzeuge, Skills, MCP-Server und Befehle an einem Ort entdecken, aufrufen und erstellen.",
+    "searchPlaceholder": "Plugins suchen…",
+    "refresh": "Aktualisieren",
+    "createSkill": "Skill erstellen",
+    "openInWorkbench": "In der Workbench öffnen",
+    "empty": "Keine passenden Plugins",
+    "loadFailed": "Plugins konnten nicht geladen werden: {error}",
+    "skill": {
+      "formTitle": "Neuen Skill erstellen",
+      "nameLabel": "Skill-Kennung (Englisch)",
+      "namePlaceholder": "z. B. my-skill",
+      "descriptionLabel": "Beschreibung",
+      "descriptionPlaceholder": "Eine kurze Beschreibung des Skills",
+      "triggersLabel": "Trigger-Wörter (kommagetrennt, optional)",
+      "triggersPlaceholder": "z. B. translate,translation",
+      "promptLabel": "Prompt-Vorlage (Variablen wie text sind verfügbar)",
+      "promptPlaceholder": "Du bist ein professioneller Übersetzer. Übersetze den folgenden Text ins Englische: [[text]]",
+      "cancel": "Abbrechen",
+      "save": "Skill speichern",
+      "saving": "Wird gespeichert…",
+      "requiredFields": "Bitte fülle alle Pflichtfelder aus",
+      "createFailed": "Der Skill konnte nicht erstellt werden: {error}"
+    },
+    "assembly": {
+      "title": "Plugin-Montagestatus (plugins.status · Startmontage)",
+      "refresh": "Montage aktualisieren",
+      "summary": "{assembled} von {installed} installierten Plugins montiert · Patch {patches} (angewendet {applied}, übersprungen {skipped}, Fehler {errors})",
+      "statusFailed": "Der Montagestatus konnte nicht geladen werden: {error}",
+      "columnManifest": "Manifest",
+      "columnMode": "Modus",
+      "columnStatus": "Montagestatus",
+      "columnSlot": "Quell-Slot",
+      "modeDeclarative": "Deklarativ · nicht montiert",
+      "modeNative": "Nativ",
+      "assembled": "Montiert",
+      "notAssembled": "Nicht montiert",
+      "patchReport": "Patch-Montagebericht"
+    },
+    "market": {
+      "title": "Plugin-Marktplatz (DSH-Ökosystem + Drittanbieter-Importe)",
+      "auditAll": "Alle prüfen",
+      "installAll": "Alle Plugins installieren",
+      "auditFailed": "Prüfung fehlgeschlagen",
+      "auditDone": "Prüfung abgeschlossen: {count} Eintrag/Einträge, {suspects} Verdacht auf Rotbereich / {risks} Funktion(en) mit hohem Risiko",
+      "noFindings": "Keine Rotbereichs- oder Hochrisiko-Befunde",
+      "columnPlugin": "Plugin",
+      "columnVersion": "Version",
+      "columnVerdict": "Urteil",
+      "columnCapabilities": "Fähigkeiten / Hooks",
+      "columnFindings": "Prüfergebnisse",
+      "tabAll": "Alle",
+      "tabPlugin": "Plugins",
+      "tabSkill": "Skills",
+      "tabHarness": "Harness-Ökosystem",
+      "catalogTitle": "Lokaler Manifest-Katalog ({count} Einträge, market.list)",
+      "kindPlugin": "Plugin",
+      "kindSkill": "Skill",
+      "declarativeOnly": "Deklarativ · nicht montiert",
+      "declarativeOnlyHint": "Deklariert, aber zur Laufzeit noch nicht montiert (Manifest hat keinen entry): Die Fähigkeit ist registriert, aber nicht aktiv.",
+      "install": "Installieren",
+      "export": "Exportieren",
+      "importSuccess": "{name} v{version} importiert — {message}",
+      "importFailed": "Import fehlgeschlagen: {error}",
+      "exportSuccess": "Manifest {name} exportiert (der Inhalt steht jetzt im Feld unten und kann kopiert und geteilt werden)",
+      "exportFailed": "Export fehlgeschlagen",
+      "batchResult": "Stapelinstallation: {ok} von {total} erfolgreich (die Laufzeitregistrierung wird nach einem Neustart des Gateways wirksam)"
+    },
+    "harness": {
+      "catalogTitle": "DeepSeek-Harness-Ökosystem ({count} Upstream-Repositories · Destillationsplan, market.harness)",
+      "distillTarget": "Destilliert über",
+      "aligned": "Mit dem DeepSeek-Ökosystem abgestimmt"
+    },
+    "sources": {
+      "title": "Download-Quellen (deepseek harness-Ökosystem · market.sources)",
+      "refresh": "Quellen aktualisieren",
+      "kindExternalRepo": "Drittanbieter-Repository",
+      "kindCatalog": "Manifest-Katalog",
+      "importTitle": "Plugin-Manifest importieren (Dritt-/Viertanbieter-Ökosystem; Rotbereich-Felder werden standardmäßig abgelehnt)",
+      "importPlaceholder": "plugin.json-Inhalt einfügen, zum Beispiel ein Manifest mit name, version und description",
+      "importAck": "Ich habe die Risiken der Rotbereich-Felder geprüft (ack)",
+      "importAction": "Importieren",
+      "refreshMarket": "Marktplatz aktualisieren"
+    },
+    "verdict": {
+      "clean": "Bestanden",
+      "warn": "Warnung",
+      "broken": "Defekt"
+    },
+    "ecosystem": {
+      "computerUse": "Computer Use",
+      "harness": "Harness"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "Fenster minimieren",
+      "maximize": "Fenster maximieren",
+      "restore": "Fenster wiederherstellen",
+      "close": "Fenster schließen"
     }
   }
 }

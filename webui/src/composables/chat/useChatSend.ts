@@ -296,6 +296,8 @@ export interface UseChatSendOptions {
   busySendMode: Ref<BusySendMode>
   modelRoutingMode: Readonly<Ref<ModelRoutingMode>>
   modelRoutingSettingsBusy: Readonly<Ref<boolean>>
+  /** 深度思考开关：true 时此轮 chat.send 透传 thinking=true（DeepSeek 推理链）。 */
+  enableThinking?: Readonly<Ref<boolean>>
   elevatedMode: Ref<string>
   runMode: Ref<SandboxRunMode>
   pendingAttachments: Ref<Attachment[]>
@@ -770,7 +772,8 @@ export function useChatSend(options: UseChatSendOptions) {
       const code = terminalReplayErrorCode(response, status)
       options.messages.value.push({
         role: 'error',
-        text: localizedChatErrorMessage(code, terminalReplayMessage(response, status)),
+        // R65/B1：终态响应若带结构化上下文（step_id / step_title），按码本地化时插值。
+        text: localizedChatErrorMessage(code, terminalReplayMessage(response, status), response),
         errorCode: code,
         terminalNotice: true,
         ts: new Date().toISOString(),
@@ -1492,6 +1495,7 @@ export function useChatSend(options: UseChatSendOptions) {
         params.collaborationMode = initialCollaborationMode
       }
       if (forkBeforeMessageId) params.forkBeforeMessageId = forkBeforeMessageId
+      if (options.enableThinking?.value) params.thinking = true
       if (attachmentsToSend.length > 0) {
         params.displayText = userText
         params.attachments = attachmentsToSend.map(serializeSendableAttachment)

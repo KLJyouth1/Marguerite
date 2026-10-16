@@ -80,6 +80,11 @@ const modelRoutingOptions = computed(() => [
     label: t('chat.composer.modelRoutingBloomEnsemble'),
     description: t('chat.composer.modelRoutingBloomEnsembleDesc'),
   },
+  {
+    value: 'omni_agent',
+    label: t('chat.composer.modelRoutingOmni'),
+    description: t('chat.composer.modelRoutingOmniDesc'),
+  },
 ] satisfies Array<{ value: ModelRoutingMode; label: string; description: string }>)
 
 const selectedMode = computed(() => normalizeModelRoutingMode(props.modelRoutingMode))
@@ -315,6 +320,20 @@ onMounted(() => rootRef.value?.focus())
   background: transparent;
   border: 1.5px solid var(--routing-option-mark);
   box-shadow: none;
+}
+
+.composer-model-routing__option--omni_agent .composer-model-routing__option-mark {
+  --routing-option-mark: color-mix(in srgb, var(--accent) 75%, var(--bloom-accent));
+  width: 20px;
+  height: 9px;
+  background: linear-gradient(
+    90deg,
+    transparent 2px,
+    color-mix(in srgb, var(--routing-option-mark) 60%, transparent) 2px,
+    color-mix(in srgb, var(--routing-option-mark) 60%, transparent) 18px,
+    transparent 18px
+  ) center / 100% 3px no-repeat;
+  box-shadow: 0 0 6px 0 color-mix(in srgb, var(--routing-option-mark) 50%, transparent);
 }
 
 .composer-model-routing__option-label {

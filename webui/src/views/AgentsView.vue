@@ -817,7 +817,7 @@ function rpcErrorCode(err: unknown): string {
   position: fixed;
   right: 0;
   top: 0;
-  z-index: 1000;
+  z-index: 1000; /* Layer: view-drawer */
 }
 
 .drawer {
@@ -961,7 +961,7 @@ function rpcErrorCode(err: unknown): string {
   position: fixed;
   right: 0;
   top: 0;
-  z-index: 1100;
+  z-index: 1100; /* Layer: modal-dialog */
 }
 
 .modal {

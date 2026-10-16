@@ -49,6 +49,18 @@ function resolveColor(page: Page, expr: string) {
   }, expr)
 }
 
+/** Resolve a length expression (e.g. `var(--radius-md)`) to its computed pixel value. */
+function resolveLength(page: Page, expr: string) {
+  return page.evaluate((value) => {
+    const el = document.createElement('span')
+    el.style.borderRadius = value
+    document.body.appendChild(el)
+    const v = getComputedStyle(el).borderRadius
+    el.remove()
+    return v.trim()
+  }, expr)
+}
+
 function rootToken(page: Page, name: string) {
   return page.evaluate(
     (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(),
@@ -165,7 +177,12 @@ test.describe('Theme engine (P0)', () => {
 
     expect(darkRadius).toBe(lightRadius)
     expect(darkFs).toBe(lightFs)
-    expect(darkRadius).toBe('8px') // the ladder's control tier, unchanged by P0
+    // L0 守卫只钉「跨主题不变 + 阶梯真的解析成像素」，不再钉死具体像素字面量：
+    // 阶梯的权威定义在 src/assets/foundation.css（md/控制档已由 8px 调为 10px），
+    // 旧断言 `toBe('8px')` 让这条守卫变成「设计一改就假红」的噪声源，
+    // 而真正要守的「主题不得各自改阶梯」由上面两条相等断言 + 下面的实测解析负责。
+    expect(darkRadius, '阶梯档必须是真实像素长度').toMatch(/^\d+(?:\.\d+)?px$/)
+    expect(await resolveLength(page, 'var(--radius-md)'), '阶梯必须能解析出同一像素值').toBe(darkRadius)
   })
 
   test('the topbar menu lists only the basic modes plus "More themes…"', async ({ page }) => {

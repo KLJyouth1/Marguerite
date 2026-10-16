@@ -169,7 +169,8 @@ async function installMockGateway(page: Page, options: MockGatewayOptions = {}) 
 
 async function openChat(page: Page) {
   await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
-  await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10000 })
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 10000 })
   await expect(page.locator('.chat-header')).toBeVisible({ timeout: 10000 })
 }
 

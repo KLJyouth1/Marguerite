@@ -233,6 +233,46 @@ describe('useChatStream render coalescing', () => {
     api.cleanup()
   })
 
+  // 回归：后端 tool_call / tool_result 帧**不带 id**（真实 payload 只有 name + input / result）。
+  // 历史缺陷：appendToolResult 在无 id 时拿空串去 find → 必然落空 → 每次结果都新建一条，
+  // 而原来那条 running 记录永不收敛（秒数一直涨）→ 界面上连出十几行
+  // 「正在使用工具 · 1次工具调用 24s / 25s / 26s…」。
+  it('无 id 的 tool_result 必须与同名最早未定案调用配对（不新建、不堆叠）', () => {
+    const { api } = makeStream()
+
+    api.appendToolCall({ name: 'str_replace_editor', input: '{"command":"view","path":"a.html"}' })
+    api.appendToolCall({ name: 'str_replace_editor', input: '{"command":"create","path":"b.html"}' })
+    expect(api.streamToolCalls.value).toHaveLength(2)
+
+    // 第一个结果必须落在**最早**那条（FIFO，与后端顺序执行一致），且不得新建条目
+    api.appendToolResult({ name: 'str_replace_editor', result: 'view ok' })
+    expect(api.streamToolCalls.value).toHaveLength(2)
+    const [first, second] = api.streamToolCalls.value
+    expect(first.isRunning).toBe(false)
+    expect(first.result).toBe('view ok')
+    expect(second.isRunning).toBe(true)
+    expect(second.result).toBe('')
+
+    api.appendToolResult({ name: 'str_replace_editor', result: 'create ok' })
+    expect(api.streamToolCalls.value).toHaveLength(2)
+    expect(api.streamToolCalls.value[1].result).toBe('create ok')
+    expect(api.streamToolCalls.value.every(t => !t.isRunning)).toBe(true)
+
+    api.cleanup()
+  })
+
+  it('连续 12 轮无 id 的同名工具调用只产生 12 条记录（不是 24 条，且全部收敛）', () => {
+    const { api } = makeStream()
+    for (let i = 0; i < 12; i++) {
+      api.appendToolCall({ name: 'str_replace_editor', input: `{"path":"f${i}.html"}` })
+      api.appendToolResult({ name: 'str_replace_editor', result: `ok ${i}` })
+    }
+    expect(api.streamToolCalls.value).toHaveLength(12)
+    expect(api.streamToolCalls.value.every(t => !t.isRunning && t.status === 'success')).toBe(true)
+    expect(api.streamToolCalls.value[11].result).toBe('ok 11')
+    api.cleanup()
+  })
+
   it('keeps intermediate and answer text in separate live segments', () => {
     const { api } = makeStream()
 

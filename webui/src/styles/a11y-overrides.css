@@ -1,0 +1,37 @@
+/*
+ * WP4 accessibility overrides.
+ *
+ * Pure CSS. No imports from the design-token layer, so this file stays
+ * loadable in isolation and never edits existing theme tokens. Load it once
+ * from the app entry; the rules below are deliberately opt-in / additive.
+ */
+
+/* 1. High-contrast keyboard focus ring.
+ *    Never hide focus globally; only show a strong ring when the user is
+ *    actually tabbing (:focus-visible), so mouse users are unaffected. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* 2. Respect the user's reduced-motion preference.
+ *    When the OS/browser asks for less motion, collapse animations and
+ *    transitions to near-instant. This is the WCAG 2.3.3 safe-harbour. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 3. WCAG 2.5.8 minimum target size (24×24 CSS px).
+ *    Add this class to small interactive controls (icon buttons, chips) so
+ *    they meet the AA hit-target floor without touching their visual size. */
+.a11y-target-min {
+  min-width: 24px;
+  min-height: 24px;
+}

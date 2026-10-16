@@ -1,5 +1,7 @@
 export * from './artifactItems'
 export * from './layout'
+export * from './goalItems'
+export * from './taskItems'
 export * from './registry'
 export * from './runtime'
 export * from './store'

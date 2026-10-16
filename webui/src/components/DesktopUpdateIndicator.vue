@@ -240,7 +240,7 @@ useDocumentEvent('click', (event) => {
   gap: var(--sp-2);
   min-width: 260px;
   padding: var(--sp-3);
-  z-index: 1000;
+  z-index: 1002; /* Layer: view-indicator (above drawers/toasts) */
 }
 
 .desktop-update__head {

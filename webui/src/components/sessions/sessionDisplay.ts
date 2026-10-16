@@ -1,6 +1,7 @@
 import i18n from '@/i18n'
 import type { IconName } from '@/utils/icons'
 import type { SessionItem } from '@/composables/useSessions'
+import { sessionRelativeTime } from '@/utils/messageTime'
 
 export interface SessionStatusBadge {
   label: string
@@ -84,26 +85,16 @@ export function sessionStatusBadge(
 
 /**
  * Shared relative-time formatter for every session ledger row (and any other
- * surface that lists sessions). Renders "just now" / "Ns ago" / "Nm ago" /
- * "Nh ago" / "Nd ago" up to ~7 days, then falls back to an absolute date.
+ * surface that lists sessions). Delegates to the single implementation in
+ * `utils/messageTime.ts::sessionRelativeTime` (R65 收敛) so the ledger, the
+ * sidebar and the inspect drawer cannot drift. Missing/invalid timestamps
+ * render an em dash — the ledger's long-standing placeholder.
  */
 export function formatRelativeTime(timestamp: number | null | undefined): string {
   if (!timestamp) return '—'
   const d = new Date(timestamp)
   if (isNaN(d.getTime())) return '—'
-
-  const diffSec = Math.floor((Date.now() - d.getTime()) / 1000)
-  const diffMin = Math.floor(diffSec / 60)
-  const diffHour = Math.floor(diffMin / 60)
-  const diffDay = Math.floor(diffHour / 24)
-
-  const t = i18n.global.t
-  if (diffSec < 10) return t('sessions.relTime.justNow')
-  if (diffSec < 60) return t('sessions.relTime.seconds', { n: diffSec })
-  if (diffMin < 60) return t('sessions.relTime.minutes', { n: diffMin })
-  if (diffHour < 24) return t('sessions.relTime.hours', { n: diffHour })
-  if (diffDay < 7) return t('sessions.relTime.days', { n: diffDay })
-  return d.toLocaleDateString()
+  return sessionRelativeTime(timestamp)
 }
 
 /** Back-compat alias; prefer {@link formatRelativeTime} for new call sites. */
@@ -120,4 +111,44 @@ export function subagentRowTitle(parentTitle: string | null | undefined): string
   return parent
     ? `↳ ${t('sessions.ledger.subagentWithParent', { parent })}`
     : `↳ ${t('sessions.ledger.subagent')}`
+}
+
+export interface WorkspaceBadge {
+  label: string
+  cls: string
+  icon: IconName
+}
+
+/** The resolved workspace root, as returned by `workspace.status`. */
+export interface WorkspaceBadgeInput {
+  root: string
+  source: string
+}
+
+/**
+ * Workspace root → status chip for the session inspect drawer.
+ *
+ * Only `bound` means file tools touch the user's real project; the other states
+ * write into the app data dir (or a missing dir). Treating them as neutral
+ * would hide the very condition that produced "why did this task fail" — hence
+ * `alertTriangle` plus a distinct class for both non-bound states.
+ */
+export function workspaceBadge(status: WorkspaceBadgeInput): WorkspaceBadge {
+  const t = i18n.global.t
+  switch (status.source) {
+    case 'bound':
+      return { label: t('sessions.inspect.workspaceBound'), cls: 'is-bound', icon: 'folder' }
+    case 'missing':
+      return {
+        label: t('sessions.inspect.workspaceMissing'),
+        cls: 'is-missing',
+        icon: 'alertTriangle',
+      }
+    default:
+      return {
+        label: t('sessions.inspect.workspaceUnbound'),
+        cls: 'is-unbound',
+        icon: 'alertTriangle',
+      }
+  }
 }

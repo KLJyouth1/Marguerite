@@ -1112,7 +1112,8 @@ describe('SetupProviderPanel — configured provider management', () => {
 
     const empty = el.querySelector<HTMLElement>('[data-testid="provider-empty-state"]')!
     expect(empty.textContent).toContain('Add your first model provider')
-    expect(empty.textContent).toContain('one provider can still route between multiple models')
+    // v3.3.1：三步引导文案已 i18n 化（setup.provider.emptyStep1/2/3）
+    expect(empty.textContent).toMatch(/API [Kk]ey/)
     expect(el.querySelector('[data-testid="provider-model-usage"]')).toBeNull()
     expect(el.textContent).not.toContain('Multi-provider features')
     expect(Array.from(el.querySelectorAll<HTMLButtonElement>('button'))

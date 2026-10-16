@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "Jeu de l'île",
+    "title": "Île Marguerite",
+    "subtitle": "Une île monde ouvert vivante, liée à l’état réel du moteur",
+    "controls": "WASD / Flèches pour marcher · caméra qui suit",
+    "canvasAria": "Scène 3D de l’île, accessible en WASD",
+    "engine": {
+      "online": "Passerelle en ligne",
+      "offline": "Passerelle hors ligne — état moteur masqué",
+      "mode": "Mode",
+      "shards": "Shards",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "Dégagé",
+      "rain": "Pluie",
+      "night": "Nuit",
+      "fog": "Brouillard"
+    },
+    "day": {
+      "day": "Jour",
+      "night": "Nuit"
+    },
+    "tier": {
+      "high": "Élevé",
+      "medium": "Moyen",
+      "low": "Bas"
+    },
+    "quest": {
+      "title": "Tableau de quêtes",
+      "advance": "Avancer",
+      "turnIn": "Rendre",
+      "complete": "Terminer",
+      "status": {
+        "posted": "Proposée",
+        "accepted": "Acceptée",
+        "in_progress": "En cours",
+        "verifying": "Prête",
+        "completed": "Terminée",
+        "failed": "Échouée"
+      }
+    },
+    "titles": {
+      "title": "Titres",
+      "none": "Aucun titre",
+      "zeroWarn": "Chevalier zéro-avertissement",
+      "gateKeeper": "Conquérant du porche",
+      "nightOwl": "Oiseau de nuit",
+      "thrifty": "Intendant économe"
+    },
+    "party": {
+      "title": "Équipe",
+      "aria": "Emplacements des elfes compagnons",
+      "slotAria": "Basculer l’emplacement elfe {n}",
+      "scout": "Corbeau éclaireur",
+      "smith": "Abeille artisan",
+      "aegis": "Tortue-bouclier",
+      "gull": "Mouette messagère"
+    },
+    "theme": {
+      "verdant": "Verdoyant",
+      "blossom": "Floraison",
+      "twilight": "Crépuscule"
+    },
+    "region": {
+      "garden": "Jardin PSI",
+      "atrium": "Sanctuaire de la marguerite",
+      "board": "Tableau de quêtes"
+    },
+    "worldgen": {
+      "title": "Générateur de monde",
+      "label": "Décris une modification de l’île",
+      "placeholder": "ex. une île fleurie sous la pluie avec un donjon difficile",
+      "apply": "Générer",
+      "rollback": "Retour arrière",
+      "hint": "Échec de validation → le monde précédent est conservé"
+    },
+    "fallback": {
+      "aria": "Carte 2D de secours",
+      "note": "WebGL indisponible — île 2D accessible affichée."
+    },
+    "world3d": {
+      "canvasAria": "Scène d'île ouverte 3D, navigable avec WASD et souris",
+      "controls": "WASD / Flèches pour marcher · clic pour verrouiller la souris · E pour ramasser",
+      "tierLabel": "Palier du modèle",
+      "tier": {
+        "flagship": "Raisonnement phare",
+        "efficient": "Raisonnement efficace",
+        "sprint": "Production rapide",
+        "omni": "Omni Pareto"
+      },
+      "connected": "Connecté",
+      "offline": "Hors ligne",
+      "pending": "en attente",
+      "pickup": "Ramasser",
+      "glow": "Lueur",
+      "particles": "particules",
+      "npcDepth": "profondeur de dialogue",
+      "npcTitle": "Dialogue PNJ IA",
+      "npcPlaceholder": "Sujet à discuter…",
+      "talk": "Parler",
+      "npcDisclaimer": "Dialogue par modèle déterministe (pas une réponse de modèle en direct)",
+      "fallbackNote": "WebGL indisponible — affichage de l'île 2D de secours.",
+      "prop": {
+        "code_crystal": {
+          "name": "Cristal de code",
+          "desc": "Sortie d'outil cristallisée ; le ramasser demande une analyse."
+        },
+        "doc_scroll": {
+          "name": "Parchemin documentaire",
+          "desc": "Document livré ; le ramasser demande une explication."
+        },
+        "data_fruit": {
+          "name": "Fruit de données",
+          "desc": "Métriques d'exécution en fruit ; le ramasser demande un aperçu."
+        },
+        "quest_beacon": {
+          "name": "Balise de quête",
+          "desc": "Commission en attente ; le ramasser réclame la quête."
+        },
+        "inspiration_bloom": {
+          "name": "Fleur d'inspiration",
+          "desc": "Mémoire ou idée en fleur ; le ramasser demande un brainstorming."
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD chargé ({count} vérifications réussies)",
+      "failed": "Échec de la validation du GDD — configuration du monde actuelle conservée",
+      "revision": "Révision du monde",
+      "errorsLabel": "Détails des erreurs",
+      "warningsLabel": "Détails des avertissements",
+      "noGdd": "Aucun GDD chargé pour le moment"
+    },
+    "glb": {
+      "statusProcedural": "Actifs : géométrie procédurale",
+      "statusLoaded": "Actifs : {count} chargés à chaud (rév. {rev})",
+      "statusFailed": "Actifs : échec de la validation",
+      "errorsLabel": "Erreurs d’actifs",
+      "revisionLabel": "Révision des actifs"
+    },
+    "viewMode": {
+      "world3d": "Monde ouvert 3D",
+      "classic": "Île classique",
+      "aria": "Mode d'affichage de l'île"
+    }
+  },
   "workspaces": {
     "projects": "Projets",
     "createProject": "Créer un projet",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "L’artefact enregistré est endommagé ou ne correspond plus à sa somme de contrôle. Republiez-le ou téléchargez-le pour vérification.",
       "invalidContent": "Le contenu téléchargé ne correspond pas au type d’artefact.",
       "failedDetail": "Réessayez l’aperçu ou téléchargez le fichier."
+    },
+    "goal": {
+      "title": "Progression de l'objectif",
+      "empty": "Aucun objectif actif.",
+      "loading": "Chargement de l'état de l'objectif…",
+      "refresh": "Actualiser l'état de l'objectif",
+      "rounds": "Tours",
+      "tokens": "Jetons",
+      "steps": "Étapes",
+      "actions": "Actions de l'objectif",
+      "pause": "Pause",
+      "resume": "Reprendre",
+      "complete": "Terminer",
+      "status": {
+        "active": "Actif",
+        "paused": "En pause",
+        "blocked": "Bloqué",
+        "completed": "Terminé"
+      }
+    },
+    "task": {
+      "title": "Progression de la tâche",
+      "subtitle": "Les étapes se mettent à jour en direct pendant l'exécution.",
+      "empty": "Aucune étape de tâche active pour l'instant.",
+      "refresh": "Actualiser les étapes de la tâche",
+      "steps": "Étapes",
+      "stepStatus": {
+        "pending": "En attente",
+        "in_progress": "En cours",
+        "done": "Terminé",
+        "failed": "Échec"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "Plugins",
     "graph": "Graphe",
     "poker": "Poker",
-    "pet": "Mascotte"
+    "pet": "Mascotte",
+    "engine": "État du moteur",
+    "ops": "Ops",
+    "terminal": "Terminal",
+    "changelog": "Journal des modifications",
+    "games": "Jeux",
+    "expert-center": "Centre d'experts",
+    "editor": "Éditeur",
+    "browser-cockpit": "Cockpit navigateur",
+    "sandbox": "Bac à sable",
+    "device-twin": "Jumeau d'appareil",
+    "pet-overlay": "Superposition du compagnon",
+    "groupCountHint": "{count} destinations dans {group}",
+    "groupWork": "Travail",
+    "groupOperate": "Exploitation",
+    "groupObserve": "Observation",
+    "groupSettings": "Paramètres",
+    "groupExtras": "Extras",
+    "control-center": "Centre de contrôle",
+    "ssh-collab": "Collaboration SSH",
+    "capabilities-hub": "Hub des capacités",
+    "local-models": "Modèles locaux",
+    "knowledge": "Connaissances",
+    "wallpaper": "Fond d'écran",
+    "brain": "Cerveau partagé"
   },
   "notFound": {
     "title": "Page introuvable",
@@ -258,6 +461,7 @@
     "expandSidebar": "Déplier la barre latérale",
     "collapseSidebar": "Réduire la barre latérale",
     "toggleSidebar": "Afficher ou masquer la barre latérale",
+    "zenMode": "Mode zen",
     "resizeSidebar": "Redimensionner la barre latérale",
     "sidebarWidthValue": "Largeur de la barre latérale : {width} px, {preset}",
     "sidebarWidthLimitedValue": "Largeur de la barre latérale : {width} px, {preset} ; limitée par cette fenêtre (préférence : {preference} px)",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "Connecté",
       "connecting": "Connexion…",
-      "disconnected": "Déconnecté"
+      "disconnected": "Déconnecté",
+      "ready": "Prêt",
+      "not_ready": "Configuration requise"
     },
     "bgm": {
       "label": "Musique de fond",
@@ -291,7 +497,15 @@
       "light": "Clair",
       "dark": "Sombre",
       "system": "Système"
-    }
+    },
+    "languageSwitchTitle": "Langue : {name} — changer la langue de l'interface",
+    "modeBadge": "Mode d'exécution : {mode}",
+    "modeMenu": "Menu du mode d'exécution",
+    "modeMenuTitle": "Mode d'exécution",
+    "modeMenuCurrent": "Actuel : {mode}",
+    "modeMenuOpenHub": "Ouvrir le centre de contrôle (gestion complète des modes)",
+    "modeSwitchFailed": "Impossible de changer le mode d'exécution.",
+    "modeMatrix": "Mode : intensité × style de travail"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "Langue d'affichage de l'interface et des messages système des canaux. Elle s'applique ici immédiatement et enregistre la langue des messages pour toute la passerelle.",
       "channelNoticeLocaleSyncPending": "La langue de l'interface a changé, mais la langue des messages système des canaux n'est pas encore enregistrée. Une nouvelle tentative aura lieu à la reconnexion de la passerelle.",
       "toolDetailsLabel": "Affichage par défaut des détails d'outil",
+      "chatFontLabel": "Taille du texte du chat",
+      "chatFontDesc": "Modifie la taille du texte uniquement sur la page de chat ; la barre latérale et les réglages restent inchangés.",
+      "chatFontSmall": "Petit",
+      "chatFontDefault": "Standard",
+      "chatFontLarge": "Grand",
+      "chatFontXlarge": "Très grand",
       "toolDetailsDesc": "Automatique suit le type d'outil ; Compact réduit les outils ordinaires ; Développé les ouvre. Les erreurs s'ouvrent automatiquement par défaut et peuvent être repliées manuellement.",
       "toolDetailsAuto": "Automatique",
       "toolDetailsCompact": "Compact",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "Largeur actuelle sur ordinateur : {current} px.",
       "sidebarWidthClampedStatus": "Valeur enregistrée : {saved} px ; cette fenêtre utilise actuellement {current} px.",
       "sidebarWidthCompactStatus": "La disposition compacte utilise {current} px. Votre préférence sur ordinateur de {saved} px est conservée.",
-      "sidebarWidthDrawerStatus": "La disposition en tiroir utilise {current} px. Votre préférence sur ordinateur de {saved} px est conservée."
+      "sidebarWidthDrawerStatus": "La disposition en tiroir utilise {current} px. Votre préférence sur ordinateur de {saved} px est conservée.",
+      "bootAnimationLabel": "Écran de démarrage",
+      "bootAnimationDesc": "L'écran affiché pendant le démarrage de la console. Complet joue l'orchestre de constellation d'agents (marque, nœuds de flotte, journal), Minimal n'affiche qu'une marque statique et Désactivé l'ignore entièrement. Choisir Complet à nouveau rejoue l'orchestre. Le mouvement est réduit automatiquement si votre système le demande.",
+      "bootAnimationFull": "Complet",
+      "bootAnimationMinimal": "Minimal",
+      "bootAnimationOff": "Désactivé"
     },
     "dataMigration": {
       "title": "Données et sauvegardes",
@@ -732,7 +957,8 @@
       "pet": "Pet",
       "communityPlugins": "Community Plugins",
       "graph": "Graph",
-      "collabSsh": "Collab & SSH"
+      "collabSsh": "Collab & SSH",
+      "doctor": "Docteur"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "Collab & SSH",
         "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
         "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
-        "open": "Open Overview"
+        "open": "Open Overview",
+        "localNote": "La passerelle de Marguerite n'écoute que sur la boucle locale (127.0.0.1) : la collaboration entre machines nécessite donc d'abord un réseau privé.",
+        "vpnTitle": "Créer un réseau Radmin VPN",
+        "step1": "Installez Radmin VPN sur les deux machines et créez un réseau :",
+        "download": "Télécharger Radmin VPN",
+        "step2": "Rejoignez le même réseau depuis l'autre machine avec son nom et son mot de passe.",
+        "step3": "Relevez l'IP virtuelle attribuée à cette machine par Radmin (26.x.x.x).",
+        "step4": "Gardez la passerelle liée à la boucle locale et accédez-y via un tunnel SSH plutôt que de l'exposer.",
+        "step5": "Vérifiez que le pair peut se connecter avant de démarrer une session.",
+        "copy": "Copier",
+        "copied": "Copié",
+        "securityTitle": "Limite de sécurité",
+        "sec1": "La passerelle reste sur 127.0.0.1 — le réseau privé transporte SSH, pas la console.",
+        "sec2": "Ne liez jamais la passerelle à 0.0.0.0 pour faire fonctionner la collaboration.",
+        "sec3": "Utilisez l'authentification SSH par clé ; ne mettez ni mots de passe ni jetons dans le dépôt.",
+        "docs": "Documentation Radmin VPN"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "Aucun modèle correspondant — vous pouvez garder votre saisie.",
       "modelListTruncated": "{shown} modèles sur {total} — continuez à taper pour affiner.",
       "modelProvenance": "Liste fournisseur en direct · source des capacités : {sources}",
-      "modelMetadataProvenance": "Liste fournisseur en direct · valeurs officielles prioritaires, sinon valeurs catalogue"
+      "modelMetadataProvenance": "Liste fournisseur en direct · valeurs officielles prioritaires, sinon valeurs catalogue",
+      "emptyStep1": "Ajoutez votre premier fournisseur de modèles et collez sa clé API pour vérifier les identifiants.",
+      "emptyStep2": "Connectez un fournisseur pour vérifier les identifiants et choisir les modèles disponibles.",
+      "emptyStep3": "Choisissez les modèles que vous souhaitez utiliser dans toute l'application."
     },
     "preset": {
       "summary": "Modèle de routage : {label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "Jeton Bearer pour les passerelles qui requièrent une authentification. Stocké dans cet onglet uniquement.",
       "reconnect": "Reconnecter",
       "connect": "Connecter",
-      "disconnect": "Déconnecter"
+      "disconnect": "Déconnecter",
+      "rbacBoundaryNote": "Le contrôle d'accès par rôle protège contre les manipulations accidentelles, mais pas contre un attaquant local capable de modifier la configuration de la passerelle ou le processus lui-même."
     },
     "runtime": {
       "title": "Environnement d'exécution",
@@ -1739,6 +1984,8 @@
       "reload": "recharger",
       "descReloadSuffix": "prennent effet après un rafraîchissement de la page.",
       "foldLabel": "Nouveau rendu des tours en direct",
+      "autostartLabel": "Lancer à la connexion",
+      "autostartDesc": "Démarrer Marguerite automatiquement à la connexion (application de bureau uniquement).",
       "foldDesc": "Construit la carte de travail en streaming à partir d'un journal d'événements ordonné. Désactivez-le uniquement pour rétablir temporairement le rendu compatible.",
       "foldAria": "Nouveau rendu des tours en direct (prend effet après rechargement)",
       "revealLabel": "Fenêtre de révélation de la réponse (ms)",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "Arrête la télémétrie d'installation et d'usage quotidien, les vérifications de mise à jour en arrière-plan, les identifiants pseudonymes de session et l'en-tête intersession facultatif X-Marguerite-Install-Id, envoyé par défaut uniquement à l'API HTTPS officielle de TokenRhythm. L'identifiant d'installation persistant peut être dérivé de données MAC/IP locales ; les adresses brutes ne sont jamais envoyées. Les environnements CI/test et l'ancien refus de télémétrie le suppriment aussi ; le refus des seules mises à jour ne le fait pas. Vos propres requêtes de modèle continuent de fonctionner.",
       "memoryAutoCaptureLabel": "Capture automatique de la mémoire",
       "memoryAutoCaptureDesc": "Autorise Marguerite à enregistrer les informations utiles des conversations dans la mémoire à long terme.",
-      "save": "Enregistrer la confidentialité"
+      "save": "Enregistrer la confidentialité",
+      "permissionBoundaryNotice": "Les autorisations de ce système servent à prévenir les erreurs de manipulation, pas à se protéger des utilisateurs malveillants locaux. Toutes les données sont locales ; configurez une authentification réelle avant tout accès au-delà du loopback."
     },
     "toast": {
       "loadFailed": "Échec du chargement des paramètres : {error}",
@@ -2070,6 +2318,24 @@
           "Clé AES d'encodage."
         ]
       }
+    },
+    "ops": {
+      "sshSession": "Session SSH",
+      "terminal": "Terminal",
+      "exportDiagnostics": "Exporter le diagnostic",
+      "diagnosticsCopied": "Diagnostic copié",
+      "diagnosticsCopyFailed": "Échec de la copie : {error}",
+      "hostRequired": "Sélectionnez d'abord un hôte"
+    },
+    "doctor": {
+      "title": "Docteur",
+      "desc": "État de préparation de la passerelle, constats de capacités et recettes CLI. Lecture seule — rien n'est enregistré ici.",
+      "refresh": "Actualiser",
+      "runDeep": "Lancer la vérification approfondie",
+      "loading": "Exécution des contrôles de santé…",
+      "noFindings": "Aucune constatation retournée. La passerelle ne signale aucun problème.",
+      "errorTitle": "Impossible de charger le rapport de santé",
+      "retry": "Réessayer"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "mis à jour {time}",
       "transcriptPreview": "Aperçu de la transcription",
       "transcriptError": "Impossible de charger la transcription.",
+      "workspaceBound": "Lié au dossier de projet",
+      "workspaceUnbound": "Non lié à un projet",
+      "workspaceMissing": "Dossier introuvable",
       "loadingTranscript": "Chargement de la transcription…",
       "loadEarlier": "Charger les éléments précédents",
       "loading": "Chargement…",
@@ -2201,6 +2470,19 @@
       "abortDone": "Exécution abandonnée.",
       "abortNone": "Aucune exécution active à abandonner.",
       "abortFailed": "Échec de l'abandon."
+    },
+    "reasoning": {
+      "effortLabel": "Intensité de réflexion",
+      "effortInherit": "Hériter du global",
+      "effortOff": "Désactivé",
+      "effortNormal": "Normal",
+      "effortDeep": "Profond",
+      "effortMax": "Maximal",
+      "contextLabel": "Fenêtre de contexte",
+      "contextPlaceholder": "Hériter",
+      "inheritHint": "Vide (ou 0 pour la fenêtre de contexte) = hériter de la configuration globale du modèle",
+      "saveDone": "Paramètres de raisonnement de la session enregistrés.",
+      "saveFailed": "Impossible d'enregistrer les paramètres de raisonnement de la session."
     },
     "overview": {
       "title": "État",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count}",
       "toolsLoading": "Chargement du catalogue d'outils…",
       "baotaCredentials": "Identifiants",
-      "baotaCredentialsTitle": "Configurer l'URL, l'utilisateur et le mot de passe du panneau Baota (connexion automatique avant les appels d'outils)"
+      "baotaCredentialsTitle": "Configurer l'URL, l'utilisateur et le mot de passe du panneau Baota (connexion automatique avant les appels d'outils)",
+      "mcpProbe": "Détecter les outils",
+      "mcpProbing": "Détection…",
+      "mcpToolsCount": "{count} outils",
+      "toolsPatchTitle": "Activation des outils (couche correctif)",
+      "toolsPatchHint": "Prend effet au prochain tour de l'agent — sans redémarrage",
+      "toolsPatchEnable": "Activé",
+      "toolsPatchDisable": "Désactivé",
+      "toolsPatchInactive": "Absents de la surface d'outils actuelle : {names}"
     },
     "autoPropose": {
       "title": "Paramètres de proposition automatique",
@@ -3481,7 +3771,9 @@
         "probing": "Sonde en cours",
         "paused": "Limite d'inactivité atteinte ; attente du prochain message",
         "stopped": "Arrêté après échec"
-      }
+      },
+      "cacheHits": "Hits de cache",
+      "cacheHitsHint": "Jetons servis depuis le cache lors de la dernière requête"
     },
     "send": "Envoyer",
     "sendQueues": "Envoyer (mise en file après la réponse actuelle)",
@@ -3747,7 +4039,10 @@
       },
       "more": "{count} de plus",
       "stale": "Toujours en cours — aucun signal récent",
-      "liveStep": "étape {n}"
+      "liveStep": "étape {n}",
+      "memoryRecall": "Mémoire inter-projets rappelée · {count} résultats",
+      "stepRound": "Tour d'outils {round}",
+      "stepRoundDone": "Tour {round} terminé · {reason}"
     },
     "suggestedTasks": "Tâches suggérées",
     "greetingMorning": "Bonjour.",
@@ -3818,7 +4113,13 @@
         "settingsHint": "Activez les sauvegardes dans Paramètres > Bac à sable > Sécurité des fichiers.",
         "unavailableTitle": "Aucune sauvegarde n'est disponible",
         "unavailableBody": "Cette action ne pourra pas être récupérée. Continuez uniquement si vous acceptez une perte définitive des données."
-      }
+      },
+      "intent": "Aperçu de l'intention",
+      "intentAction": "Opération",
+      "intentObject": "Cible",
+      "intentScope": "Portée",
+      "intentIrreversible": "Réversibilité",
+      "intentIrreversibleYes": "Irréversible"
     },
     "plan": {
       "label": "Plan",
@@ -3839,7 +4140,27 @@
       "actionFailed": "Échec de l’action sur le plan : {error}",
       "revisionMissing": "L'enregistrement de cette révision de plan n'est plus disponible (les données de session ont peut-être été effacées). Régénérez le plan puis réessayez.",
       "revisePromptPlaceholder": "Décrivez comment le plan doit changer",
-      "reviseSend": "Réviser le plan"
+      "reviseSend": "Réviser le plan",
+      "editing": "Édition",
+      "dependsOn": "Dépend de",
+      "renameStep": "Renommer",
+      "removeStep": "Supprimer l'étape",
+      "addStep": "Ajouter une étape",
+      "stepTitlePlaceholder": "Titre de l'étape",
+      "saveStep": "Ajouter",
+      "cancel": "Annuler",
+      "reuseLast": "Continuer le plan précédent « {title} »",
+      "cancelStep": "Annuler",
+      "strategyLabel": "Forme d'orchestration",
+      "rationaleLabel": "Justification",
+      "revisionFull": "Révision {id} (identifiant complet)",
+      "strategy": {
+        "solo": "Agent unique",
+        "dual-leader": "Double chef",
+        "expert-team": "Équipe d'experts",
+        "cluster": "Cluster",
+        "pipeline": "Pipeline de livraison"
+      }
     },
     "planRun": {
       "title": "Exécution du plan",
@@ -3874,7 +4195,14 @@
       "preflight": "Liste de contrôle pré-exécution",
       "parallel": "Sous-tâches parallèles",
       "replanned": "Plan révisé",
-      "replanDetail": "Redécomposé en {steps} étapes d'après l'observation · révision {revision}"
+      "replanDetail": "Redécomposé en {steps} étapes d'après l'observation · révision {revision}",
+      "eta": "~{eta} restant",
+      "elapsed": "{elapsed} écoulé",
+      "replannedAhead": "Étapes sautées",
+      "replanAdvanceDetail": "L'observation correspond à l'étape suivante « {step} » · {count} étapes sautées",
+      "parallelSimulated": "Parallèle (simulé)",
+      "parallelStepDuration": "Durée de l'étape {duration}",
+      "parallelStepRetries": "Réessayé {count} fois"
     },
     "planMode": {
       "label": "Mode plan",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "Accède directement aux fichiers, au réseau et au système sans demander à chaque fois.",
       "runModeFullUnavailable": "L'accès complet est réservé au propriétaire de la session.",
       "runModeLocked": "Le mode d'exécution ne peut pas être modifié tant que cette session est active.",
-      "badgeNew": "NEW"
+      "badgeNew": "NEW",
+      "modelRoutingOmniDesc": "Un agent d'orchestration coordonne les meilleurs modèles disponibles à chaque tour.",
+      "modelRoutingOmni": "Agent omni",
+      "runModePanel": "Mode d'exécution et routage",
+      "thinking": "Réflexion approfondie",
+      "modeShort": {
+        "safe": "Sûr",
+        "full": "Complet",
+        "plan": "Plan",
+        "default": "Par défaut",
+        "off": "Désactivé",
+        "squilla": "Routeur",
+        "ensemble": "Ensemble",
+        "bloom": "Affinage",
+        "omni": "Omni"
+      }
     },
     "pending": {
       "label": "En attente {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "Modèles de l'ensemble"
     },
     "modelRouting": {
-      "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez."
+      "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez.",
+      "effective": "Routage des modèles changé — désormais sur {mode}.",
+      "mismatch": "Le routage des modèles n'a pas basculé comme demandé : demandé {requested}, mais {actual} appliqué."
     },
     "routeFeedback": {
       "up": "Bon choix de modèle pour ce tour",
@@ -4170,6 +4515,115 @@
       "reject": "Rejeter",
       "empty": "Aucune modification de fichier pour l’instant",
       "loadFailed": "Échec du chargement des modifications de fichiers"
+    },
+    "persona": {
+      "current": "Expert actuel : {name}",
+      "newSession": "Nouvelle session d’expert"
+    },
+    "presets": {
+      "label": "Mode",
+      "triggerHint": "Choisir un mode de travail : intensité × style",
+      "lockedHint": "Mode verrouillé pendant l'exécution (consultation possible)",
+      "advanced": "Avancé",
+      "advancedHint": "Ouvrir toutes les options mode / bac à sable / routage",
+      "autoModel": "Modèle auto",
+      "autoModelOn": "Débridé",
+      "autoModelOff": "Désactivé",
+      "autoModelHint": "Utilise automatiquement le modèle le plus puissant disponible et orchestre selon la tâche (fusion / essaim)"
+    },
+    "waitIndicator": {
+      "running": "Toujours en cours",
+      "toolRunning": "En attente d'un outil",
+      "approvalPending": "En attente de votre validation",
+      "ensemble": "Ensemble en cours"
+    },
+    "emptyLead": "Agents, sous-agents, outils, mémoire et connaissances — un orchestre, moins de tokens, un code plus net.",
+    "orbit": {
+      "agent": "Agent",
+      "subagent": "Sous-agent",
+      "tools": "Outils",
+      "memory": "Mémoire",
+      "knowledge": "Savoir"
+    },
+    "errors": {
+      "apiKeyMissing": "Aucune clé API configurée. Ouvrez les paramètres et ajoutez la clé API de votre fournisseur pour discuter.",
+      "authFailed": "Le fournisseur du modèle a refusé votre clé API. Ouvrez les paramètres pour la corriger, ou réessayez.",
+      "rateLimited": "Le fournisseur du modèle limite les requêtes. Réessayez bientôt.",
+      "network": "Impossible de joindre le fournisseur du modèle (erreur réseau ou délai dépassé). Réessayez.",
+      "server": "Le fournisseur du modèle a renvoyé une erreur serveur. Réessayez plus tard.",
+      "timeout": "Le fournisseur du modèle n'a pas répondu à temps (délai dépassé). Réessayez.",
+      "other": "La requête au fournisseur du modèle a échoué. Réessayez.",
+      "planStepFailed": "L’étape « {step} » du plan a échoué. Consultez les journaux pour plus de détails, ou révisez le plan et réessayez.",
+      "planStepFailedGeneric": "Une étape du plan a échoué. Consultez les journaux pour plus de détails, ou révisez le plan et réessayez.",
+      "planStepArtifactMissing": "L’étape « {step} » du plan s’est terminée sans produire le fichier attendu. Consultez les journaux pour plus de détails, ou révisez le plan et réessayez.",
+      "planStepArtifactMissingGeneric": "Une étape du plan s’est terminée sans produire le fichier attendu. Consultez les journaux pour plus de détails, ou révisez le plan et réessayez.",
+      "planCompletionBlocked": "Le plan est terminé mais n’a pas passé la vérification de complétion ; il est donc marqué comme partiel. Consultez les journaux pour plus de détails.",
+      "hostExited": "Le processus hôte s’est arrêté avec le code {exit_code} après {uptime_ms} de fonctionnement.",
+      "hostExitedNoCode": "Le processus hôte a été arrêté par un signal après {uptime_ms} de fonctionnement.",
+      "hostExitedGeneric": "Le processus hôte s’est arrêté de manière inattendue.",
+      "hostExitCodeLabel": "Code de sortie",
+      "hostExitUptimeLabel": "Durée de vie",
+      "hostExitStderrLabel": "Sortie d’erreur (stderr)"
+    },
+    "errorActions": {
+      "viewLogs": "Voir les journaux",
+      "replan": "Réviser le plan",
+      "openSettings": "Ouvrir les paramètres",
+      "retry": "Réessayer"
+    },
+    "escalation": {
+      "title": "Votre confirmation est requise",
+      "requiredFor": "Confirmation requise : {reason}",
+      "neededFor": "Confirmation requise : {reason}",
+      "operation": "Opération",
+      "suggestedAction": "Action suggérée",
+      "continue": "Continuer",
+      "abort": "Abandonner",
+      "trigger": {
+        "high_impact_side_effect": "Effet secondaire à fort impact",
+        "intent_ambiguity": "Intention ambiguë",
+        "timeout": "Opération expirée",
+        "budget_exceeded": "Coût hors budget"
+      }
+    },
+    "collapse": "Réduire",
+    "expand": "Développer",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "Tâches",
+        "artifacts": "Artefacts",
+        "changes": "Modifications",
+        "tree": "Arborescence"
+      },
+      "tasksEmpty": "Les étapes des tâches apparaîtront ici dès qu'une tâche s'exécute.",
+      "artifactsDiagnostic": "{count} artefacts non chargés détectés",
+      "artifactsEmptyLead": "Aucun artefact n'a encore été produit dans cette session",
+      "artifactsEmptySub": "Envoyez une tâche et Marguerite produira des documents, des feuilles de calcul ou du code",
+      "artifactsCompose": "Envoyer une tâche",
+      "artifactsReload": "Recharger",
+      "artifactsRunningHint": "En cours — vous pourrez lancer une nouvelle tâche une fois terminée",
+      "artifactOpenInApp": "Aperçu / édition dans Marguerite",
+      "artifactOpenSystem": "Ouvrir avec l'application système",
+      "artifactMore": "Plus d'actions",
+      "artifactPreview": "Aperçu",
+      "artifactEdit": "Modifier",
+      "artifactSystemOpen": "Ouvrir dans le système",
+      "artifactCopyPath": "Copier le chemin",
+      "artifactCopied": "Chemin de l'artefact copié",
+      "artifactCopyFailed": "Échec de la copie, veuillez copier le chemin manuellement",
+      "statusReady": "Prêt",
+      "statusUpdating": "Mise à jour",
+      "statusStale": "Obsolète",
+      "changesEmpty": "Les modifications de fichiers (+/- lignes) apparaîtront ici",
+      "treeUpDir": "Répertoire parent",
+      "treeRoot": "Racine de l'espace de travail",
+      "treeRefresh": "Actualiser",
+      "treeLoading": "Chargement…",
+      "treeEmptyDir": "(répertoire vide)",
+      "widen": "Panneau étroit",
+      "narrow": "Panneau large",
+      "collapse": "Réduire le panneau",
+      "expand": "Développer le panneau"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "Ouvrir les Paramètres",
       "actionToggleTheme": "Basculer le thème",
       "actionBgmEnable": "Activer la musique de fond",
-      "actionBgmDisable": "Désactiver la musique de fond"
+      "actionBgmDisable": "Désactiver la musique de fond",
+      "actionModeSwitch": "Changer de mode : {mode}",
+      "modeActive": "Actif"
     },
     "toast": {
       "dismiss": "Ignorer la notification"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "Supprimer la sélection",
       "bulkDeleteDone": "{count} sessions supprimées",
       "bulkDeletePartial": "{count} sessions n'ont pas pu être supprimées",
-      "bulkDeleteFailed": "Impossible de supprimer les sessions sélectionnées"
+      "bulkDeleteFailed": "Impossible de supprimer les sessions sélectionnées",
+      "showMore": "Afficher {count} de plus",
+      "showLess": "Réduire"
     },
     "setupBanner": {
       "ariaLabel": "Configuration de la passerelle requise",
@@ -4379,7 +4837,425 @@
       "window_focus": "Activer la fenêtre",
       "cursor_pos": "Position du curseur",
       "key_state": "État de la touche",
-      "idle_time": "Temps d’inactivité"
+      "idle_time": "Temps d’inactivité",
+      "locate": "Localiser par description"
+    },
+    "descriptionLabel": "Description de la cible",
+    "descriptionPlaceholder": "ex. la zone de recherche en haut à droite",
+    "visionLabel": "Ancrage visuel",
+    "autoClickLabel": "Cliquer après localisation",
+    "patchLabel": "Ancrage par patch (haute densité)",
+    "modeLabel": "Capture",
+    "maxEdgeLabel": "Bord maximal (px)",
+    "maxEdgePlaceholder": "0 = natif",
+    "captureMode": {
+      "primary": "Écran principal",
+      "all": "Tous les écrans",
+      "window": "Fenêtre active"
+    },
+    "groundingTitle": "Résultat de localisation",
+    "groundingConfidence": "Confiance {value}",
+    "groundingLowConfidence": "Confiance faible",
+    "groundingDescription": "Cible : {description}",
+    "visionUnavailable": "Aucun modèle visuel n’est configuré : rien n’a été exécuté. Choisissez un modèle compatible vision et renseignez sa clé API, puis relancez."
+  },
+  "boot": {
+    "orchestraAria": "Démarrage de Marguerite",
+    "orchestraTagline": "Agents, sous-agents, outils, mémoire et connaissances — un seul orchestre qui s'éveille.",
+    "enterWorkspace": "Entrer dans l'espace de travail",
+    "pressEnter": "ou appuyez sur Entrée"
+  },
+  "island": {
+    "title": "Espace de l'île",
+    "subtitle": "L'exécution de l'agent comme une île : les ateliers sont les appels d'outils, les postes les sous-agents, le phare la stratégie de routage, la jetée l'avancement du plan.",
+    "status": {
+      "idle": "Inactif",
+      "running": "En cours",
+      "queued": "En file",
+      "failed": "Échec",
+      "success": "Terminé",
+      "error": "Erreur",
+      "waiting": "En attente",
+      "offline": "Hors ligne"
+    },
+    "quality": {
+      "high": "3D complète",
+      "low": "3D légère",
+      "medium": "3D équilibrée",
+      "fallback": "Mode léger (2D)",
+      "fallbackNote": "WebGL n'est pas disponible ici : l'île s'affiche en carte 2D, avec exactement les mêmes données.",
+      "contextLost": "Le contexte 3D a été perdu. Bascule vers la carte 2D.",
+      "specInvalid": "La spécification de l'île est invalide : rendu refusé, carte 2D affichée."
+    },
+    "controls": {
+      "reset": "Réinitialiser la vue",
+      "focus": "Cibler",
+      "autoDayNight": "Jour/nuit auto",
+      "daylight": "Lumière du jour",
+      "skin": "Apparence",
+      "openInWorkbench": "Ouvrir dans l'espace de travail",
+      "hint": "Glisser pour tourner · molette pour zoomer · glisser avec le bouton droit (ou Maj) pour déplacer · clic sur un bâtiment pour les détails · double-clic pour cibler · clavier : flèches pour tourner, Maj+flèches pour déplacer, +/- pour zoomer, 0 pour réinitialiser, Échap pour fermer"
+    },
+    "detail": {
+      "status": "État",
+      "source": "Détail",
+      "progress": "Progression",
+      "openChat": "Ouvrir dans le chat",
+      "empty": "Cliquez sur un bâtiment pour voir ses données en direct",
+      "close": "Fermer",
+      "duration": "Durée",
+      "flavor": "Poste",
+      "toolId": "ID d'outil",
+      "childKey": "Session enfant",
+      "artifactKind": "Type de livrable",
+      "artifactId": "ID de livrable",
+      "sessionKey": "Session",
+      "taskTitle": "Tâche",
+      "strategy": "Stratégie",
+      "members": "Membres de l'ensemble",
+      "steps": "Étapes du plan",
+      "recallQuery": "Requête de rappel",
+      "recallHits": "Résultats mémoire",
+      "recallTopScore": "Meilleure similarité",
+      "reinforced": "Synapses renforcées",
+      "memoryIds": "Entrées mémoire",
+      "stage": "Phase",
+      "floors": "Étages"
+    },
+    "flavor": {
+      "mill": "Atelier",
+      "forge": "Forge",
+      "library": "Bibliothèque",
+      "observatory": "Observatoire"
+    },
+    "legend": {
+      "title": "Sur l'île",
+      "plan": "Jetée du plan"
+    },
+    "empty": {
+      "hint": "Aucune donnée d'exécution pour l'instant : lancez une tâche et l'île se construira."
+    },
+    "kind": {
+      "core": "Donjon central",
+      "workshop": "Atelier",
+      "outpost": "Poste avancé",
+      "depot": "Entrepôt",
+      "beacon": "Phare",
+      "pier": "Jetée",
+      "athenaeum": "Tour de mémoire",
+      "construction": "Chantier"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "Fondation",
+        "structure": "Structure",
+        "frame": "Charpente",
+        "facade": "Façade",
+        "windows": "Fenêtres",
+        "interior": "Intérieur",
+        "finished": "Réalisé"
+      },
+      "timeline": "Jour de chantier",
+      "day": "Jour"
+    }
+  },
+  "sandbox": {
+    "title": "Maquette miniature",
+    "subtitle": "Un schéma de circulation en boucle fermée, jumeau numérique du flux de tâches : départ, traversée, arrivée, stationnement, nouveau départ.",
+    "kind": {
+      "train": "Train"
+    },
+    "train": {
+      "label": "Train {n}"
+    },
+    "station": {
+      "A": "Station A",
+      "B": "Station B"
+    },
+    "phase": {
+      "dwell": "Arrêt en gare",
+      "departing": "En départ",
+      "cruise": "En ligne",
+      "arriving": "En approche"
+    },
+    "controls": {
+      "play": "Lecture",
+      "pause": "Pause",
+      "speed": "Vitesse",
+      "timeline": "Chronologie",
+      "dayNight": "Jour / Nuit",
+      "rain": "Pluie fine",
+      "resetView": "Réinitialiser"
+    },
+    "detail": {
+      "close": "Fermer"
+    },
+    "empty": {
+      "pickTrain": "Cliquez un train pour voir ce qu'il fait maintenant et ensuite"
+    },
+    "quality": {
+      "fallbackNote": "WebGL indisponible ici : la boucle est dessinée en schéma 2D — le graphique est identique.",
+      "contextLost": "Le contexte 3D a été perdu. Bascule vers le schéma 2D."
+    }
+  },
+  "task": {
+    "title": "Espace de tâche",
+    "subtitle": "Suivez chaque étape et livrable pendant l'exécution de la tâche.",
+    "empty": "Aucune tâche en cours. Lancez-en une depuis le chat et elle apparaîtra ici.",
+    "refresh": "Actualiser la tâche",
+    "steps": "Étapes",
+    "deliverables": "Livrables",
+    "status": "Statut",
+    "mode": "Mode",
+    "elapsed": "Durée",
+    "artifacts": {
+      "empty": "Aucun livrable pour l'instant. Les fichiers générés apparaissent ici dès leur création."
+    },
+    "runStatus": {
+      "idle": "Inactif",
+      "running": "En cours",
+      "completed": "Terminé",
+      "partial": "Partiel",
+      "failed": "Échec"
+    },
+    "modeImpact": {
+      "title": "Impact du mode",
+      "route": "Route",
+      "strategy": "Stratégie"
+    },
+    "stepStatus": {
+      "pending": "En attente",
+      "in_progress": "En cours",
+      "done": "Terminé",
+      "failed": "Échec"
+    },
+    "gate": {
+      "title": "Contrôle qualité",
+      "searchValid": "Résultats de recherche valides",
+      "artifactsComplete": "Livrables complets",
+      "missing": "Manquant : {items}",
+      "verdict": {
+        "pass": "Réussi",
+        "partial": "Partiel",
+        "fail": "Échoué"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "Bienvenue dans Marguerite",
+      "welcomeSubtitle": "Connectez un fournisseur de modèles pour commencer à discuter. Configuration en environ 30 secondes.",
+      "featureLocal": "Exécution locale — vos données restent sur votre machine",
+      "featureMultiProvider": "Compatible OpenAI, Anthropic, DeepSeek, OpenRouter et plus",
+      "featureAgent": "Agent multimode avec plan, ensemble et bloom",
+      "getStarted": "Commencer",
+      "exploreSettings": "Explorer les paramètres",
+      "chooseProvider": "Choisir un fournisseur",
+      "chooseProviderHint": "Sélectionnez un fournisseur pour lequel vous avez une clé API. Modifiable ultérieurement.",
+      "loadingProviders": "Chargement des fournisseurs...",
+      "seeAllProviders": "Voir tous les fournisseurs dans les paramètres",
+      "configureProvider": "Configurer {provider}",
+      "apiKey": "Clé API",
+      "apiKeyPlaceholder": "Collez votre clé API ici",
+      "apiKeyOrEnvHint": "Collez la clé ou utilisez la variable d'environnement {envKey}",
+      "useEnvInstead": "Utiliser une variable d'environnement à la place",
+      "modelPlaceholder": "ex. gpt-4o, deepseek-chat",
+      "verifyAndSave": "Vérifier et enregistrer",
+      "verifying": "Vérification...",
+      "ready": "Tout est prêt !",
+      "readyHint": "Votre fournisseur est configuré et vérifié. Lancez une nouvelle conversation pour commencer.",
+      "savedButProbeFailed": "Enregistré — vérification en attente",
+      "savedButProbeFailedHint": "Vos identifiants ont été enregistrés. La sonde de vérification n'a pas pu joindre le fournisseur (réseau ou limite de débit). Essayez un chat pour confirmer.",
+      "startUsing": "Utiliser Marguerite",
+      "openSettings": "Ouvrir les paramètres",
+      "advancedSettings": "Paramètres avancés",
+      "back": "Retour",
+      "errors": {
+        "configure": "Impossible d'enregistrer la configuration du fournisseur. Réessayez ou utilisez les paramètres."
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "Initialisation",
+    "gatewayLoading": "La passerelle charge la configuration...",
+    "setupNeeded": "Configuration requise",
+    "setupNeededHint": "Passerelle connectee mais non configuree. Configurez un fournisseur de modeles pour discuter.",
+    "gotoTopbarBadge": "Changez de mode via le badge de la barre supérieure",
+    "bloomParallelOff": "Le parallélisme d'essaim est désactivé. Passez en mode Bloom pour l'activer."
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "Minimal · Question",
+      "minimal_plan": "Minimal · Plan",
+      "minimal_doit": "Minimal · Action",
+      "standard_ask": "Standard · Question",
+      "standard_plan": "Standard · Plan",
+      "standard_doit": "Standard · Action",
+      "extreme_ask": "Extrême · Question",
+      "extreme_plan": "Extrême · Plan",
+      "extreme_doit": "Extrême · Action"
+    },
+    "userModeHint": {
+      "minimal_ask": "Réponses rapides à faible coût",
+      "minimal_plan": "Planification légère",
+      "minimal_doit": "Un seul agent, exécution directe",
+      "standard_ask": "Questions du quotidien",
+      "standard_plan": "Plans structurés",
+      "standard_doit": "Fusion multi-modèles",
+      "extreme_ask": "Réponses de recherche approfondie",
+      "extreme_plan": "Décomposition par l’équipe d’experts",
+      "extreme_doit": "Collaboration en essaim, approfondissement"
+    },
+    "alias": {
+      "plan": "Exploration sûre",
+      "agent": "Collaboration quotidienne",
+      "ensemble": "Fusion multicandidats",
+      "bloom": "Peaufinage profond",
+      "omni-transcend": "Omniscience"
+    },
+    "hint": {
+      "plan": "Exploration en lecture seule · un plan d'abord, exécution après validation",
+      "agent": "Mode par défaut · lecture libre, écriture avec confirmation",
+      "ensemble": "Candidats en parallèle · fusion MAX en quatre phases",
+      "bloom": "Profondeur de réflexion et passes de vérification déclaratives",
+      "omni-transcend": "Omniscience · synthèse multimodale"
+    },
+    "intensity": {
+      "minimal": "Minimal",
+      "standard": "Standard",
+      "extreme": "Extrême"
+    },
+    "working": {
+      "ask": "Question",
+      "plan": "Plan",
+      "doit": "Action"
+    }
+  },
+  "deviceTwin": {
+    "title": "Jumeau 3D de l’appareil",
+    "teaching": "Simulation pédagogique · non mesuré",
+    "demo": "Démo · aucun appareil réel connecté",
+    "viewLabel": "États de vue",
+    "state": {
+      "product": "Ensemble",
+      "open": "Ouvert",
+      "explode": "Éclaté",
+      "section": "Coupe",
+      "cycle": "Cycle",
+      "inspect": "Inspecter"
+    },
+    "fallback": "Mode simplifié : WebGL indisponible, schéma 2D",
+    "partInfo": "Archive des pièces",
+    "selectHint": "Cliquez une pièce pour voir sa fiche",
+    "thermal": "Thermique (pédagogique)",
+    "cabTemp": "Temp. interne",
+    "condTemp": "Temp. condenseur",
+    "compressor": "Compresseur",
+    "on": "En marche",
+    "off": "À l’arrêt",
+    "energy": "Énergie cumulée"
+  },
+  "plugins": {
+    "title": "Plugins et compétences",
+    "subtitle": "Registre unifié PluginSlot — un seul endroit pour découvrir, appeler et créer des outils, des compétences, des serveurs MCP et des commandes.",
+    "searchPlaceholder": "Rechercher des plugins…",
+    "refresh": "Actualiser",
+    "createSkill": "Créer une compétence",
+    "openInWorkbench": "Ouvrir dans l'atelier",
+    "empty": "Aucun plugin correspondant",
+    "loadFailed": "Impossible de charger les plugins : {error}",
+    "skill": {
+      "formTitle": "Créer une nouvelle compétence",
+      "nameLabel": "Identifiant de la compétence (anglais)",
+      "namePlaceholder": "ex. my-skill",
+      "descriptionLabel": "Description",
+      "descriptionPlaceholder": "Une description courte de la compétence",
+      "triggersLabel": "Mots-clés déclencheurs (séparés par des virgules, facultatif)",
+      "triggersPlaceholder": "ex. traduire,translation",
+      "promptLabel": "Modèle de prompt (des variables comme text sont disponibles)",
+      "promptPlaceholder": "Vous êtes un expert en traduction professionnel. Traduisez le texte suivant en anglais : [[text]]",
+      "cancel": "Annuler",
+      "save": "Enregistrer la compétence",
+      "saving": "Enregistrement…",
+      "requiredFields": "Veuillez remplir tous les champs obligatoires",
+      "createFailed": "Impossible de créer la compétence : {error}"
+    },
+    "assembly": {
+      "title": "État d'assemblage des plugins (plugins.status · assemblage au démarrage)",
+      "refresh": "Actualiser l'assemblage",
+      "summary": "{assembled} assemblage(s) sur {installed} plugin(s) installé(s) · patch {patches} (appliqués {applied}, ignorés {skipped}, erreurs {errors})",
+      "statusFailed": "Impossible de charger l'état d'assemblage : {error}",
+      "columnManifest": "Manifeste",
+      "columnMode": "Mode",
+      "columnStatus": "État d'assemblage",
+      "columnSlot": "Emplacement source",
+      "modeDeclarative": "Déclaratif · non assemblé",
+      "modeNative": "Natif",
+      "assembled": "Assemblé",
+      "notAssembled": "Non assemblé",
+      "patchReport": "Rapport d'assemblage des patchs"
+    },
+    "market": {
+      "title": "Place de marché des plugins (écosystème DSH + imports tiers)",
+      "auditAll": "Auditer tout",
+      "installAll": "Installer tous les plugins",
+      "auditFailed": "Échec de l'audit",
+      "auditDone": "Audit terminé : {count} élément(s), {suspects} suspicion(s) de zone rouge / {risks} capacité(s) à haut risque",
+      "noFindings": "Aucune zone rouge ni risque élevé",
+      "columnPlugin": "Plugin",
+      "columnVersion": "Version",
+      "columnVerdict": "Verdict",
+      "columnCapabilities": "Capacités / hooks",
+      "columnFindings": "Résultats d'audit",
+      "tabAll": "Tous",
+      "tabPlugin": "Plugins",
+      "tabSkill": "Compétences",
+      "tabHarness": "Écosystème Harness",
+      "catalogTitle": "Catalogue de manifestes locaux ({count} élément(s), market.list)",
+      "kindPlugin": "Plugin",
+      "kindSkill": "Compétence",
+      "declarativeOnly": "Déclaratif · non assemblé",
+      "declarativeOnlyHint": "Déclaré mais pas encore assemblé à l'exécution (le manifeste n'a pas d'entry) : la capacité est enregistrée mais inactive.",
+      "install": "Installer",
+      "export": "Exporter",
+      "importSuccess": "{name} v{version} importé — {message}",
+      "importFailed": "Échec de l'import : {error}",
+      "exportSuccess": "Manifeste {name} exporté (le contenu a été placé dans le champ ci-dessous, prêt à être copié et partagé)",
+      "exportFailed": "Échec de l'export",
+      "batchResult": "Installation par lot : {ok}/{total} réussi(s) (l'enregistrement à l'exécution prend effet après le redémarrage de la passerelle)"
+    },
+    "harness": {
+      "catalogTitle": "Écosystème DeepSeek Harness ({count} dépôts amont · plan de distillation, market.harness)",
+      "distillTarget": "Distillé via",
+      "aligned": "Aligné sur l'écosystème DeepSeek"
+    },
+    "sources": {
+      "title": "Sources de téléchargement (écosystème deepseek harness · market.sources)",
+      "refresh": "Actualiser les sources",
+      "kindExternalRepo": "Dépôt tiers",
+      "kindCatalog": "Catalogue de manifestes",
+      "importTitle": "Importer un manifeste de plugin (écosystèmes tiers / quatrièmes ; les champs de zone rouge sont refusés par défaut)",
+      "importPlaceholder": "Collez le contenu de plugin.json, par exemple un manifeste déclarant name, version et description",
+      "importAck": "J'ai vérifié les risques des champs de zone rouge (ack)",
+      "importAction": "Importer",
+      "refreshMarket": "Actualiser la place de marché"
+    },
+    "verdict": {
+      "clean": "Validé",
+      "warn": "Avertissement",
+      "broken": "Cassé"
+    },
+    "ecosystem": {
+      "computerUse": "Computer Use",
+      "harness": "Harness"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "Réduire la fenêtre",
+      "maximize": "Agrandir la fenêtre",
+      "restore": "Restaurer la fenêtre",
+      "close": "Fermer la fenêtre"
     }
   }
 }

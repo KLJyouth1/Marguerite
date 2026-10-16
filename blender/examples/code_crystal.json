@@ -1,0 +1,25 @@
+{
+  "id": "code_crystal",
+  "name": "代码结晶",
+  "kind": "code_crystal",
+  "version": "1.0",
+  "geometry": {
+    "main": "octahedron",
+    "accent": "prism",
+    "detail": 2,
+    "scale": 0.8
+  },
+  "material": {
+    "name": "crystal_pbr",
+    "color": [0.45, 0.65, 0.9],
+    "metallic": 0.35,
+    "roughness": 0.28,
+    "emissive": [0.2, 0.55, 1.0],
+    "emissiveStrength": 1.6
+  },
+  "lod": [
+    { "level": 0, "targetFaces": 320, "decimateRatio": 1.0 },
+    { "level": 1, "targetFaces": 140, "decimateRatio": 0.45 },
+    { "level": 2, "targetFaces": 48, "decimateRatio": 0.18 }
+  ]
+}

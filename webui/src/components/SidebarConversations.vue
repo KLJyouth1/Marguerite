@@ -46,6 +46,7 @@ import Icon from './Icon.vue'
 import { useConfirm } from '@/composables/useConfirm'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import { shouldShowAgentFilterBadge } from '@/utils/sidebarConversations'
+import { sessionRelativeTime } from '@/utils/messageTime'
 
 const props = withDefaults(defineProps<{
   sections: SidebarSection[]
@@ -95,25 +96,86 @@ function taskAttentionLabel(attention: SessionTaskAttention | undefined): string
   return key ? t(key) : ''
 }
 
-function formatIdleTime(ts: number | undefined): string {
-  if (!ts) return ''
-  const diff = Date.now() - Number(ts)
-  if (diff < 0) return ''
-  const sec = Math.floor(diff / 1000)
-  if (sec < 60) return '刚刚'
-  const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}分钟前`
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr}小时前`
-  const day = Math.floor(hr / 24)
-  if (day < 30) return `${day}天前`
-  const d = new Date(Number(ts))
-  return `${d.getMonth() + 1}/${d.getDate()}`
-}
+/**
+ * A1：recents 折叠阈值。真机实测（R65）单个「项目/最近」区会平铺 ~100 条会话，
+ * 既找不到最近的，也看不出新旧。这里把 Chats 族**默认只渲染最近这么多条**，
+ * 其余收在「显示更多」之后（点开即展开、可再收起）。计数与分组都在 `arrangeSidebarSections`
+ * 里，这里只裁剪**渲染**，不改会话契约、不动排序。
+ */
+const RECENTS_PAGE_SIZE = 25
+const recentsExpanded = ref(false)
 
 function formatIdleTitle(ts: number | undefined): string {
   if (!ts) return ''
   return new Date(Number(ts)).toLocaleString()
+}
+
+/** 极短标题（≤ 8 字符）无法自我区分；两个会话同名则更是无法分辨。 */
+const AMBIGUOUS_TITLE_MAX = 8
+
+/**
+ * A8：真实区分信息。最近会话里出现两条都叫「hi」时，光看模糊的「刚刚 / N 分钟前」
+ * 无法分辨；这里对**极短或重名**的会话补出**真实**的更新时间（HH:MM）。绝不凭空
+ * 编造标题——只把既有事实（时间）显式化，并在 `title` 兜底提示里带上完整首句。
+ */
+const sessionTitleCounts = computed(() => {
+  const counts = new Map<string, number>()
+  for (const section of props.sections) {
+    for (const row of section.rows) {
+      if (row.rowKind !== 'session') continue
+      const title = row.title.trim()
+      counts.set(title, (counts.get(title) ?? 0) + 1)
+    }
+  }
+  return counts
+})
+
+function needsDistinctMeta(row: SidebarConversationItem): boolean {
+  if (row.rowKind !== 'session') return false
+  const title = row.title.trim()
+  if (!title) return true
+  if ([...title].length <= AMBIGUOUS_TITLE_MAX) return true
+  return (sessionTitleCounts.value.get(title) ?? 0) > 1
+}
+
+function formatClockTime(ts: number | undefined): string {
+  if (!ts) return ''
+  const d = new Date(Number(ts))
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function sameLocalDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate()
+}
+
+/**
+ * A8「真实区分信息」的最小收敛（A2 复核修正）：**当天**用真实时刻 HH:MM，用于区分
+ * 两条同名/极短标题的会话；**跨天**则退回与其余会话行一致的绝对日期——裸时刻一旦
+ * 脱离当天上下文（如三天前的 `01:28`）会被误读成「今天」，反而制造歧义。
+ */
+function distinctTimeText(ts: number | undefined, now = Date.now()): string {
+  if (!ts) return ''
+  const d = new Date(Number(ts))
+  if (Number.isNaN(d.getTime())) return ''
+  return sameLocalDay(d, new Date(now)) ? formatClockTime(ts) : sessionRelativeTime(ts, now)
+}
+
+/** 行内 meta：可辨识标题用模糊空闲时长；极短/重名改用真实时刻（当天）或绝对日期。 */
+function rowMetaLabel(row: SidebarConversationItem): string {
+  return needsDistinctMeta(row)
+    ? distinctTimeText(row.updatedAt)
+    : sessionRelativeTime(row.updatedAt)
+}
+
+/** `title` 兜底提示：完整标题；极短/重名时附带真实时刻/日期，避免两条同名无从区分。 */
+function rowTitleHint(row: SidebarConversationItem): string {
+  if (!needsDistinctMeta(row)) return row.title
+  const clock = distinctTimeText(row.updatedAt)
+  return clock ? `${row.title} · ${clock}` : row.title
 }
 
 /* ── Agent filter (lives within the Chats section) ─────────────────── */
@@ -230,7 +292,7 @@ function filterCollapsedProjectRows(rows: SidebarConversationItem[]): SidebarCon
 }
 
 // Sections with at least one row, honoring the agent filter inside Chats.
-const visibleSections = computed(() => {
+const filteredSections = computed(() => {
   return props.sections
     .map(section => {
       const filteredRows = section.family === 'chats' && agentFilter.value
@@ -243,6 +305,34 @@ const visibleSections = computed(() => {
       }
     })
     .filter(section => section.rows.length > 0)
+})
+
+// A1：默认把 Chats 族的会话行折叠到最近 RECENTS_PAGE_SIZE 条（保留项目头与其
+// 直接子行），其余交给「显示更多」按钮 —— 避免 ~100 条平铺。展开状态只活在组件内。
+const visibleSections = computed(() => {
+  if (recentsExpanded.value) return filteredSections.value
+  let remaining = RECENTS_PAGE_SIZE
+  return filteredSections.value.map(section => {
+    if (section.family !== 'chats') return section
+    const kept: SidebarSectionRow[] = []
+    for (const row of section.rows) {
+      if (row.rowKind === 'session') {
+        if (remaining <= 0) continue
+        remaining -= 1
+      }
+      kept.push(row)
+    }
+    return { ...section, rows: kept }
+  })
+})
+
+/** 被折叠起来的会话行数（0 表示无可展开内容）。 */
+const collapsedRecentsCount = computed(() => {
+  if (recentsExpanded.value) return 0
+  const chats = filteredSections.value.find(section => section.family === 'chats')
+  if (!chats) return 0
+  const total = chats.rows.filter(row => row.rowKind === 'session').length
+  return Math.max(0, total - RECENTS_PAGE_SIZE)
 })
 
 const visibleProjectCount = computed(() =>
@@ -852,7 +942,7 @@ function onSelectRow(row: SidebarConversationItem) {
         >
           <Icon class="sidebar-group__chevron" name="chevronRight" :size="12" />
           <span class="sidebar-group__label">{{ section.label }}</span>
-          <span class="sidebar-group__count">{{ section.rows.length }}</span>
+          <span v-if="section.rows.length > 0" class="sidebar-group__count">{{ section.rows.length }}</span>
         </button>
 
         <TransitionGroup
@@ -986,7 +1076,7 @@ function onSelectRow(row: SidebarConversationItem) {
               v-else-if="row.rowKind === 'session'"
               class="sidebar-history-item"
               :class="{ 'is-current': row.key === currentKey }"
-              :title="row.title"
+              :title="rowTitleHint(row)"
               :aria-pressed="selectionMode && !row.provisional ? isRowSelected(row.key) : undefined"
               @click="onSelectRow(row)"
             >
@@ -1011,7 +1101,7 @@ function onSelectRow(row: SidebarConversationItem) {
                 v-else-if="row.updatedAt"
                 class="sidebar-idle-time"
                 :title="formatIdleTitle(row.updatedAt)"
-              >{{ formatIdleTime(row.updatedAt) }}</span>
+              >{{ rowMetaLabel(row) }}</span>
               <Icon
                 v-if="row.pinned"
                 class="sidebar-history-pin"
@@ -1179,6 +1269,22 @@ function onSelectRow(row: SidebarConversationItem) {
           </div>
         </TransitionGroup>
       </div>
+      <!-- A1：默认只渲染最近 N 条会话，其余收在这里（可展开/收起），
+           避免上百条平铺把最近的会话挤出视口。 -->
+      <button
+        v-if="collapsedRecentsCount > 0"
+        type="button"
+        class="sidebar-recents-more"
+        data-testid="sidebar-recents-more"
+        @click="recentsExpanded = true"
+      >{{ t('shared.sidebar.showMore', { count: collapsedRecentsCount }) }}</button>
+      <button
+        v-else-if="recentsExpanded"
+        type="button"
+        class="sidebar-recents-more"
+        data-testid="sidebar-recents-less"
+        @click="recentsExpanded = false"
+      >{{ t('shared.sidebar.showLess') }}</button>
       <div
         v-if="visibleProjectCount > 0 && !hasVisibleRecentRows"
         class="sidebar-zone-empty"

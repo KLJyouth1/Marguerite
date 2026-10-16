@@ -1,13 +1,12 @@
-import { ref, onMounted, type Ref } from 'vue'
-import { useRpcStore } from '@/stores/rpc'
-import { useErrorSink } from '@/composables/useErrorSink'
+import { type Ref } from 'vue'
+import { useRpcCall, type UseRpcCallOptions } from '@/composables/useRpc'
 
 export interface UseRequestOptions {
   /** Run once on mount (after the connection is ready). Default true. */
   immediate?: boolean
-  /** Route failures through the de-duped error→toast sink. Default true. */
+  /** Route failures through the de-duped error->toast sink. Default true. */
   toastOnError?: boolean
-  /** Human label for the error toast + the dedupe key, e.g. 'Failed to load channels'. */
+  /** Human label for the error toast + the dedupe key. */
   errorLabel?: string
 }
 
@@ -22,56 +21,32 @@ export interface UseRequestResult<T> {
 }
 
 /**
- * Flat `{ data, error, loading }` wrapper over `rpc.call` that gates on the
- * connection and never rethrows, so views stop hand-rolling try/catch +
- * `console.warn`. Failures populate `error` (for an inline `ErrorState`) and,
- * unless disabled, raise one de-duped danger toast via `useErrorSink`.
+ * DEPRECATED: Use `useRpcCall` directly with `toastOnError` / `errorLabel` /
+ * `immediate` options. Kept for backward compatibility; will be removed in a
+ * future release.
  *
- * Modeled on `useRpcCall` (composables/useRpc.ts) but flat + auto-toast.
+ * Thin wrapper over `useRpcCall` that enables `toastOnError` by default and
+ * accepts a function-valued `params` argument for legacy callers. All
+ * connection gating, coalescing, retry and admission logic is delegated to
+ * the underlying `useRpcCall`.
  */
 export function useRequest<T = unknown>(
   method: string,
   params?: Record<string, unknown> | (() => Record<string, unknown> | undefined),
   options: UseRequestOptions = {},
-): UseRequestResult<T> {
+) {
   const { immediate = true, toastOnError = true, errorLabel } = options
-  const rpc = useRpcStore()
-  const { reportError } = useErrorSink()
 
-  const data = ref<T | null>(null) as Ref<T | null>
-  const loading = ref(false)
-  const error = ref<string | null>(null)
+  // Resolve function-valued params eagerly — no production caller uses this,
+  // but the type is kept for backward compatibility.
+  const resolved: Record<string, unknown> | undefined =
+    typeof params === 'function' ? params() : params
 
-  function resolveParams(): Record<string, unknown> | undefined {
-    return typeof params === 'function' ? params() : params
+  const rpcOptions: UseRpcCallOptions = {
+    immediate,
+    toastOnError,
+    errorLabel,
   }
 
-  async function run(silent: boolean): Promise<T | null> {
-    if (!silent) loading.value = true
-    error.value = null
-    try {
-      await rpc.waitForConnection()
-      const result = await rpc.call<T>(method, resolveParams())
-      data.value = result
-      return result
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      error.value = msg
-      if (toastOnError) {
-        reportError(errorLabel ? `${errorLabel}: ${msg}` : msg, errorLabel || method)
-      }
-      return null
-    } finally {
-      if (!silent) loading.value = false
-    }
-  }
-
-  const execute = () => run(false)
-  const refresh = () => run(true)
-
-  onMounted(() => {
-    if (immediate) void execute()
-  })
-
-  return { data, error, loading, execute, refresh }
+  return useRpcCall<T>(method, resolved, rpcOptions) as UseRequestResult<T>
 }

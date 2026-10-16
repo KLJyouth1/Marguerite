@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "note": "GLB 热加载资产清单（Blender 管线 → 3D 场景消费闭环的登记端）。本机未安装 Blender（`blender --version` 不存在），5 种道具中仅 code_crystal 有 GLB（由 webui/scripts/dev/make_fixture_glb.py 生成的管线冒烟产物，非 Blender 导出，见该条 source 字段），其余 4 种尚未导出；全部登记为 optional: true——加载失败静默回退程序化几何，不假装资产存在（诚实性红线）。",
+  "pipeline": "AI 资产规格 JSON（blender/schemas/prop_asset.schema.json）→ blender/asset_pipeline.py 建模导出 GLB → glbHotReload.ts 校验（含 Mesh / 非退化包围盒 / 面数预算 ≤ 50k 三角形）→ scene.ts 热加载进场景",
+  "assetDir": {
+    "strategy": "GLB 走 webui/public/ 静态资产目录（与 music/、pets/ 同模式）：文件放 public/island3d/<kind>.glb，Vite 原样复制进 dist，不改 vite.config.ts。",
+    "urlResolve": "本清单 url 字段是相对本目录的登记名（./<kind>.glb）。运行时由消费方按环境解析真实 URL：DEV 直接取 /island3d/<kind>.glb；PROD 取 <basePath>/static/dist/island3d/<kind>.glb（basePath 取 #Marguerite-data 的 dataset.basePath，与 useBgm.ts 的 musicAssetUrl 同构）。",
+    "mime": "网关对 .glb 未 pin Content-Type（回落 application/octet-stream 或 mimetypes 猜测）；GLTFLoader 用 fetch+ArrayBuffer 解析二进制，不校验 Content-Type，故无需改 Rust/pyengine 网关。",
+    "cache": "非 HTML 静态资产 immutable 长缓存——同名 GLB 更新需换文件名或清缓存（同 music/ 模式）。"
+  },
+  "assets": [
+    {
+      "id": "marguerite_code_crystal",
+      "kind": "code_crystal",
+      "url": "./code_crystal.glb",
+      "optional": true,
+      "license": "project",
+      "source": "webui/scripts/dev/make_fixture_glb.py 生成（管线冒烟产物，非 Blender 导出；规格语义对齐 blender/schemas/prop_asset.schema.json 与 blender/examples/code_crystal.json）。有 Blender 时应改用 blender/asset_pipeline.py 导出同名 GLB 覆盖。",
+      "note": "本文件是「消费端链路真实字节验证」用的低多边形 GLB（八面体 detail=2，32 三角形，蓝色 PBR 材质），已放 public/island3d/code_crystal.glb 供运行时真实加载；校验失败或文件缺失时静默回退程序化几何。"
+    },
+    {
+      "id": "marguerite_doc_scroll",
+      "kind": "doc_scroll",
+      "url": "./doc_scroll.glb",
+      "optional": true,
+      "license": "project",
+      "source": "blender/asset_pipeline.py 导出；spec 待补（参照 blender/examples/code_crystal.json 格式）",
+      "note": "GLB 尚未导出（本机无 Blender）；加载失败静默回退程序化几何。"
+    },
+    {
+      "id": "marguerite_data_fruit",
+      "kind": "data_fruit",
+      "url": "./data_fruit.glb",
+      "optional": true,
+      "license": "project",
+      "source": "blender/asset_pipeline.py 导出；spec 待补（参照 blender/examples/code_crystal.json 格式）",
+      "note": "GLB 尚未导出（本机无 Blender）；加载失败静默回退程序化几何。"
+    },
+    {
+      "id": "marguerite_quest_beacon",
+      "kind": "quest_beacon",
+      "url": "./quest_beacon.glb",
+      "optional": true,
+      "license": "project",
+      "source": "blender/asset_pipeline.py 导出；spec 待补（参照 blender/examples/code_crystal.json 格式）",
+      "note": "GLB 尚未导出（本机无 Blender）；加载失败静默回退程序化几何。"
+    },
+    {
+      "id": "marguerite_inspiration_bloom",
+      "kind": "inspiration_bloom",
+      "url": "./inspiration_bloom.glb",
+      "optional": true,
+      "license": "project",
+      "source": "blender/asset_pipeline.py 导出；spec 待补（参照 blender/examples/code_crystal.json 格式）",
+      "note": "GLB 尚未导出（本机无 Blender）；加载失败静默回退程序化几何。"
+    }
+  ],
+  "redline": "来源不明 / AI 抓取 / CC-BY 未署名的模型禁止入库（蓝图 §4.3 库存红线）。面数预算 ≤ 50k 三角形/件：AI 产出失控防护，超预算 GLB 拒绝入库回退程序化几何。程序化几何是 fallback 而非删除：GLB 是可选升级出口，无素材依赖时世界照常渲染。"
+}

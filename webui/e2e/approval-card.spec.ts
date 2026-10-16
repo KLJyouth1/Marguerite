@@ -221,7 +221,8 @@ test.describe('Approval flow (live gateway, Standard execution mode)', () => {
   test('blocked shell command surfaces a card; Allow once resumes the run', async ({ page }) => {
     test.slow()
     await page.goto(CONTROL_URL + 'chat/new')
-    await page.waitForSelector('.conn-pill.connected', { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await page.waitForSelector('.conn-pill.ready', { timeout: 15000 })
 
     const textarea = page.locator('.chat-textarea')
     // `rm` is on the shell warnlist, so this command blocks on approval; the
@@ -241,7 +242,8 @@ test.describe('Approval flow (live gateway, Standard execution mode)', () => {
   test('Deny terminates the command without scheduling another agent turn', async ({ page }) => {
     test.slow()
     await page.goto(CONTROL_URL + 'chat/new')
-    await page.waitForSelector('.conn-pill.connected', { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await page.waitForSelector('.conn-pill.ready', { timeout: 15000 })
 
     const textarea = page.locator('.chat-textarea')
     // Warnlisted command (see the Allow-once test): guaranteed to raise an approval.

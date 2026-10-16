@@ -187,7 +187,7 @@ watch(() => props.open, open => {
   justify-content: center;
   padding: 24px;
   position: fixed;
-  z-index: 1100;
+  z-index: 1103; /* Layer: modal-dialog */
 }
 
 .bcd-panel {

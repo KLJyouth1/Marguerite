@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useChatFeatureToggles } from './useChatFeatureToggles'
 import source from './useChatFeatureToggles.ts?raw'
+import i18n from '@/i18n'
+import en from '@/locales/en.json'
+import { useToasts } from '@/composables/useToasts'
 import type { RpcCallOptions } from '@/lib/rpc'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 
@@ -444,5 +447,81 @@ describe('useChatFeatureToggles model routing mode', () => {
     expect(setterSource).toContain("options.rpc.call('models.routing.set'")
     expect(setterSource).not.toContain("options.rpc.call('config.patch.safe'")
     expect(setterSource).not.toMatch(/localStorage|sessionStorage/)
+  })
+})
+
+// The routing setter reports its outcome to the user through pushToast(): a
+// resolved "effective" line when the Gateway landed on the requested mode, and a
+// "mismatch" line naming requested vs actual when it did not. Both keys are
+// reached through the object-qualified `i18n.global.t('chat.modelRouting.*')`
+// form, which the source i18n guard only learned to scan recently — so pin the
+// *rendered* text here, not merely the key's existence. A typo'd key must fail
+// the suite instead of leaking a raw `chat.modelRouting.*` path into the toast.
+const { toasts, dismissToast } = useToasts()
+
+function resolveEn(dottedKey: string): string {
+  let node: unknown = en
+  for (const part of dottedKey.split('.')) {
+    node = (node as Record<string, unknown>)[part]
+  }
+  return node as string
+}
+
+function renderEn(dottedKey: string, params: Record<string, string>): string {
+  return Object.entries(params).reduce(
+    (text, [name, value]) => text.replace(`{${name}}`, value),
+    resolveEn(dottedKey),
+  )
+}
+
+describe('useChatFeatureToggles model routing feedback toasts', () => {
+  beforeEach(() => {
+    i18n.global.locale.value = 'en'
+    toasts.value = []
+  })
+
+  afterEach(() => {
+    for (const toast of [...toasts.value]) dismissToast(toast.id)
+  })
+
+  it('renders the localized "effective" copy once the requested mode is live', async () => {
+    const { api } = createHarness({
+      configGetResults: [{}, { llm_ensemble: { enabled: true } }],
+    })
+    await api.loadFeatureToggles()
+    toasts.value = []
+
+    await api.setModelRoutingMode('llm_ensemble')
+
+    const last = toasts.value[toasts.value.length - 1]
+    const expected = renderEn('chat.modelRouting.effective', { mode: 'llm_ensemble' })
+    expect(last?.message).toBe(expected)
+    expect(last?.message).toContain('llm_ensemble')
+    expect(last?.message).not.toContain('chat.modelRouting')
+    expect(last?.tone).toBe('ok')
+  })
+
+  it('renders the localized "mismatch" copy with requested/actual when the mode did not switch', async () => {
+    const { api } = createHarness({
+      configGetResults: [
+        { llm_ensemble: { enabled: true } },
+        { squilla_router: { enabled: false }, llm_ensemble: { enabled: false } },
+      ],
+    })
+    await api.loadFeatureToggles()
+    toasts.value = []
+
+    await api.setModelRoutingMode('llm_ensemble')
+
+    const last = toasts.value[toasts.value.length - 1]
+    const expected = renderEn('chat.modelRouting.mismatch', {
+      requested: 'llm_ensemble',
+      actual: 'off',
+    })
+    expect(last?.message).toBe(expected)
+    expect(last?.message).toContain('llm_ensemble')
+    expect(last?.message).toContain('off')
+    expect(last?.message).not.toContain('chat.modelRouting')
+    expect(last?.tone).toBe('danger')
   })
 })

@@ -8,7 +8,9 @@ async function openControl(page: Page, path = '') {
   await page.goto(CONTROL_URL + path)
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
   // Let the session list settle before inspecting the sidebar.
-  await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类（disconnected|connecting|not_ready|ready），
+  // 改为 .ready 类断言。
+  await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
   await page.waitForTimeout(800)
   await expect(
     page.locator('.sidebar-history-list, .sidebar-history-empty, .sidebar-onboarding').first(),
@@ -462,7 +464,8 @@ test.describe('Sidebar', () => {
   test('footer pins Settings; connection state shows in the topbar', async ({ page }) => {
     await page.goto(CONTROL_URL)
     await page.waitForSelector('.conn-pill', { timeout: 10000 })
-    await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
     await page.waitForTimeout(800)
 
     const foot = page.locator('.sidebar-foot')
@@ -484,8 +487,14 @@ test.describe('Sidebar', () => {
     // Connection state is shown once, in the global topbar pill — not duplicated
     // in the sidebar footer.
     await expect(foot.locator('.sidebar-conn')).toHaveCount(0)
-    const conn = (await page.locator('.topbar .conn-pill').innerText()).toLowerCase()
-    expect(conn).toMatch(/connected|connecting/)
+    // 顶栏徽标只渲染统一就绪态：类名为 readiness state，文本为
+    // chrome.connectionState.<readiness>（Ready / Connecting / Setup needed /
+    // Disconnected）。旧断言 /connected|connecting/ 既匹配已退休的裸 WS
+    // “Connected”，又会把 “Disconnected” 误判为通过（子串含 connected）。
+    const connPill = page.locator('.topbar .conn-pill')
+    await expect(connPill).toHaveClass(/\b(disconnected|connecting|not_ready|ready)\b/)
+    const conn = (await connPill.innerText()).toLowerCase()
+    expect(conn).toMatch(/^(disconnected|connecting|setup needed|ready)$/)
   })
 
   test('mobile drawer shows a scrim and tapping it closes the drawer', async ({ page }) => {

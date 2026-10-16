@@ -95,6 +95,10 @@
       @open-session="openSession"
       @toggle-model-expand="toggleModelExpand"
     />
+
+    <!-- M3-D2 任务成本卡片 / M3-D1 最近活动时间线：成本归因与行为事件的产品级视图 -->
+    <TaskCostPanel />
+    <RecentActivityPanel />
   </div>
 </template>
 

@@ -3,9 +3,12 @@ import type {
   CollaborationSnapshot,
   PlanParallelBatch,
   PlanReplanInfo,
+  PlanReplanLookaheadHit,
+  PlanReplanMode,
   PlanRevisionSnapshot,
   PlanRevisionStep,
   PlanRunChecklistItem,
+  PlanRunCost,
   PlanRunSnapshot,
   PlanRunStatus,
   PlanRunStepSnapshot,
@@ -132,17 +135,25 @@ function normalizeParallelBatch(value: unknown): PlanParallelBatch | undefined {
     successful,
     failed,
     total,
+    ...(source.executed === true ? { executed: true } : {}),
+    ...(source.simulated === true ? { simulated: true } : {}),
     results: results.flatMap(result => {
       const r = record(result)
       if (!r) return []
       const stepId = stringField(r, 'stepId', 'step_id', 'id')
       const title = stringField(r, 'title', 'label')
       if (!stepId || !title) return []
+      // 真实耗时/尝试次数/超时标记：无数据即缺省（前端不显示），绝不补 0 冒充
+      const elapsedMs = numberField(r, 'elapsedMs', 'elapsed_ms')
+      const attempts = numberField(r, 'attempts')
       return [{
         stepId,
         title,
         status: r.status === 'failed' ? 'failed' : 'completed',
         summary: stringField(r, 'summary', 'detail'),
+        ...(elapsedMs !== undefined && elapsedMs >= 0 ? { elapsedMs } : {}),
+        ...(attempts !== undefined && attempts > 0 ? { attempts } : {}),
+        ...(r.timedOut === true || r.timed_out === true ? { timedOut: true } : {}),
       }]
     }),
   }
@@ -158,6 +169,9 @@ function normalizeReplanInfo(value: unknown): PlanReplanInfo | undefined {
   const similarity = numberField(source, 'similarity')
   const stepsChanged = numberField(source, 'stepsChanged', 'steps_changed')
   const createdAt = numberField(source, 'createdAt', 'created_at')
+  const mode = normalizeReplanMode(stringField(source, 'mode'))
+  const skippedStepIds = stringList(source.skippedStepIds ?? source.skipped_step_ids)
+  const bestMatch = normalizeLookaheadHit(source.bestMatch ?? source.best_match)
   return {
     revisionId,
     planId,
@@ -166,6 +180,56 @@ function normalizeReplanInfo(value: unknown): PlanReplanInfo | undefined {
     prompt: stringField(source, 'prompt', 'observation'),
     stepsChanged: stepsChanged ?? 0,
     ...(createdAt !== undefined ? { createdAt } : {}),
+    ...(mode ? { mode } : {}),
+    ...(skippedStepIds.length ? { skippedStepIds } : {}),
+    ...(bestMatch ? { bestMatch } : {}),
+  }
+}
+
+const REPLAN_MODES = new Set<PlanReplanMode>(['on_plan', 'advance', 'rebuild'])
+
+function normalizeReplanMode(value: string): PlanReplanMode | undefined {
+  return REPLAN_MODES.has(value as PlanReplanMode) ? value as PlanReplanMode : undefined
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : []
+}
+
+function normalizeLookaheadHit(value: unknown): PlanReplanLookaheadHit | undefined {
+  const source = record(value)
+  if (!source) return undefined
+  const stepId = stringField(source, 'stepId', 'step_id')
+  if (!stepId) return undefined
+  return {
+    stepId,
+    title: stringField(source, 'title', 'label'),
+    similarity: numberField(source, 'similarity') ?? 0,
+    distance: numberField(source, 'distance') ?? 0,
+  }
+}
+
+/**
+ * 剩余代价模型：仅在带**实测样本**（`sampleCount > 0`）时才接受 ETA。
+ * 无样本时引擎回传 null，前端同样不显示——缺证据就不给用户看假进度。
+ */
+function normalizeRunCost(value: unknown): PlanRunCost | undefined {
+  const source = record(value)
+  if (!source) return undefined
+  const remainingSteps = numberField(source, 'remainingSteps', 'remaining_steps')
+  const sampleCount = numberField(source, 'sampleCount', 'sample_count')
+  if (remainingSteps === undefined || sampleCount === undefined) return undefined
+  const avgStepMs = numberField(source, 'avgStepMs', 'avg_step_ms')
+  const estimatedRemainingMs = numberField(source, 'estimatedRemainingMs', 'estimated_remaining_ms')
+  return {
+    remainingSteps,
+    sampleCount,
+    avgStepMs: sampleCount > 0 && avgStepMs !== undefined ? avgStepMs : null,
+    estimatedRemainingMs: sampleCount > 0 && estimatedRemainingMs !== undefined
+      ? estimatedRemainingMs
+      : null,
   }
 }
 
@@ -213,6 +277,9 @@ export function normalizePlanRevisionSnapshot(
   const generation = numberField(source, 'generation')
   const createdAt = numberField(source, 'createdAt', 'created_at')
   const explicitCurrent = booleanField(source, 'current')
+  // A5：编排形态机器键 + 决策理由（纯增、向后兼容；旧修订无此二字段）。
+  const strategy = stringField(source, 'strategy')
+  const rationale = stringField(source, 'rationale')
   return {
     revisionId,
     planId,
@@ -221,6 +288,8 @@ export function normalizePlanRevisionSnapshot(
     title,
     markdown: typeof source.markdown === 'string' ? source.markdown : '',
     steps: stepsRaw.flatMap(step => normalizePlanStep(step) ?? []),
+    ...(strategy ? { strategy } : {}),
+    ...(rationale ? { rationale } : {}),
     current: explicitCurrent ?? (Boolean(currentRevisionId) && revisionId === currentRevisionId),
     ...(createdAt !== undefined ? { createdAt } : {}),
   }
@@ -261,6 +330,7 @@ export function normalizePlanRunSnapshot(value: unknown): PlanRunSnapshot | null
   const checklist = normalizeRunChecklist(source.checklist)
   const parallelBatch = normalizeParallelBatch(source.parallelBatch ?? source.parallel_batch)
   const replan = normalizeReplanInfo(source.replan)
+  const cost = normalizeRunCost(source.cost)
   return {
     runId,
     planRevisionId,
@@ -280,6 +350,7 @@ export function normalizePlanRunSnapshot(value: unknown): PlanRunSnapshot | null
     ...(checklist.length ? { checklist } : {}),
     ...(parallelBatch ? { parallelBatch } : {}),
     ...(replan ? { replan } : {}),
+    ...(cost ? { cost } : {}),
   }
 }
 

@@ -1374,10 +1374,6 @@ function gatewayContextUrl(): string {
   .ov-kpis {
     grid-template-columns: 1fr 1fr;
   }
-  .ov-readiness__actions {
-    flex-basis: 100%;
-    margin-left: 0;
-  }
 }
 
 @media (max-width: 760px) {
@@ -1393,10 +1389,6 @@ function gatewayContextUrl(): string {
 @media (max-width: 480px) {
   .ov-kpis {
     grid-template-columns: 1fr;
-  }
-  .ov-readiness__counts {
-    flex-wrap: wrap;
-    gap: var(--sp-2) var(--sp-4);
   }
 }
 </style>

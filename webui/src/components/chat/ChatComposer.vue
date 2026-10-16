@@ -73,16 +73,30 @@
             :aria-describedby="sendBlockedMessage ? 'chat-composer-send-status' : undefined"
             @beforeinput="emit('expand'); emit('beforeinput', $event)"
             @input="emit('input', $event)"
-            @keydown="emit('keydown', $event)"
+            @keydown="onTextareaKeydown"
             @compositionstart="emit('compositionChange', true)"
             @compositionend="emit('compositionChange', false)"
             @pointerdown="emit('expand')"
             @focus="emit('expand')"
           />
+          <ComposerMentionPopover
+            v-if="mentionQuery !== null"
+            ref="mentionPopoverEl"
+            :query="mentionQuery"
+            @select="applyMention"
+          />
         </div>
         <div class="chat-collapse-region chat-collapse-region--footer">
           <div class="chat-input-footer">
           <div class="chat-input-actions chat-input-actions--left">
+            <ChatComposerPresets
+              v-if="showPresets"
+              :run-mode-locked="runModeLocked"
+              :model-routing-mode="modelRoutingMode"
+              :model-routing-busy="modelRoutingSettingsBusy"
+              @open-advanced="openAdvancedFromPresets"
+              @set-model-routing-mode="emit('setModelRoutingMode', $event)"
+            />
             <div ref="addMenuAnchorEl" class="chat-settings-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-plus-btn"
@@ -155,65 +169,35 @@
               <span>{{ t('chat.codingMode.activeLabel') }}</span>
               <Icon name="x" :size="12" aria-hidden="true" />
             </button>
-            <div ref="modelRoutingAnchorEl" class="chat-settings-anchor">
-              <button
-                class="btn btn--icon btn--ghost chat-model-routing-btn"
-                :class="[
-                  `chat-model-routing-btn--${modelRoutingMode}`,
-                  { 'is-active': modelRoutingOpen || modelRoutingMode !== 'off' },
-                ]"
-                :title="t('chat.composer.modelRouting')"
-                :aria-label="t('chat.composer.modelRouting')"
-                :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
-                @click="toggleModelRouting"
-              >
-                <Icon name="router" :size="17" />
-                <span
-                  v-if="showRouterNewBadge"
-                  class="chat-model-routing-btn__new"
-                  aria-hidden="true"
-                >{{ t('chat.composer.badgeNew') }}</span>
-              </button>
-              <ChatComposerModelRouting
-                v-if="modelRoutingOpen"
-                :model-routing-mode="modelRoutingMode"
-                :busy="modelRoutingSettingsBusy"
-                @close="modelRoutingOpen = false"
-                @set-model-routing-mode="emit('setModelRoutingMode', $event)"
-              />
-            </div>
-            <div ref="runModeAnchorEl" class="chat-settings-anchor chat-run-mode-anchor">
-              <button
-                class="btn btn--icon btn--ghost chat-run-mode-btn"
-                :class="[`chat-run-mode-btn--${runMode}`, {
-                  'is-active': runModeOpen,
-                  'is-locked': runModeLocked,
-                }]"
-                :title="runModeLocked ? undefined : t('chat.composer.runMode')"
-                :aria-label="t('chat.composer.runMode')"
-                :aria-expanded="runModeOpen ? 'true' : 'false'"
-                :aria-disabled="runModeLocked ? 'true' : 'false'"
-                :aria-describedby="runModeLocked ? 'chat-run-mode-lock-tip' : undefined"
-                :disabled="runModeLocked"
-                @click="toggleRunMode"
-              >
-                <Icon name="shield" :size="17" />
-              </button>
-              <span
-                v-if="runModeLocked"
-                id="chat-run-mode-lock-tip"
-                class="chat-run-mode-lock-tip"
-                role="tooltip"
-              >{{ runModeLockMessage }}</span>
-              <ChatComposerRunMode
-                v-if="runModeOpen"
-                :run-mode="runMode"
-                :allowed-run-modes="allowedRunModes"
-                :safe-setup-available="safeSetupAvailable"
-                @close="runModeOpen = false"
-                @set-run-mode="emit('setRunMode', $event)"
-              />
-            </div>
+            <RunModePanel
+              v-model:open="runModePanelOpen"
+              :run-mode="runMode"
+              :allowed-run-modes="allowedRunModes"
+              :safe-setup-available="safeSetupAvailable"
+              :run-mode-locked="runModeLocked"
+              :run-mode-lock-message="runModeLockMessage"
+              :collaboration-mode="collaborationMode || 'default'"
+              :plan-mode-available="planModeAvailable === true"
+              :plan-mode-busy="planModeBusy === true"
+              :plan-mode-disabled="planModeDisabled === true"
+              :plan-mode-applies-next-turn="planModeAppliesNextTurn === true"
+              :model-routing-mode="modelRoutingMode"
+              :model-routing-settings-busy="modelRoutingSettingsBusy"
+              :show-new-badge="showRouterNewBadge"
+              @set-run-mode="emit('setRunMode', $event)"
+              @set-collaboration-mode="emit('setCollaborationMode', $event)"
+              @set-model-routing-mode="emit('setModelRoutingMode', $event)"
+            />
+            <button
+              class="btn btn--icon btn--ghost chat-thinking-btn"
+              :class="{ 'is-active': thinking }"
+              :title="t('chat.composer.thinking')"
+              :aria-label="t('chat.composer.thinking')"
+              :aria-pressed="thinking ? 'true' : 'false'"
+              @click="toggleThinking"
+            >
+              <Icon name="sparkles" :size="17" />
+            </button>
             <div ref="moreActionsAnchorEl" class="chat-settings-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-more-actions-btn"
@@ -284,14 +268,6 @@
               </div>
             </div>
           </div>
-          <ChatComposerPlanMode
-            :available="planModeAvailable === true"
-            :mode="collaborationMode || 'default'"
-            :busy="planModeBusy === true"
-            :disabled="planModeDisabled === true"
-            :applies-next-turn="planModeAppliesNextTurn === true"
-            @set-mode="emit('setCollaborationMode', $event)"
-          />
           <div class="chat-input-actions chat-input-actions--right">
             <Transition name="composer-ctl" mode="out-in">
               <button
@@ -355,9 +331,9 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
 import ChatComposerAddMenu from '@/components/chat/ChatComposerAddMenu.vue'
-import ChatComposerModelRouting from '@/components/chat/ChatComposerModelRouting.vue'
-import ChatComposerPlanMode from '@/components/chat/ChatComposerPlanMode.vue'
-import ChatComposerRunMode from '@/components/chat/ChatComposerRunMode.vue'
+import ChatComposerPresets from '@/components/chat/ChatComposerPresets.vue'
+import ComposerMentionPopover from '@/components/chat/ComposerMentionPopover.vue'
+import RunModePanel from '@/components/chat/RunModePanel.vue'
 import type { Attachment } from '@/types/chat'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 import type { SandboxRunMode } from '@/types/sandbox'
@@ -392,6 +368,8 @@ const props = withDefaults(defineProps<{
   runModeLockMessage: string
   modelRoutingMode: ModelRoutingMode
   modelRoutingSettingsBusy: boolean
+  /** 深度思考（DeepSeek thinking 模式）开关状态，由父级持久化。 */
+  thinking?: boolean
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
   voiceBusy: boolean
@@ -416,6 +394,8 @@ const props = withDefaults(defineProps<{
   /** Floating-composer toggle: false docks the panel (solid surface, no
       glass) even though the composer still renders in the normal layout. */
   floating?: boolean
+  /** D-02：在底栏渲染 3×3 模式选择胶囊（仅 ChatView 开启）。 */
+  showPresets?: boolean
 }>(), {
   canChooseProject: true,
   codingModeEnabled: false,
@@ -423,6 +403,7 @@ const props = withDefaults(defineProps<{
   inputDisabled: false,
   safeSetupAvailable: false,
   floating: false,
+  showPresets: false,
 })
 
 const emit = defineEmits<{
@@ -437,6 +418,7 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setModelRoutingMode: [mode: ModelRoutingMode]
+  setThinking: [enabled: boolean]
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
   cancelReplan: []
@@ -459,8 +441,56 @@ const composerEl = ref<HTMLElement | null>(null)
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const addMenuOpen = ref(false)
-const modelRoutingOpen = ref(false)
+const runModePanelOpen = ref(false)
 const moreActionsOpen = ref(false)
+
+// ── 「@」专家 / 智能体引用（对话框内）─────────────────────────────────────
+// 输入 `@` 触发候选浮层；选中后把 `@名称` 插入输入框。纯前端引用（不改 chat.send
+// 负载）——满足「专家团能在对话框中被引用」；专家团整队启动走专家中心页 team.run。
+const mentionPopoverEl = ref<InstanceType<typeof ComposerMentionPopover> | null>(null)
+const mentionQuery = ref<string | null>(null)
+
+function updateMentionTrigger() {
+  const m = /(^|\s)@([^\s@]*)$/.exec(inputText.value)
+  mentionQuery.value = m ? m[2] : null
+}
+watch(inputText, updateMentionTrigger)
+
+function onTextareaKeydown(event: KeyboardEvent) {
+  if (mentionQuery.value !== null && mentionPopoverEl.value) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      mentionPopoverEl.value.move(1)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      mentionPopoverEl.value.move(-1)
+      return
+    }
+    if ((event.key === 'Enter' || event.key === 'Tab') && mentionPopoverEl.value.hasCandidates()) {
+      event.preventDefault()
+      mentionPopoverEl.value.selectActive()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      mentionQuery.value = null
+      return
+    }
+  }
+  emit('keydown', event)
+}
+
+function applyMention(label: string) {
+  const text = inputText.value
+  const m = /(^|\s)@([^\s@]*)$/.exec(text)
+  if (m) {
+    inputText.value = `${text.slice(0, m.index)}${m[1]}@${label} `
+  }
+  mentionQuery.value = null
+  void nextTick(() => textareaEl.value?.focus())
+}
 const showProjectContext = computed(() =>
   Boolean(props.projectWorkspace && (props.canCloseProject || props.projectStatusMessage)),
 )
@@ -491,18 +521,22 @@ function dismissRouterNewBadge() {
     localStorage.setItem(ROUTER_NEW_BADGE_KEY, '1')
   } catch { /* localStorage unavailable */ }
 }
-const runModeOpen = ref(false)
 const addMenuAnchorEl = ref<HTMLElement | null>(null)
-const modelRoutingAnchorEl = ref<HTMLElement | null>(null)
-const runModeAnchorEl = ref<HTMLElement | null>(null)
 const moreActionsAnchorEl = ref<HTMLElement | null>(null)
 
 const anyPopoverOpen = computed(() =>
   addMenuOpen.value
-  || modelRoutingOpen.value
-  || runModeOpen.value
+  || runModePanelOpen.value
   || moreActionsOpen.value,
 )
+
+// 「@」候选与 Add / More 菜单互斥：同一时刻只留一个浮层。
+watch(mentionQuery, (q) => {
+  if (q !== null) {
+    addMenuOpen.value = false
+    moreActionsOpen.value = false
+  }
+})
 
 function eventInsideRoot(event: PointerEvent, root: HTMLElement | null): boolean {
   if (!root) return false
@@ -521,12 +555,6 @@ function closeOpenPopoversFromOutside(event: PointerEvent) {
   ) {
     moreActionsOpen.value = false
   }
-  if (modelRoutingOpen.value && !eventInsideRoot(event, modelRoutingAnchorEl.value)) {
-    modelRoutingOpen.value = false
-  }
-  if (runModeOpen.value && !eventInsideRoot(event, runModeAnchorEl.value)) {
-    runModeOpen.value = false
-  }
 }
 
 watch(anyPopoverOpen, (open) => {
@@ -541,35 +569,31 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', closeOpenPopoversFromOutside, true)
 })
 
-function toggleModelRouting() {
-  modelRoutingOpen.value = !modelRoutingOpen.value
-  if (modelRoutingOpen.value) {
+// 首次展开统一模式面板时消除「NEW」角标（原在路由按钮上）；
+// 同时与 Add / More 菜单互斥，保证同一时刻只有一个浮层。
+watch(runModePanelOpen, (isOpen) => {
+  if (isOpen) {
     dismissRouterNewBadge()
     addMenuOpen.value = false
-    runModeOpen.value = false
     moreActionsOpen.value = false
   }
-}
-
-function toggleRunMode() {
-  if (props.runModeLocked) return
-  runModeOpen.value = !runModeOpen.value
-  if (runModeOpen.value) {
-    addMenuOpen.value = false
-    modelRoutingOpen.value = false
-    moreActionsOpen.value = false
-  }
-}
-
-watch(() => props.runModeLocked, (locked) => {
-  if (locked) runModeOpen.value = false
 })
+
+function toggleThinking() {
+  emit('setThinking', !props.thinking)
+}
+
+// 「高级 ▾」：打开既有 RunModePanel（内含全量的 RunMode / PlanMode / ModelRouting），
+// 与 Add / More 菜单互斥（见 runModePanelOpen 的 watch）。
+function openAdvancedFromPresets() {
+  runModePanelOpen.value = true
+}
 
 function closeAllPopovers() {
   addMenuOpen.value = false
-  modelRoutingOpen.value = false
-  runModeOpen.value = false
+  runModePanelOpen.value = false
   moreActionsOpen.value = false
+  mentionQuery.value = null
 }
 
 // The retract animation collapses the footer with overflow clipping; any open
@@ -583,8 +607,7 @@ function toggleMoreActions() {
   moreActionsOpen.value = !moreActionsOpen.value
   if (moreActionsOpen.value) {
     addMenuOpen.value = false
-    modelRoutingOpen.value = false
-    runModeOpen.value = false
+    runModePanelOpen.value = false
     if (
       props.promptCacheKeepaliveAvailable
       && props.promptCacheKeepaliveSessionReady
@@ -598,8 +621,7 @@ function toggleAddMenu() {
   addMenuOpen.value = !addMenuOpen.value
   if (addMenuOpen.value) {
     moreActionsOpen.value = false
-    modelRoutingOpen.value = false
-    runModeOpen.value = false
+    runModePanelOpen.value = false
   }
 }
 
@@ -819,6 +841,31 @@ defineExpose<ChatComposerExpose>({
 .chat-coding-mode-chip:disabled {
   cursor: default;
   opacity: var(--state-disabled-opacity);
+}
+.chat-thinking-btn {
+  position: relative;
+}
+.chat-thinking-btn.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.chat-thinking-btn.is-active::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 8px 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: chat-thinking-glow 1.8s var(--ease-standard) infinite;
+  pointer-events: none;
+}
+@keyframes chat-thinking-glow {
+  0%, 100% { opacity: 0.4; }
+  55% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-thinking-btn.is-active::after { animation: none; opacity: 0.6; }
 }
 .chat-project-choose {
   flex-shrink: 0;
@@ -1295,6 +1342,7 @@ defineExpose<ChatComposerExpose>({
   flex: 1;
   min-width: 0;
   display: flex;
+  position: relative;
 }
 
 .chat-textarea {

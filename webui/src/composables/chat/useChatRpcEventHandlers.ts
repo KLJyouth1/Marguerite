@@ -12,9 +12,11 @@ import type {
   CronResultPayload,
   EnsembleProgressPayload,
   InputDispositionPayload,
+  MemoryRecallPayload,
   RouterDecisionPayload,
   SessionEventPayload,
   SessionMessagesSnapshotResponse,
+  StepLoopPayload,
   StreamEventEnvelope,
   SubagentCompletionPayload,
   TextDeltaPayload,
@@ -42,6 +44,7 @@ import {
   isCurrentTaskPayload as payloadIsCurrentTask,
   isStaleEpoch as payloadIsStaleEpoch,
   payloadTaskId,
+  sessionChangeIsStrongTerminal as payloadSessionChangeIsStrongTerminal,
   sessionChangeIsTerminal as payloadSessionChangeIsTerminal,
   sessionErrorMessage as eventSessionErrorMessage,
   taskGroupId as eventTaskGroupId,
@@ -110,6 +113,13 @@ export interface UseChatRpcEventHandlersOptions {
   normalizeRunStatus: (status: string) => string
   sessionRunStatus: (source: ChatRunStatusSource | null | undefined) => ChatRunStatus
   applySessionRunState: (source: ChatRunStatusSource | null | undefined) => void
+  /**
+   * True while an approval/clarify interrupt is on screen for this session.
+   * Used to refuse the `sessions.changed` turn-end fallback (`occasion:
+   * 'turn_end'` / `run_status: 'idle'`): an idle frame racing a pending approval
+   * must never collapse the turn the user is still being asked about.
+   */
+  hasActiveInterrupt?: Ref<boolean>
   queueRouterDecision: (payload: RouterDecisionPayload) => void
   appendEnsembleProgress: (payload: EnsembleProgressPayload) => void
   markEnsembleHandoff: () => void
@@ -612,14 +622,19 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   function appendThinkingDelta(text: string, payload: SessionEventPayload) {
     if (!text) return
     if (!stream.isStreaming.value) stream.startStreaming()
+    // A3：编排叙述（payload.kind === 'narration'）是**整条记录**而非 token 增量。
+    // 多条记录若首尾直接相接，会被 Markdown 粘成同一段落（`> a…> b…` → 一整段），
+    // 故记录之间补一个空行分隔；真实推理增量（无 kind）必须保持原样拼接，绝不插分隔。
+    const narration = String((payload as Record<string, unknown>)?.kind || '') === 'narration'
     const current = streamThinking.value
+    const frameText = narration && current?.text ? `\n\n${text}` : text
     if (current) {
-      streamThinking.value = { ...current, text: current.text + text }
+      streamThinking.value = { ...current, text: current.text + frameText }
     } else {
       const now = Date.now()
       const serverStartedAt = trustedReasoningStartedAt(payload.started_at, now)
       streamThinking.value = {
-        text,
+        text: frameText,
         startedAt: serverStartedAt ?? now,
         serverStartedAt,
       }
@@ -629,7 +644,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     stream.setThinkingContent(streamThinking.value.text)
     // The fold concats the same text into its thinkingText. Gating already
     // passed upstream (handleRpcAny), so this frame mirrors an accepted delta.
-    if (stream.useReducer.value) stream.appendFrame({ kind: 'thinking', text, at: Date.now() })
+    if (stream.useReducer.value) stream.appendFrame({ kind: 'thinking', text: frameText, at: Date.now() })
     // Reasoning growth must re-pin the thread to the bottom just like answer
     // text and tool deltas. Schedule the same batched render/scroll flush so a
     // long thinking phase keeps following the live turn instead of only
@@ -741,6 +756,33 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     return decision.accepted
   }
 
+  /**
+   * 本轮的流是否已经结算（done / error / 中止）。
+   *
+   * 结算后 `activeStreamTaskId` 落在 `FINISHED`/`STOPPED` 哨兵上，此时**不允许**任何
+   * 迟到事件把流重新拉起 —— 见 [`restartStreamingForLiveEvent`]。
+   */
+  function turnIsSettled(): boolean {
+    return activeStreamTaskId.value === FINISHED_STREAM_TASK_ID
+      || activeStreamTaskId.value === STOPPED_STREAM_TASK_ID
+  }
+
+  /**
+   * 仅在「本轮仍在进行」时按事件恢复流渲染。
+   *
+   * 背景（真机现象）：一轮以 `session.event.error`（如 401）收尾后，后端那一轮已经死了、
+   * 不会再有事件；此时若再来一条 `state_change` / `ensemble_progress` 生命周期帧，旧代码
+   * 会 `startStreaming()` 把流重新拉起并重新武装空闲看门狗（`DEFAULT_STREAM_IDLE_TIMEOUT_MS`
+   * = 630s）。没有任何生产者再发事件 → 用户先看到失败卡，再干等满 630 秒才被告知
+   * 「Response timed out -- no events received for 630s」——失败信息被一条假的超时盖住。
+   *
+   * 迟到的生命周期帧仍会刷新 seq/运行态（不丢信息），只是不再复活渲染。
+   */
+  function restartStreamingForLiveEvent() {
+    if (stream.isStreaming.value || turnIsSettled()) return
+    stream.startStreaming()
+  }
+
   function activeTaskGroupRunState(payload: SessionEventPayload = {}) {
     return buildActiveTaskGroupRunState(payload, activeTaskGroups.value.size)
   }
@@ -769,6 +811,10 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
   function sessionChangeIsTerminal(payload: SessionEventPayload): boolean {
     return payloadSessionChangeIsTerminal(payload, options.normalizeRunStatus)
+  }
+
+  function sessionChangeIsStrongTerminal(payload: SessionEventPayload): boolean {
+    return payloadSessionChangeIsStrongTerminal(payload, options.normalizeRunStatus)
   }
 
   function isStoppedCancelledTerminalEvent(terminalStatus: string, payload: SessionEventPayload): boolean {
@@ -892,7 +938,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     stream.resetStreamIdleTimer()
     const to = payload.to_state || payload.toState || ''
     const activeState = ['thinking', 'streaming', 'tool_calling', 'tool_use', 'running'].includes(String(to))
-    if (!stream.isStreaming.value && activeState) stream.startStreaming()
+    if (activeState) restartStreamingForLiveEvent()
     if (!stream.isStreaming.value) return
     if (activeState) options.markEnsembleHandoff()
     if (to === 'thinking') {
@@ -916,14 +962,14 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     if (bufferPendingStreamEvent('session.event.run_heartbeat', payload)) return
     if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
-    if (!stream.isStreaming.value) stream.startStreaming()
+    restartStreamingForLiveEvent()
     stream.resetStreamIdleTimer()
     if (stream.streamBubble.value && !stream.streamHasVisibleOutput.value) {
       const phase = String(payload.phase || '')
-      // The channel wrapper emits a generic keepalive on the same cadence as
-      // ensemble heartbeats. It proves liveness but does not represent a phase
-      // transition, so changing the activity would restart its timer.
-      const isPhaseAgnosticKeepalive = phase === 'channel'
+      // Generic keepalives prove liveness but are NOT phase transitions, so they
+      // must not overwrite the activity label ('channel' from the Python
+      // channel wrapper; 'turn' from the Rust gateway's turn heartbeat).
+      const isPhaseAgnosticKeepalive = phase === 'channel' || phase === 'turn'
       if (phase.startsWith('ensemble_proposers')) {
         stream.setStreamActivity('Generating candidates')
       } else if (phase.startsWith('ensemble_aggregator')) {
@@ -1220,6 +1266,24 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     ) return
     if (!isCurrentTaskPayload(payload)) return
     if (sessionChangeIsTerminal(payload)) {
+      // `occasion: 'turn_end'` / `run_status: 'idle'` are a *fallback* terminal
+      // (see sessionChangeIsTurnEndSignal): the primary completion path remains
+      // `session.event.done`. A bare idle frame is ambiguous — it can be a stale
+      // snapshot replayed while our own `chat.send` is still pending, or an idle
+      // heartbeat racing an approval prompt. Only collapse the live turn once it
+      // is bound to a concrete task (not the PENDING window) and no interrupt is
+      // on screen; otherwise keep streaming and let `session.event.done` or the
+      // idle watchdog decide.
+      const turnEndFallback = !sessionChangeIsStrongTerminal(payload)
+      if (
+        turnEndFallback
+        && (
+          activeStreamTaskId.value === PENDING_STREAM_TASK_ID
+          || options.hasActiveInterrupt?.value === true
+        )
+      ) {
+        return
+      }
       markTaskSettled(payload)
       const state = options.sessionRunStatus(payload)
       const interrupted = state.status === 'cancelled' || state.status === 'interrupted'
@@ -1304,7 +1368,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     if (bufferPendingStreamEvent('session.event.ensemble_progress', payload)) return
     if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
-    if (!stream.isStreaming.value) stream.startStreaming()
+    restartStreamingForLiveEvent()
     // A lifecycle frame is a real gateway event. Keep the hard no-event timer
     // aligned with the wire even when heartbeat cadence is slower than progress.
     stream.resetStreamIdleTimer()
@@ -1384,6 +1448,26 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
       stream.resetStreamIdleTimer()
       appendThinkingDelta(thinkingText, payload)
       return
+    }
+
+    // v3.3 插话生命周期事件（Rust steer_v2 发布）：
+    // - steer_accepted：插话已入队，等待运行边界应用 → 用户气泡标记「已并入运行」
+    // - steers_applied：turn 结束时插话已并入回复 → 标记「已应用」并提示查看结论
+    if (event === 'session.event.status') {
+      const kind = String((payload as Record<string, unknown>)?.kind || '')
+      if (kind === 'steer_accepted' || kind === 'steers_applied') {
+        const clientMessageId = String(
+          (payload as Record<string, unknown>)?.client_message_id || '',
+        )
+        const target = clientMessageId
+          ? messages.value.find(m => m.steerClientMessageId === clientMessageId)
+          : undefined
+        if (target && (target.inputDisposition === 'steering' || kind === 'steers_applied')) {
+          target.inputDisposition = kind === 'steer_accepted' ? 'steering' : 'applied'
+        }
+        stream.resetStreamIdleTimer()
+        return
+      }
     }
 
     if (event.endsWith('.done') || event === 'chat.done') {
@@ -1479,7 +1563,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
       const serverMessage = eventSessionErrorMessage(payload)
       messages.value.push({
         role: 'error',
-        text: localizedChatErrorMessage(errorCode, serverMessage),
+        // R65/B1：结构化错误帧（如计划步骤失败）携带 step_id / step_title，
+        // 按码本地化时用其插值，避免回显后端内部术语。
+        text: localizedChatErrorMessage(errorCode, serverMessage, payload ?? {}),
         errorCode,
         terminalNotice: true,
         ts: new Date().toISOString(),
@@ -1563,6 +1649,73 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     }
   }
 
+  /**
+   * T04：跨项目记忆召回（Rust 仅在有命中时发布）。按 session 过滤后，向当前 live
+   * 活动时间线插入一条轻量信息行。**不**触碰 idle 计时、不改变流状态——它只是
+   * 一条可观测性记录，流式相位仍由内容事件驱动。
+   */
+  function handleRpcMemoryRecall(payload: MemoryRecallPayload) {
+    if (isStaleEpoch(payload)) return
+    if (aborted.value) return
+    if (!payloadIsCurrentSession(payload, sessionKey.value)) return
+    const hits = Number(payload.hits ?? 0)
+    if (!Number.isFinite(hits) || hits <= 0) return
+    if (!stream.useReducer.value) return
+    stream.appendFrame({
+      kind: 'status',
+      action: 'memory_recall',
+      label: '',
+      at: Date.now(),
+      detail: String(Math.floor(hits)),
+    })
+  }
+
+  /** agent 工具回路轮次 / 交付流水线步骤：可读 token（轮次或 `i/total`）。 */
+  function stepLoopToken(payload: StepLoopPayload): string {
+    const round = Number(payload.round)
+    if (Number.isFinite(round) && round > 0) return String(Math.floor(round))
+    const index = Number(payload.index)
+    const total = Number(payload.total)
+    if (Number.isFinite(index) && Number.isFinite(total) && total > 0) {
+      return `${Math.floor(index) + 1}/${Math.floor(total)}`
+    }
+    return ''
+  }
+
+  function handleRpcStepStart(payload: StepLoopPayload) {
+    if (isStaleEpoch(payload)) return
+    if (aborted.value) return
+    if (!payloadIsCurrentSession(payload, sessionKey.value)) return
+    const token = stepLoopToken(payload)
+    if (!token) return
+    if (!stream.useReducer.value) return
+    stream.appendFrame({
+      kind: 'status',
+      action: 'step_start',
+      label: '',
+      at: Date.now(),
+      detail: token,
+    })
+  }
+
+  function handleRpcStepFinish(payload: StepLoopPayload) {
+    if (isStaleEpoch(payload)) return
+    if (aborted.value) return
+    if (!payloadIsCurrentSession(payload, sessionKey.value)) return
+    const token = stepLoopToken(payload)
+    if (!token) return
+    if (!stream.useReducer.value) return
+    // reason 优先取工具回路 reason，其次流水线 status；均为我方稳定 token。
+    const reason = String(payload.reason || payload.status || '')
+    stream.appendFrame({
+      kind: 'status',
+      action: 'step_finish',
+      label: '',
+      at: Date.now(),
+      detail: `${token}|${reason}`,
+    })
+  }
+
   const handlers: ChatRpcSubscriptionHandlers = {
     onTextDelta: handleRpcTextDelta,
     onToolUseStart: handleRpcToolUseStart,
@@ -1570,6 +1723,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     onToolResult: handleRpcToolResult,
     onArtifact: handleRpcArtifact,
     onArtifactUpdated: handleRpcArtifactUpdated,
+    onMemoryRecall: handleRpcMemoryRecall,
+    onStepStart: handleRpcStepStart,
+    onStepFinish: handleRpcStepFinish,
     onStateChange: handleRpcStateChange,
     onRunHeartbeat: handleRpcRunHeartbeat,
     onCompaction: handleRpcCompaction,

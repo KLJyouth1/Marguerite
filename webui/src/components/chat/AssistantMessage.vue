@@ -157,6 +157,7 @@
         @implement-current="$emit('planImplementCurrent', $event)"
         @implement-new="$emit('planImplementNew', $event)"
         @replan="$emit('planReplan', $event)"
+        @reuse-last="$emit('planReuseLast', $event)"
       />
 
       <div
@@ -429,6 +430,8 @@ const emit = defineEmits<{
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
+  /** D-05/T08：复用上次计划（target.revisionId = 复用候选 revision）。 */
+  planReuseLast: [target: PlanCardActionTarget]
 }>()
 
 // Absolute label is static; only the relative label subscribes to the shared

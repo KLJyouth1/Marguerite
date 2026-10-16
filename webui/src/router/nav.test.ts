@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getNavigationItems, getWorkNavigationSection } from './nav'
+import { getNavigationItems, getWorkNavigationSection, getGroupedNavigation } from './nav'
 import { sharedRoutes } from './sharedRoutes'
 
 // Guards the flat route taxonomy shared by the sidebar rail, mobile drawer,
@@ -8,14 +8,17 @@ import { sharedRoutes } from './sharedRoutes'
 
 describe('getWorkNavigationSection', () => {
   it('returns the flat sidebar order after the dedicated chat action', () => {
-    // v10 导航精简：fleet/computer-use 归入 agent 能力与模式逻辑，不再占导航。
+    // v11 导航锐减：主 rail 保留核心工作流；Gap4 起 /task（交付流水线工作台）晋升为
+    // 一等 Work 目的地（navOrder 35，紧邻 /skills），evolve/plugins 归 Work 折叠组，
+    // 扑克/游戏/桌宠/壁纸等娱乐功能全部隔离到 Extras 扩展组。
+    // v3 岛屿工作空间：/island（navOrder 37）作为 /task 的可视化孪生视图进入主 rail ——
+    // 两者回答同一个问题（「任务现在怎么在跑」），只是呈现方式不同（流水线 vs 3D 岛屿）。
     expect(getWorkNavigationSection().map((item) => item.path)).toEqual([
+      '/task',
+      '/island',
       '/skills',
       '/cron',
       '/usage',
-      '/evolve',
-      '/plugins',
-      '/poker',
     ])
   })
 
@@ -50,16 +53,12 @@ describe('getWorkNavigationSection', () => {
 describe('navigation taxonomy invariants', () => {
   it('keeps Agents out of every primary navigation consumer', () => {
     // v10 导航精简：电脑操控/舰队是 agent 能力与模式执行逻辑、关系图谱与宠物
-    // 移入设置，均不再出现在主导航。
-    expect(getNavigationItems('primary').map((item) => item.path)).toEqual([
-      '/chat',
-      '/skills',
-      '/cron',
-      '/usage',
-      '/evolve',
-      '/plugins',
-      '/poker',
-    ])
+    // 移入设置，均不再出现在主导航。Agents 保留深链但不带 nav:'primary' 元数据。
+    const primaryPaths = getNavigationItems('primary').map((item) => item.path)
+    expect(primaryPaths).not.toContain('/agents')
+    // The dedicated Settings footer owns /settings; it must not surface as a
+    // primary rail row.
+    expect(primaryPaths).not.toContain('/settings')
   })
 
   it('keeps the /agents deep link while omitting primary-nav metadata', () => {
@@ -70,10 +69,66 @@ describe('navigation taxonomy invariants', () => {
     expect(agentsRoute?.meta?.nav).toBeUndefined()
   })
 
+  it('surfaces grouped non-Work primary items without duplicating the flat rail', () => {
+    // Task #6: engine/editor/terminal etc. carry nav:'primary' but a non-Work
+    // group, so they belong in the collapsible groups, not the flat rail.
+    const primaryPaths = getNavigationItems('primary').map((i) => i.path)
+    const grouped = getGroupedNavigation()
+    const groupedPaths = new Set(grouped.flatMap((g) => g.items.map((i) => i.path)))
+    for (const p of ['/engine', '/editor', '/terminal', '/browser-cockpit']) {
+      expect(groupedPaths.has(p)).toBe(true)
+    }
+    // The flat rail (Work-group primary) must not also appear in the groups.
+    for (const p of ['/skills', '/cron', '/usage']) {
+      expect(groupedPaths.has(p)).toBe(false)
+    }
+    expect(primaryPaths).toContain('/chat')
+  })
+
   it('keeps retired and hub-hosted routes out of the flat navigation', () => {
     const paths = getWorkNavigationSection().map((item) => item.path)
     for (const path of ['/approvals', '/agents', '/channels', '/overview', '/logs']) {
       expect(paths).not.toContain(path)
+    }
+  })
+})
+
+describe('getGroupedNavigation (Task #6 collapsible groups)', () => {
+  it('buckets deep-link capabilities into the four semantic groups', () => {
+    const groups = getGroupedNavigation()
+    const byId = Object.fromEntries(groups.map((g) => [g.id, g.items.map((i) => i.path)]))
+    // Observe must surface runtime diagnostics that were previously hidden.
+    expect(byId.Observe).toEqual(expect.arrayContaining(['/logs', '/engine']))
+    // Operate surfaces execution tools.
+    expect(byId.Operate).toEqual(expect.arrayContaining(['/terminal', '/editor', '/browser-cockpit', '/computer-use']))
+    // Settings surfaces system/agent subsystems.
+    expect(byId.Settings).toEqual(expect.arrayContaining(['/agents', '/graph', '/expert-center', '/capabilities-hub']))
+    // Extras isolates entertainment features away from the working rail.
+    expect(byId.Extras).toEqual(expect.arrayContaining(['/poker', '/games', '/pet', '/wallpaper']))
+    // No duplicate paths across groups (dedup by canonical route).
+    const all = groups.flatMap((g) => g.items.map((i) => i.path))
+    expect(new Set(all).size).toBe(all.length)
+    // Primary rail items stay out of the groups.
+    for (const primary of ['/skills', '/cron', '/usage']) {
+      for (const paths of Object.values(byId)) {
+        expect(paths).not.toContain(primary)
+      }
+    }
+  })
+
+  it('orders items inside a group by navOrder', () => {
+    const operate = getGroupedNavigation().find((g) => g.id === 'Operate')
+    expect(operate).toBeDefined()
+    const idx = (p: string) => operate!.items.findIndex((i) => i.path === p)
+    // /editor (86) precedes /browser-cockpit (88) precedes /terminal (89) precedes /ssh-collab (90)
+    expect(idx('/editor')).toBeLessThan(idx('/browser-cockpit'))
+    expect(idx('/browser-cockpit')).toBeLessThan(idx('/terminal'))
+    expect(idx('/terminal')).toBeLessThan(idx('/ssh-collab'))
+  })
+
+  it('never emits an empty group', () => {
+    for (const g of getGroupedNavigation()) {
+      expect(g.items.length).toBeGreaterThan(0)
     }
   })
 })

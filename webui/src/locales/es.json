@@ -1,4 +1,151 @@
 {
+  "islandGame": {
+    "navLabel": "Juego de la isla",
+    "title": "Isla Marguerite",
+    "subtitle": "Una isla de mundo abierto viviente, ligada al estado real del motor",
+    "controls": "WASD / Flechas para caminar · la cámara sigue",
+    "canvasAria": "Escena 3D de la isla, transitable con WASD",
+    "engine": {
+      "online": "Pasarela en línea",
+      "offline": "Pasarela sin conexión — estado del motor oculto",
+      "mode": "Modo",
+      "shards": "Fragmentos",
+      "unknown": "—"
+    },
+    "weather": {
+      "clear": "Despejado",
+      "rain": "Lluvia",
+      "night": "Noche",
+      "fog": "Niebla"
+    },
+    "day": {
+      "day": "Día",
+      "night": "Noche"
+    },
+    "tier": {
+      "high": "Alto",
+      "medium": "Medio",
+      "low": "Bajo"
+    },
+    "quest": {
+      "title": "Tablón de misiones",
+      "advance": "Avanzar",
+      "turnIn": "Entregar",
+      "complete": "Completar",
+      "status": {
+        "posted": "Publicada",
+        "accepted": "Aceptada",
+        "in_progress": "En curso",
+        "verifying": "Lista",
+        "completed": "Hecha",
+        "failed": "Fallida"
+      }
+    },
+    "titles": {
+      "title": "Títulos",
+      "none": "Sin títulos aún",
+      "zeroWarn": "Caballero de cero avisos",
+      "gateKeeper": "Conquistador del portal",
+      "nightOwl": "Búho nocturno",
+      "thrifty": "Administrador ahorrador"
+    },
+    "party": {
+      "title": "Grupo",
+      "aria": "Ranuras de elfos compañeros",
+      "slotAria": "Alternar ranura de elfo {n}",
+      "scout": "Cuervo explorador",
+      "smith": "Abeja artesana",
+      "aegis": "Tortuga escudo",
+      "gull": "Gaviota mensajera"
+    },
+    "theme": {
+      "verdant": "Verde",
+      "blossom": "Florecimiento",
+      "twilight": "Crepúsculo"
+    },
+    "region": {
+      "garden": "Jardín PSI",
+      "atrium": "Santuario de la margarita",
+      "board": "Tablón de misiones"
+    },
+    "worldgen": {
+      "title": "Generador de mundos",
+      "label": "Describe un cambio en la isla",
+      "placeholder": "p. ej. una isla florida lluviosa con una mazmorra difícil",
+      "apply": "Generar",
+      "rollback": "Deshacer",
+      "hint": "Si la validación falla → se conserva el mundo anterior"
+    },
+    "fallback": {
+      "aria": "Mapa 2D de respaldo",
+      "note": "WebGL no disponible — se muestra la isla 2D accesible."
+    },
+    "world3d": {
+      "canvasAria": "Escena de isla 3D de mundo abierto, transitable con WASD y ratón",
+      "controls": "WASD / Flechas para caminar · clic para bloquear ratón · E para recoger",
+      "tierLabel": "Nivel del modelo",
+      "tier": {
+        "flagship": "Razonamiento insignia",
+        "efficient": "Razonamiento eficiente",
+        "sprint": "Producción rápida",
+        "omni": "Omni Pareto"
+      },
+      "connected": "Conectado",
+      "offline": "Sin conexión",
+      "pending": "pendiente",
+      "pickup": "Recoger",
+      "glow": "Brillo",
+      "particles": "partículas",
+      "npcDepth": "profundidad de diálogo",
+      "npcTitle": "Diálogo NPC IA",
+      "npcPlaceholder": "Tema a discutir…",
+      "talk": "Hablar",
+      "npcDisclaimer": "Diálogo de plantilla determinista (no es una respuesta de modelo en vivo)",
+      "fallbackNote": "WebGL no disponible — se muestra la isla 2D de respaldo.",
+      "prop": {
+        "code_crystal": {
+          "name": "Cristal de código",
+          "desc": "Salida de herramienta cristalizada; recogerla solicita análisis."
+        },
+        "doc_scroll": {
+          "name": "Rollo de documento",
+          "desc": "Documento entregado; recogerlo solicita explicación."
+        },
+        "data_fruit": {
+          "name": "Fruto de datos",
+          "desc": "Métricas de ejecución como fruto; recogerlo solicita perspectiva."
+        },
+        "quest_beacon": {
+          "name": "Faro de misión",
+          "desc": "Comisión pendiente; recogerlo reclama la misión."
+        },
+        "inspiration_bloom": {
+          "name": "Flor de inspiración",
+          "desc": "Memoria o idea en flor; recogerla solicita lluvia de ideas."
+        }
+      }
+    },
+    "gdd": {
+      "loaded": "GDD cargado ({count} comprobaciones superadas)",
+      "failed": "Validación del GDD fallida — se mantiene la configuración actual del mundo",
+      "revision": "Revisión del mundo",
+      "errorsLabel": "Detalles del error",
+      "warningsLabel": "Detalles de la advertencia",
+      "noGdd": "Aún no se ha cargado ningún GDD"
+    },
+    "glb": {
+      "statusProcedural": "Activos: geometría procedural",
+      "statusLoaded": "Activos: {count} cargados en caliente (rev. {rev})",
+      "statusFailed": "Activos: falló la validación",
+      "errorsLabel": "Errores de activos",
+      "revisionLabel": "Revisión de activos"
+    },
+    "viewMode": {
+      "world3d": "Mundo abierto 3D",
+      "classic": "Isla clásica",
+      "aria": "Modo de vista de la isla"
+    }
+  },
   "workspaces": {
     "projects": "Proyectos",
     "createProject": "Crear proyecto",
@@ -210,6 +357,38 @@
       "integrityErrorDetail": "El artefacto guardado está dañado o ya no coincide con su suma de comprobación. Vuelve a publicarlo o descárgalo para verificarlo.",
       "invalidContent": "El contenido descargado no coincide con el tipo de artefacto.",
       "failedDetail": "Reintenta la vista previa o descarga el archivo."
+    },
+    "goal": {
+      "title": "Progreso del objetivo",
+      "empty": "No hay ningún objetivo activo.",
+      "loading": "Cargando el estado del objetivo…",
+      "refresh": "Actualizar el estado del objetivo",
+      "rounds": "Rondas",
+      "tokens": "Tokens",
+      "steps": "Pasos",
+      "actions": "Acciones del objetivo",
+      "pause": "Pausar",
+      "resume": "Reanudar",
+      "complete": "Completar",
+      "status": {
+        "active": "Activo",
+        "paused": "En pausa",
+        "blocked": "Bloqueado",
+        "completed": "Completado"
+      }
+    },
+    "task": {
+      "title": "Progreso de la tarea",
+      "subtitle": "Los pasos se actualizan en vivo mientras se ejecuta.",
+      "empty": "Todavía no hay pasos de tarea activos.",
+      "refresh": "Actualizar pasos de la tarea",
+      "steps": "Pasos",
+      "stepStatus": {
+        "pending": "Pendiente",
+        "in_progress": "En curso",
+        "done": "Completado",
+        "failed": "Fallido"
+      }
     }
   },
   "nav": {
@@ -237,7 +416,31 @@
     "plugins": "Complementos",
     "graph": "Grafo",
     "poker": "Poker",
-    "pet": "Mascota"
+    "pet": "Mascota",
+    "engine": "Estado del motor",
+    "ops": "Operaciones",
+    "terminal": "Terminal",
+    "changelog": "Registro de cambios",
+    "games": "Juegos",
+    "expert-center": "Centro de expertos",
+    "editor": "Editor",
+    "browser-cockpit": "Cabina del navegador",
+    "sandbox": "Sandbox",
+    "device-twin": "Gemelo de dispositivo",
+    "pet-overlay": "Superposición de mascota",
+    "groupCountHint": "{count} destinos en {group}",
+    "groupWork": "Trabajo",
+    "groupOperate": "Operación",
+    "groupObserve": "Observación",
+    "groupSettings": "Ajustes",
+    "groupExtras": "Extras",
+    "control-center": "Centro de control",
+    "ssh-collab": "Colaboración SSH",
+    "capabilities-hub": "Centro de capacidades",
+    "local-models": "Modelos locales",
+    "knowledge": "Conocimiento",
+    "wallpaper": "Fondo de pantalla",
+    "brain": "Cerebro compartido"
   },
   "notFound": {
     "title": "Página no encontrada",
@@ -258,6 +461,7 @@
     "expandSidebar": "Expandir barra lateral",
     "collapseSidebar": "Contraer barra lateral",
     "toggleSidebar": "Alternar barra lateral",
+    "zenMode": "Modo zen",
     "resizeSidebar": "Cambiar el ancho de la barra lateral",
     "sidebarWidthValue": "Ancho de la barra lateral: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Ancho de la barra lateral: {width}px, {preset}; limitado por esta ventana (preferencia: {preference}px)",
@@ -270,7 +474,9 @@
     "connectionState": {
       "connected": "Conectado",
       "connecting": "Conectando",
-      "disconnected": "Desconectado"
+      "disconnected": "Desconectado",
+      "ready": "Listo",
+      "not_ready": "Configuración necesaria"
     },
     "bgm": {
       "label": "Música de fondo",
@@ -291,7 +497,15 @@
       "light": "Claro",
       "dark": "Oscuro",
       "system": "Sistema"
-    }
+    },
+    "languageSwitchTitle": "Idioma: {name} — cambiar el idioma de la interfaz",
+    "modeBadge": "Modo de ejecución: {mode}",
+    "modeMenu": "Menú de modo de ejecución",
+    "modeMenuTitle": "Modo de ejecución",
+    "modeMenuCurrent": "Actual: {mode}",
+    "modeMenuOpenHub": "Abrir el centro de control (gestión completa de modos)",
+    "modeSwitchFailed": "No se pudo cambiar el modo de ejecución.",
+    "modeMatrix": "Modo: intensidad × estilo de trabajo"
   },
   "settings": {
     "appearance": {
@@ -303,6 +517,12 @@
       "languageDesc": "Idioma de visualización de la interfaz y de los mensajes del sistema de los canales. Se aplica aquí al instante y guarda el idioma de los mensajes para toda la puerta de enlace.",
       "channelNoticeLocaleSyncPending": "El idioma de la interfaz cambió, pero el idioma de los mensajes del sistema de los canales aún no se ha guardado. Se volverá a intentar cuando se reconecte la puerta de enlace.",
       "toolDetailsLabel": "Detalles de herramientas de forma predeterminada",
+      "chatFontLabel": "Tamaño de letra del chat",
+      "chatFontDesc": "Cambia el tamaño de letra solo en la página de chat; la barra lateral y los ajustes no se modifican.",
+      "chatFontSmall": "Pequeño",
+      "chatFontDefault": "Estándar",
+      "chatFontLarge": "Grande",
+      "chatFontXlarge": "Muy grande",
       "toolDetailsDesc": "Automático sigue el tipo de herramienta; Compacto contrae las herramientas normales; Expandido las abre. Los errores se abren automáticamente de forma predeterminada y se pueden contraer manualmente.",
       "toolDetailsAuto": "Automático",
       "toolDetailsCompact": "Compacto",
@@ -331,7 +551,12 @@
       "sidebarWidthResizableStatus": "Ancho actual en el escritorio: {current}px.",
       "sidebarWidthClampedStatus": "Se guardaron {saved}px; esta ventana usa actualmente {current}px.",
       "sidebarWidthCompactStatus": "El diseño compacto usa {current}px. Se conserva tu preferencia de escritorio de {saved}px.",
-      "sidebarWidthDrawerStatus": "El diseño de cajón usa {current}px. Se conserva tu preferencia de escritorio de {saved}px."
+      "sidebarWidthDrawerStatus": "El diseño de cajón usa {current}px. Se conserva tu preferencia de escritorio de {saved}px.",
+      "bootAnimationLabel": "Pantalla de inicio",
+      "bootAnimationDesc": "La pantalla que se muestra mientras arranca la consola. Completa reproduce la orquesta de constelación de agentes (marca, nodos de flota, registro), Mínima solo muestra una marca estática y Desactivada la omite por completo. Elegir Completa de nuevo la vuelve a reproducir. El movimiento se reduce automáticamente si el sistema lo solicita.",
+      "bootAnimationFull": "Completa",
+      "bootAnimationMinimal": "Mínima",
+      "bootAnimationOff": "Desactivada"
     },
     "dataMigration": {
       "title": "Datos y copias de seguridad",
@@ -732,7 +957,8 @@
       "pet": "Pet",
       "communityPlugins": "Community Plugins",
       "graph": "Graph",
-      "collabSsh": "Collab & SSH"
+      "collabSsh": "Collab & SSH",
+      "doctor": "Doctor"
     },
     "ext": {
       "plugins": {
@@ -790,7 +1016,22 @@
         "title": "Collab & SSH",
         "desc": "Enterprise remote collaboration (Track G CRDT) and SSH deployment capabilities.",
         "hint": "Collab is powered by the yrs CRDT engine with awareness and RBAC; SSH exposes deploy/tunnel/batch execution through the gateway and CLI.",
-        "open": "Open Overview"
+        "open": "Open Overview",
+        "localNote": "La pasarela de Marguerite solo escucha en loopback (127.0.0.1), así que colaborar entre máquinas requiere primero una red privada.",
+        "vpnTitle": "Crear una red de Radmin VPN",
+        "step1": "Instala Radmin VPN en ambas máquinas y crea una red:",
+        "download": "Descargar Radmin VPN",
+        "step2": "Únete a la misma red desde la otra máquina con su nombre y contraseña.",
+        "step3": "Consulta la IP virtual que Radmin asignó a esta máquina (26.x.x.x).",
+        "step4": "Mantén la pasarela en loopback y accede a ella por un túnel SSH en lugar de exponerla.",
+        "step5": "Verifica que el par pueda conectarse antes de iniciar una sesión.",
+        "copy": "Copiar",
+        "copied": "Copiado",
+        "securityTitle": "Límite de seguridad",
+        "sec1": "La pasarela permanece en 127.0.0.1: la red privada transporta SSH, no la consola.",
+        "sec2": "Nunca vincules la pasarela a 0.0.0.0 para que funcione la colaboración.",
+        "sec3": "Usa autenticación SSH por clave; no pongas contraseñas ni tokens en el repositorio.",
+        "docs": "Documentación de Radmin VPN"
       }
     }
   },
@@ -1157,7 +1398,10 @@
       "modelNoMatches": "No hay modelos coincidentes — puedes usar lo que escribiste.",
       "modelListTruncated": "Mostrando {shown} de {total} modelos — sigue escribiendo para acotar.",
       "modelProvenance": "Lista del proveedor en vivo · fuente de capacidades: {sources}",
-      "modelMetadataProvenance": "Lista del proveedor en vivo · valores oficiales si están disponibles; si no, valores del catálogo"
+      "modelMetadataProvenance": "Lista del proveedor en vivo · valores oficiales si están disponibles; si no, valores del catálogo",
+      "emptyStep1": "Añade tu primer proveedor de modelos y pega su clave API para verificar las credenciales.",
+      "emptyStep2": "Conecta un proveedor para verificar las credenciales y elegir los modelos disponibles.",
+      "emptyStep3": "Elige los modelos que quieres usar en toda la aplicación."
     },
     "preset": {
       "summary": "Plantilla de enrutamiento: {label}",
@@ -1543,7 +1787,8 @@
       "tokenDesc": "Token de portador para puertas de enlace que requieren autenticación. Se almacena solo en esta pestaña.",
       "reconnect": "Reconectar",
       "connect": "Conectar",
-      "disconnect": "Desconectar"
+      "disconnect": "Desconectar",
+      "rbacBoundaryNote": "El control de acceso basado en roles protege contra operaciones accidentales, no contra un atacante local que pueda editar la configuración de la puerta de enlace o el propio proceso."
     },
     "runtime": {
       "title": "Tiempo de ejecución",
@@ -1739,6 +1984,8 @@
       "reload": "recargar",
       "descReloadSuffix": "surten efecto tras actualizar la página.",
       "foldLabel": "Nuevo renderizado de turnos en vivo",
+      "autostartLabel": "Iniciar al iniciar sesión",
+      "autostartDesc": "Inicia Marguerite automáticamente al iniciar sesión (solo app de escritorio).",
       "foldDesc": "Construye la tarjeta de trabajo en streaming desde un registro ordenado de eventos. Desactívalo solo para restaurar temporalmente el renderizado compatible.",
       "foldAria": "Nuevo renderizado de turnos en vivo (surte efecto tras recargar)",
       "revealLabel": "Ventana de revelado de la respuesta (ms)",
@@ -1781,7 +2028,8 @@
       "disableNetworkObservabilityDesc": "Detiene la telemetría de instalación y de uso diario, las comprobaciones de actualizaciones en segundo plano, los identificadores seudónimos de sesión y la cabecera opcional X-Marguerite-Install-Id entre sesiones, enviada de forma predeterminada solo a la API HTTPS oficial de TokenRhythm. El ID de instalación persistente puede derivarse de datos MAC/IP locales; nunca se envían las direcciones originales. Los entornos CI/pruebas y la exclusión heredada de telemetría también lo suprimen; desactivar solo las actualizaciones no. Tus propias solicitudes de modelo siguen funcionando.",
       "memoryAutoCaptureLabel": "Captura automática de memoria",
       "memoryAutoCaptureDesc": "Permite que Marguerite guarde información útil de las conversaciones en la memoria a largo plazo.",
-      "save": "Guardar privacidad"
+      "save": "Guardar privacidad",
+      "permissionBoundaryNotice": "Los permisos del sistema están diseñados para evitar operaciones accidentales, no para defender contra usuarios maliciosos locales. Todos los datos se almacenan localmente; configure autenticación real antes de exponer más allá del loopback."
     },
     "toast": {
       "loadFailed": "No se pudieron cargar los ajustes: {error}",
@@ -2070,6 +2318,24 @@
           "Clave AES de codificación."
         ]
       }
+    },
+    "ops": {
+      "sshSession": "Sesión SSH",
+      "terminal": "Terminal",
+      "exportDiagnostics": "Exportar diagnóstico",
+      "diagnosticsCopied": "Diagnóstico copiado",
+      "diagnosticsCopyFailed": "Error al copiar: {error}",
+      "hostRequired": "Selecciona un host primero"
+    },
+    "doctor": {
+      "title": "Doctor",
+      "desc": "Disponibilidad de la puerta de enlace, hallazgos de capacidades y recetas de CLI. Solo lectura: aquí no se guarda nada.",
+      "refresh": "Actualizar",
+      "runDeep": "Ejecutar comprobación profunda",
+      "loading": "Ejecutando comprobaciones de salud…",
+      "noFindings": "No se devolvieron hallazgos. La puerta de enlace no informa ningún problema.",
+      "errorTitle": "No se pudo cargar el informe de salud",
+      "retry": "Reintentar"
     }
   },
   "sessions": {
@@ -2185,6 +2451,9 @@
       "updated": "actualizado {time}",
       "transcriptPreview": "Vista previa de la transcripción",
       "transcriptError": "No se pudo cargar la transcripción.",
+      "workspaceBound": "Vinculado al proyecto",
+      "workspaceUnbound": "Sin vincular a un proyecto",
+      "workspaceMissing": "Falta el directorio",
       "loadingTranscript": "Cargando transcripción…",
       "loadEarlier": "Cargar anteriores",
       "loading": "Cargando…",
@@ -2201,6 +2470,19 @@
       "abortDone": "Ejecución abortada.",
       "abortNone": "No hay ninguna ejecución activa que abortar.",
       "abortFailed": "Error al abortar."
+    },
+    "reasoning": {
+      "effortLabel": "Intensidad de razonamiento",
+      "effortInherit": "Heredar global",
+      "effortOff": "Desactivado",
+      "effortNormal": "Normal",
+      "effortDeep": "Profundo",
+      "effortMax": "Máximo",
+      "contextLabel": "Ventana de contexto",
+      "contextPlaceholder": "Heredar",
+      "inheritHint": "Vacío (o 0 para la ventana de contexto) = heredar la configuración global del modelo",
+      "saveDone": "Ajustes de razonamiento de la sesión guardados.",
+      "saveFailed": "No se pudieron guardar los ajustes de razonamiento de la sesión."
     },
     "overview": {
       "title": "Estado",
@@ -3024,7 +3306,15 @@
       "toolsCount": "{count}",
       "toolsLoading": "Cargando el catálogo de herramientas…",
       "baotaCredentials": "Credenciales",
-      "baotaCredentialsTitle": "Configurar URL, usuario y contraseña del panel Baota (inicio de sesión automático antes de las llamadas)"
+      "baotaCredentialsTitle": "Configurar URL, usuario y contraseña del panel Baota (inicio de sesión automático antes de las llamadas)",
+      "mcpProbe": "Detectar herramientas",
+      "mcpProbing": "Detectando…",
+      "mcpToolsCount": "{count} herramientas",
+      "toolsPatchTitle": "Activar herramientas (capa de parche)",
+      "toolsPatchHint": "Surte efecto en el siguiente turno del agente, sin reiniciar",
+      "toolsPatchEnable": "Activada",
+      "toolsPatchDisable": "Desactivada",
+      "toolsPatchInactive": "No existen en la superficie de herramientas actual: {names}"
     },
     "autoPropose": {
       "title": "Ajustes de propuesta automática",
@@ -3481,7 +3771,9 @@
         "probing": "Sondeando",
         "paused": "Límite de inactividad alcanzado; esperando el siguiente mensaje",
         "stopped": "Detenido tras fallo"
-      }
+      },
+      "cacheHits": "Aciertos de caché",
+      "cacheHitsHint": "Tokens servidos desde la caché en la última petición"
     },
     "send": "Enviar",
     "sendQueues": "Enviar (se pone en cola hasta después de la respuesta actual)",
@@ -3747,7 +4039,10 @@
       },
       "more": "{count} más",
       "stale": "Sigue trabajando — sin señal reciente",
-      "liveStep": "paso {n}"
+      "liveStep": "paso {n}",
+      "memoryRecall": "Memoria entre proyectos recuperada · {count} coincidencias",
+      "stepRound": "Ronda de herramientas {round}",
+      "stepRoundDone": "Ronda {round} finalizada · {reason}"
     },
     "suggestedTasks": "Tareas sugeridas",
     "greetingMorning": "Buenos días.",
@@ -3818,7 +4113,13 @@
         "settingsHint": "Activa las copias en Ajustes > Sandbox > Seguridad de archivos.",
         "unavailableTitle": "No hay ninguna copia disponible",
         "unavailableBody": "Esta acción no se podrá recuperar. Continúa solo si aceptas una pérdida permanente de datos."
-      }
+      },
+      "intent": "Vista previa de la intención",
+      "intentAction": "Operación",
+      "intentObject": "Objetivo",
+      "intentScope": "Alcance",
+      "intentIrreversible": "Reversibilidad",
+      "intentIrreversibleYes": "Irreversible"
     },
     "plan": {
       "label": "Plan",
@@ -3839,7 +4140,27 @@
       "actionFailed": "La acción del plan falló: {error}",
       "revisionMissing": "El registro de esta revisión del plan ya no está disponible (los datos de la sesión pueden haberse borrado). Regenera el plan e inténtalo de nuevo.",
       "revisePromptPlaceholder": "Describe cómo debe cambiar el plan",
-      "reviseSend": "Revisar plan"
+      "reviseSend": "Revisar plan",
+      "editing": "Editando",
+      "dependsOn": "Depende de",
+      "renameStep": "Renombrar",
+      "removeStep": "Quitar paso",
+      "addStep": "Añadir paso",
+      "stepTitlePlaceholder": "Título del paso",
+      "saveStep": "Añadir",
+      "cancel": "Cancelar",
+      "reuseLast": "Continuar el plan anterior «{title}»",
+      "cancelStep": "Cancelar",
+      "strategyLabel": "Forma de orquestación",
+      "rationaleLabel": "Justificación",
+      "revisionFull": "Revisión {id} (identificador completo)",
+      "strategy": {
+        "solo": "Agente único",
+        "dual-leader": "Doble líder",
+        "expert-team": "Equipo de expertos",
+        "cluster": "Clúster",
+        "pipeline": "Pipeline de entrega"
+      }
     },
     "planRun": {
       "title": "Ejecución del plan",
@@ -3874,7 +4195,14 @@
       "preflight": "Lista de verificación previa",
       "parallel": "Subtareas paralelas",
       "replanned": "Plan replanteado",
-      "replanDetail": "Redescompuesto en {steps} pasos según la observación · revisión {revision}"
+      "replanDetail": "Redescompuesto en {steps} pasos según la observación · revisión {revision}",
+      "eta": "~{eta} restante",
+      "elapsed": "{elapsed} transcurrido",
+      "replannedAhead": "Pasos omitidos",
+      "replanAdvanceDetail": "La observación coincide con el paso posterior «{step}» · {count} pasos omitidos",
+      "parallelSimulated": "Paralelo (simulado)",
+      "parallelStepDuration": "Duración {duration}",
+      "parallelStepRetries": "Reintentado {count} veces"
     },
     "planMode": {
       "label": "Modo de plan",
@@ -3945,7 +4273,22 @@
       "runModeFullDesc": "Accede directamente a archivos, la red y el sistema sin preguntar cada vez.",
       "runModeFullUnavailable": "El acceso completo solo está disponible para el propietario de la sesión.",
       "runModeLocked": "El modo de ejecución no puede cambiarse mientras esta sesión tenga trabajo activo.",
-      "badgeNew": "NEW"
+      "badgeNew": "NEW",
+      "modelRoutingOmniDesc": "Un agente orquestador coordina los mejores modelos disponibles en cada turno.",
+      "modelRoutingOmni": "Agente omni",
+      "runModePanel": "Modo de ejecución y enrutado",
+      "thinking": "Razonamiento profundo",
+      "modeShort": {
+        "safe": "Seguro",
+        "full": "Completo",
+        "plan": "Plan",
+        "default": "Predeterminado",
+        "off": "Desactivado",
+        "squilla": "Enrutador",
+        "ensemble": "Ensamble",
+        "bloom": "Pulido",
+        "omni": "Omni"
+      }
     },
     "pending": {
       "label": "Pendientes {count}/{max}",
@@ -4147,7 +4490,9 @@
       "ensembleModelsAria": "Modelos del conjunto"
     },
     "modelRouting": {
-      "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo."
+      "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo.",
+      "effective": "Enrutamiento de modelos cambiado — ahora en {mode}.",
+      "mismatch": "El enrutamiento de modelos no cambió como se solicitó: solicitado {requested}, pero se aplicó {actual}."
     },
     "routeFeedback": {
       "up": "Buena elección de modelo para este turno",
@@ -4170,6 +4515,115 @@
       "reject": "Rechazar",
       "empty": "Aún no hay cambios en archivos",
       "loadFailed": "No se pudieron cargar los cambios de archivo"
+    },
+    "persona": {
+      "current": "Experto actual: {name}",
+      "newSession": "Nueva sesión de experto"
+    },
+    "presets": {
+      "label": "Modo",
+      "triggerHint": "Elige un modo de trabajo: intensidad × estilo",
+      "lockedHint": "Modo bloqueado durante la ejecución (puedes consultarlo)",
+      "advanced": "Avanzado",
+      "advancedHint": "Abrir todas las opciones de modo / sandbox / enrutamiento",
+      "autoModel": "Modelo auto",
+      "autoModelOn": "Desatado",
+      "autoModelOff": "Desactivado",
+      "autoModelHint": "Usa automáticamente el modelo más potente disponible y orquesta según la tarea (fusión / enjambre)"
+    },
+    "waitIndicator": {
+      "running": "En ejecución",
+      "toolRunning": "Esperando a que termine una herramienta",
+      "approvalPending": "Esperando tu aprobación",
+      "ensemble": "Ensamble en curso"
+    },
+    "emptyLead": "Agentes, subagentes, herramientas, memoria y conocimiento — una orquesta, menos tokens, código más limpio.",
+    "orbit": {
+      "agent": "Agente",
+      "subagent": "Subagente",
+      "tools": "Herramientas",
+      "memory": "Memoria",
+      "knowledge": "Conocimiento"
+    },
+    "errors": {
+      "apiKeyMissing": "No hay clave API configurada. Abre Ajustes y añade la clave API de tu proveedor para empezar a chatear.",
+      "authFailed": "El proveedor del modelo rechazó tu clave API. Abre Ajustes para corregirla o reinténtalo.",
+      "rateLimited": "El proveedor del modelo está limitando las solicitudes. Reinténtalo en breve.",
+      "network": "No se pudo contactar con el proveedor del modelo (error de red o tiempo de espera). Reinténtalo.",
+      "server": "El proveedor del modelo devolvió un error del servidor. Reinténtalo más tarde.",
+      "timeout": "El proveedor del modelo no respondió a tiempo (tiempo de espera agotado). Reinténtalo.",
+      "other": "La solicitud al proveedor del modelo falló. Reinténtalo.",
+      "planStepFailed": "El paso «{step}» del plan falló. Consulta los registros para más detalles, o revisa el plan y vuelve a intentarlo.",
+      "planStepFailedGeneric": "Un paso del plan falló. Consulta los registros para más detalles, o revisa el plan y vuelve a intentarlo.",
+      "planStepArtifactMissing": "El paso «{step}» del plan terminó sin generar el archivo esperado. Consulta los registros para más detalles, o revisa el plan y vuelve a intentarlo.",
+      "planStepArtifactMissingGeneric": "Un paso del plan terminó sin generar el archivo esperado. Consulta los registros para más detalles, o revisa el plan y vuelve a intentarlo.",
+      "planCompletionBlocked": "El plan terminó pero no superó la comprobación de finalización, por lo que se marca como parcial. Consulta los registros para más detalles.",
+      "hostExited": "El proceso host terminó con el código {exit_code} tras {uptime_ms} en ejecución.",
+      "hostExitedNoCode": "El proceso host fue terminado por una señal tras {uptime_ms} en ejecución.",
+      "hostExitedGeneric": "El proceso host terminó de forma inesperada.",
+      "hostExitCodeLabel": "Código de salida",
+      "hostExitUptimeLabel": "Tiempo activo",
+      "hostExitStderrLabel": "Salida de error (stderr)"
+    },
+    "errorActions": {
+      "viewLogs": "Ver registros",
+      "replan": "Revisar plan",
+      "openSettings": "Abrir ajustes",
+      "retry": "Reintentar"
+    },
+    "escalation": {
+      "title": "Necesita su confirmación",
+      "requiredFor": "Se necesita confirmación: {reason}",
+      "neededFor": "Se necesita confirmación: {reason}",
+      "operation": "Operación",
+      "suggestedAction": "Acción sugerida",
+      "continue": "Continuar",
+      "abort": "Abortar",
+      "trigger": {
+        "high_impact_side_effect": "Efecto secundario de alto impacto",
+        "intent_ambiguity": "Intención ambigua",
+        "timeout": "Operación agotó el tiempo",
+        "budget_exceeded": "Costo excede el presupuesto"
+      }
+    },
+    "collapse": "Contraer",
+    "expand": "Expandir",
+    "rightSidebar": {
+      "tabs": {
+        "tasks": "Tareas",
+        "artifacts": "Artefactos",
+        "changes": "Cambios",
+        "tree": "Árbol"
+      },
+      "tasksEmpty": "Los pasos de la tarea aparecerán aquí mientras se ejecuta.",
+      "artifactsDiagnostic": "Se detectaron {count} artefactos sin cargar",
+      "artifactsEmptyLead": "Aún no se han generado artefactos en esta sesión",
+      "artifactsEmptySub": "Envía una tarea y Marguerite generará documentos, hojas de cálculo o código",
+      "artifactsCompose": "Enviar una tarea",
+      "artifactsReload": "Recargar",
+      "artifactsRunningHint": "En ejecución: podrás iniciar otra tarea al terminar",
+      "artifactOpenInApp": "Vista previa / edición en Marguerite",
+      "artifactOpenSystem": "Abrir con la aplicación del sistema",
+      "artifactMore": "Más acciones",
+      "artifactPreview": "Vista previa",
+      "artifactEdit": "Editar",
+      "artifactSystemOpen": "Abrir en el sistema",
+      "artifactCopyPath": "Copiar ruta",
+      "artifactCopied": "Ruta del artefacto copiada",
+      "artifactCopyFailed": "No se pudo copiar; copia la ruta manualmente",
+      "statusReady": "Listo",
+      "statusUpdating": "Actualizando",
+      "statusStale": "Obsoleto",
+      "changesEmpty": "Los cambios de archivos (+/- líneas) aparecerán aquí",
+      "treeUpDir": "Directorio superior",
+      "treeRoot": "Raíz del espacio de trabajo",
+      "treeRefresh": "Actualizar",
+      "treeLoading": "Cargando…",
+      "treeEmptyDir": "(directorio vacío)",
+      "widen": "Panel estrecho",
+      "narrow": "Panel ancho",
+      "collapse": "Contraer panel",
+      "expand": "Expandir panel"
     }
   },
   "shared": {
@@ -4193,7 +4647,9 @@
       "actionOpenSettings": "Abrir Ajustes",
       "actionToggleTheme": "Cambiar tema",
       "actionBgmEnable": "Activar música de fondo",
-      "actionBgmDisable": "Desactivar música de fondo"
+      "actionBgmDisable": "Desactivar música de fondo",
+      "actionModeSwitch": "Cambiar de modo: {mode}",
+      "modeActive": "Activo"
     },
     "toast": {
       "dismiss": "Descartar notificación"
@@ -4249,7 +4705,9 @@
       "bulkDeleteConfirm": "Eliminar seleccionadas",
       "bulkDeleteDone": "{count} sesiones eliminadas",
       "bulkDeletePartial": "No se pudieron eliminar {count} sesiones",
-      "bulkDeleteFailed": "No se pudieron eliminar las sesiones seleccionadas"
+      "bulkDeleteFailed": "No se pudieron eliminar las sesiones seleccionadas",
+      "showMore": "Mostrar {count} más",
+      "showLess": "Mostrar menos"
     },
     "setupBanner": {
       "ariaLabel": "Es necesaria la configuración de la puerta de enlace",
@@ -4379,7 +4837,425 @@
       "window_focus": "Enfocar ventana",
       "cursor_pos": "Posición del cursor",
       "key_state": "Estado de la tecla",
-      "idle_time": "Tiempo inactivo"
+      "idle_time": "Tiempo inactivo",
+      "locate": "Localizar por descripción"
+    },
+    "descriptionLabel": "Descripción del objetivo",
+    "descriptionPlaceholder": "p. ej. el cuadro de búsqueda de arriba a la derecha",
+    "visionLabel": "Anclaje visual",
+    "autoClickLabel": "Clic tras localizar",
+    "patchLabel": "Anclaje por parches (alta densidad)",
+    "modeLabel": "Captura",
+    "maxEdgeLabel": "Borde máximo (px)",
+    "maxEdgePlaceholder": "0 = nativo",
+    "captureMode": {
+      "primary": "Pantalla principal",
+      "all": "Todas las pantallas",
+      "window": "Ventana activa"
+    },
+    "groundingTitle": "Resultado de localización",
+    "groundingConfidence": "Confianza {value}",
+    "groundingLowConfidence": "Confianza baja",
+    "groundingDescription": "Objetivo: {description}",
+    "visionUnavailable": "No hay ningún modelo visual configurado, así que no se ejecutó nada. Elige un modelo compatible con visión, indica su clave API y vuelve a ejecutar."
+  },
+  "boot": {
+    "orchestraAria": "Marguerite arrancando",
+    "orchestraTagline": "Agentes, subagentes, herramientas, memoria y conocimiento — una orquesta despertando.",
+    "enterWorkspace": "Entrar al espacio de trabajo",
+    "pressEnter": "o pulsa Enter"
+  },
+  "island": {
+    "title": "Espacio de la isla",
+    "subtitle": "La ejecución del agente vista como una isla: los talleres son llamadas de herramientas, los puestos son subagentes, el faro es la estrategia de enrutado y el muelle el avance del plan.",
+    "status": {
+      "idle": "Inactivo",
+      "running": "En ejecución",
+      "queued": "En cola",
+      "failed": "Fallido",
+      "success": "Completado",
+      "error": "Error",
+      "waiting": "En espera",
+      "offline": "Sin conexión"
+    },
+    "quality": {
+      "high": "3D completa",
+      "low": "3D ligera",
+      "medium": "3D equilibrada",
+      "fallback": "Modo ligero (2D)",
+      "fallbackNote": "WebGL no está disponible aquí: la isla se muestra como mapa 2D, con exactamente los mismos datos.",
+      "contextLost": "Se perdió el contexto 3D. Se cambió al mapa 2D.",
+      "specInvalid": "La especificación de la isla no es válida: se rechazó el render y se muestra el mapa 2D."
+    },
+    "controls": {
+      "reset": "Restablecer vista",
+      "focus": "Enfocar",
+      "autoDayNight": "Día/noche automático",
+      "daylight": "Luz diurna",
+      "skin": "Aspecto",
+      "openInWorkbench": "Abrir en el espacio de trabajo",
+      "hint": "Arrastra para girar · rueda para acercar · arrastra con el botón derecho (o Mayús) para desplazar · clic en un edificio para ver detalles · doble clic para enfocar · teclado: flechas giran, Mayús+flechas desplazan, +/- acercan, 0 restablece, Esc cierra"
+    },
+    "detail": {
+      "status": "Estado",
+      "source": "Detalle",
+      "progress": "Progreso",
+      "openChat": "Abrir en el chat",
+      "empty": "Haz clic en un edificio para ver sus datos en directo",
+      "close": "Cerrar",
+      "duration": "Duración",
+      "flavor": "Puesto",
+      "toolId": "ID de herramienta",
+      "childKey": "Sesión hija",
+      "artifactKind": "Tipo de entregable",
+      "artifactId": "ID de entregable",
+      "sessionKey": "Sesión",
+      "taskTitle": "Tarea",
+      "strategy": "Estrategia",
+      "members": "Miembros del conjunto",
+      "steps": "Pasos del plan",
+      "recallQuery": "Consulta de recuperación",
+      "recallHits": "Aciertos de memoria",
+      "recallTopScore": "Mejor similitud",
+      "reinforced": "Sinapsis reforzadas",
+      "memoryIds": "Entradas de memoria",
+      "stage": "Fase",
+      "floors": "Plantas"
+    },
+    "flavor": {
+      "mill": "Taller",
+      "forge": "Fragua",
+      "library": "Biblioteca",
+      "observatory": "Observatorio"
+    },
+    "legend": {
+      "title": "En la isla",
+      "plan": "Muelle del plan"
+    },
+    "empty": {
+      "hint": "Aún no hay datos de ejecución: inicia una tarea y la isla se construirá."
+    },
+    "kind": {
+      "core": "Torreón central",
+      "workshop": "Taller",
+      "outpost": "Puesto avanzado",
+      "depot": "Almacén",
+      "beacon": "Faro",
+      "pier": "Muelle",
+      "athenaeum": "Torre de memoria",
+      "construction": "Obra"
+    },
+    "construction": {
+      "stage": {
+        "foundation": "Cimentación",
+        "structure": "Estructura",
+        "frame": "Entramado",
+        "facade": "Fachada",
+        "windows": "Ventanas",
+        "interior": "Interior",
+        "finished": "Terminado"
+      },
+      "timeline": "Día de obra",
+      "day": "Día"
+    }
+  },
+  "sandbox": {
+    "title": "Maqueta en miniatura",
+    "subtitle": "Un diagrama de circulación en bucle cerrado como gemelo digital del flujo de tareas: salida, cruce, llegada, parada, salida.",
+    "kind": {
+      "train": "Tren"
+    },
+    "train": {
+      "label": "Tren {n}"
+    },
+    "station": {
+      "A": "Estación A",
+      "B": "Estación B"
+    },
+    "phase": {
+      "dwell": "Parada en andén",
+      "departing": "Saliendo",
+      "cruise": "En línea",
+      "arriving": "Aproximándose"
+    },
+    "controls": {
+      "play": "Reproducir",
+      "pause": "Pausa",
+      "speed": "Velocidad",
+      "timeline": "Línea de tiempo",
+      "dayNight": "Día / Noche",
+      "rain": "Lluvia ligera",
+      "resetView": "Reiniciar"
+    },
+    "detail": {
+      "close": "Cerrar"
+    },
+    "empty": {
+      "pickTrain": "Haz clic en un tren para ver qué hace ahora y qué hará después"
+    },
+    "quality": {
+      "fallbackNote": "WebGL no está disponible aquí, así que el bucle se dibuja como esquema 2D: el horario es el mismo.",
+      "contextLost": "Se perdió el contexto 3D. Se cambió al esquema 2D."
+    }
+  },
+  "task": {
+    "title": "Espacio de tarea",
+    "subtitle": "Sigue cada paso y entregable mientras la tarea se ejecuta.",
+    "empty": "Todavía no hay ninguna tarea en curso. Inicia una desde el chat y aparecerá aquí.",
+    "refresh": "Actualizar tarea",
+    "steps": "Pasos",
+    "deliverables": "Entregables",
+    "status": "Estado",
+    "mode": "Modo",
+    "elapsed": "Duración",
+    "artifacts": {
+      "empty": "Aún no hay entregables. Los archivos generados aparecen aquí en cuanto se escriben."
+    },
+    "runStatus": {
+      "idle": "Inactivo",
+      "running": "En curso",
+      "completed": "Completado",
+      "partial": "Parcial",
+      "failed": "Fallido"
+    },
+    "modeImpact": {
+      "title": "Impacto del modo",
+      "route": "Ruta",
+      "strategy": "Estrategia"
+    },
+    "stepStatus": {
+      "pending": "Pendiente",
+      "in_progress": "En curso",
+      "done": "Completado",
+      "failed": "Fallido"
+    },
+    "gate": {
+      "title": "Control de calidad",
+      "searchValid": "Resultados de búsqueda válidos",
+      "artifactsComplete": "Entregables completos",
+      "missing": "Falta: {items}",
+      "verdict": {
+        "pass": "Aprobado",
+        "partial": "Parcial",
+        "fail": "Fallido"
+      }
+    }
+  },
+  "onboarding": {
+    "wizard": {
+      "welcomeTitle": "Bienvenido a Marguerite",
+      "welcomeSubtitle": "Conecta un proveedor de modelos para empezar a chatear. La configuración tarda unos 30 segundos.",
+      "featureLocal": "Ejecución local — tus datos permanecen en tu equipo",
+      "featureMultiProvider": "Admite OpenAI, Anthropic, DeepSeek, OpenRouter y más",
+      "featureAgent": "Agente multimodo con flujos de plan, ensamble y bloom",
+      "getStarted": "Empezar",
+      "exploreSettings": "Explorar ajustes",
+      "chooseProvider": "Elegir proveedor",
+      "chooseProviderHint": "Selecciona un proveedor del que tengas una clave API. Cambiable más tarde.",
+      "loadingProviders": "Cargando proveedores...",
+      "seeAllProviders": "Ver todos los proveedores en Ajustes",
+      "configureProvider": "Configurar {provider}",
+      "apiKey": "Clave API",
+      "apiKeyPlaceholder": "Pega tu clave API aquí",
+      "apiKeyOrEnvHint": "Pega la clave o usa la variable de entorno {envKey}",
+      "useEnvInstead": "Usar una variable de entorno en su lugar",
+      "modelPlaceholder": "ej. gpt-4o, deepseek-chat",
+      "verifyAndSave": "Verificar y guardar",
+      "verifying": "Verificando...",
+      "ready": "¡Todo listo!",
+      "readyHint": "Tu proveedor está configurado y verificado. Inicia un nuevo chat para comenzar.",
+      "savedButProbeFailed": "Guardado — verificación pendiente",
+      "savedButProbeFailedHint": "Tus credenciales se guardaron. La sonda de verificación no pudo alcanzar el proveedor (red o límite de frecuencia). Prueba un chat para confirmar.",
+      "startUsing": "Usar Marguerite",
+      "openSettings": "Abrir ajustes",
+      "advancedSettings": "Ajustes avanzados",
+      "back": "Atrás",
+      "errors": {
+        "configure": "No se pudo guardar la configuración del proveedor. Reinténtalo o usa Ajustes."
+      }
+    }
+  },
+  "modeHintBar": {
+    "initializing": "Inicializando",
+    "gatewayLoading": "La pasarela está cargando la configuración...",
+    "setupNeeded": "Configuración necesaria",
+    "setupNeededHint": "Pasarela conectada pero sin configurar. Configura un proveedor de modelos para chatear.",
+    "gotoTopbarBadge": "Cambia de modo desde la insignia de la barra superior",
+    "bloomParallelOff": "El paralelismo de enjambre está desactivado. Cambia al modo Bloom para activarlo."
+  },
+  "mode": {
+    "userMode": {
+      "minimal_ask": "Mínimo · Consulta",
+      "minimal_plan": "Mínimo · Plan",
+      "minimal_doit": "Mínimo · Actuación",
+      "standard_ask": "Estándar · Consulta",
+      "standard_plan": "Estándar · Plan",
+      "standard_doit": "Estándar · Actuación",
+      "extreme_ask": "Extremo · Consulta",
+      "extreme_plan": "Extremo · Plan",
+      "extreme_doit": "Extremo · Actuación"
+    },
+    "userModeHint": {
+      "minimal_ask": "Respuestas rápidas de bajo coste",
+      "minimal_plan": "Planificación ligera",
+      "minimal_doit": "Un solo agente, ejecución directa",
+      "standard_ask": "Consultas cotidianas",
+      "standard_plan": "Planes estructurados",
+      "standard_doit": "Fusión multimodelo",
+      "extreme_ask": "Respuestas de investigación profunda",
+      "extreme_plan": "Desglose por equipo de expertos",
+      "extreme_doit": "Colaboración en enjambre, profundización"
+    },
+    "alias": {
+      "plan": "Exploración segura",
+      "agent": "Colaboración diaria",
+      "ensemble": "Fusión multicandidata",
+      "bloom": "Pulido profundo",
+      "omni-transcend": "Omnisciencia"
+    },
+    "hint": {
+      "plan": "Exploración de solo lectura · primero un plan, ejecutar tras aprobación",
+      "agent": "Modo predeterminado · lectura libre, escritura con confirmación",
+      "ensemble": "Candidatos en paralelo · fusión MAX en cuatro fases",
+      "bloom": "Profundidad de pensamiento y rondas de verificación declarativas",
+      "omni-transcend": "Omnisciencia · síntesis multimodal"
+    },
+    "intensity": {
+      "minimal": "Mínimo",
+      "standard": "Estándar",
+      "extreme": "Extremo"
+    },
+    "working": {
+      "ask": "Consulta",
+      "plan": "Plan",
+      "doit": "Actuación"
+    }
+  },
+  "deviceTwin": {
+    "title": "Gemelo 3D del dispositivo",
+    "teaching": "Simulación didáctica · no medido",
+    "demo": "Demo · sin dispositivo real conectado",
+    "viewLabel": "Estados de vista",
+    "state": {
+      "product": "Conjunto",
+      "open": "Abierto",
+      "explode": "Explotado",
+      "section": "Sección",
+      "cycle": "Ciclo",
+      "inspect": "Inspeccionar"
+    },
+    "fallback": "Modo simple: WebGL no disponible, esquema 2D",
+    "partInfo": "Archivo de piezas",
+    "selectHint": "Haz clic en una pieza para ver su ficha",
+    "thermal": "Térmico (didáctico)",
+    "cabTemp": "Temp. interior",
+    "condTemp": "Temp. condensador",
+    "compressor": "Compresor",
+    "on": "En marcha",
+    "off": "Detenido",
+    "energy": "Energía acumulada"
+  },
+  "plugins": {
+    "title": "Complementos y habilidades",
+    "subtitle": "Registro unificado de PluginSlot — un solo lugar para descubrir, invocar y crear herramientas, habilidades, servidores MCP y comandos.",
+    "searchPlaceholder": "Buscar complementos…",
+    "refresh": "Actualizar",
+    "createSkill": "Crear habilidad",
+    "openInWorkbench": "Abrir en el banco de trabajo",
+    "empty": "No hay complementos coincidentes",
+    "loadFailed": "No se pudieron cargar los complementos: {error}",
+    "skill": {
+      "formTitle": "Crear una habilidad nueva",
+      "nameLabel": "Identificador de la habilidad (en inglés)",
+      "namePlaceholder": "p. ej. my-skill",
+      "descriptionLabel": "Descripción",
+      "descriptionPlaceholder": "Una descripción breve de la habilidad",
+      "triggersLabel": "Palabras clave (separadas por comas, opcional)",
+      "triggersPlaceholder": "p. ej. translate,translation",
+      "promptLabel": "Plantilla de prompt (hay variables como text disponibles)",
+      "promptPlaceholder": "Eres un traductor profesional. Traduce el siguiente texto al inglés: [[text]]",
+      "cancel": "Cancelar",
+      "save": "Guardar habilidad",
+      "saving": "Guardando…",
+      "requiredFields": "Rellena todos los campos obligatorios",
+      "createFailed": "No se pudo crear la habilidad: {error}"
+    },
+    "assembly": {
+      "title": "Estado de ensamblaje de complementos (plugins.status · ensamblaje al inicio)",
+      "refresh": "Actualizar el ensamblaje",
+      "summary": "{assembled} de {installed} complementos instalados ensamblados · patch {patches} (aplicados {applied}, omitidos {skipped}, errores {errors})",
+      "statusFailed": "No se pudo cargar el estado de ensamblaje: {error}",
+      "columnManifest": "Manifiesto",
+      "columnMode": "Modo",
+      "columnStatus": "Estado de ensamblaje",
+      "columnSlot": "Ranura de origen",
+      "modeDeclarative": "Declarativo · sin ensamblar",
+      "modeNative": "Nativo",
+      "assembled": "Ensamblado",
+      "notAssembled": "Sin ensamblar",
+      "patchReport": "Informe de ensamblaje de parches"
+    },
+    "market": {
+      "title": "Mercado de complementos (ecosistema DSH + importaciones de terceros)",
+      "auditAll": "Auditar todo",
+      "installAll": "Instalar todos los complementos",
+      "auditFailed": "La auditoría falló",
+      "auditDone": "Auditoría finalizada: {count} elemento(s), {suspects} sospecha(s) de línea roja / {risks} capacidad(es) de alto riesgo",
+      "noFindings": "Sin hallazgos de línea roja ni de alto riesgo",
+      "columnPlugin": "Complemento",
+      "columnVersion": "Versión",
+      "columnVerdict": "Veredicto",
+      "columnCapabilities": "Capacidades / hooks",
+      "columnFindings": "Resultados de la auditoría",
+      "tabAll": "Todos",
+      "tabPlugin": "Complementos",
+      "tabSkill": "Habilidades",
+      "tabHarness": "Ecosistema Harness",
+      "catalogTitle": "Catálogo local de manifiestos ({count} elemento(s), market.list)",
+      "kindPlugin": "Complemento",
+      "kindSkill": "Habilidad",
+      "declarativeOnly": "Declarativo · sin ensamblar",
+      "declarativeOnlyHint": "Declarado pero aún sin ensamblar en tiempo de ejecución (el manifiesto no tiene entry): la capacidad está registrada pero no activa.",
+      "install": "Instalar",
+      "export": "Exportar",
+      "importSuccess": "{name} v{version} importado — {message}",
+      "importFailed": "La importación falló: {error}",
+      "exportSuccess": "Manifiesto {name} exportado (el contenido se colocó en el cuadro de abajo, listo para copiar y compartir)",
+      "exportFailed": "La exportación falló",
+      "batchResult": "Instalación por lotes: {ok} de {total} con éxito (el registro en tiempo de ejecución se aplica tras reiniciar la puerta de enlace)"
+    },
+    "harness": {
+      "catalogTitle": "Ecosistema DeepSeek Harness ({count} repositorios upstream · plano de destilación, market.harness)",
+      "distillTarget": "Destilado mediante",
+      "aligned": "Alineado con el ecosistema DeepSeek"
+    },
+    "sources": {
+      "title": "Fuentes de descarga (ecosistema deepseek harness · market.sources)",
+      "refresh": "Actualizar fuentes",
+      "kindExternalRepo": "Repositorio de terceros",
+      "kindCatalog": "Catálogo de manifiestos",
+      "importTitle": "Importar un manifiesto de complemento (ecosistemas de terceros/cuartos; los campos de línea roja se rechazan de forma predeterminada)",
+      "importPlaceholder": "Pega el contenido de plugin.json, por ejemplo un manifiesto que declare name, version y description",
+      "importAck": "He revisado los riesgos de los campos de línea roja (ack)",
+      "importAction": "Importar",
+      "refreshMarket": "Actualizar el mercado"
+    },
+    "verdict": {
+      "clean": "Aprobado",
+      "warn": "Advertencia",
+      "broken": "Roto"
+    },
+    "ecosystem": {
+      "computerUse": "Computer Use",
+      "harness": "Harness"
+    }
+  },
+  "shell": {
+    "window": {
+      "minimize": "Minimizar la ventana",
+      "maximize": "Maximizar la ventana",
+      "restore": "Restaurar la ventana",
+      "close": "Cerrar la ventana"
     }
   }
 }

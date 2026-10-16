@@ -113,6 +113,10 @@ export type AssistantActivityStatusCode =
   | 'chat.compact.withinBudget'
   | 'chat.compact.cancelled'
   | 'chat.compact.failed'
+  // T04：此前被前端丢弃的 3 类 Rust 事件，补订后的轻量信息行。
+  | 'chat.activity.memoryRecall'
+  | 'chat.activity.stepRound'
+  | 'chat.activity.stepRoundDone'
 
 export interface AssistantActivityStatusStep {
   key: string
@@ -828,6 +832,21 @@ function statusLabelFor(
   }
   if (normalized.startsWith('write:') || normalized === 'writing reply') {
     return codeDescriptor('chat.activity.lifecycle.answering')
+  }
+  // T04：补订事件的轻量信息行（参数取自结构化 detail，不解析自由文本）。
+  if (normalized === 'memory_recall') {
+    return codeDescriptor('chat.activity.memoryRecall', { count: Number(entry.detail) || 0 })
+  }
+  if (normalized === 'step_start') {
+    return codeDescriptor('chat.activity.stepRound', { round: String(entry.detail || '') })
+  }
+  if (normalized === 'step_finish') {
+    // detail 形如 `{token}|{reason}`（token 为轮次或 `i/total`，reason 为 runner 稳定 token）。
+    const [token, reasonRaw] = String(entry.detail || '').split('|')
+    return codeDescriptor('chat.activity.stepRoundDone', {
+      round: token || '',
+      reason: reasonRaw || '',
+    })
   }
   const purpose = STATUS_PURPOSE_CODES[normalized]
   if (purpose) return codeDescriptor(purpose)

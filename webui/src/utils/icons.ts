@@ -22,7 +22,10 @@ export type IconName =
   | 'cursor' | 'sparkles' | 'blocks'
   | 'camera' | 'crosshair' | 'timer' | 'command' | 'move' | 'drag' | 'window'
   | 'mouse-left' | 'mouse-right' | 'mouse-middle' | 'mouse-double' | 'scroll-vertical'
-  | 'clipboard-write' | 'clipboard-read';
+  | 'clipboard-write' | 'clipboard-read'
+  // Semantic-exclusive icons (upgrade-masterplan §4): each concept gets one
+  // named glyph so call sites stop overloading gauge/sparkles/agents/blocks.
+  | 'mode' | 'model' | 'plugin' | 'capabilities' | 'knowledge' | 'pet' | 'collab' | 'swarm';
 
 interface IconDef {
   path: string;
@@ -167,6 +170,24 @@ const ICONS: Record<IconName, IconDef> = {
   'scroll-vertical': { path: '<rect x="7" y="2" width="10" height="20" rx="5"/><path d="m10.4 8.6 1.6-2 1.6 2"/><path d="m10.4 15.4 1.6 2 1.6-2"/>', strokeWidth: 1.7 },
   'clipboard-write': { path: '<path d="M16 4h2a2 2 0 0 1 2 2v3.5"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M18.4 12.6a2 2 0 0 1 2.8 2.8L17 19.6l-3 .8.8-3z"/>', strokeWidth: 1.7 },
   'clipboard-read':  { path: '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 13h6"/><path d="M9 17h4"/>', strokeWidth: 1.7 },
+
+  // ── Semantic-exclusive family (upgrade-masterplan §4) ──
+  // mode: a layered diamond — declared spec cascading into execution tier.
+  mode: { path: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 8l4 2.25v4.5L12 17l-4-2.25v-4.5z"/><path d="M12 3v5"/>', strokeWidth: 1.6 },
+  // model: a chip with a signal wave — the LLM service.
+  model: { path: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M9 15h.01"/><path d="M15 15h.01"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="M4 10v4"/><path d="M20 10v4"/>', strokeWidth: 1.6 },
+  // plugin: a puzzle piece — extendable capability.
+  plugin: { path: '<path d="M14 4a2 2 0 0 0-4 0v2H6a2 2 0 0 0-2 2v3h2a2 2 0 1 1 0 4H4v3a2 2 0 0 0 2 2h3v-2a2 2 0 1 1 4 0v2h3a2 2 0 0 0 2-2v-3h-2a2 2 0 1 1 0-4h2V8a2 2 0 0 0-2-2h-4z"/>', strokeWidth: 1.6 },
+  // capabilities: a hexagon radar — capability surface.
+  capabilities: { path: '<path d="M12 3l7.5 4.5v9L12 21l-7.5-4.5v-9z"/><path d="M12 8l4 2.4v4.8L12 16l-4-2.4V10.4z"/><path d="M12 3v5"/>', strokeWidth: 1.6 },
+  // knowledge: a book with a node — KB / memory graph.
+  knowledge: { path: '<path d="M4 5a2 2 0 0 1 2-2h5v16H6a2 2 0 0 0-2 2z"/><path d="M20 5a2 2 0 0 0-2-2h-5v16h5a2 2 0 0 1 2 2z"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>', strokeWidth: 1.6 },
+  // pet: a paw — the companion creature.
+  pet: { path: '<circle cx="6.5" cy="10" r="1.8"/><circle cx="11" cy="7.5" r="1.8"/><circle cx="15.5" cy="7.5" r="1.8"/><circle cx="17.5" cy="10.5" r="1.8"/><path d="M12 12c-2.2 0-4 1.6-4 3.4 0 1.7 1.5 2.6 4 2.6s4-.9 4-2.6c0-1.8-1.8-3.4-4-3.4z"/>', strokeWidth: 1.6 },
+  // collab: two nodes linked by a chain — remote collaboration / SSH.
+  collab: { path: '<circle cx="7" cy="8" r="3"/><circle cx="17" cy="16" r="3"/><path d="M9.5 10.2 14.5 13.8"/><path d="M14.5 10.2 9.5 13.8"/>', strokeWidth: 1.6 },
+  // swarm: scattered dots converging into a core — swarm / fleet.
+  swarm: { path: '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="6" r="1.6"/><circle cx="4" cy="17" r="1.6"/><circle cx="20" cy="17" r="1.6"/><circle cx="12" cy="3" r="1.6"/><path d="M6 7l4 3.5M18 7l-4 3.5M5.5 15.5 10 13M18.5 15.5 14 13M12 5v4.5"/>', strokeWidth: 1.5 },
 };
 
 export function getIconSvg(name: IconName, size: number = 16): string {

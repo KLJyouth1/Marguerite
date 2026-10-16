@@ -151,6 +151,20 @@ function tailCalls() {
   return rpcMocks.call.mock.calls.filter(([method]) => method === 'logs.tail')
 }
 
+// The ERROR chip's live count, i.e. what the operator reads as "how many
+// problems do I have". Collapsed repeats must not inflate it.
+function errorChipCount(el: HTMLElement): string {
+  return el.querySelector('.lg-level-btn--error .lg-level-btn__count')?.textContent?.trim() ?? ''
+}
+
+function repeatBadges(el: HTMLElement): string[] {
+  return Array.from(el.querySelectorAll('.lg-line__rep')).map(node => node.textContent?.trim() ?? '')
+}
+
+function lineRows(el: HTMLElement): HTMLElement[] {
+  return Array.from(el.querySelectorAll('.lg-line'))
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   rpcMocks.call.mockReset()
@@ -301,6 +315,129 @@ describe('LogsView states', () => {
 
     expect(el.textContent).toContain('No lines match the current filter.')
     expect(el.textContent).not.toContain('No logs have been recorded yet.')
+  })
+})
+
+describe('LogsView repeat collapsing', () => {
+  const RESET_NOISE = {
+    level: 'ERROR',
+    message: 'ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。',
+    timestamp: '2026-10-09 21:06:28,207',
+  }
+
+  it('collapses identical consecutive lines into one row with a ×N badge', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return { lines: [RESET_NOISE, RESET_NOISE, RESET_NOISE], cursor: 3 }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+
+    expect(lineRows(el)).toHaveLength(1)
+    expect(repeatBadges(el)).toEqual(['×3'])
+  })
+
+  it('reports the collapsed count as a single entry on the level chip', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return { lines: [RESET_NOISE, RESET_NOISE, RESET_NOISE], cursor: 3 }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+
+    // The defect: 3 identical harmless lines used to read as "ERROR 3".
+    expect(errorChipCount(el)).toBe('1')
+  })
+
+  it('keeps alternating levels as separate rows with no badge', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return {
+          lines: [
+            { level: 'ERROR', message: 'reset noise' },
+            { level: 'INFO', message: 'gateway ready' },
+          ],
+          cursor: 2,
+        }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+
+    expect(lineRows(el)).toHaveLength(2)
+    expect(repeatBadges(el)).toEqual([])
+    expect(errorChipCount(el)).toBe('1')
+  })
+
+  it('does not merge the same message at a different level', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return {
+          lines: [
+            { level: 'ERROR', message: 'shared text' },
+            { level: 'INFO', message: 'shared text' },
+          ],
+          cursor: 2,
+        }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+
+    expect(lineRows(el)).toHaveLength(2)
+    expect(repeatBadges(el)).toEqual([])
+  })
+
+  it('collapses repeats that arrive across separate polls', async () => {
+    let tailCall = 0
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        tailCall += 1
+        if (tailCall === 1) return { lines: [RESET_NOISE], cursor: 1 }
+        if (tailCall === 2) return { lines: [RESET_NOISE], cursor: 2 }
+        return { lines: [], cursor: 2 }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+    await vi.advanceTimersByTimeAsync(3_000)
+    await flush()
+
+    expect(lineRows(el)).toHaveLength(1)
+    expect(repeatBadges(el)).toEqual(['×2'])
+    expect(errorChipCount(el)).toBe('1')
+  })
+
+  it('keeps a collapsed repeat findable through the message filter', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return { lines: [RESET_NOISE, RESET_NOISE], cursor: 2 }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+
+    const { el } = await mountLogs()
+    const input = el.querySelector<HTMLInputElement>('input[type="search"]')!
+    input.value = '10054'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await vi.advanceTimersByTimeAsync(150)
+    await flush()
+
+    expect(lineRows(el)).toHaveLength(1)
+    expect(repeatBadges(el)).toEqual(['×2'])
   })
 })
 

@@ -196,6 +196,16 @@ pre {
   color: var(--ok);
   border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--border));
 }
+.conn-pill.ready {
+  background: color-mix(in srgb, var(--ok) 16%, var(--bg-surface));
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.conn-pill.not-ready {
+  background: color-mix(in srgb, var(--warn) 16%, var(--bg-surface));
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+}
 .conn-pill.connecting {
   background: color-mix(in srgb, var(--warn) 16%, var(--bg-surface));
   color: var(--warn);
@@ -253,7 +263,18 @@ pre {
   display: flex;
   flex-direction: column;
   padding: 8px 0 10px;
-  overflow: hidden;
+  /* Scroll, don't hide — retained as a safety net. The nav index is bounded by
+     its own `.sidebar-nav` scroll region, so with the default groups expanded
+     the column now fits a 900px viewport and this rule never has to fire. It
+     stays `auto` (never `hidden`) so that if the floors below were ever raised
+     enough to overflow again, the excess remains reachable instead of clipping
+     `.sidebar-foot` off-screen — the exact failure `overflow: hidden` caused
+     (measured: Settings sat at y=1062 in a 900px fixed column and was not
+     clickable). The rail and conversation list keep their own floors so
+     nothing is squeezed into an unreadable sliver first. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   transform: translateX(-100%);
   transition: transform var(--dur-base) var(--ease-out);
 }
@@ -453,17 +474,18 @@ pre {
   padding: 4px 0;
 }
 
-/* Grouped nav index: every destination is a labelled row. Bounded and
-   self-scrolling so a short viewport shrinks it instead of squeezing Recents. */
-.sidebar-core {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  padding: 2px 8px 8px;
-  position: relative;
-  z-index: 4;
+/* Bounded scroll region for the whole nav index — the primary rail below plus
+   the collapsible capability groups that follow it. `.sidebar` is a
+   fixed-height flex column, and the groups are non-shrinkable siblings that
+   together need ~1100px; without this wrapper they push the column past a
+   900px viewport and (via the flex automatic-minimum-size rule) crush
+   `.sidebar-core` into a sliver. Bounding the nav here lets it yield space to
+   Recents as a single unit and scroll internally, so the column itself never
+   overflows while every destination stays reachable. */
+.sidebar-nav {
+  display: block;
   flex: 0 1 auto;
-  min-height: 0;
+  min-height: 96px;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* Scroll affordance: a soft edge fade appears at whichever side still has
@@ -480,6 +502,42 @@ pre {
   background-repeat: no-repeat;
   background-size: 100% 26px, 100% 26px, 100% 11px, 100% 11px;
   background-attachment: local, local, scroll, scroll;
+}
+
+/* Primary rail: New task + the flat Work rows. It shares the `.sidebar-nav`
+   scroll region above; the min-height floor guarantees the action and at least
+   one destination always render in full even if the nav is ever squeezed. */
+.sidebar-core {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 2px 8px 8px;
+  position: relative;
+  z-index: 4;
+  flex: 0 1 auto;
+  /* NEVER leave this at 0.
+     This is a flex item with `overflow-y: auto`, and per the flexbox automatic
+     minimum size rule that combination makes its min-height resolve to ZERO. So
+     without an explicit floor the rail is the only item that can absorb a
+     viewport deficit, and it absorbs all of it. Measured on a 900px viewport
+     with the default groups expanded: the rail collapsed to clientHeight 14px
+     against a scrollHeight of 191px. The rows keep their layout rects, so the
+     DOM looks fine, but their text is clipped away — what the user actually saw
+     under the brand was a bare unlabelled bar (the active row's background) and
+     three unreachable destinations (技能·渠道 / 定时任务 / 查看用量).
+
+     Why the deficit lands here and not on Recents: `.sidebar-history-list` is
+     `flex: 1`, i.e. `flex-basis: 0%`, so its hypothetical size is 0 and it
+     contributes nothing to shrink distribution, while this rail has
+     `flex-basis: auto` (≈191px) and shrink 1 — it takes 100% of the shrink.
+
+     96px = two full 42px rows plus the 2px top padding, the 4px gap and the 8px
+     bottom padding, so the New-task action and at least one destination always
+     render in full. Anything beyond that still scrolls inside the rail, which is
+      the original intent; it just can no longer be squeezed into a sliver. */
+  min-height: 96px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* New-chat keyboard hint */
@@ -712,6 +770,28 @@ pre {
   margin-left: auto;
 }
 
+/* A1：折叠掉的会话数提示 / 展开后收起。文本按钮，不抢视觉权重。 */
+.sidebar-recents-more {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 2px 8px 6px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--sidebar-text-soft) 22%, transparent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--sidebar-text-soft);
+  font-size: var(--fs-xs);
+  text-align: center;
+  cursor: pointer;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast);
+}
+
+.sidebar-recents-more:hover {
+  color: var(--sidebar-text);
+  border-color: color-mix(in srgb, var(--sidebar-text-soft) 40%, transparent);
+  background: var(--sidebar-selection-bg);
+}
+
 .sidebar-history.is-selecting .sidebar-recents-eyebrow {
   color: var(--sidebar-text);
   letter-spacing: 0;
@@ -843,6 +923,13 @@ pre {
 
 .sidebar-history-list {
   flex: 1;
+  /* Floor, not just `flex: 1`. Because the basis is 0% this list contributes
+     nothing to flex shrink distribution, yet it is the only item that *can*
+     shrink — so in practice it was the rail that collapsed instead. Measured
+     before the fix: a 2-row window here (clientHeight 152 against scrollHeight
+     6070) while the rail above it was crushed to 14px. Keeping an explicit
+     floor means both regions stay usable and the column scrolls instead. */
+  min-height: 160px;
   overflow-y: auto;
   padding: 4px 8px 8px;
 }
@@ -1723,6 +1810,19 @@ pre {
   margin-left: auto;
 }
 
+/* Chat topbar declares THREE columns but has FOUR children (sidebar toggle /
+   route actions / mode badge / app cluster). Auto-placement therefore puts the
+   app cluster on an implicit second row: that row is 36px tall inside a 49px
+   bar, so the connection pill, language switcher and theme menu spilled ~56px
+   BELOW the bar and printed on top of the chat thread (mode hint bar + first
+   message) — four overlapping strings in one band. Declaring a fourth column
+   keeps all four children in the single declared row; the auto-sized badge and
+   cluster columns are sized by their own content, and the `minmax(0, 1fr)`
+   route-actions column absorbs (and yields) the remainder. */
+.topbar--chat {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
 /* Theme picker menu (topbar) */
 .theme-menu-wrap {
   position: relative;
@@ -1832,6 +1932,8 @@ pre {
 }
 
 .approval-inline {
+  overflow: hidden;
+  max-width: 100%;
   background: var(--danger);
   color: var(--accent-foreground);
   border: none;

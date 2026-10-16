@@ -151,7 +151,8 @@ test.describe('Chat Page', () => {
     await expect(page.locator('.sidebar-filter-chip')).toHaveCount(0)
 
     // Let the session list settle before inspecting sidebar text.
-    await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
     await page.waitForTimeout(800)
     await expect(page.locator('.sidebar-history-list, .sidebar-onboarding, .sidebar-history-empty').first()).toBeVisible()
 
@@ -195,12 +196,17 @@ test.describe('Chat Page', () => {
     await expect(page.locator('.chat-composer')).toBeVisible()
   })
 
-  test('connection status shows connected', async ({ page }) => {
+  test('connection status shows a unified readiness label', async ({ page }) => {
     const connPill = page.locator('.topbar .conn-pill')
     await expect(connPill).toBeVisible()
 
-    const text = await connPill.textContent()
-    expect(text?.toLowerCase()).toMatch(/connected|connecting/)
+    // 顶栏徽标渲染统一就绪态（App.vue connectionStateLabel =
+    // chrome.connectionState.<readiness>），类名即 readiness state。
+    // 旧断言 /connected|connecting/ 会把 “Disconnected” 误判为通过（子串含 connected），
+    // 且裸 WS “Connected” 文案已随 readiness 类退休。
+    await expect(connPill).toHaveClass(/\b(disconnected|connecting|not_ready|ready)\b/)
+    const text = (await connPill.textContent())?.toLowerCase() ?? ''
+    expect(text).toMatch(/^(disconnected|connecting|setup needed|ready)$/)
   })
 
   test('no console errors on load', async ({ page }) => {

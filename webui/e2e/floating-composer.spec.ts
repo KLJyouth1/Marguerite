@@ -147,7 +147,8 @@ async function openChat(page: Page, sessionKey = SESSION_A, enabled = true) {
   }, enabled)
   await installMockGateway(page)
   await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(sessionKey))
-  await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10000 })
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 10000 })
   await expect(page.getByText('Session A message 48.', { exact: false })).toBeVisible()
   await expect.poll(() => page.locator('.chat-thread').evaluate(el => (
     el.scrollHeight > el.clientHeight

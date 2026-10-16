@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import ControlSwitch from '@/components/ControlSwitch.vue'
+import Icon from '@/components/Icon.vue'
 
 const { t } = useI18n()
 
@@ -58,5 +59,10 @@ const emit = defineEmits<{
         />
       </div>
     </label>
+
+    <div class="permission-boundary-notice" role="note">
+      <Icon name="shield" :size="16" aria-hidden="true" />
+      <p>{{ t('setup.privacy.permissionBoundaryNotice') }}</p>
+    </div>
   </section>
 </template>

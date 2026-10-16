@@ -5,7 +5,7 @@
       <p class="ext-panel__desc">{{ t(`settings.ext.${sectionId}.desc`) }}</p>
     </header>
 
-    <!-- 宠物：桌宠开关 + 预览提示 -->
+    <!-- 宠物：桌宠开关 + 皮肤选择 + 预览提示 -->
     <section v-if="sectionId === 'pet'" class="ext-card">
       <label class="control-row" for="pet-desktop-toggle">
         <span class="control-label">{{ t('settings.ext.pet.toggleLabel') }}</span>
@@ -19,6 +19,24 @@
         />
       </label>
       <p class="ext-hint">{{ t('settings.ext.pet.hint') }}</p>
+
+      <h4 class="ext-subtitle">选择皮肤</h4>
+      <div class="pet-skin-grid">
+        <button
+          v-for="s in petSkins"
+          :key="s.id"
+          class="pet-skin-opt"
+          :class="{ 'is-active': s.id === currentPetSkin }"
+          @click="selectPetSkin(s.id)"
+        >
+          <div class="pet-skin-opt__preview">
+            <img v-if="s.kind === 'image'" :src="s.src" :alt="s.name" draggable="false" />
+            <span v-else class="pet-skin-opt__emoji">🐱</span>
+          </div>
+          <span class="pet-skin-opt__name">{{ s.name }}</span>
+        </button>
+      </div>
+
       <RouterLink class="btn btn--ghost" :to="{ path: '/pet' }">
         {{ t('settings.ext.pet.openPreview') }}
       </RouterLink>
@@ -37,6 +55,46 @@
         </li>
       </ul>
       <p v-else class="ext-hint">{{ t('settings.ext.pluginMarket.loading') }}</p>
+    </section>
+
+    <!-- 企业协同 · SSH：本地回环不变量下的远程协同时代指南（Radmin VPN 组网） -->
+    <section v-else-if="sectionId === 'collabSsh'" class="ext-card">
+      <p class="ext-hint">{{ t('settings.ext.collabSsh.localNote') }}</p>
+
+      <h4 class="ext-subtitle">{{ t('settings.ext.collabSsh.vpnTitle') }}</h4>
+      <ol class="ext-steps">
+        <li>{{ t('settings.ext.collabSsh.step1') }}
+          <a class="ext-link" href="https://www.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
+            {{ t('settings.ext.collabSsh.download') }} ↗
+          </a>
+        </li>
+        <li>{{ t('settings.ext.collabSsh.step2') }}</li>
+        <li>{{ t('settings.ext.collabSsh.step3') }}</li>
+        <li>{{ t('settings.ext.collabSsh.step4') }}</li>
+        <li>{{ t('settings.ext.collabSsh.step5') }}</li>
+      </ol>
+      <div class="ext-cmdrow">
+        <code class="ext-cmd">{{ sshSampleCommand }}</code>
+        <button type="button" class="btn btn--ghost btn--sm" @click="copySshCommand">
+          {{ copied ? t('settings.ext.collabSsh.copied') : t('settings.ext.collabSsh.copy') }}
+        </button>
+      </div>
+
+      <h4 class="ext-subtitle">{{ t('settings.ext.collabSsh.securityTitle') }}</h4>
+      <ul class="ext-security">
+        <li>{{ t('settings.ext.collabSsh.sec1') }}</li>
+        <li>{{ t('settings.ext.collabSsh.sec2') }}</li>
+        <li>{{ t('settings.ext.collabSsh.sec3') }}</li>
+      </ul>
+
+      <div class="ext-actions">
+        <a class="btn btn--secondary" href="https://www.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
+          {{ t('settings.ext.collabSsh.download') }}
+        </a>
+        <a class="btn btn--ghost" href="https://help.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
+          {{ t('settings.ext.collabSsh.docs') }} ↗
+        </a>
+      </div>
     </section>
 
     <!-- 通用：说明 + 打开入口 -->
@@ -58,6 +116,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
+import { PET_SKINS, getCurrentSkin, setCurrentSkin } from '@/components/pet/skins'
 
 const props = defineProps<{ sectionId: string }>()
 const { t } = useI18n()
@@ -66,9 +125,15 @@ const rpc = useRpcStore()
 const PET_ENABLED_KEY = 'pet.desktopEnabled'
 
 const petEnabled = ref(localStorage.getItem(PET_ENABLED_KEY) === 'true')
+const petSkins = PET_SKINS
+const currentPetSkin = ref(getCurrentSkin().id)
 function persistPetEnabled() {
   localStorage.setItem(PET_ENABLED_KEY, String(petEnabled.value))
   window.dispatchEvent(new StorageEvent('storage', { key: PET_ENABLED_KEY }))
+}
+function selectPetSkin(id: string) {
+  setCurrentSkin(id)
+  currentPetSkin.value = id
 }
 
 interface MarketItem { name: string; version: string; description: string; kind: string }
@@ -87,6 +152,21 @@ const CTA_MAP: Record<string, { path: string; labelKey: string }[]> = {
 const ctas = computed(() =>
   (CTA_MAP[props.sectionId] ?? []).map(c => ({ path: c.path, label: t(`settings.ext.${props.sectionId}.${c.labelKey}`) })),
 )
+
+// ---- Collab & SSH：示例命令 + 复制回执（纯前端能力，不伪造后端 SSH RPC）----
+const sshSampleCommand = 'ssh <user>@26.x.x.x   # Radmin VPN 分配的虚拟 IP'
+const copied = ref(false)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+async function copySshCommand() {
+  try {
+    await navigator.clipboard.writeText(sshSampleCommand)
+    copied.value = true
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copied.value = false }, 1500)
+  } catch {
+    /* 剪贴板权限被拒时静默保留原文案（无敏感数据） */
+  }
+}
 
 async function loadMarket() {
   if (props.sectionId !== 'pluginMarket') return
@@ -134,4 +214,24 @@ onMounted(loadMarket)
 .ext-list__main { display: flex; gap: var(--sp-2); }
 .ext-list__ver { color: var(--text-dim); font-size: var(--fs-xs); }
 .ext-list__desc { color: var(--text-muted); font-size: var(--fs-sm); text-align: right; }
+.ext-subtitle { font-size: var(--fs-sm); font-weight: 700; margin: var(--sp-1) 0 0; }
+.ext-steps { color: var(--text-muted); display: flex; flex-direction: column; font-size: var(--fs-sm); gap: 6px; margin: 0; padding-left: 18px; }
+.ext-link { color: var(--accent); text-decoration: none; }
+.ext-link:hover { text-decoration: underline; }
+
+.pet-skin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; margin: var(--sp-2) 0 var(--sp-3); }
+.pet-skin-opt {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 8px 4px; background: var(--bg); border: 2px solid var(--border);
+  border-radius: var(--radius-sm); cursor: pointer; transition: all var(--dur-fast) var(--ease-out);
+}
+.pet-skin-opt:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.pet-skin-opt.is-active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent); }
+.pet-skin-opt__preview { width: 50px; height: 56px; display: flex; align-items: center; justify-content: center; border-radius: var(--radius-xs); overflow: hidden; }
+.pet-skin-opt__preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.pet-skin-opt__emoji { font-size: 28px; }
+.pet-skin-opt__name { font-size: 11px; color: var(--text); text-align: center; }
+.ext-cmdrow { align-items: center; background: color-mix(in srgb, var(--text) 6%, transparent); border-radius: var(--radius-sm); display: flex; gap: var(--sp-2); justify-content: space-between; padding: 8px 10px; }
+.ext-cmd { font-family: var(--font-mono, monospace); font-size: var(--fs-xs); word-break: break-all; }
+.ext-security { color: var(--text-muted); display: flex; flex-direction: column; font-size: var(--fs-xs); gap: 4px; margin: 0; padding-left: 16px; }
 </style>

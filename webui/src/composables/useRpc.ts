@@ -2,9 +2,16 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRpcStore } from '@/stores/rpc'
 import type { RpcCallOptions, RpcClientError, RpcEventHandler } from '@/lib/rpc'
 import { optionalSessionRpcAllowed } from '@/composables/chat/sessionBootstrapAdmission'
+import { useErrorSink } from '@/composables/useErrorSink'
 
-interface UseRpcCallOptions {
+export interface UseRpcCallOptions {
   callOptions?: RpcCallOptions
+  /** Run once on mount (after the connection is ready). Default true. */
+  immediate?: boolean
+  /** Route failures through the de-duped error->toast sink. Default false. */
+  toastOnError?: boolean
+  /** Human label for the error toast + the dedupe key. */
+  errorLabel?: string
 }
 
 const coalescedAutoCalls = new WeakMap<object, Map<string, Promise<unknown>>>()
@@ -39,7 +46,18 @@ export function useRpcEvent(event: string, handler: RpcEventHandler) {
 }
 
 /**
- * Composable that calls an RPC method on mount and exposes reactive state.
+ * Unified composable that calls an RPC method on mount and exposes reactive
+ * state. Subsumes the former `useRequest` composable via the `toastOnError`,
+ * `errorLabel`, `immediate` and `refresh` options.
+ *
+ * Features:
+ * - Admission gating: optional RPCs wait for chat session bootstrap.
+ * - Coalescing: identical mount-time calls share a single in-flight promise.
+ * - Retry: transient (retryable) errors back off once before surfacing.
+ * - Auto-toast: when `toastOnError` is set, failures route through
+ *   `useErrorSink` instead of throwing.
+ * - Silent refresh: `refresh()` re-fetches without a loading flash.
+ * - `immediate: false` suppresses auto-mount execution.
  */
 export function useRpcCall<T = unknown>(
   method: string,
@@ -47,6 +65,8 @@ export function useRpcCall<T = unknown>(
   options: UseRpcCallOptions = {},
 ) {
   const rpc = useRpcStore()
+  const { immediate = true, toastOnError = false, errorLabel } = options
+
   const data = ref<T | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -55,13 +75,23 @@ export function useRpcCall<T = unknown>(
   let admissionUnsub: (() => void) | null = null
   let autoStarted = false
 
-  async function perform(coalesce: boolean) {
-    loading.value = true
+  function handleError(e: unknown): null {
+    const msg = e instanceof Error ? e.message : String(e)
+    error.value = msg
+    if (toastOnError) {
+      const { reportError } = useErrorSink()
+      reportError(errorLabel ? `${errorLabel}: ${msg}` : msg, errorLabel || method)
+    }
+    return null
+  }
+
+  async function perform(coalesce: boolean, silent = false): Promise<T | null> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       if (!coalesce) {
         data.value = await rpc.call<T>(method, params, options.callOptions)
-        return
+        return data.value
       }
       let calls = coalescedAutoCalls.get(rpc)
       if (!calls) {
@@ -80,30 +110,35 @@ export function useRpcCall<T = unknown>(
         })
       }
       data.value = await pending
+      return data.value
     } catch (e: unknown) {
       const err = e as RpcClientError
-      // 瞬时故障（Python 侧车超时等，网关标记 retryable）：退避重试一次。
-      // 永久错误（NOT_IMPLEMENTED/权限/版本冲突）与写型副作用不在此重试。
+      // Transient fault (Python sidecar timeout, gateway-marked retryable):
+      // back off and retry once. Permanent errors (NOT_IMPLEMENTED / perms /
+      // version conflict) and side-effecting writes are not retried here.
       if (err?.retryable) {
         const backoff = err.retry_after_ms ?? 800
         await new Promise((resolve) => setTimeout(resolve, backoff))
         try {
           data.value = await rpc.call<T>(method, params, options.callOptions)
-          return
+          return data.value
         } catch (e2: unknown) {
-          error.value = e2 instanceof Error ? e2.message : String(e2)
-          throw e2
+          return handleError(e2)
         }
       }
-      error.value = e instanceof Error ? e.message : String(e)
-      throw e
+      return handleError(e)
     } finally {
-      loading.value = false
+      if (!silent) loading.value = false
     }
   }
 
-  function execute() {
+  function execute(): Promise<T | null> {
     return perform(false)
+  }
+
+  /** Re-execute silently (no loading flash) — for background refresh. */
+  function refresh(): Promise<T | null> {
+    return perform(false, true)
   }
 
   function maybeAutoExecute() {
@@ -123,6 +158,7 @@ export function useRpcCall<T = unknown>(
   }
 
   onMounted(() => {
+    if (!immediate) return
     admissionUnsub = watch(optionalSessionRpcAllowed, maybeAutoExecute, {
       immediate: true,
     })
@@ -141,5 +177,5 @@ export function useRpcCall<T = unknown>(
     admissionUnsub = null
   })
 
-  return { data, loading, error, execute }
+  return { data, loading, error, execute, refresh }
 }

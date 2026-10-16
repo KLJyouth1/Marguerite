@@ -5,7 +5,8 @@ const CONTROL_URL = '/control/'
 async function openDraft(page: Page) {
   await page.goto(CONTROL_URL + 'chat/new')
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
-  await page.waitForSelector('.conn-pill.connected', { timeout: 10000 }).catch(() => {})
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await page.waitForSelector('.conn-pill.ready', { timeout: 10000 }).catch(() => {})
 }
 
 test.describe('Empty draft state', () => {

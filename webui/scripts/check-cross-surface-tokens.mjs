@@ -17,8 +17,9 @@ import { hexToRgb, stripAllComments } from './lib/css-utils.mjs'
 // colour. Backgrounds are intentionally out of scope (too many valid neutral
 // shades to allowlist without false positives).
 //
-// The gateway serves the generated Vue bundle from static/dist; its source
-// tokens are covered by check-webui-colors.mjs and therefore are not rescanned.
+// The launch sequence is authored in the Vue console's own entry files
+// (webui/index.html + src/assets/boot.css). The theme token files themselves are
+// covered by check-webui-colors.mjs and are not rescanned here.
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 
 // The canonical "strike" family — the Instrument accent and its documented
@@ -51,10 +52,18 @@ const ONBOARDING_PROMOTION = new Set([
 
 const ALLOWED_DESKTOP_ACCENTS = new Set([...CANONICAL, ...ONBOARDING_PROMOTION])
 
-// Files that make up the desktop launch sequence.
+// Files that make up the desktop launch sequence — the first surfaces the user
+// sees before the console paints.
+//
+// History: the old targets were `desktop/electron/src/{boot.html,main.ts}`, which
+// were deleted along with the egui/Electron shells. Every target was then missing,
+// so the guard warned and skipped — a no-op that still reported "passed". A guard
+// that silently no-ops when its target disappears is worse than none. Hence:
+// (a) the targets point at the surfaces that actually exist, and
+// (b) a missing target is a FAILURE below, not a skip.
 const targets = [
-  'desktop/electron/src/boot.html',
-  'desktop/electron/src/main.ts',
+  'webui/index.html',
+  'webui/src/assets/boot.css',
 ]
 
 // Is this rgb a saturated orange — i.e. a brand-accent candidate?
@@ -84,7 +93,10 @@ for (const rel of targets) {
   try {
     text = readFileSync(repoRoot + rel, 'utf8')
   } catch {
-    console.warn(`[cross-surface] skipped (not found): ${rel}`)
+    failures.push(
+      `${rel}: target not found — the launch-sequence file list is stale. ` +
+        'Update it (a missing target must never silently disable this guard).',
+    )
     continue
   }
   // Comments are stripped so hexes named in them don't trip the guard.

@@ -153,7 +153,8 @@ async function openMockedChat(page: Page, capturedSends: CapturedSend[], options
   await mockRpc(page, capturedSends, options)
   await page.goto(CONTROL_URL)
   await expect(page.locator('.chat-textarea')).toBeVisible()
-  await expect(page.locator('.conn-pill.connected')).toBeVisible()
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+  await expect(page.locator('.conn-pill.ready')).toBeVisible()
 }
 
 async function dropFiles(page: Page, files: Array<{ name: string; type: string; text?: string; size?: number }>) {
@@ -435,7 +436,7 @@ test.describe('attachment drag upload', () => {
       const request = route.request()
       downloadRequests.push({
         authorization: request.headers().authorization,
-        sessionKey: request.headers()['x-opensquilla-session-key'],
+        sessionKey: request.headers()['x-Marguerite-session-key'],
         url: request.url(),
       })
       return route.fulfill({

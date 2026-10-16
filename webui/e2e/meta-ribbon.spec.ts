@@ -114,7 +114,9 @@ async function setup(page: Page): Promise<(frames: Frame[]) => Promise<void>> {
   // Wait until the proxied socket is connected and the chat view has mounted
   // its composer + registered useMetaRuns.subscribe() (settle avoids a race
   // where frames inject before the rpc.on listeners attach).
-  await expect(page.locator('.conn-pill')).toContainText(/connected/i, { timeout: 15000 })
+  // 旧选择器 .conn-pill.connected 已改名为 readiness state 类（disconnected|connecting|not_ready|ready）；
+  // 此处要求 WS 已连上且网关就绪，故用 .ready 类断言（不能用 /ready/i 文本，not_ready 文案也含 ready）。
+  await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 15000 })
   await page.waitForSelector('.chat-textarea', { timeout: 15000 })
   await expect.poll(() => (send ? 'ready' : 'pending'), { timeout: 15000 }).toBe('ready')
   await page.waitForTimeout(600)
@@ -218,7 +220,8 @@ test.describe('Meta-skill ribbon (Vue port)', () => {
       send = (s) => ws.send(s)
     })
     await page.goto(CONTROL_URL + 'chat/new')
-    await expect(page.locator('.conn-pill')).toContainText(/connected/i, { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 15000 })
     await page.waitForSelector('.chat-textarea', { timeout: 15000 })
     await expect.poll(() => (send ? 'ready' : 'pending'), { timeout: 15000 }).toBe('ready')
     await page.waitForTimeout(600)
@@ -320,14 +323,16 @@ test.describe('Meta-skill ribbon (Vue port)', () => {
     }
 
     await page.goto(CONTROL_URL + 'chat/new')
-    await expect(page.locator('.conn-pill')).toContainText(/connected/i, { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 15000 })
     await assertRecovered()
     const beforeReload = recoveryRequests
 
     // Do not inject any session.event.meta_* frames after reload. The card
     // must come exclusively from the durable recovery projection.
     await page.reload()
-    await expect(page.locator('.conn-pill')).toContainText(/connected/i, { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 15000 })
     await assertRecovered()
     expect(recoveryRequests).toBeGreaterThan(beforeReload)
   })
@@ -395,7 +400,8 @@ test.describe('Meta-skill ribbon (Vue port)', () => {
       send = (s) => ws.send(s)
     })
     await page.goto(CONTROL_URL + 'chat/new')
-    await expect(page.locator('.conn-pill')).toContainText(/connected/i, { timeout: 15000 })
+    // 旧选择器 .conn-pill.connected 已改名为 readiness state 类，改为 .ready 类断言。
+    await expect(page.locator('.conn-pill.ready')).toBeVisible({ timeout: 15000 })
     await page.waitForSelector('.chat-textarea', { timeout: 15000 })
     await expect.poll(() => (send ? 'ready' : 'pending'), { timeout: 15000 }).toBe('ready')
     await page.waitForTimeout(600)

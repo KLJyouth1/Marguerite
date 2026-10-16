@@ -20,6 +20,10 @@ export type WorkbenchPanelKind =
   | 'file'
   | 'diff'
   | 'terminal'
+  | 'goal'
+  | 'task'
+  | 'island'
+  | 'view'
 
 export type WorkbenchRetention = 'dispose-on-suspend' | 'keep-alive'
 

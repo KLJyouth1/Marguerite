@@ -1,6 +1,7 @@
 <template>
   <div
     class="chat"
+    :style="{ fontSize: chatFontPx }"
     :class="{
       'chat--new-landing': isNewChatLanding,
       'chat--meta-setup': Boolean(setupState),
@@ -81,11 +82,12 @@
         </button>
       </div>
       <div class="chat-thread-shell">
+        <ModeHintBar />
         <ChatForkTransitionOverlay
           v-if="forkTransition"
           :fork="forkTransition"
           @retry="retryForkTransition"
-          @return-to-parent="returnToForkParent"
+          @return-to-forkParent="returnToForkParent"
         />
         <div
           ref="threadRef"
@@ -175,6 +177,7 @@
           :plan-action-pending="planCardPendingAction"
           :plan-actions-disabled="planActionsDisabled"
           :is-streaming="isStreaming"
+          :can-replan="failedTurnReplanTarget !== null"
           @fork-conversation="forkConversation"
           @edit-message="editMessage"
           @regenerate-message="regenerateMessage"
@@ -189,9 +192,14 @@
           @clarify-submit="submitClarify"
           @clarify-dismiss="dismissClarify"
           @resume-sandbox="resumeSandbox"
+          @open-auth-settings="openAuthSettings"
+          @retry-auth-failure="retryAuthFailure"
+          @replan-failed-turn="replanFromFailedTurn"
+          @view-turn-logs="openTurnLogs"
           @plan-implement-current="implementCurrentPlan"
           @plan-implement-new="implementPlanInNewTask"
           @plan-replan="beginPlanRevision"
+          @plan-reuse-last="reuseLastPlan"
         >
           <template #router-strip="{ message: msg }">
             <RouterFxStrip v-if="shouldRenderRouterStrip(msg)" :message="msg" />
@@ -231,9 +239,14 @@
           :plan="currentPlan"
           :disabled="planActionsDisabled"
           :pending-action="planCardPendingAction"
+          :editing="planCardEditing"
           @implement-current="implementCurrentPlan"
           @implement-new="implementPlanInNewTask"
           @replan="beginPlanRevision"
+          @reuse-last="reuseLastPlan"
+          @step-add="onPlanStepAdd"
+          @step-remove="onPlanStepRemove"
+          @step-update="onPlanStepUpdate"
         />
 
         <!-- Pre-reveal router phase: shown only before the live activity owns
@@ -281,6 +294,13 @@
               :elapsed-label="streamPhaseElapsed"
               :stale="streamActivityStale"
             >
+              <HeartbeatWaitIndicator
+                :visible="waitIndicatorVisible"
+                :phase-label="streamPhaseLabel"
+                :seconds="streamTurnElapsedSeconds"
+                :suspended="stallSuspendReason !== null"
+                :suspend-label="waitSuspendLabel"
+              />
               <!-- Reasoning remains available as a flat, secondary disclosure,
                    rendered by the same part component settled turns use so the
                    chevron affordance and wording stay consistent; `live`
@@ -327,6 +347,7 @@
               <TextPart
                 :part="liveAnswerPart"
                 :sources="[]"
+                live
               />
             </div>
             <span
@@ -444,14 +465,30 @@
     <!-- Durable execution progress belongs to the work surface, not to the
          transcript. Keeping it immediately above the composer also lets a
          future goal driver reuse this dock across multiple turns. -->
+    <!-- Durable execution progress belongs to the work surface, not to the
+         transcript. Keeping it immediately above the composer also lets a
+         future goal driver reuse this dock across multiple turns. -->
     <Transition name="plan-run-dock">
       <div v-if="executionDockRun" class="plan-run-dock">
         <PlanRunRibbon
           :run="executionDockRun"
           :cancel-busy="planActionPending === 'cancel-run'"
           :disabled="planModeBusy || planActionPending !== null"
+          :step-kind="chatPlans.activeStepKind.value"
+          :timing="chatPlans.runTiming.value"
           @cancel="cancelActivePlanRun"
           @focus-return="focusComposerAfterPlanRun"
+        />
+      </div>
+    </Transition>
+    <!-- M2-C4：护栏升级「需要确认」浮层。存在 pending escalation 时置顶呈现，
+         用户选择 继续/中止 后由 escalation.ack 决策并弹出队列下一项。 -->
+    <Transition name="escalation-dock">
+      <div v-if="chatEscalations.pending.value" class="plan-run-dock escalation-dock">
+        <EscalationCard
+          :event="chatEscalations.pending.value"
+          :busy="chatEscalations.busy.value"
+          @ack="decision => void chatEscalations.resolve(chatEscalations.pending.value!, decision)"
         />
       </div>
     </Transition>
@@ -535,6 +572,7 @@
       :run-mode-lock-message="t('chat.composer.runModeLocked')"
       :model-routing-mode="modelRoutingMode"
       :model-routing-settings-busy="modelRoutingSettingsBusy"
+      :thinking="composerThinking"
       :coding-mode-enabled="codingModeEnabled"
       :coding-mode-settings-busy="codingModeSettingsBusy"
       :voice-busy="voiceBusy"
@@ -556,6 +594,7 @@
       :prompt-cache-keepalive-status="promptCacheKeepaliveStatus"
       :collapsed="composerCollapsed && composerFxEnabled && !isNewChatLanding"
       :floating="composerFxEnabled && !isNewChatLanding"
+      :show-presets="true"
       @expand="expandComposer"
       @composition-change="composing = $event"
       @beforeinput="onTextareaBeforeInput"
@@ -567,6 +606,7 @@
       @set-busy-send-mode="busySendMode = $event"
       @set-run-mode="setComposerRunMode"
       @set-model-routing-mode="setComposerModelRoutingMode"
+      @set-thinking="setComposerThinking"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
       @cancel-replan="cancelPlanRevision"
@@ -580,6 +620,21 @@
       @open-prompt-cache-keepalive="promptCacheKeepaliveOpen = true"
       @refresh-prompt-cache-keepalive="void refreshPromptCacheKeepaliveStatus()"
     />
+    <!-- Usage telemetry: small-print footnote rendered BELOW the composer's
+         "内容由 AI 生成" disclaimer, so runtime stats never compete with input.
+         Only shown when THIS session has its own usage (or a client-measured
+         first token) — an unscoped aggregate is never labelled 本会话. -->
+    <div
+      v-if="(usageStrip?.runs ?? 0) > 0 || (usageStrip?.total_tokens ?? usageStrip?.totalTokens ?? 0) > 0 || lastTtftMs !== null"
+      class="chat-usage-strip chat-usage-strip--foot"
+      data-testid="chat-usage-strip"
+    >
+      <span class="chat-usage-strip__item">首 token {{ lastTtftMs === null ? '—' : lastTtftMs + ' ms' }}（客户端实测）</span>
+      <span class="chat-usage-strip__item">本会话 token {{ usageStrip?.total_tokens ?? usageStrip?.totalTokens ?? 0 }}</span>
+      <span class="chat-usage-strip__item">轮次 {{ usageStrip?.runs ?? 0 }}</span>
+      <span class="chat-usage-strip__item">服务端前缀缓存命中率 {{ cacheStrip?.server_cache_hit_rate ?? 0 }}%</span>
+      <span class="chat-usage-strip__item">省前缀 token {{ cacheStrip?.saved_prompt_tokens ?? 0 }}（复用 {{ cacheStrip?.prefix_hits ?? 0 }} 次）</span>
+    </div>
     <SandboxSetupDialog
       :open="composerSandboxSetupOpen"
       :pending="sandboxSetupPending"
@@ -699,16 +754,19 @@ import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useRpcStore } from '@/stores/rpc'
 import { useRpcCall } from '@/composables/useRpc'
+import { useChatFontScale } from '@/composables/useChatFontScale'
 import { useAppStore } from '@/stores/app'
 import { useSandboxSetupStore } from '@/stores/sandboxSetup'
 import { useWorkbenchStore } from '@/workbench/store'
 import { usePlatform } from '@/platform'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import ActivityDisclosure from '@/components/chat/ActivityDisclosure.vue'
+import HeartbeatWaitIndicator from '@/components/chat/HeartbeatWaitIndicator.vue'
 import AssistantActivityTimeline from '@/components/chat/AssistantActivityTimeline.vue'
 import ChatArtifactList from '@/components/chat/ChatArtifactList.vue'
 import ChatForkTransitionOverlay from '@/components/chat/ChatForkTransitionOverlay.vue'
 import ChatHeaderActions from '@/components/chat/ChatHeaderActions.vue'
+import ModeHintBar from '@/components/ModeHintBar.vue'
 import PromptCacheKeepaliveDialog from '@/components/chat/PromptCacheKeepaliveDialog.vue'
 import DeliverablesDrawer from '@/components/chat/DeliverablesDrawer.vue'
 import FileChangesDrawer from '@/components/chat/FileChangesDrawer.vue'
@@ -732,6 +790,7 @@ import MetaSkillSetupCard from '@/components/chat/MetaSkillSetupCard.vue'
 import PendingQueue from '@/components/chat/PendingQueue.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
 import PlanRunRibbon from '@/components/chat/PlanRunRibbon.vue'
+import EscalationCard from '@/components/chat/EscalationCard.vue'
 import RouterFxStrip from '@/components/chat/RouterFxStrip.vue'
 import SharePreviewModal from '@/components/chat/SharePreviewModal.vue'
 import SandboxSetupDialog from '@/components/sandbox/SandboxSetupDialog.vue'
@@ -778,6 +837,7 @@ import { useArtifactImageLightbox } from '@/composables/chat/useArtifactImageLig
 import { useMetaRuns } from '@/composables/chat/useMetaRuns'
 import { useMetaSkillSetup } from '@/composables/chat/useMetaSkillSetup'
 import { useChatPlans } from '@/composables/chat/useChatPlans'
+import { useChatEscalations } from '@/composables/chat/useChatEscalations'
 import {
   shouldCanonicalizeInitialDraftRoute,
   useChatSessionRoute,
@@ -811,6 +871,7 @@ import { useChatTextRendering } from '@/composables/chat/useChatTextRendering'
 import { useChatUsageWidget } from '@/composables/chat/useChatUsageWidget'
 import { useSessionArtifacts } from '@/composables/chat/useSessionArtifacts'
 import { useArtifactActions } from '@/composables/chat/useArtifactActions'
+import { useChatSidebarPanels } from '@/composables/chat/useChatSidebarPanels'
 import { useVoiceInput } from '@/composables/chat/useVoiceInput'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import { hasOpenDialogLayer } from '@/composables/useDialogA11y'
@@ -990,95 +1051,6 @@ const {
 /* ── Stores / Router ───────────────────────────────────────────────── */
 
 const rpc = useRpcStore()
-const fileChangesOpen = ref(false)
-const fileChangesVisible = computed(() => rpc.supportsMethod('workspace.file_changes.list'))
-
-// ── 右侧侧边栏 ──
-const RIGHT_SIDEBAR_OPEN_KEY = 'marguerite.chat.rightSidebarOpen'
-// Persist across route changes: ChatView must not reset the panel to closed
-// on every mount (issue #A — RightSidebar state should survive navigation).
-const rightSidebarOpen = ref(localStorage.getItem(RIGHT_SIDEBAR_OPEN_KEY) === '1')
-watch(rightSidebarOpen, (open) => {
-  try { localStorage.setItem(RIGHT_SIDEBAR_OPEN_KEY, open ? '1' : '0') } catch { /* ignore */ }
-})
-const sidebarTasks = computed((): Array<{ title: string; detail?: string; status: 'running' | 'done' | 'error' | 'pending'; tools?: string[]; duration?: string }> => {
-  const tasks: Array<{ title: string; detail?: string; status: 'running' | 'done' | 'error' | 'pending'; tools?: string[]; duration?: string }> = []
-  // Feed the live orchestrator step stream (in-flight tool calls) so the task
-  // axis reflects real-time execution, not just committed history.
-  for (const tc of chatStream.streamToolCalls.value) {
-    tasks.push({
-      title: `调用工具：${tc.displayName || tc.name}`,
-      status: (tc.isRunning ? 'running' : (tc.isError ? 'error' : 'done')) as 'running' | 'done' | 'error' | 'pending',
-      tools: [tc.name],
-    })
-  }
-  for (const msg of messages.value) {
-    if (msg.role !== 'assistant') continue
-    if (msg.reasoning?.text) {
-      tasks.push({ title: '深度思考', status: 'done' as const, detail: String(msg.reasoning.text).slice(0, 100) })
-    }
-    if (msg.timeline) {
-      for (const seg of msg.timeline) {
-        const s = seg as Record<string, unknown>
-        tasks.push({
-          title: String(s.label || s.kind || s.text || '步骤'),
-          detail: s.detail ? String(s.detail) : undefined,
-          status: String(s.status || 'done') as 'running' | 'done' | 'error' | 'pending',
-          duration: s.duration ? String(s.duration) : undefined,
-        })
-      }
-    }
-    if (msg.tool_calls) {
-      for (const tc of msg.tool_calls) {
-        const toolName = String(tc.name || tc.tool_name || tc.tool || 'tool')
-        tasks.push({
-          title: `调用工具：${toolName}`,
-          detail: typeof tc.input === 'object' ? JSON.stringify(tc.input).slice(0, 120) : String(tc.input || ''),
-          status: (tc.error ? 'error' : (tc.result ? 'done' : 'running')) as 'running' | 'done' | 'error' | 'pending',
-          tools: [toolName],
-        })
-      }
-    }
-  }
-  return tasks
-})
-const sidebarChanges = ref<Array<{ path: string; name?: string; additions: number; deletions: number; kind?: 'created' | 'modified' | 'deleted' }>>([])
-// 加载文件更改
-async function refreshSidebarChanges() {
-  if (!rpc.supportsMethod('workspace.file_changes.list')) return
-  try {
-    const res = await rpc.call<{ changes?: Array<Record<string, unknown>> }>('workspace.file_changes.list', {})
-    sidebarChanges.value = (res.changes || []).map(c => {
-      const p = String(c.path || '')
-      const k = String(c.kind || c.change_type || 'modified')
-      return {
-        path: p,
-        name: p.split(/[\\/]/).pop() || p,
-        additions: Number(c.additions || c.lines_added || 0),
-        deletions: Number(c.deletions || c.lines_deleted || 0),
-        kind: (k === 'created' || k === 'deleted' ? k : 'modified') as 'created' | 'modified' | 'deleted',
-      }
-    })
-  } catch { /* ignore */ }
-}
-watch(rightSidebarOpen, (open) => { if (open) refreshSidebarChanges() })
-
-function onSidebarOpenArtifact(a: RsArtifact) {
-  // 在应用内：打开内联编辑 / 预览覆盖层（markdown/text/csv 可编辑，其余走预览/系统打开）
-  const artifact = sessionArtifacts.value.find(art =>
-    (art.id && art.id === a.id) ||
-    (art.download_url && art.download_url === a.download_url) ||
-    (art.name || art.filename || '') === (a.name || '') || art.path === a.path,
-  )
-  if (artifact) {
-    editingArtifact.value = artifact
-  }
-}
-
-const editingArtifact = ref<RsArtifact | null>(null)
-function onArtifactInlineSaved() {
-  void reloadSidebarArtifacts()
-}
 
 // 编辑器所需的会话标识与同源信息（与预览器一致，走 window 同源）
 const currentSessionKey = computed(() => String((route.params as Record<string, unknown>).sessionKey || ''))
@@ -1088,76 +1060,7 @@ function rpcAuthToken(): string {
   return token || ''
 }
 
-// 双轨打开：用系统程序打开（artifacts.open_in_system，缺实现时回退 Gateway 启动器）
-const artifactActions = useArtifactActions({ rpc })
-async function onSidebarOpenArtifactSystem(a: RsArtifact) {
-  const artifact = sessionArtifacts.value.find(art =>
-    (art.id && art.id === a.id) ||
-    (art.download_url && art.download_url === a.download_url) ||
-    (art.name || art.filename || '') === (a.name || '') || art.path === a.path,
-  )
-  if (!artifact) return
-  const result = await artifactActions.openInSystem(artifact)
-  if (!result.launched && result.error) {
-    // 没有可用的系统启动器时，退化为应用内预览，避免死路
-    if (result.method !== 'gateway-fallback') openArtifact(artifact)
-  }
-}
 
-// 诊断：消息中引用了产物、但索引侧边栏为空，提示用户重试重载
-const sidebarDiagnostics = computed<string[]>(() => {
-  if (sessionArtifacts.value.length > 0) return []
-  const referenced = new Set<string>()
-  for (const msg of messages.value) {
-    const refs = (msg as unknown as { artifact_refs?: Array<Record<string, unknown>> }).artifact_refs
-    if (Array.isArray(refs)) {
-      for (const r of refs) {
-        const p = String(r.path || r.name || '')
-        if (p) referenced.add(p)
-      }
-    }
-  }
-  return Array.from(referenced)
-})
-
-async function reloadSidebarArtifacts() {
-  try { await loadSessionArtifacts() } catch { /* ignore */ }
-}
-
-// 订阅 artifact.updated：后端一旦发出即重拉索引，让内联编辑/系统写入后的产物实时出现。
-// 防抖 + 去重：单次保存可能触发多次事件（多分片写入），避免并发重拉打满网关。
-let artifactUpdatedTimer: ReturnType<typeof setTimeout> | null = null
-const artifactUpdatedKeys = new Set<string>()
-// 后端有更新版本、但侧边栏当前行仍指向旧内容时，暂存其 key 用于标 stale；
-// 重拉索引后再清除，让状态点回归「就绪」。
-const staleKeySet = new Set<string>()
-const staleKeys = computed<string[]>(() => Array.from(staleKeySet))
-function onArtifactUpdated(payload: { session_key?: string; sessionKey?: string; key?: string; id?: string | number }) {
-  const evSession = payload?.session_key || payload?.sessionKey || ''
-  if (evSession && evSession !== sessionKey.value) return
-  const key = evSession || 'default'
-  if (artifactUpdatedKeys.has(key)) return
-  artifactUpdatedKeys.add(key)
-  // 事件命中侧边栏已有产物 → 先标记 stale，等待重拉。
-  const incomingId = payload?.id
-  if (incomingId != null && sessionArtifacts.value.some((a) => String(a.id) === String(incomingId))) {
-    staleKeySet.add(String(incomingId))
-  }
-  if (artifactUpdatedTimer) clearTimeout(artifactUpdatedTimer)
-  artifactUpdatedTimer = setTimeout(() => {
-    artifactUpdatedKeys.clear()
-    staleKeySet.clear()
-    void reloadSidebarArtifacts()
-  }, 250)
-}
-
-// 流式期间经 session.event.artifact 出现的产物 key（仅在 isStreaming 时计入），
-// 用于驱动侧边栏状态点的「更新中」态。turn 结束后 isStreaming 翻 false，自动清空。
-const liveKeys = computed<string[]>(() =>
-  isStreaming.value
-    ? streamArtifacts.value.map((a) => String(a.id || a.download_url || `${a.path}|${a.name}`))
-    : [],
-)
 const sandboxSetupStore = useSandboxSetupStore()
 const {
   ensuring: sandboxSetupPending,
@@ -1173,6 +1076,8 @@ const appStore = useAppStore()
 const workbenchStore = useWorkbenchStore()
 const artifactImageLightbox = useArtifactImageLightbox()
 const platform = usePlatform()
+// 对话页字号：只作用于本视图根节点（`.chat`），页内 rem 字号随之按比例级联。
+const { fontPx: chatFontPx } = useChatFontScale()
 const router = useRouter()
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
@@ -1433,6 +1338,7 @@ const {
   streamActivityStale,
   streamPhaseLabel,
   streamPhaseElapsed,
+  streamTurnElapsedSeconds,
   streamToolElapsedText,
   streamIdleTimeoutMs,
   thinkingVisible,
@@ -1453,6 +1359,15 @@ const {
   appendInterruptFrame,
   ensureInterruptBubble,
 } = chatStream
+// ── 首 token（客户端实测：发送 → 首个可见输出；含网关排队/编排开销）──
+const ttftStartMs = ref(0)
+const lastTtftMs = ref<number | null>(null)
+watch(streamHasVisibleOutput, (visible) => {
+  if (visible && ttftStartMs.value > 0) {
+    lastTtftMs.value = Math.round(performance.now() - ttftStartMs.value)
+    ttftStartMs.value = 0
+  }
+})
 // 实时轮工具耗时：把共享流格式化器绑定到 liveToolElapsedText（归一化整秒），
 // 供活动时间线 / 折叠时间线的 tool-elapsed-text 使用。
 const liveToolElapsed = (call: { toolId: string }): string =>
@@ -1827,6 +1742,12 @@ const chatPlans = useChatPlans({
   onMutationAccepted: () => planMutationAccepted(),
   isDraft: () => isDraftRoute() && pendingSessionIntent.value === 'new_chat',
 })
+// M2-C4：护栏 escalation「需要确认」事件流（同一会话内一条 pending 卡 + 队列）。
+const chatEscalations = useChatEscalations({
+  rpc,
+  sessionKey,
+  notifyError: message => pushToast(message, { tone: 'danger', duration: 8000 }),
+})
 const {
   collaboration,
   initialCollaborationMode,
@@ -1838,6 +1759,9 @@ const {
   pendingAction: planActionPending,
   replanTarget,
   replanActive,
+  stepEditAdd: planStepEditAdd,
+  stepEditRemove: planStepEditRemove,
+  stepEditUpdate: planStepEditUpdate,
 } = chatPlans
 
 const renderSourceMessages = computed(() => messages.value)
@@ -2490,6 +2414,18 @@ const {
 } = chatComposerShortcuts
 resetComposerInputHistory = chatComposerShortcuts.resetInputHistory
 
+// 深度思考（DeepSeek thinking 模式）开关：per-composer 偏好，localStorage 持久化。
+const COMPOSER_THINKING_KEY = 'chat.composer.thinking'
+const composerThinking = ref(localStorage.getItem(COMPOSER_THINKING_KEY) === 'true')
+function setComposerThinking(enabled: boolean) {
+  composerThinking.value = enabled
+  try {
+    localStorage.setItem(COMPOSER_THINKING_KEY, String(enabled))
+  } catch {
+    // localStorage 不可用时静默降级，仅本次会话有效。
+  }
+}
+
 const chatSend = useChatSend({
   rpc,
   supportsMethod: method => rpc.supportsMethod(method),
@@ -2504,6 +2440,7 @@ const chatSend = useChatSend({
   busySendMode,
   modelRoutingMode,
   modelRoutingSettingsBusy,
+  enableThinking: composerThinking,
   elevatedMode,
   runMode,
   pendingAttachments,
@@ -2576,6 +2513,7 @@ async function onSend(
   sendOptions?: Parameters<typeof dispatchCurrentInput>[0],
 ): Promise<void> {
   markProvisionalDraftUsed()
+  ttftStartMs.value = performance.now()
   if (pendingAutoSendSessionKey.value === sessionKey.value) {
     pendingAutoSend.value = ''
     pendingAutoSendSessionKey.value = ''
@@ -2845,6 +2783,8 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   normalizeRunStatus,
   sessionRunStatus,
   applySessionRunState,
+  hasActiveInterrupt: computed(() =>
+    Array.from(interruptState.value.values()).some(state => !state.resolution)),
   queueRouterDecision,
   appendEnsembleProgress,
   markEnsembleHandoff,
@@ -3023,8 +2963,7 @@ watch(isStreaming, (streaming, wasStreaming) => {
     // the sidebar. Re-listing once the turn settles closes that window without
     // polling: it costs one `artifacts.list` per turn, and the composable
     // de-duplicates by artifact identity, so an already-listed file is a no-op.
-    void reloadSidebarArtifacts()
-    staleKeySet.clear()
+    sidebarPanels.resyncArtifactsAfterTurn()
   }
 })
 
@@ -3032,9 +2971,33 @@ watch(isStreaming, (streaming, wasStreaming) => {
 // a neutral long-running notice. Backend-deadline-owned Ensemble phases remain
 // suppressed, while the hard idle timer continues to mean no events at all.
 const stallWatchdog = useChatStallWatchdog({ isStreaming, streamIdleGraceMs: streamIdleTimeoutMs })
-const { stallActive, stallSeconds } = stallWatchdog
+const { stallActive, stallSeconds, suspendReason: stallSuspendReason } = stallWatchdog
+
+// F-09：等待指示器的派生（纯展示组件 HeartbeatWaitIndicator）。
+// 秒数与「正在工作」共用同一个回合时钟（N1），因此不会自相矛盾、也不重置
+// 软看门狗的内容静默时钟。挂起态与看门狗的 suspendReason 严格一致。
+const waitSuspendLabel = computed(() => {
+  switch (stallSuspendReason.value) {
+    case 'tool-running': return String(t('chat.waitIndicator.toolRunning'))
+    case 'approval-pending': return String(t('chat.waitIndicator.approvalPending'))
+    case 'ensemble-running': return String(t('chat.waitIndicator.ensemble'))
+    default: return ''
+  }
+})
+const waitIndicatorVisible = computed(() =>
+  isStreaming.value && (stallSuspendReason.value !== null || !streamHasVisibleOutput.value),
+)
 
 const noop = () => {}
+
+// Late-bound: onArtifactUpdated 由 useChatSidebarPanels 创建（装配在产物索引与
+// 打开动作就绪之后），两处 RPC 订阅接线先持占位、装配后立即回填（本文件既有惯例）。
+let onArtifactUpdated: (payload: {
+  session_key?: string
+  sessionKey?: string
+  key?: string
+  id?: string | number
+}) => void = () => {}
 
 // Chat-view-scoped RPC events: torn down with the view (see onUnmounted).
 // The handlers that must keep the sidebar/session list live across routes are
@@ -3050,7 +3013,11 @@ const chatRpcSubscriptions = useChatRpcSubscriptions(rpc, {
   onTaskGroupDone: noop,
   onTaskGroupFailed: noop,
   onEnsembleProgress: noop,
-  onArtifactUpdated,
+  // Thunk, not the value: `onArtifactUpdated` is late-bound after
+  // useChatSidebarPanels is assembled (line ~3458). Passing the value here would
+  // freeze the placeholder no-op and silently drop every `artifact.updated`
+  // frame, so a registered file would only ever appear after a full reload.
+  onArtifactUpdated: (payload) => onArtifactUpdated(payload),
   // The wildcard handler is the one funnel that sees every gateway event with
   // its name; feed the active session's events to the watchdog before the
   // regular handler consumes them (same session filter as existing handlers).
@@ -3087,7 +3054,12 @@ const globalRpcSubscriptions = useChatRpcSubscriptions(rpc, {
   onRouterDecision: noop,
   onRouterControlReplay: noop,
   onConnectionState: noop,
-  onArtifactUpdated,
+  // T04：这三类事件只驱动 live 活动时间线，归 chat-view 订阅独占（避免双处理）。
+  onMemoryRecall: noop,
+  onStepStart: noop,
+  onStepFinish: noop,
+  // Late-bound thunk (same reason as the chat-view subscription above).
+  onArtifactUpdated: (payload) => onArtifactUpdated(payload),
   onAny: noop,
 })
 
@@ -3166,6 +3138,39 @@ const visibleHistoryRecoveryState = computed(() => (
   visibleChatHistoryRecoveryState(historyRecoveryState.value)
 ))
 
+// 历史恢复失败态的有界自愈：初次读失败（首启瞬时不可用）不该只能等用户手点
+// 「重新加载历史」。重连路径由 bootstrap 的 handleConnectionState 兜底，这里
+// 补齐「连接从未掉线、读请求自身失败」这一窗口；预算耗尽仍是诚实的手动重试。
+const HISTORY_AUTO_RETRY_DELAYS_MS = [4_000, 15_000] as const
+let historyAutoRetryTimer: ReturnType<typeof setTimeout> | null = null
+let historyAutoRetryAttempt = 0
+
+function cancelHistoryAutoRetry() {
+  if (!historyAutoRetryTimer) return
+  clearTimeout(historyAutoRetryTimer)
+  historyAutoRetryTimer = null
+}
+
+watch(visibleHistoryRecoveryState, state => {
+  if (state === 'history-error') {
+    if (
+      historyAutoRetryTimer
+      || historyAutoRetryAttempt >= HISTORY_AUTO_RETRY_DELAYS_MS.length
+    ) return
+    const delay = HISTORY_AUTO_RETRY_DELAYS_MS[historyAutoRetryAttempt]
+    historyAutoRetryAttempt += 1
+    historyAutoRetryTimer = setTimeout(() => {
+      historyAutoRetryTimer = null
+      if (visibleHistoryRecoveryState.value !== 'history-error') return
+      void retryHistory()
+    }, delay)
+    return
+  }
+  cancelHistoryAutoRetry()
+  // 恢复成功即复位预算：下一次真实故障重新享有自愈机会。
+  if (state === null) historyAutoRetryAttempt = 0
+})
+
 const liveRecoveryState = computed(() => {
   if (livePhase.value === 'degraded') return 'live-degraded' as const
   if (
@@ -3220,6 +3225,19 @@ const planActionsDisabled = computed(() =>
   || activePlanRun.value?.status === 'queued'
   || activePlanRun.value?.status === 'running',
 )
+
+// M2-C2锛氭墽琛屽墠鍦ㄨ鍒掑崱涓婂鍒犳敼瀛愪换鍔★紙浠呭綋鍓嶈鍒掍笖鏃犺繍琛屼腑浠诲姟鏃跺惎鐢級
+const planCardEditing = computed(() => !planActionsDisabled.value)
+function onPlanStepAdd(step: { stepTitle: string; details?: string; deps?: string[] }): void {
+  void planStepEditAdd(step)
+}
+function onPlanStepRemove(stepId: string): void {
+  void planStepEditRemove(stepId)
+}
+function onPlanStepUpdate(step: { stepId: string; stepTitle: string; details?: string; deps?: string[] }): void {
+  void planStepEditUpdate(step)
+}
+
 const composerStopsPlanRun = computed(() =>
   executionDockRun.value?.status === 'queued'
   || executionDockRun.value?.status === 'running',
@@ -3330,6 +3348,7 @@ const sendButtonTitle = computed(() => {
 const {
   implementCurrentPlan,
   implementPlanInNewTask,
+  reuseLastPlan,
   beginPlanRevision,
   cancelPlanRevision,
   cancelActivePlanRun,
@@ -3362,9 +3381,10 @@ const currentChatTitle = computed(() => {
   if (firstUser) {
     return truncate(stripTimePrefix(firstUser.text).replace(/\s+/g, ' ').trim(), 28)
   }
-  const suffix = sessionKey.value.split(':').pop() || ''
-  if (!suffix || suffix === 'default') return t('chat.newChat')
-  return t('chat.chatWithSuffix', { suffix })
+  // 空会话此前把会话键尾段当标题渲染（真机实测标题是「聊天 8w1h8wxe」）——
+  // 那串是内部 id 片段，对用户没有任何意义。没有消息时就说「新对话」，
+  // 有消息时上面那条分支会立刻换成首句内容。
+  return t('chat.newChat')
 })
 
 function focusComposer() {
@@ -3399,6 +3419,41 @@ function onVoiceInput() {
 function onVoiceSetup() {
   pushToast(t('chat.toast.voiceSetupNeeded'), { tone: 'info' })
   router.push('/settings/capabilities').catch(() => {})
+}
+
+// P0-1c：鉴权失败（AUTH_FAILED）错误卡的两个操作。
+// 「前往设置」直达模型服务设置页修复 Key；「重试」把上一条用户消息回填输入框并重新发送。
+function openAuthSettings() {
+  router.push('/settings/provider').catch(() => {})
+}
+
+function retryAuthFailure() {
+  const lastUser = [...messages.value].reverse().find((m) => m.role === 'user')
+  const text = (lastUser?.text ?? '').trim()
+  if (!text) return
+  inputText.value = text
+  void onComposerSend()
+}
+
+/**
+ * B2：失败轮次卡片的「改计划」出口。目标是当前方案卡（会话里存在且可修订时），
+ * 复用方案卡自身的 replan 通道（`beginPlanRevision`）—— 不新造第二套修订逻辑。
+ * 没有方案卡时按钮不出现（`canReplan` 为 false），因此这里拿到的一定是有效目标。
+ */
+const failedTurnReplanTarget = computed<PlanCardActionTarget | null>(() => {
+  const plan = currentPlan.value
+  if (!plan || !plan.planId) return null
+  return { planId: plan.planId, revisionId: currentPlanRevisionId.value || plan.revisionId }
+})
+
+function replanFromFailedTurn() {
+  const target = failedTurnReplanTarget.value
+  if (target) beginPlanRevision(target)
+}
+
+// B2「看日志」：失败轮次的技术细节落在日志页，直接跳过去比死路强。
+function openTurnLogs() {
+  router.push('/logs').catch(() => {})
 }
 
 /* ── Artifacts ─────────────────────────────────────────────────────── */
@@ -3436,6 +3491,42 @@ const {
   shareableMessageCount,
   readAuthToken,
 })
+
+// ── 右侧侧栏面板（计量条 / 文件更改 / 任务轴 / 产物追踪，分治迁出）──
+// 依赖产物索引与打开动作，装配在两者就绪之后；模板引用名与迁移前一致。
+const sidebarPanels = useChatSidebarPanels({
+  rpc,
+  sessionKey,
+  messages,
+  streamToolCalls: chatStream.streamToolCalls,
+  sessionArtifacts,
+  loadSessionArtifacts,
+  isStreaming,
+  streamArtifacts,
+  openArtifact,
+  openArtifactInSystem: (a) => artifactActions.openInSystem(a),
+})
+const {
+  usageStrip,
+  cacheStrip,
+  fileChangesOpen,
+  fileChangesVisible,
+  rightSidebarOpen,
+  sidebarTasks,
+  sidebarChanges,
+  onSidebarOpenArtifact,
+  onSidebarOpenArtifactSystem,
+  editingArtifact,
+  onArtifactInlineSaved,
+  sidebarDiagnostics,
+  reloadSidebarArtifacts,
+  staleKeys,
+  liveKeys,
+} = sidebarPanels
+// 晚绑回填：RPC 订阅接线先持占位，此处立即接管真实处理器。
+onArtifactUpdated = sidebarPanels.onArtifactUpdated
+// 双轨打开（系统程序优先，缺实现时由侧栏面板回退 Gateway 启动器/应用内预览）
+const artifactActions = useArtifactActions({ rpc })
 
 
 watch(sessionArtifacts, artifacts => {
@@ -3718,6 +3809,7 @@ onMounted(async () => {
   unsubs.push(chatApprovals.subscribe())
   unsubs.push(metaRuns.subscribe())
   unsubs.push(chatPlans.subscribe())
+  unsubs.push(chatEscalations.subscribe())
   const sessionBootstrap = startSessionBootstrap({
     includeHistory: !initialSession.draft,
   })
@@ -3837,6 +3929,7 @@ onUnmounted(() => {
   releaseOptionalRpcAdmission = null
   cancelActiveProjectValidation()
   clearExecutionDockHideTimer()
+  cancelHistoryAutoRetry()
   unsubs.forEach(fn => fn())
   unsubs = []
   // NOTE: `globalRpcUnsub` is intentionally NOT invoked here. The route-surviving
@@ -4087,4 +4180,19 @@ watch(
 @media (prefers-reduced-motion: reduce) {
   .aie-overlay-enter-active, .aie-overlay-leave-active { transition: none; }
 }
+
+/* Usage telemetry footnote — renders BELOW the composer's AI-generated
+   disclaimer. Deliberately small print: muted, centered, never competing
+   with the input surface. */
+.chat-usage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 4px 16px 6px;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.chat-usage-strip--foot { justify-content: center; opacity: 0.85; }
+.chat-usage-strip__item { white-space: nowrap; }
 </style>

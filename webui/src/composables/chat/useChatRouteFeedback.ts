@@ -1,7 +1,8 @@
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 import i18n from '@/i18n'
 import { useToasts } from '@/composables/useToasts'
 import { useRpcStore } from '@/stores/rpc'
+import type { RouterDecisionPersona } from '@/types/rpc'
 
 export type RouteFeedbackRating = 'up' | 'down'
 
@@ -11,6 +12,14 @@ interface FeedbackSubmitResponse {
   reason?: string
 }
 
+/** P0-2: the expert persona currently applied to the live session. */
+export interface ActivePersona {
+  agentId: string
+  name: string
+  description: string
+  isBuiltin: boolean
+}
+
 // Per-decision selected state for the whole view. Keyed by decisionId (not
 // message index) so history reloads and regenerates keep ratings attached to
 // the routing decision they judged. Optimistic: the sidecar is last-write-wins
@@ -18,8 +27,31 @@ interface FeedbackSubmitResponse {
 const selected = reactive(new Map<string, RouteFeedbackRating>())
 const inFlight = reactive(new Set<string>())
 
+// P0-2: the persona from the latest router_decision frame. Single shared ref so
+// the event pipeline (writer) and the header badge (reader) never diverge.
+const activePersona = ref<ActivePersona | null>(null)
+
+/** Normalize the optional wire persona into the badge's display shape. */
+export function normalizeActivePersona(
+  persona: RouterDecisionPersona | null | undefined,
+): ActivePersona | null {
+  if (!persona || typeof persona !== 'object') return null
+  const agentId = String(persona.agent_id || persona.agentId || '').trim()
+  if (!agentId) return null
+  return {
+    agentId,
+    name: String(persona.name || '').trim() || agentId,
+    description: String(persona.description || '').trim(),
+    isBuiltin: persona.is_builtin === true || persona.isBuiltin === true,
+  }
+}
+
 export function useChatRouteFeedback() {
   const { pushToast } = useToasts()
+
+  function setActivePersona(persona: ActivePersona | null): void {
+    activePersona.value = persona
+  }
 
   function ratingFor(decisionId: string | undefined): RouteFeedbackRating | undefined {
     return decisionId ? selected.get(decisionId) : undefined
@@ -70,5 +102,5 @@ export function useChatRouteFeedback() {
     else selected.set(decisionId, previous)
   }
 
-  return { ratingFor, busy, submit }
+  return { ratingFor, busy, submit, activePersona, setActivePersona }
 }

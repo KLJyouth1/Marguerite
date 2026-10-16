@@ -65,6 +65,31 @@ export function useChatElevatedMode(options: UseChatElevatedModeOptions) {
     if (modeOptions.sync) syncElevatedMode(normalized)
   }
 
+  // Statuses that mean "this deployment does not offer the endpoint", as opposed
+  // to "you are not allowed to use it" (403). All of them must land on the same
+  // honest outcome: the mode is NOT active, and the user is told so.
+  //
+  // Why 404/405 are included: the gateway implements only `/ws`, `/api/health`
+  // and the `/control/*` static routes (core/src/gateway/server.rs:149-156).
+  // There is no `/api/elevated-mode` handler anywhere in the Rust tree, so the
+  // request is answered by the SPA static fallback, which only serves GET/HEAD
+  // and therefore replies 405. Treating that as a generic error and merely
+  // `console.warn`-ing it left `elevatedMode` set in localStorage while the
+  // gateway never enforced anything — the UI claimed approval-bypass was on
+  // when it was not. That is a silent correctness failure, so it is now treated
+  // exactly like "unsupported".
+  const ELEVATED_UNSUPPORTED_STATUSES = new Set([403, 404, 405, 501])
+
+  function markElevatedUnavailable(reason: string) {
+    elevatedUnavailable.value = true
+    try {
+      localStorage.removeItem(ELEVATED_MODE_KEY)
+      localStorage.removeItem(ELEVATED_MODE_VERSION_KEY)
+    } catch {}
+    elevatedMode.value = ''
+    console.warn(`Approval-bypass mode is unavailable here (${reason}).`)
+  }
+
   async function syncElevatedMode(mode: string) {
     if (!options.sessionKey.value || elevatedUnavailable.value) return
     try {
@@ -73,18 +98,17 @@ export function useChatElevatedMode(options: UseChatElevatedModeOptions) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionKey: options.sessionKey.value, mode: mode || 'off' }),
       })
-      if (resp.status === 403) {
-        elevatedUnavailable.value = true
-        try {
-          localStorage.removeItem(ELEVATED_MODE_KEY)
-          localStorage.removeItem(ELEVATED_MODE_VERSION_KEY)
-        } catch {}
-        elevatedMode.value = ''
-        console.warn('Bypass requires a local owner session (loopback only).')
+      if (ELEVATED_UNSUPPORTED_STATUSES.has(resp.status)) {
+        markElevatedUnavailable(`HTTP ${resp.status}`)
         return
       }
       if (!resp.ok) throw new Error('HTTP ' + resp.status)
     } catch (err: unknown) {
+      // Network failure: we cannot confirm the gateway accepted the mode, so do
+      // not leave the UI claiming it did. Keep it retryable (no permanent
+      // `elevatedUnavailable` latch) — only an explicit unsupported status is
+      // treated as permanent.
+      elevatedMode.value = ''
       console.warn('Failed to sync bypass mode:', err instanceof Error ? err.message : String(err))
     }
   }

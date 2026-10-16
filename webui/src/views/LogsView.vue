@@ -154,6 +154,11 @@
                 <template v-else>{{ part.text }}</template>
               </template>
             </span>
+            <span
+              v-if="repeatCount(line) > 1"
+              class="lg-line__rep"
+              :title="`${repeatCount(line)} consecutive identical entries`"
+            >×{{ repeatCount(line) }}</span>
           </div>
         </div>
       </div>
@@ -232,6 +237,8 @@ interface LogLine {
   message: string
   ts?: string | number | null
   raw?: string
+  /** Number of consecutive identical lines collapsed into this row. */
+  count?: number
 }
 
 interface LogTailResponse {
@@ -323,6 +330,11 @@ let initialLoadInFlight = false
 
 const totalCount = computed(() => allLines.value.length)
 // One pass over the buffer instead of one full scan per level per change.
+// Rows are already repeat-collapsed by pushLine, so counting rows counts the
+// merged entries: three identical WinError 10054 lines land as one row and the
+// chip reads 1. Deliberately NOT summing `count` — that would restore the very
+// spam figure (100) the badge exists to reveal. The per-row repeat tally stays
+// visible on the row itself as ×N.
 const levelCounts = computed(() => {
   const counts: Record<string, number> = { TRACE: 0, DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 }
   for (const l of allLines.value) {
@@ -503,6 +515,28 @@ watch(autoFollow, (val) => {
 // Actions
 // ---------------------------------------------------------------------------
 
+// Repeat-collapse factors. A gateway that loses its client every few seconds
+// replays the identical "ConnectionResetError: [WinError 10054]" block forever;
+// without this the ERROR chip reads 100 while hiding every real problem.
+// Only *consecutive* rows with the same level and message collapse, so a
+// repeated line separated by other output still appears as its own entry.
+function repeatCount(line: LogLine): number {
+  return line.count ?? 1
+}
+
+// Append one entry, folding it into the previous row when they are identical.
+// The buffer cap below slices by collapsed row, which is what the window and
+// the level chips both read, so the two can never disagree.
+function pushLine(line: LogLine): void {
+  const buffer = allLines.value
+  const last = buffer[buffer.length - 1]
+  if (last && last.level === line.level && last.message === line.message) {
+    last.count = repeatCount(last) + 1
+    return
+  }
+  buffer.push({ ...line, count: 1 })
+}
+
 async function loadData() {
   if (initialLoadInFlight || !isActive) return
   initialLoadInFlight = true
@@ -552,9 +586,9 @@ async function poll() {
       }
       lines.forEach(entry => {
         if (typeof entry === 'string') {
-          allLines.value.push({ level: guessLevel(entry), message: entry, raw: entry })
+          pushLine({ level: guessLevel(entry), message: entry, raw: entry })
         } else {
-          allLines.value.push({
+          pushLine({
             level: (entry.level || entry.lvl || 'INFO').toUpperCase(),
             message: entry.message || entry.msg || JSON.stringify(entry),
             ts: entry.timestamp || entry.ts || null,
@@ -1023,6 +1057,23 @@ function escRegex(s: string): string {
   color: var(--text-muted);
   flex: 1;
   min-width: 0;
+}
+
+/* Repeat badge for a collapsed run of identical rows. Mirrors the level chip's
+   shape (radius/padding/weight) so it reads as the same family of marker, but
+   stays neutral because the level colour already belongs to lg-line__lvl. */
+.lg-line__rep {
+  align-self: flex-start;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: help;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  white-space: nowrap;
 }
 
 .lg-line__msg :deep(.lg-line__match) {

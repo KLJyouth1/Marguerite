@@ -19,7 +19,7 @@
         <button
           type="button"
           class="rs-icon-btn"
-          :title="wide ? '窄栏' : '宽栏'"
+          :title="wide ? t('chat.rightSidebar.widen') : t('chat.rightSidebar.narrow')"
           @click="wide = !wide"
         >
           <Icon :name="wide ? 'panel-right-open' : 'panel-right-close'" :size="14" />
@@ -27,7 +27,7 @@
         <button
           type="button"
           class="rs-icon-btn"
-          title="折叠侧边栏"
+          :title="t('chat.rightSidebar.collapse')"
           @click="emit('close')"
         >
           <Icon name="x" :size="14" />
@@ -39,7 +39,7 @@
         <div v-if="activeTab === 'tasks'" class="rs-section">
           <div v-if="tasks.length === 0" class="rs-empty">
             <Icon name="listChecks" :size="28" :opacity="0.3" />
-            <p>发送消息后，任务步骤将实时显示在这里</p>
+            <p>{{ t('chat.rightSidebar.tasksEmpty') }}</p>
           </div>
           <ol v-else class="rs-timeline">
             <li
@@ -69,22 +69,27 @@
                作为兜底入口，避免「生成了文件却看不到」的死路。 -->
           <div v-if="diagnosticList.length > 0" class="rs-diagnostic">
             <Icon name="alertTriangle" :size="14" />
-            <span>检测到 {{ diagnosticList.length }} 个未载入产物</span>
+            <span>{{ t('chat.rightSidebar.artifactsDiagnostic', { count: diagnosticList.length }) }}</span>
             <button type="button" class="rs-diagnostic__retry" @click="emit('retryArtifacts')">
-              <Icon name="refresh" :size="12" />重试
+              <Icon name="refresh" :size="12" />{{ t('chat.rightSidebar.artifactsReload') }}
             </button>
           </div>
 
           <div v-if="artifacts.length === 0" class="rs-empty rs-empty--artifacts">
             <Icon name="fileStack" :size="28" :opacity="0.3" />
-            <p class="rs-empty__lead">本次会话还没有生成文件</p>
-            <p class="rs-empty__sub">发送任务，让 Marguerite 为你产出文档、表格或代码</p>
+            <p class="rs-empty__lead">{{ t('chat.rightSidebar.artifactsEmptyLead') }}</p>
+            <p class="rs-empty__sub">{{ t('chat.rightSidebar.artifactsEmptySub') }}</p>
             <div class="rs-empty__actions">
-              <button type="button" class="rs-empty__btn" @click="emit('compose')">
-                <Icon name="pencil" :size="13" />发送任务
+              <!-- A running turn owns the session; offering "send a task" here would
+                   conflict with it, so surface the running state instead of a dead CTA. -->
+              <span v-if="streaming" class="rs-empty__hint">
+                {{ t('chat.rightSidebar.artifactsRunningHint') }}
+              </span>
+              <button v-else type="button" class="rs-empty__btn" @click="emit('compose')">
+                <Icon name="pencil" :size="13" />{{ t('chat.rightSidebar.artifactsCompose') }}
               </button>
               <button type="button" class="rs-empty__btn rs-empty__btn--ghost" @click="emit('retryArtifacts')">
-                <Icon name="refresh" :size="13" />重新载入
+                <Icon name="refresh" :size="13" />{{ t('chat.rightSidebar.artifactsReload') }}
               </button>
             </div>
           </div>
@@ -108,7 +113,7 @@
               <button
                 type="button"
                 class="rs-artifact__btn"
-                :title="'在 Marguerite 内预览 / 编辑'"
+                :title="t('chat.rightSidebar.artifactOpenInApp')"
                 @click="emit('openArtifact', a)"
               >
                 <Icon name="edit" :size="13" />
@@ -116,7 +121,7 @@
               <button
                 type="button"
                 class="rs-artifact__btn"
-                :title="'用系统程序打开'"
+                :title="t('chat.rightSidebar.artifactOpenSystem')"
                 @click="emit('openArtifactSystem', a)"
               >
                 <Icon name="appWindow" :size="13" />
@@ -125,7 +130,7 @@
                 <button
                   type="button"
                   class="rs-artifact__btn"
-                  :title="'更多操作'"
+                  :title="t('chat.rightSidebar.artifactMore')"
                   aria-haspopup="menu"
                   :aria-expanded="openMenuKey === artifactKey(a)"
                   @click.stop="toggleMenu(a)"
@@ -135,22 +140,22 @@
                 <ul v-if="openMenuKey === artifactKey(a)" class="rs-artifact__menu" role="menu">
                   <li role="none">
                     <button type="button" role="menuitem" @click="previewArtifact(a)">
-                      <Icon name="eye" :size="14" /><span>预览</span>
+                      <Icon name="eye" :size="14" /><span>{{ t('chat.rightSidebar.artifactPreview') }}</span>
                     </button>
                   </li>
                   <li role="none">
                     <button type="button" role="menuitem" @click="editArtifact(a)">
-                      <Icon name="edit" :size="14" /><span>编辑</span>
+                      <Icon name="edit" :size="14" /><span>{{ t('chat.rightSidebar.artifactEdit') }}</span>
                     </button>
                   </li>
                   <li role="none">
                     <button type="button" role="menuitem" @click="openArtifactSystemAction(a)">
-                      <Icon name="appWindow" :size="14" /><span>系统打开</span>
+                      <Icon name="appWindow" :size="14" /><span>{{ t('chat.rightSidebar.artifactSystemOpen') }}</span>
                     </button>
                   </li>
                   <li role="none">
                     <button type="button" role="menuitem" @click="copyArtifactPath(a)">
-                      <Icon name="copy" :size="14" /><span>复制路径</span>
+                      <Icon name="copy" :size="14" /><span>{{ t('chat.rightSidebar.artifactCopyPath') }}</span>
                     </button>
                   </li>
                 </ul>
@@ -163,7 +168,7 @@
         <div v-if="activeTab === 'changes'" class="rs-section">
           <div v-if="changes.length === 0" class="rs-empty">
             <Icon name="fork" :size="28" :opacity="0.3" />
-            <p>文件更改（+/- 行数）将显示在这里</p>
+            <p>{{ t('chat.rightSidebar.changesEmpty') }}</p>
           </div>
           <ul v-else class="rs-change-list">
             <li v-for="c in changes" :key="c.path" class="rs-change">
@@ -178,11 +183,11 @@
         <!-- 文件树 -->
         <div v-if="activeTab === 'tree'" class="rs-section">
           <div class="rs-tree-toolbar">
-            <button type="button" class="rs-icon-btn" title="上级目录" :disabled="treeStack.length === 0" @click="goUpTree">
+            <button type="button" class="rs-icon-btn" :title="t('chat.rightSidebar.treeUpDir')" :disabled="treeStack.length === 0" @click="goUpTree">
               <Icon name="chevronLeft" :size="14" />
             </button>
-            <span class="rs-tree-path" :title="treePath">{{ treePath || '工作区根目录' }}</span>
-            <button type="button" class="rs-icon-btn" title="刷新" @click="loadTree(treePath)">
+            <span class="rs-tree-path" :title="treePath">{{ treePath || t('chat.rightSidebar.treeRoot') }}</span>
+            <button type="button" class="rs-icon-btn" :title="t('chat.rightSidebar.treeRefresh')" @click="loadTree(treePath)">
               <Icon name="refresh" :size="14" />
             </button>
           </div>
@@ -191,7 +196,7 @@
             <span>{{ treeError }}</span>
           </div>
           <div v-if="treeLoading" class="rs-empty">
-            <p>加载中…</p>
+            <p>{{ t('chat.rightSidebar.treeLoading') }}</p>
           </div>
           <ul v-else-if="treeEntries.length > 0" class="rs-tree-list">
             <li v-for="e in treeEntries" :key="e.path" class="rs-tree-item">
@@ -213,7 +218,7 @@
           </ul>
           <div v-else-if="!treeLoading" class="rs-empty">
             <Icon name="folder" :size="28" :opacity="0.3" />
-            <p>（空目录）</p>
+            <p>{{ t('chat.rightSidebar.treeEmptyDir') }}</p>
           </div>
         </div>
       </div>
@@ -225,7 +230,7 @@
     v-if="!open"
     type="button"
     class="rs-toggle"
-    title="展开侧边栏"
+    :title="t('chat.rightSidebar.expand')"
     @click="emit('open')"
   >
     <Icon name="panel-right-open" :size="16" />
@@ -234,6 +239,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
 import type { ArtifactPayload, SandboxPathEntry } from '@/types/rpc'
@@ -283,6 +289,8 @@ const emit = defineEmits<{
   compose: []
 }>()
 
+const { t } = useI18n()
+
 const activeTab = ref<'tasks' | 'artifacts' | 'changes' | 'tree'>('tasks')
 // Persist width across mounts so navigating away and back keeps the chosen
 // layout instead of resetting to the narrow column.
@@ -292,11 +300,13 @@ watch(wide, (value) => {
   try { localStorage.setItem(RIGHT_SIDEBAR_WIDE_KEY, value ? '1' : '0') } catch { /* ignore */ }
 })
 
+// Tab labels are localized: the artefacts tab used to be hard-coded Chinese and
+// its empty state called the same thing "文件", contradicting the tab wording.
 const tabs = computed(() => [
-  { id: 'tasks' as const, label: '任务', icon: 'listChecks' as IconName, count: props.tasks.filter(t => t.status === 'running').length },
-  { id: 'artifacts' as const, label: '产物', icon: 'fileText' as IconName, count: props.artifacts.length },
-  { id: 'changes' as const, label: '更改', icon: 'fork' as IconName, count: props.changes.length },
-  { id: 'tree' as const, label: '树', icon: 'listTree' as IconName, count: 0 },
+  { id: 'tasks' as const, label: t('chat.rightSidebar.tabs.tasks'), icon: 'listChecks' as IconName, count: props.tasks.filter(task => task.status === 'running').length },
+  { id: 'artifacts' as const, label: t('chat.rightSidebar.tabs.artifacts'), icon: 'fileText' as IconName, count: props.artifacts.length },
+  { id: 'changes' as const, label: t('chat.rightSidebar.tabs.changes'), icon: 'fork' as IconName, count: props.changes.length },
+  { id: 'tree' as const, label: t('chat.rightSidebar.tabs.tree'), icon: 'listTree' as IconName, count: 0 },
 ])
 
 // ── 文件树（工作区目录浏览，数据源 sandbox.path.list）──
@@ -396,13 +406,13 @@ function statusFor(a: RsArtifact): ArtifactStatus {
   return 'ready'
 }
 
-const STATUS_TITLE: Record<ArtifactStatus, string> = {
-  ready: '就绪',
-  updating: '更新中',
-  stale: '已过期',
+const STATUS_LABEL_KEYS: Record<ArtifactStatus, string> = {
+  ready: 'chat.rightSidebar.statusReady',
+  updating: 'chat.rightSidebar.statusUpdating',
+  stale: 'chat.rightSidebar.statusStale',
 }
 function statusTitle(a: RsArtifact): string {
-  return STATUS_TITLE[statusFor(a)]
+  return String(t(STATUS_LABEL_KEYS[statusFor(a)]))
 }
 
 // 「更多」菜单：同一时刻仅允许展开一行，点击外部或按 Escape 收起。
@@ -451,8 +461,8 @@ function copyArtifactPath(account: RsArtifact) {
     return
   }
   navigator.clipboard.writeText(text).then(
-    () => pushToast('已复制产物路径', { tone: 'ok', duration: 1600 }),
-    () => pushToast('复制失败，请手动复制路径', { tone: 'danger', duration: 2000 }),
+    () => pushToast(String(t('chat.rightSidebar.artifactCopied')), { tone: 'ok', duration: 1600 }),
+    () => pushToast(String(t('chat.rightSidebar.artifactCopyFailed')), { tone: 'danger', duration: 2000 }),
   )
   closeMenu()
 }
@@ -557,6 +567,12 @@ function copyArtifactPath(account: RsArtifact) {
 .rs-empty__lead { color: var(--text-muted); font-size: 12px; font-weight: 500; }
 .rs-empty__sub { font-size: 11px; line-height: 1.5; max-width: 220px; }
 .rs-empty__actions { display: flex; gap: 6px; margin-top: 4px; }
+.rs-empty__hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 220px;
+}
 .rs-empty__btn {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 6px 12px; border: 1px solid var(--accent);

@@ -1,5 +1,6 @@
 import i18n from '@/i18n'
 import { runStatusLabelText as sessionsRunStatusLabelText } from '@/composables/useSessions'
+import { normalizeRunStatus as normalizeRunStatusValue } from '@/utils/chat/runStatus'
 import type {
   ChatRunStatus,
   ChatRunStatusSource,
@@ -18,12 +19,9 @@ export const CHAT_RUN_STATUS_VALUES: ChatRunStatusState[] = [
 
 /** Normalize a raw session run status string into the canonical view state. */
 export function normalizeRunStatus(status: string): ChatRunStatusState {
-  const value = String(status || '').toLowerCase()
-  if (value === 'abandoned') return 'interrupted'
-  if (value === 'killed') return 'cancelled'
-  if (['succeeded', 'success', 'complete'].includes(value)) return 'idle'
-  if (CHAT_RUN_STATUS_VALUES.includes(value as ChatRunStatusState)) return value as ChatRunStatusState
-  return 'idle'
+  // 单一事实源：utils/chat/runStatus.ts（F-06）。两个入口共用同一词表，
+  // 杜绝「error → failed 只补一处」那类静默分叉。
+  return normalizeRunStatusValue(status) as ChatRunStatusState
 }
 
 /** Localized display label for a normalized run status. */

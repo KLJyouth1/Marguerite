@@ -80,8 +80,8 @@
      vapor, …), and custom properties inherit — a nested [data-theme="light"]
      island (e.g. the share-export stage) can only undo that remap by
      re-declaring the token, which light/dark tokens.css do from these. */
-  --font-sans-default: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", "Yu Gothic", sans-serif;
-  --font-display-default: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", "Yu Gothic", sans-serif;
+  --font-sans-default: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", "Yu Gothic", sans-serif;
+  --font-display-default: "Space Grotesk", -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", "Yu Gothic", sans-serif;
   --font-sans: var(--font-sans-default);
   --font-display: var(--font-display-default);
   --font-mono: "SFMono-Regular", ui-monospace, "Cascadia Code", "IBM Plex Mono", Menlo, "PingFang SC", "Hiragino Sans", "Microsoft YaHei", "Yu Gothic", monospace;
@@ -118,8 +118,8 @@
   --fw-eyebrow: 600;
   --fw-quiet: 500;
 
-  /* Radius — a hierarchy-tied ladder (0 / 4 / 8 / 12 / 16 / 20 + pill). Each tier
-     maps to a role so a corner encodes rank; components should prefer the
+  /* Radius — a hierarchy-tied ladder (0 / 4 / 8 / 10 / 14 / 18 / 24 + pill). Each
+     tier maps to a role so a corner encodes rank; components should prefer the
      semantic aliases below over the raw steps. (Direction: "Instrument".) */
   --radius-none: 0;
   --radius-xs: 4px;

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ChatComposerPlanMode from './ChatComposerPlanMode.vue'
 import chatComposerSource from './ChatComposer.vue?raw'
+import runModePanelSource from './RunModePanel.vue?raw'
 import type { CollaborationMode } from '@/types/plans'
 
 const mountedApps: ReturnType<typeof createApp>[] = []
@@ -101,16 +102,18 @@ describe('ChatComposerPlanMode', () => {
     expect(host.querySelector('.composer-plan-mode')).toBeNull()
   })
 
-  it('is rendered inside the composer footer instead of as an external strip', () => {
-    const footerIndex = chatComposerSource.indexOf('<div class="chat-input-footer">')
-    const modeIndex = chatComposerSource.indexOf('<ChatComposerPlanMode', footerIndex)
+  it('is reused inside the unified run-mode panel rendered in the composer footer', () => {
+    const leftIndex = chatComposerSource.indexOf('<div class="chat-input-actions chat-input-actions--left">')
+    const panelIndex = chatComposerSource.indexOf('<RunModePanel', leftIndex)
     const rightActionsIndex = chatComposerSource.indexOf(
       '<div class="chat-input-actions chat-input-actions--right">',
-      footerIndex,
+      leftIndex,
     )
 
-    expect(footerIndex).toBeGreaterThanOrEqual(0)
-    expect(modeIndex).toBeGreaterThan(footerIndex)
-    expect(modeIndex).toBeLessThan(rightActionsIndex)
+    expect(leftIndex).toBeGreaterThanOrEqual(0)
+    expect(panelIndex).toBeGreaterThan(leftIndex)
+    expect(panelIndex).toBeLessThan(rightActionsIndex)
+    // 协作维度在统一面板内复用 ChatComposerPlanMode
+    expect(runModePanelSource).toContain('<ChatComposerPlanMode')
   })
 })

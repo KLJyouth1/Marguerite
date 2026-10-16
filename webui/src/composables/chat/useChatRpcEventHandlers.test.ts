@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { effectScope, nextTick, ref } from 'vue'
+import { effectScope, nextTick, ref, type Ref } from 'vue'
 import { useChatRpcEventHandlers, type ChatRpcStreamApi } from './useChatRpcEventHandlers'
 import type { SessionBootstrapRun } from './useChatSessionBootstrap'
 import type {
@@ -29,6 +29,7 @@ function createHarness(options: {
   pendingQueue?: ChatPendingItem[]
   restoreSteerIntoComposer?: (text: string) => void
   getCompactionPlacement?: (compactionId: string) => 'activity' | 'standalone' | undefined
+  hasActiveInterrupt?: Ref<boolean>
 } = {}) {
   const messages = ref<ChatMessage[]>(options.messages ?? [])
   const sessionKey = ref('agent:main:test')
@@ -98,6 +99,7 @@ function createHarness(options: {
     normalizeRunStatus: (status: string) => status,
     sessionRunStatus: options.sessionRunStatus || (() => ({ status: 'idle', label: 'Idle', task: null })),
     applySessionRunState,
+    hasActiveInterrupt: options.hasActiveInterrupt,
     queueRouterDecision: vi.fn(),
     appendEnsembleProgress: vi.fn(),
     markEnsembleHandoff,
@@ -1359,6 +1361,77 @@ describe('useChatRpcEventHandlers reasoning timer replay', () => {
   })
 })
 
+describe('useChatRpcEventHandlers narration separation (A3)', () => {
+  it('separates stacked narration records with a blank line', () => {
+    const { api, stop } = createHarness()
+
+    try {
+      api.handlers.onAny('session.event.thinking', {
+        session_key: 'agent:main:test',
+        stream_seq: 1,
+        text: '> 自动编排决策：Pipeline — 检测到 3 个交付物',
+        kind: 'narration',
+        started_at: 100_000,
+      })
+      api.handlers.onAny('session.event.thinking', {
+        session_key: 'agent:main:test',
+        stream_seq: 2,
+        text: '> 交付流水线：检索 → 网页 → 演示文稿',
+        kind: 'narration',
+        started_at: 101_000,
+      })
+
+      expect(api.streamThinkingText.value).toBe(
+        '> 自动编排决策：Pipeline — 检测到 3 个交付物\n\n'
+        + '> 交付流水线：检索 → 网页 → 演示文稿',
+      )
+    } finally {
+      stop()
+    }
+  })
+
+  it('keeps raw reasoning deltas concatenated without a separator', () => {
+    const { api, stop } = createHarness()
+
+    try {
+      api.handlers.onAny('session.event.thinking', {
+        session_key: 'agent:main:test',
+        stream_seq: 1,
+        text: '思考',
+        started_at: 100_000,
+      })
+      api.handlers.onAny('session.event.thinking', {
+        session_key: 'agent:main:test',
+        stream_seq: 2,
+        text: '片段',
+        started_at: 101_000,
+      })
+
+      expect(api.streamThinkingText.value).toBe('思考片段')
+    } finally {
+      stop()
+    }
+  })
+
+  it('does not prepend a separator before the first narration record', () => {
+    const { api, stop } = createHarness()
+
+    try {
+      api.handlers.onAny('session.event.thinking', {
+        session_key: 'agent:main:test',
+        stream_seq: 1,
+        text: '> 单条叙述',
+        kind: 'narration',
+        started_at: 100_000,
+      })
+
+      expect(api.streamThinkingText.value).toBe('> 单条叙述')
+    } finally {
+      stop()
+    }
+  })
+})
+
 describe('useChatRpcEventHandlers ensemble handoff', () => {
   it('marks ensemble handoff when a current tool call starts', () => {
     const { api, stream, markEnsembleHandoff, stop } = createHarness()
@@ -1585,6 +1658,227 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
       await Promise.all([live, history])
     } finally {
       harness.stop()
+    }
+  })
+})
+
+/**
+ * 已结算的回合不得被迟到的生命周期帧复活。
+ *
+ * 真机现象：一轮以 `session.event.error`（401）收尾后，流已 `endStreaming()`；随后一条
+ * `state_change` 声称 `running` → 旧代码 `startStreaming()` 把流重新拉起并重新武装
+ * 空闲看门狗（630s）。后端那一轮已经死了、不会再发事件，于是用户先看到失败卡，再干等
+ * 满 630 秒才收到「Response timed out -- no events received for 630s」——失败被一条
+ * 假超时盖住。
+ */
+describe('useChatRpcEventHandlers settled turn must not be resurrected', () => {
+  it('ignores an active state_change after the turn already finished', () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = FINISHED_STREAM_TASK_ID
+      stream.isStreaming.value = false
+
+      api.handlers.onStateChange({ session_key: 'agent:main:test', to_state: 'running' })
+
+      expect(stream.startStreaming).not.toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
+
+  it('still resumes rendering for a live turn (guard must not be blanket)', () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = 'task-live'
+      stream.isStreaming.value = false
+
+      api.handlers.onStateChange({ session_key: 'agent:main:test', to_state: 'thinking' })
+
+      expect(stream.startStreaming).toHaveBeenCalledOnce()
+    } finally {
+      stop()
+    }
+  })
+
+  it('keeps the late lifecycle frame out of the stream but still records run state', () => {
+    const { api, stream, activeStreamTaskId, lastStreamSeq, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = FINISHED_STREAM_TASK_ID
+      stream.isStreaming.value = false
+
+      api.handlers.onStateChange({
+        session_key: 'agent:main:test',
+        to_state: 'running',
+        stream_seq: 42,
+      })
+
+      expect(stream.startStreaming).not.toHaveBeenCalled()
+      // 迟到帧的 seq 仍被接受：不丢信息，只是不再复活渲染。
+      expect(lastStreamSeq.value).toBe(42)
+    } finally {
+      stop()
+    }
+  })
+
+  it('ignores a heartbeat that arrives after the turn finished', () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = FINISHED_STREAM_TASK_ID
+      stream.isStreaming.value = false
+
+      api.handlers.onRunHeartbeat({ session_key: 'agent:main:test', phase: 'turn' })
+
+      expect(stream.startStreaming).not.toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
+})
+
+/**
+ * Rust 网关的回合保活帧（`phase: 'turn'`）是**相位无关**的 keepalive：
+ * 它证明这一轮还活着，但不代表阶段跃迁，不能覆盖当前活动文案
+ * ——否则长工具执行期间文案会被改写成「Planning next step」，与事实不符。
+ */
+describe('useChatRpcEventHandlers turn heartbeat phase', () => {
+  it('does not overwrite the activity label for the agnostic turn keepalive', () => {
+    const { api, stream, stop } = createHarness()
+    try {
+      api.handlers.onRunHeartbeat({ session_key: 'agent:main:test', phase: 'turn' })
+      expect(stream.setStreamActivity).not.toHaveBeenCalled()
+      // 存活时间仍要刷新（保活的全部意义）
+      expect(stream.resetStreamIdleTimer).toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
+
+  it('still labels a real phase transition', () => {
+    const { api, stream, stop } = createHarness()
+    try {
+      api.handlers.onRunHeartbeat({ session_key: 'agent:main:test', phase: 'provider_wait' })
+      expect(stream.setStreamActivity).toHaveBeenCalledWith('Planning next step')
+    } finally {
+      stop()
+    }
+  })
+})
+
+/**
+ * 网关在回合结束时会顺序发 `session.event.done`（主路径）与
+ * `sessions.changed { occasion, run_status }`（兜底）。当 done 因 WS 重连 /
+ * task_id 不匹配 / 终态帧被缓冲后丢弃而没生效时，只认强终态信号的旧代码会把
+ * `turn_end` / `idle` 判成非终结 → 界面永久停在「思考中」，只能手点停止。
+ * 下面这组用例锁定兜底语义，并锁定它**不得**误伤刚开的流。
+ */
+describe('useChatRpcEventHandlers sessions.changed turn-end fallback', () => {
+  it("finalizes the live turn on occasion:'turn_end' / run_status:'idle'", () => {
+    const { api, stream, activeStreamTaskId, applySessionRunState, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = 'task-live'
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        occasion: 'turn_end',
+        run_status: 'idle',
+      })
+
+      expect(stream.endStreaming).toHaveBeenCalledOnce()
+      expect(activeStreamTaskId.value).toBe(FINISHED_STREAM_TASK_ID)
+      expect(applySessionRunState).toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
+
+  it("finalizes on a bare run_status:'idle' even without the occasion field", () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = 'task-live'
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        run_status: 'idle',
+      })
+
+      expect(stream.endStreaming).toHaveBeenCalledOnce()
+      expect(activeStreamTaskId.value).toBe(FINISHED_STREAM_TASK_ID)
+    } finally {
+      stop()
+    }
+  })
+
+  it("does not finalize on occasion:'turn_start' / run_status:'running'", () => {
+    const { api, stream, activeStreamTaskId, applySessionRunState, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = 'task-live'
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        occasion: 'turn_start',
+        run_status: 'running',
+      })
+
+      expect(stream.endStreaming).not.toHaveBeenCalled()
+      expect(activeStreamTaskId.value).toBe('task-live')
+      expect(applySessionRunState).toHaveBeenCalledWith(
+        expect.objectContaining({ occasion: 'turn_start', run_status: 'running' }),
+      )
+    } finally {
+      stop()
+    }
+  })
+
+  it('refuses the turn-end fallback while an approval interrupt is on screen', () => {
+    const interrupt = ref(true)
+    const { api, stream, activeStreamTaskId, stop } = createHarness({ hasActiveInterrupt: interrupt })
+    try {
+      activeStreamTaskId.value = 'task-live'
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        occasion: 'turn_end',
+        run_status: 'idle',
+      })
+
+      expect(stream.endStreaming).not.toHaveBeenCalled()
+      expect(activeStreamTaskId.value).toBe('task-live')
+    } finally {
+      stop()
+    }
+  })
+
+  it('does not collapse the still-pending chat.send window', () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = PENDING_STREAM_TASK_ID
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        occasion: 'turn_end',
+        run_status: 'idle',
+      })
+
+      expect(stream.endStreaming).not.toHaveBeenCalled()
+      expect(activeStreamTaskId.value).toBe(PENDING_STREAM_TASK_ID)
+    } finally {
+      stop()
+    }
+  })
+
+  it('does not treat a recents-only change (no run_status) as a turn end', () => {
+    const { api, stream, activeStreamTaskId, stop } = createHarness()
+    try {
+      activeStreamTaskId.value = 'task-live'
+
+      api.handlers.onSessionsChanged({
+        session_key: 'agent:main:test',
+        reason: 'title_changed',
+      })
+
+      expect(stream.endStreaming).not.toHaveBeenCalled()
+    } finally {
+      stop()
     }
   })
 })

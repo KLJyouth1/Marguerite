@@ -6,6 +6,8 @@
 // so `new Date(...)` renders them in the user's own browser timezone with no
 // extra handling — there is no naive-local ambiguity to guard against.
 
+import i18n from '@/i18n'
+
 function normalize(ts: string | number | null | undefined): number | string | null {
   if (ts == null || ts === '') return null
   // Defensive: a numeric value below 1e12 is epoch-SECONDS (some test fixtures
@@ -87,4 +89,53 @@ export function isoTime(ts: string | number | null | undefined): string {
 export function fullTime(ts: string | number | null | undefined): string {
   const date = messageDate(ts)
   return date ? date.toLocaleString() : ''
+}
+
+/**
+ * Single source of truth for a session row's relative/absolute "when" label —
+ * the sidebar recents list, the sessions ledger and the session inspect drawer
+ * all render this for the common case. Rule: **relative within the last 24h,
+ * absolute short date beyond it.**
+ *
+ * Why this lives here: R65 真机实测发现同一屏里混用了三套实现
+ * (`SidebarConversations.vue::formatIdleTime` 自己拼 `${min}分钟前`、
+ * `sessions/sessionDisplay.ts::formatRelativeTime` 用 `toLocaleDateString()`、
+ * 本文件另有 `relativeTime/absoluteTime`)，于是同一瞬时出现 `8/27`、`01:28`、
+ * `47分钟前` 三种写法。收敛到这一处后，「会话行的相对/绝对标签」不再分叉。
+ *
+ * SCOPE（2026-09-27 真机复核修正）: this function does NOT cover every time a
+ * screen can show. Two deliberate exceptions remain, so one view can still
+ * legitimately render more than one format — this is by design, not drift:
+ *   * `SidebarConversations.vue::formatClockTime` renders a bare `HH:MM`
+ *     (e.g. `01:28`) for short/duplicate-titled rows — A8 的「真实区分信息」，
+ *     用真实时刻区分两条同名/极短标题的会话。
+ *   * chat message bubbles (`UserMessage`/`AssistantMessage`) render the
+ *     compact English `relativeTime` / `absoluteTime` (e.g. `15m ago`,
+ *     `Aug 27, 2026, 01:28`), a separate chat surface by design.
+ * 所以「任何表面都不可能再分叉」是**过度声明**；准确的说法是「所有『会话行』的
+ * 相对/绝对标签都走这一处」。
+ *
+ * Relative labels come from the `sessions.relTime.*` locale keys, so a Chinese
+ * UI shows `47 分钟前` and never a hard-coded English/Latin string. `now`
+ * defaults to the wall clock; callers with a ticking clock may pass it in.
+ */
+export function sessionRelativeTime(
+  ts: string | number | null | undefined,
+  now: number = Date.now(),
+): string {
+  const date = messageDate(ts)
+  if (!date) return ''
+  // Clamp future timestamps (client/server skew) to "just now" so a skewed
+  // clock can never render a negative age or blank the cell.
+  const diffSec = Math.max(0, Math.floor((now - date.getTime()) / 1000))
+  const t = i18n.global.t
+  if (diffSec < 10) return t('sessions.relTime.justNow')
+  if (diffSec < 60) return t('sessions.relTime.seconds', { n: diffSec })
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return t('sessions.relTime.minutes', { n: diffMin })
+  const diffHour = Math.floor(diffMin / 60)
+  if (diffHour < 24) return t('sessions.relTime.hours', { n: diffHour })
+  // Older than 24h → absolute short date in the active UI locale (never a
+  // bucketed "Nd ago", which drifts the older it gets).
+  return date.toLocaleDateString(String(i18n.global.locale.value))
 }

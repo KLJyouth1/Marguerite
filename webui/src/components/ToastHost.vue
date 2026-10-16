@@ -40,7 +40,7 @@ const { toasts, dismissToast } = useToasts()
   position: fixed;
   right: var(--sp-4);
   bottom: var(--sp-4);
-  z-index: 1000;
+  z-index: 1001; /* Layer: view-toast */
   display: flex;
   flex-direction: column;
   align-items: flex-end;

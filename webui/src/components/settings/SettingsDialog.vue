@@ -97,6 +97,10 @@
 
           <SandboxSettingsPanel v-else-if="section === 'sandbox'" />
 
+          <!-- Doctor is a client-type read-only health surface (doctor.status).
+               Like Sandbox/Connection it renders regardless of config load. -->
+          <SettingsDoctorPanel v-else-if="section === 'doctor'" />
+
           <!-- Optional cross-installation discovery is deliberately mounted
                only when the user opens this section. It never runs at app or
                Settings-dialog startup. -->
@@ -178,11 +182,20 @@
             />
             <SettingsAppearancePanel v-else-if="section === 'appearance'" />
             <SettingsKeyboardPanel v-else-if="section === 'keyboard'" />
-            <SettingsAdvancedPanel
-              v-else-if="section === 'advanced'"
-              @open-agent-configuration="openAgentConfiguration"
-              @open-data-maintenance="openDataMaintenance"
-            />
+            <template v-else-if="section === 'advanced'">
+              <SettingsAdvancedPanel
+                @open-agent-configuration="openAgentConfiguration"
+                @open-data-maintenance="openDataMaintenance"
+              />
+              <!-- M2-C5 信任校准 / M2-C6 持久任务队列：动作型面板（非 config 表单），
+                   在 Advanced 节直接渲染，操作走 RPC 立即生效。 -->
+              <TrustCalibrationPanel />
+              <TaskQueuePanel />
+              <!-- M3-D1 最近活动时间线 / M3-D2 预算阈值 + 任务成本卡片 -->
+              <RecentActivityPanel />
+              <BudgetPanel />
+              <TaskCostPanel />
+            </template>
             <SettingsExtensionsPanel
               v-else-if="isExtensionSection(section)"
               :section-id="section"
@@ -258,9 +271,12 @@ import MemoryLayersPanel from '@/components/settings/MemoryLayersPanel.vue'
 import ProfileCard from '@/components/settings/ProfileCard.vue'
 import ExpertsPanel from '@/components/settings/ExpertsPanel.vue'
 import SandboxSettingsPanel from '@/components/settings/SandboxSettingsPanel.vue'
+import SettingsDoctorPanel from '@/components/settings/SettingsDoctorPanel.vue'
 import DesktopRuntimePanel from '@/components/settings/DesktopRuntimePanel.vue'
 import DataMigrationPanel from '@/components/settings/DataMigrationPanel.vue'
 import SettingsExtensionsPanel from '@/components/settings/SettingsExtensionsPanel.vue'
+import TrustCalibrationPanel from '@/components/settings/TrustCalibrationPanel.vue'
+import TaskQueuePanel from '@/components/settings/TaskQueuePanel.vue'
 import { useSetupCatalog, SETTINGS_SECTIONS } from '@/composables/setup/useSetupCatalog'
 import { parseProviderHash, sectionFromRouteParam } from '@/composables/setup/useSettingsSection'
 import { useConfirm } from '@/composables/useConfirm'
@@ -949,19 +965,24 @@ onUnmounted(() => {
 }
 
 /* Quiet uppercase eyebrow that heads each rail group (see .control-nav-group__label).
-   Non-interactive, so it never enters the tab order. */
+   Non-interactive, so it never enters the tab order.
+   v3.2 视觉优化：分组眉题增加上间距与分隔线，强化「AI 配置 / 偏好 / 扩展」
+   三个信息层级的扫读边界——用户反馈侧边栏项多时分组感弱。 */
 .settings-rail__group {
+  border-top: 1px solid var(--hairline);
   color: var(--text-dim);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
   margin: var(--sp-3) 0 var(--sp-1);
-  padding: 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) 0;
   text-transform: uppercase;
 }
 
 .settings-rail__group:first-child {
+  border-top: 0;
   margin-top: 0;
+  padding-top: 0;
 }
 
 .settings-panel {

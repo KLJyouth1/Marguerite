@@ -1,11 +1,55 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ControlSwitch from '@/components/ControlSwitch.vue'
 import MemoryLearningGroup from '@/components/settings/MemoryLearningGroup.vue'
 import { usePlatform } from '@/platform'
+import { getTauriInvoke, isDesktopShell } from '@/utils/tauriBridge'
 
 const { t } = useI18n()
+
+// ── 开机自启动（**仅桌面壳可用**）──
+// web 包没有 `@tauri-apps/api`（静态 import 会让 vite build 失败），所以走 utils/tauriBridge
+// 的动态取法；拿不到 invoke 就说明当前是浏览器形态，入口直接不渲染（见模板 v-if）。
+const desktopShell = isDesktopShell()
+const tauriInvoke = getTauriInvoke()
+const autostartOn = ref(false)
+const autostartError = ref('')
+
+async function loadAutostart() {
+  if (!tauriInvoke) return
+  try {
+    autostartOn.value = Boolean(await tauriInvoke('autostart_status'))
+  } catch (e) {
+    autostartError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/**
+ * 切换开机自启动。
+ *
+ * 两处刻意的"不撒谎"：
+ * 1. 失败时回滚 UI 并**如实显示错误**（组策略会拦 HKCU Run 键，不能装成功）；
+ * 2. 成功后**回读真值**（`autostart_status`）而不是直接相信"调用没报错就等于已生效"——
+ *    注册表写入与查询是两条独立路径，回读才能证明确实写进去了。
+ */
+async function setAutostart(next: boolean) {
+  if (!tauriInvoke) return
+  autostartError.value = ''
+  const previous = autostartOn.value
+  autostartOn.value = next
+  try {
+    await tauriInvoke('autostart_set', { enabled: next })
+    autostartOn.value = Boolean(await tauriInvoke('autostart_status'))
+  } catch (e) {
+    autostartOn.value = previous
+    autostartError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+onMounted(() => {
+  void loadAutostart()
+})
 const emit = defineEmits<{
   'open-agent-configuration': []
   'open-data-maintenance': []
@@ -120,6 +164,22 @@ const agentConfigAriaLabel = computed(() =>
       <div class="control-row__control">
         <span class="labs-hint">{{ t('setup.advanced.reload') }}</span>
         <ControlSwitch name="labs_fold_live_turn" :checked="foldOn" :aria-label="t('setup.advanced.foldAria')" @change="setFold" />
+      </div>
+    </label>
+
+    <label v-if="desktopShell" class="control-row">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.advanced.autostartLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.advanced.autostartDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <ControlSwitch
+          name="desktop_autostart"
+          :checked="autostartOn"
+          :aria-label="t('setup.advanced.autostartLabel')"
+          @change="setAutostart"
+        />
+        <span v-if="autostartError" class="labs-hint" role="alert">{{ autostartError }}</span>
       </div>
     </label>
 

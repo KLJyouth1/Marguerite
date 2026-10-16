@@ -27,6 +27,7 @@ const i18n = createI18n({
           implementCurrent: 'Implement in this task',
           implementNew: 'Implement in a new task',
           replan: 'Revise plan',
+          reuseLast: 'Continue last plan “{title}”',
           working: 'Working…',
         },
       },
@@ -231,5 +232,27 @@ describe('PlanCard', () => {
     expect(Array.from(host.querySelectorAll<HTMLButtonElement>('button')).every(button => button.disabled))
       .toBe(true)
     expect(host.textContent).toContain('Working…')
+  })
+
+  it('shows a reuse-last button only when a reuse candidate is present (D-05/T08)', async () => {
+    const withoutCandidate = mountPlanCard(plan())
+    await nextTick()
+    expect(withoutCandidate.querySelector('[data-testid="plan-card-reuse-last"]')).toBeNull()
+    expect(withoutCandidate.querySelectorAll('.plan-card__actions button')).toHaveLength(3)
+
+    const reuseLast = vi.fn()
+    const withCandidate = mountPlanCard(
+      plan({
+        reuseCandidate: { revisionId: 'rev-old', title: '上次的登录模块计划', createdAt: 1 },
+      }),
+      { onReuseLast: reuseLast },
+    )
+    await nextTick()
+    const button = withCandidate.querySelector('[data-testid="plan-card-reuse-last"]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    expect(button.textContent).toContain('上次的登录模块计划')
+    button.click()
+    await nextTick()
+    expect(reuseLast).toHaveBeenCalledWith({ planId: 'plan-1', revisionId: 'rev-old' })
   })
 })

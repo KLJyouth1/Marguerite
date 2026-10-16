@@ -1,6 +1,10 @@
 <template>
   <div class="empty-state">
     <p class="empty-state__greeting">{{ greeting }}</p>
+    <p class="empty-state__lead">{{ t('chat.emptyLead') }}</p>
+    <ul class="empty-state__constellation" aria-hidden="true">
+      <li v-for="node in orbitNodes" :key="node">{{ node }}</li>
+    </ul>
     <div
       v-if="!suppressed"
       class="empty-state__chips"
@@ -28,7 +32,6 @@ import { optionalSessionRpcCallOptions } from '@/composables/chat/sessionBootstr
 
 const { t } = useI18n()
 
-/** Capability flags from the same onboarding.status snapshot SetupView reads. */
 interface CapabilityStatus {
   searchConfigured?: boolean
   imageGenerationConfigured?: boolean
@@ -62,8 +65,6 @@ const buildGameChip = computed<SuggestionChip>(() => ({
   prompt: t('chat.chips.buildGamePrompt'),
 }))
 
-// Rendered immediately so a late capability lookup swaps labels in place
-// instead of shifting the landing layout, and kept whenever the lookup fails.
 const FALLBACK_CHIPS = computed(() => [
   buildGameChip.value,
   ordinaryChip(t('chat.chips.summarizeWebpage')),
@@ -82,6 +83,14 @@ const greeting = computed(() => {
   if (hour >= 12 && hour < 18) return t('chat.greetingAfternoon')
   return t('chat.greetingEvening')
 })
+
+const orbitNodes = computed(() => [
+  t('chat.orbit.agent'),
+  t('chat.orbit.subagent'),
+  t('chat.orbit.tools'),
+  t('chat.orbit.memory'),
+  t('chat.orbit.knowledge'),
+])
 
 const chips = computed(() => {
   const status = capabilityStatus.data.value
@@ -110,6 +119,8 @@ const chips = computed(() => {
   gap: var(--sp-2);
   position: relative;
   text-align: center;
+  max-width: 36rem;
+  margin-inline: auto;
 }
 
 /* Dawn halo behind the greeting — themes without --atmosphere-dawn simply
@@ -135,6 +146,45 @@ const chips = computed(() => {
   letter-spacing: var(--track-display);
   color: var(--text);
 }
+
+.empty-state__lead {
+  margin: 0;
+  max-width: 38ch;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  line-height: 1.5;
+  animation: empty-state-greeting-reveal calc(var(--dur-base) * 2.5) var(--ease-out) both;
+  animation-delay: 40ms;
+}
+
+.empty-state__constellation {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.empty-state__constellation > li {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  animation: empty-state-greeting-reveal calc(var(--dur-base) * 2.5) var(--ease-out) both;
+}
+
+.empty-state__constellation > li:nth-child(1) { animation-delay: 60ms; }
+.empty-state__constellation > li:nth-child(2) { animation-delay: 100ms; }
+.empty-state__constellation > li:nth-child(3) { animation-delay: 140ms; }
+.empty-state__constellation > li:nth-child(4) { animation-delay: 180ms; }
+.empty-state__constellation > li:nth-child(5) { animation-delay: 220ms; }
 
 @keyframes empty-state-greeting-reveal {
   from {
@@ -204,17 +254,17 @@ const chips = computed(() => {
   .empty-state__chips {
     min-height: 2.75rem;
   }
-
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .empty-state__greeting {
+  .empty-state__greeting,
+  .empty-state__lead,
+  .empty-state__constellation > li {
     animation: none;
   }
 
   .empty-state__chip {
     transition: none;
   }
-
 }
 </style>

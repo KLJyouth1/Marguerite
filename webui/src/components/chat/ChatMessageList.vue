@@ -67,11 +67,17 @@
       @plan-implement-current="$emit('planImplementCurrent', $event)"
       @plan-implement-new="$emit('planImplementNew', $event)"
       @plan-replan="$emit('planReplan', $event)"
+      @plan-reuse-last="$emit('planReuseLast', $event)"
     />
     <SystemMessage
       v-else
       :message="message"
+      :can-replan="canReplan"
       @resume="$emit('resumeSandbox')"
+      @open-settings="$emit('openAuthSettings')"
+      @retry="$emit('retryAuthFailure')"
+      @replan="$emit('replanFailedTurn')"
+      @view-logs="$emit('viewTurnLogs')"
     />
   </template>
 </template>
@@ -115,6 +121,8 @@ const props = defineProps<{
   forkBusy?: boolean
   planActionPending?: PlanCardAction | null
   planActionsDisabled?: boolean
+  /** B2：会话里存在可修订方案卡时，失败轮次的卡片提供「改计划」出口。 */
+  canReplan?: boolean
   isStreaming?: boolean
 }>()
 
@@ -133,9 +141,16 @@ defineEmits<{
   clarifySubmit: [fields: Record<string, string>, request?: NonNullable<Extract<import('@/types/parts').ChatPart, { type: 'interrupt' }>['clarify']>]
   clarifyDismiss: []
   resumeSandbox: []
+  openAuthSettings: []
+  retryAuthFailure: []
+  /** B2：失败轮次的次级出口 —— 改计划 / 看日志。 */
+  replanFailedTurn: []
+  viewTurnLogs: []
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
+  /** D-05/T08：复用上次计划。 */
+  planReuseLast: [target: PlanCardActionTarget]
 }>()
 
 // Legacy transcripts can only use the whole-conversation fallback at the

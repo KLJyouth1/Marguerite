@@ -30,6 +30,12 @@ const menuOpen = ref(false)
 const buttonRef = ref<HTMLButtonElement | null>(null)
 useDialogLayer(computed(() => menuOpen.value))
 
+// The chip shows only the language name ("中文") with no label of its own, so
+// the tooltip spells out both what it is and the current value (R65 D2).
+const triggerTitle = computed(() =>
+  t('chrome.languageSwitchTitle', { name: LOCALE_LABELS[appStore.locale] }),
+)
+
 function pick(code: LocaleCode) {
   void appStore.setLocale(code)
   menuOpen.value = false
@@ -58,8 +64,8 @@ useDocumentEvent('keydown', (e) => {
       ref="buttonRef"
       type="button"
       class="btn btn--ghost lang-menu-trigger"
-      :title="t('chrome.language')"
-      :aria-label="t('chrome.language')"
+      :title="triggerTitle"
+      :aria-label="triggerTitle"
       aria-haspopup="menu"
       :aria-expanded="menuOpen"
       data-testid="language-switcher-trigger"

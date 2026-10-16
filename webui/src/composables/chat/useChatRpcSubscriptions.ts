@@ -4,8 +4,10 @@ import type {
   CronResultPayload,
   EnsembleProgressPayload,
   InputDispositionPayload,
+  MemoryRecallPayload,
   RouterDecisionPayload,
   SessionEventPayload,
+  StepLoopPayload,
   SubagentCompletionPayload,
   TextDeltaPayload,
   ToolDeltaPayload,
@@ -47,6 +49,10 @@ export type ChatRpcSubscriptionHandlers = {
    * EVENT artifact.updated). Drives a sidebar index resync so inline edits and
    * externally-written files surface without a manual refresh. */
   onArtifactUpdated: (payload: SessionEventPayload) => void
+  // T04：此前被前端丢弃的 3 类 Rust 事件（补订订阅 + 渲染）。
+  onMemoryRecall: (payload: MemoryRecallPayload) => void
+  onStepStart: (payload: StepLoopPayload) => void
+  onStepFinish: (payload: StepLoopPayload) => void
   onAny: (rawEvent: string, rawPayload: unknown) => void
   onConnectionState: (state: string) => void
 }
@@ -93,6 +99,10 @@ export function useChatRpcSubscriptions(
       // names causes one resync, not two.
       rpc.on('artifact.updated', handlers.onArtifactUpdated),
       rpc.on('session.event.artifact_updated', handlers.onArtifactUpdated),
+      // T04：补订 3 类此前无订阅的事件（Rust 侧已稳定发布）。
+      rpc.on('session.event.memory_recall', handlers.onMemoryRecall),
+      rpc.on('session.event.step_start', handlers.onStepStart),
+      rpc.on('session.event.step_finish', handlers.onStepFinish),
       rpc.on('*', handlers.onAny),
       rpc.on('_state', handlers.onConnectionState),
     ]
