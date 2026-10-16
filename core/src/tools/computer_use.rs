@@ -14,13 +14,18 @@
 //! 「截图 → VLMM 输出坐标 → `InputControl` 执行」闭环中完成，本工具负责感知与执行两端。
 //!
 //! 诚实性：原生输入在 Linux（xdotool）/ macOS（cliclick/osascript）路径直接可用；
-//! Windows 路径通过生成临时 `.ps1` 规避 cmd 引号陷阱，运行时正确性可经 `sandboxed_exec`
-//! 返回的 stdout/stderr 观测并调优。多屏坐标采用 Windows 虚拟桌面坐标系，与全屏截图一致。
+//! Windows 路径生成临时 `.ps1` 后以 **argv 直连** spawn `powershell`（见 [`NativeCmd::Ps1`]）
+//! ——不能再把 `powershell -File "…"` 拼成命令行交给 `sandboxed_exec`：Windows 侧走 `cmd /C`，
+//! Rust 的 `\"` 转义 cmd 不认，`-File` 会收到带字面双引号的路径而直接失败
+//! （实测 `Processing -File '"C:\…\marg_cu_*.ps1"' failed: Illegal characters in path.`）。
+//! 所有动作的退出码都被如实检查：非零退出即 `ToolResult::Error`，绝不把「没生效」报成成功。
+//! 多屏坐标采用 Windows 虚拟桌面坐标系，与全屏截图一致。
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -45,6 +50,45 @@ type ToolFn = std::sync::Arc<
         + Sync,
 >;
 
+/// 一条待执行的原生命令（跨平台命令构造与执行方式的统一载体）
+///
+/// Windows 的 PowerShell 路径**不能**拼成命令行交给 `sandboxed_exec`：Windows 侧走 `cmd /C`，
+/// Rust 的 `\"` 转义 cmd 不认，`powershell -File` 会收到带字面双引号的路径
+/// （实测 `Processing -File '"C:\…\marg_cu_*.ps1"' failed: Illegal characters in path.`），
+/// 脚本根本没跑起来。故 `.ps1` 路径以 argv 直连 spawn `powershell`，
+/// 与仓库既有正确范式 `tools::builtin::win_auto::run_powershell` 一致。
+#[derive(Debug, Clone)]
+pub enum NativeCmd {
+    /// 经 `sandboxed_exec` 执行的命令行（POSIX `sh -c` / Windows `cmd /C`）
+    Shell(String),
+    /// Windows：argv 直连执行已写好的 `.ps1`（`sandboxed_exec` 无法传达的路径）
+    Ps1(PathBuf),
+}
+
+/// 把子进程结果统一转成 `ToolResult`。
+///
+/// 诚实性（D2）：**非零退出即 `Error`**——动作没生效却回报「成功」会让 agent 与用户同时被
+/// 误导（历史上 `locate` 就因此把「.ps1 根本没跑起来」显示成「读取截图失败: 系统找不到指定的文件」）。
+fn finish(stdout: &str, stderr: &str, exit_code: i32) -> ToolResult {
+    let mut body = stdout.to_string();
+    if !stderr.trim().is_empty() {
+        body.push_str("\n[stderr]\n");
+        body.push_str(stderr);
+    }
+    let body = body.trim().to_string();
+    if exit_code == 0 {
+        ToolResult::Success {
+            data: body,
+            metadata: HashMap::new(),
+        }
+    } else {
+        ToolResult::Error {
+            message: format!("命令以非零退出码 {exit_code} 结束\n{body}"),
+            code: "NONZERO_EXIT".to_string(),
+        }
+    }
+}
+
 /// 截图采集模式：主屏 / 全部显示器（虚拟桌面） / 当前活动窗口
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureMode {
@@ -65,46 +109,46 @@ impl CaptureMode {
 
 /// 三层架构之一：屏幕感知（截图采集）
 pub trait ScreenPerception {
-    /// 返回采集当前屏幕的命令（由 `sandboxed_exec` 执行）。
+    /// 返回采集当前屏幕的命令（由 [`OsComputerUse::run_cmd`] 执行）。
     /// `mode` 控制主屏/多屏/活动窗口；`max_edge` 为缩边上限（>0 时按长边等比缩到该像素，
     /// 用于降低发给 VLMM 的截图体积，对齐 OpenCUA/computer_use_ootb 的降采样策略）。
-    fn capture_cmd(&self, out_path: &str, mode: CaptureMode, max_edge: u32) -> Result<String>;
+    fn capture_cmd(&self, out_path: &str, mode: CaptureMode, max_edge: u32) -> Result<NativeCmd>;
 }
 
 /// 三层架构之一：键鼠控制（输入执行）
 pub trait InputControl {
     /// 鼠标点击（移动到 x,y 后按下/抬起左键）
-    fn click_cmd(&self, x: i64, y: i64) -> Result<String>;
+    fn click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd>;
     /// 鼠标双击
-    fn double_click_cmd(&self, x: i64, y: i64) -> Result<String>;
+    fn double_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd>;
     /// 鼠标右键点击
-    fn right_click_cmd(&self, x: i64, y: i64) -> Result<String>;
+    fn right_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd>;
     /// 鼠标中键点击
-    fn middle_click_cmd(&self, x: i64, y: i64) -> Result<String>;
+    fn middle_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd>;
     /// 鼠标拖拽（从 x1,y1 到 x2,y2）
-    fn drag_cmd(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<String>;
+    fn drag_cmd(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<NativeCmd>;
     /// 鼠标滚轮（dx 横向、dy 纵向，单位=滚动格）
-    fn scroll_cmd(&self, x: i64, y: i64, dx: i64, dy: i64) -> Result<String>;
+    fn scroll_cmd(&self, x: i64, y: i64, dx: i64, dy: i64) -> Result<NativeCmd>;
     /// 移动鼠标到 x,y（不点击）
-    fn move_cmd(&self, x: i64, y: i64) -> Result<String>;
+    fn move_cmd(&self, x: i64, y: i64) -> Result<NativeCmd>;
     /// 键盘输入文本
-    fn type_cmd(&self, text: &str) -> Result<String>;
+    fn type_cmd(&self, text: &str) -> Result<NativeCmd>;
     /// 键盘按键
-    fn key_cmd(&self, key: &str) -> Result<String>;
+    fn key_cmd(&self, key: &str) -> Result<NativeCmd>;
     /// 键盘组合键（如 "ctrl+c"，按 SendKeys/cliclick 约定）
-    fn key_combo_cmd(&self, keys: &str) -> Result<String>;
+    fn key_combo_cmd(&self, keys: &str) -> Result<NativeCmd>;
     /// 剪贴板：写入文本
-    fn clipboard_set_cmd(&self, text: &str) -> Result<String>;
+    fn clipboard_set_cmd(&self, text: &str) -> Result<NativeCmd>;
     /// 剪贴板：读取文本
-    fn clipboard_get_cmd(&self) -> Result<String>;
+    fn clipboard_get_cmd(&self) -> Result<NativeCmd>;
     /// 窗口聚焦（按窗口标题匹配，激活到前台）
-    fn window_focus_cmd(&self, title: &str) -> Result<String>;
+    fn window_focus_cmd(&self, title: &str) -> Result<NativeCmd>;
     /// 获取当前鼠标位置（输出 "x,y"）
-    fn cursor_pos_cmd(&self) -> Result<String>;
+    fn cursor_pos_cmd(&self) -> Result<NativeCmd>;
     /// 查询按键状态（输出 "pressed"/"released"）
-    fn key_state_cmd(&self, key: &str) -> Result<String>;
+    fn key_state_cmd(&self, key: &str) -> Result<NativeCmd>;
     /// 获取系统空闲时间（毫秒）
-    fn idle_time_cmd(&self) -> Result<String>;
+    fn idle_time_cmd(&self) -> Result<NativeCmd>;
 }
 
 /// 三层架构之一：GUI 定位（视觉 grounding）
@@ -139,37 +183,118 @@ impl OsComputerUse {
     }
 
     /// 生成 Windows 临时 .ps1 并写入内容，返回脚本路径
+    ///
+    /// P2-8 中文乱码修复：PowerShell 5.1 重定向 stdout 时用控制台代码页
+    /// （中文系统 = GBK/936），而 Rust 侧按 UTF-8 解码 → 中文必乱码。
+    /// 统一在脚本头部强制 `[Console]::OutputEncoding = UTF-8`，使子进程
+    /// stdout 字节流恒为 UTF-8；同时以 UTF-8 写入 .ps1（含中文命令文本时必需）。
+    ///
+    /// 诚实性（D2 补强）：脚本尾部追加「有错误记录即 exit 1」。实测 PowerShell 的 `-File`
+    /// 对**语句级** .NET 异常（如 `SendKeys` 收到非法按键串）仍返回退出码 0——若只看退出码，
+    /// 「动作没生效」会被报成成功。终止性错误（`throw`）PowerShell 自身已退出 1，故无需额外处理：
+    /// 两类错误由此全覆盖。
     fn write_ps1(&self, content: &str) -> Result<PathBuf> {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let p = std::env::temp_dir().join(format!("marg_cu_{stamp}.ps1"));
-        std::fs::write(&p, content).map_err(|e| anyhow!("写入 ps1 失败: {e}"))?;
+        let prologue = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n$OutputEncoding = [System.Text.Encoding]::UTF8\n";
+        let trailer = "if ($Error.Count -gt 0) { exit 1 }\n";
+        std::fs::write(&p, format!("{prologue}{content}\n{trailer}"))
+            .map_err(|e| anyhow!("写入 ps1 失败: {e}"))?;
         Ok(p)
     }
 
-    /// 执行一条命令并返回合并输出（成功/错误统一为 `ToolResult`）
-    async fn run_cmd(&self, cmd: &str) -> Result<ToolResult> {
-        let guard = CommandGuard::new();
-        let out = sandboxed_exec(cmd, &self.workspace, DEFAULT_TIMEOUT, &guard).await?;
-        let mut s = String::new();
-        s.push_str(&out.stdout);
-        if !out.stderr.is_empty() {
-            s.push_str("\n[stderr]\n");
-            s.push_str(&out.stderr);
+    /// 写入 `.ps1` 并包装为 argv 直连命令（Windows 专用执行路径）
+    fn ps1_cmd(&self, content: &str) -> Result<NativeCmd> {
+        Ok(NativeCmd::Ps1(self.write_ps1(content)?))
+    }
+
+    /// argv 直连执行 `.ps1`（不经 shell，路径无需转义），返回（stdout, stderr, 退出码）
+    ///
+    /// 与 `sandboxed_exec` 对齐的安全属性：工作目录限定工作区、`CREATE_NO_WINDOW` 静默执行、
+    /// 超时强杀（`kill_on_drop`）、stdin 置空。
+    async fn spawn_ps1(&self, path: &Path) -> Result<(String, String, i32)> {
+        let mut command = tokio::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(path)
+            .current_dir(&self.workspace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        s.push_str(&format!("\n[exit_code={}]", out.exit_code));
-        Ok(ToolResult::Success {
-            data: s,
-            metadata: HashMap::new(),
-        })
+        let child = command
+            .spawn()
+            .map_err(|e| anyhow!("failed to spawn `powershell`: {e}"))?;
+        match tokio::time::timeout(DEFAULT_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(out)) => Ok((
+                String::from_utf8_lossy(&out.stdout).to_string(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+                out.status.code().unwrap_or(-1),
+            )),
+            Ok(Err(e)) => Err(anyhow!("command execution error: {e}")),
+            Err(_) => Err(anyhow!(
+                "command timed out after {:?}: {}",
+                DEFAULT_TIMEOUT,
+                path.display()
+            )),
+        }
+    }
+
+    /// 执行一条命令（`Shell` 走沙箱 shell，`Ps1` 走 argv 直连）并如实转成 `ToolResult`
+    async fn run_cmd(&self, cmd: NativeCmd) -> Result<ToolResult> {
+        let guard = CommandGuard::new();
+        match cmd {
+            NativeCmd::Shell(c) => {
+                let out = sandboxed_exec(&c, &self.workspace, DEFAULT_TIMEOUT, &guard).await?;
+                Ok(finish(&out.stdout, &out.stderr, out.exit_code))
+            }
+            NativeCmd::Ps1(path) => {
+                // 护栏沿用既有语义：校验「等价的 PowerShell 调用命令行」。
+                //
+                // 刻意**不**改为校验脚本全文：脚本里的 `text`/`key` 是「要被输入到第三方应用的
+                // 文本数据」，而非 shell 命令——computer_use 的核心用途之一恰恰是往终端里打字，
+                // 拿 shell 命令模式去匹配这些数据会误伤正常输入（例如输入 `sudo make install`）。
+                // 真正的高危 shell 命令仍由 `NativeCmd::Shell` 路径经 `sandboxed_exec` 拦截，
+                // 与改动前的检查对象逐字一致，语义未削弱。
+                guard.check(&format!(
+                    "powershell -ExecutionPolicy Bypass -File {}",
+                    path.display()
+                ))?;
+                let (stdout, stderr, exit_code) = self.spawn_ps1(&path).await?;
+                Ok(finish(&stdout, &stderr, exit_code))
+            }
+        }
+    }
+
+    /// 执行一个动作并只回报「是否真正生效」（非零退出即 false）
+    async fn run_ok(&self, cmd: NativeCmd) -> Result<bool> {
+        Ok(self.run_cmd(cmd).await?.is_success())
+    }
+
+    /// locate 的自动点击闭环：移动 + 点击两步都真正生效才算成功
+    async fn auto_click(&self, x: i64, y: i64) -> Result<bool> {
+        let moved = self.run_ok(self.move_cmd(x, y)?).await?;
+        let clicked = self.run_ok(self.click_cmd(x, y)?).await?;
+        Ok(moved && clicked)
     }
 
     /// 构造截图命令（跨平台；多屏/活动窗口/降采样由 `mode`/`max_edge` 控制）
-    fn build_capture_cmd(&self, path: &str, mode: CaptureMode, max_edge: u32) -> Result<String> {
+    fn build_capture_cmd(&self, path: &str, mode: CaptureMode, max_edge: u32) -> Result<NativeCmd> {
         if cfg!(windows) {
-            // PowerShell 内容（写入 .ps1 规避 cmd 引号陷阱）；单引号包裹路径
+            // PowerShell 内容写入 .ps1 后 argv 直连执行（不经 cmd，路径无需引号转义）
             let bounds = match mode {
                 // 设备像素：逻辑 Bounds × DPI 比例（SetCursorPos 使用设备/虚拟坐标空间，非 DPI 缩放逻辑像素）
                 CaptureMode::Primary => "$dpi=(([System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)).DpiX)/96.0; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[int]($s.Width*$dpi); $h=[int]($s.Height*$dpi); $ox=[int]($s.X*$dpi); $oy=[int]($s.Y*$dpi);".to_string(),
@@ -190,11 +315,7 @@ impl OsComputerUse {
                 "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n{bounds}\n$b=New-Object System.Drawing.Bitmap($w,$h)\n$g=[System.Drawing.Graphics]::FromImage($b)\n$g.CopyFromScreen($ox,$oy,0,0,$b.Size)\n{save}\n\"$w $h\" | Set-Content -Path '{p}.dim' -Encoding ascii\n",
                 bounds = bounds, save = save, p = path
             );
-            let p = self.write_ps1(&content)?;
-            return Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ));
+            self.ps1_cmd(&content)
         } else if cfg!(target_os = "macos") {
             let base = match mode {
                 CaptureMode::Window => "screencapture -m".to_string(), // macOS 无可靠前台窗口非交互截图，退化为全屏
@@ -208,7 +329,7 @@ impl OsComputerUse {
                     me = max_edge
                 );
             }
-            return Ok(cmd);
+            Ok(NativeCmd::Shell(cmd))
         } else {
             let base = match mode {
                 CaptureMode::Window => "import -window $(xdotool getactivewindow)".to_string(),
@@ -221,11 +342,12 @@ impl OsComputerUse {
                     me = max_edge
                 );
             }
-            return Ok(cmd);
+            Ok(NativeCmd::Shell(cmd))
         }
     }
 
     /// 构造输入命令（跨平台）。`action` 可为 click/double/right_click/middle_click/drag/scroll/move/type/key/combo/clipboard_set/clipboard_get/window_focus。
+    #[allow(clippy::too_many_arguments)] // 输入动作参数天然较多，集中传参优于再包一层
     fn build_input_cmd(
         &self,
         action: &str,
@@ -237,7 +359,7 @@ impl OsComputerUse {
         dy: i64,
         text: &str,
         key: &str,
-    ) -> Result<String> {
+    ) -> Result<NativeCmd> {
         if cfg!(windows) {
             // 统一经 user32（SetCursorPos + mouse_event）与 SendKeys，写入 .ps1 执行
             let sig = "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X,int Y); [DllImport(\"user32.dll\")] public static extern void mouse_event(int f,int a,int b,int d,int e); [DllImport(\"user32.dll\")] public static extern void keybd_event(byte b,int a,int f,int e);' -Name MU -Namespace W32 -PassThru";
@@ -303,11 +425,7 @@ impl OsComputerUse {
                 _ => return Err(anyhow!("未知输入动作: {action}")),
             };
             let content = format!("{sig}\n{body}\n", sig = sig, body = body);
-            let p = self.write_ps1(&content)?;
-            return Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ));
+            self.ps1_cmd(&content)
         } else if cfg!(target_os = "macos") {
             let cmd = match action {
                 "click" => format!("cliclick c:{x},{y}"),
@@ -343,7 +461,7 @@ impl OsComputerUse {
                 ),
                 _ => return Err(anyhow!("未知输入动作: {action}")),
             };
-            Ok(cmd)
+            Ok(NativeCmd::Shell(cmd))
         } else {
             let cmd = match action {
                 "click" => format!("xdotool mousemove {x} {y} click 1"),
@@ -375,12 +493,12 @@ impl OsComputerUse {
                 "window_focus" => format!("xdotool search --name '{k}' windowactivate --sync 2>/dev/null || wmctrl -a '{k}'", k = key),
                 _ => return Err(anyhow!("未知输入动作: {action}")),
             };
-            Ok(cmd)
+            Ok(NativeCmd::Shell(cmd))
         }
     }
 
     /// 构造无障碍树 / 窗口枚举命令（辅助感知通道，对齐 awesome-computer-use / computer-vision-guide）
-    fn perceive_cmd(&self) -> Result<String> {
+    fn perceive_cmd(&self) -> Result<NativeCmd> {
         if cfg!(windows) {
             let content = "Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes; \
 $tries=0; \
@@ -389,37 +507,29 @@ $cond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Aut
 $root.FindAll([System.Windows.Automation.TreeScope]::Subtree,$cond) | \
   ForEach-Object { ($_.Current.Name+' | '+($_.Current.ControlType.ProgrammaticName -replace 'ControlType.','')) } | \
   Where-Object { $_.Length -gt 0 } | Select-Object -First 60";
-            let p = self.write_ps1(&content)?;
-            return Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ));
+            self.ps1_cmd(content)
         } else if cfg!(target_os = "macos") {
-            Ok("osascript -e 'tell application \"System Events\" to get name of every process whose visible is true'".to_string())
+            Ok(NativeCmd::Shell("osascript -e 'tell application \"System Events\" to get name of every process whose visible is true'".to_string()))
         } else {
             // 可见窗口名列表（辅助定位，避免单纯依赖像素 grounding）
-            Ok("xdotool search --onlyvisible --name '.*' 2>/dev/null | while read id; do xdotool getwindowname \"$id\" 2>/dev/null; done | head -60".to_string())
+            Ok(NativeCmd::Shell("xdotool search --onlyvisible --name '.*' 2>/dev/null | while read id; do xdotool getwindowname \"$id\" 2>/dev/null; done | head -60".to_string()))
         }
     }
 
     /// 获取当前鼠标位置
-    fn cursor_pos_cmd(&self) -> Result<String> {
+    fn cursor_pos_cmd(&self) -> Result<NativeCmd> {
         if cfg!(windows) {
             let content = "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool GetCursorPos(out POINT lpPoint); [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }' -Name CUR -Namespace W32; $p=New-Object W32.CUR+POINT; [W32.CUR]::GetCursorPos([ref]$p) | Out-Null; Write-Output \"$($p.X),$($p.Y)\"";
-            let p = self.write_ps1(content)?;
-            Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ))
+            self.ps1_cmd(content)
         } else if cfg!(target_os = "macos") {
-            Ok("cliclick p".to_string())
+            Ok(NativeCmd::Shell("cliclick p".to_string()))
         } else {
-            Ok("xdotool getmouselocation --shell 2>/dev/null | grep -E 'X=|Y=' | tr '\\n' ',' | sed 's/,$/\\n/'".to_string())
+            Ok(NativeCmd::Shell("xdotool getmouselocation --shell 2>/dev/null | grep -E 'X=|Y=' | tr '\\n' ',' | sed 's/,$/\\n/'".to_string()))
         }
     }
 
     /// 查询按键状态
-    fn key_state_cmd(&self, key: &str) -> Result<String> {
+    fn key_state_cmd(&self, key: &str) -> Result<NativeCmd> {
         if cfg!(windows) {
             // VK 码映射（常用键）
             let vk = match key.to_lowercase().as_str() {
@@ -438,92 +548,85 @@ $root.FindAll([System.Windows.Automation.TreeScope]::Subtree,$cond) | \
             let content = format!(
                 "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern short GetAsyncKeyState(int vKey);' -Name KS -Namespace W32; $s=[W32.KS]::GetAsyncKeyState({vk}); if ($s -band 0x8000) {{ Write-Output 'pressed' }} else {{ Write-Output 'released' }}"
             );
-            let p = self.write_ps1(&content)?;
-            Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ))
+            self.ps1_cmd(&content)
         } else if cfg!(target_os = "macos") {
-            Ok(format!(
+            Ok(NativeCmd::Shell(format!(
                 "osascript -e 'tell application \"System Events\" to return key code of {key}'"
-            ))
+            )))
         } else {
-            Ok(format!(
+            Ok(NativeCmd::Shell(
                 "xset q | grep -i 'LED mask' | grep -q '00000002' && echo pressed || echo released"
+                    .to_string(),
             ))
         }
     }
 
     /// 获取系统空闲时间（毫秒）
-    fn idle_time_cmd(&self) -> Result<String> {
+    fn idle_time_cmd(&self) -> Result<NativeCmd> {
         if cfg!(windows) {
             let content = "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii); [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }' -Name IDLE -Namespace W32; $lii=New-Object W32.IDLE+LASTINPUTINFO; $lii.cbSize=[uint32][System.Runtime.InteropServices.Marshal]::SizeOf($lii); [W32.IDLE]::GetLastInputInfo([ref]$lii) | Out-Null; $idle=([Environment]::TickCount - $lii.dwTime); Write-Output $idle";
-            let p = self.write_ps1(content)?;
-            Ok(format!(
-                "powershell -ExecutionPolicy Bypass -File \"{}\"",
-                p.display()
-            ))
+            self.ps1_cmd(content)
         } else if cfg!(target_os = "macos") {
-            Ok("echo $(( $(python3 -c 'import CoreFoundation; print(int(CoreFoundation.CGEventSourceSecondsSinceLastEventType(1, 0x05)*1000))' 2>/dev/null || echo 0) ))".to_string())
+            Ok(NativeCmd::Shell("echo $(( $(python3 -c 'import CoreFoundation; print(int(CoreFoundation.CGEventSourceSecondsSinceLastEventType(1, 0x05)*1000))' 2>/dev/null || echo 0) ))".to_string()))
         } else {
-            Ok("xprintidle 2>/dev/null || echo 0".to_string())
+            Ok(NativeCmd::Shell("xprintidle 2>/dev/null || echo 0".to_string()))
         }
     }
 }
 
 impl ScreenPerception for OsComputerUse {
-    fn capture_cmd(&self, out_path: &str, mode: CaptureMode, max_edge: u32) -> Result<String> {
+    fn capture_cmd(&self, out_path: &str, mode: CaptureMode, max_edge: u32) -> Result<NativeCmd> {
         self.build_capture_cmd(out_path, mode, max_edge)
     }
 }
 
 impl InputControl for OsComputerUse {
-    fn click_cmd(&self, x: i64, y: i64) -> Result<String> {
+    fn click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd> {
         self.build_input_cmd("click", x, y, 0, 0, 0, 0, "", "")
     }
-    fn double_click_cmd(&self, x: i64, y: i64) -> Result<String> {
+    fn double_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd> {
         self.build_input_cmd("double", x, y, 0, 0, 0, 0, "", "")
     }
-    fn right_click_cmd(&self, x: i64, y: i64) -> Result<String> {
+    fn right_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd> {
         self.build_input_cmd("right_click", x, y, 0, 0, 0, 0, "", "")
     }
-    fn middle_click_cmd(&self, x: i64, y: i64) -> Result<String> {
+    fn middle_click_cmd(&self, x: i64, y: i64) -> Result<NativeCmd> {
         self.build_input_cmd("middle_click", x, y, 0, 0, 0, 0, "", "")
     }
-    fn drag_cmd(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<String> {
+    fn drag_cmd(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<NativeCmd> {
         self.build_input_cmd("drag", x1, y1, x2, y2, 0, 0, "", "")
     }
-    fn scroll_cmd(&self, x: i64, y: i64, dx: i64, dy: i64) -> Result<String> {
+    fn scroll_cmd(&self, x: i64, y: i64, dx: i64, dy: i64) -> Result<NativeCmd> {
         self.build_input_cmd("scroll", x, y, 0, 0, dx, dy, "", "")
     }
-    fn move_cmd(&self, x: i64, y: i64) -> Result<String> {
+    fn move_cmd(&self, x: i64, y: i64) -> Result<NativeCmd> {
         self.build_input_cmd("move", x, y, 0, 0, 0, 0, "", "")
     }
-    fn type_cmd(&self, text: &str) -> Result<String> {
+    fn type_cmd(&self, text: &str) -> Result<NativeCmd> {
         self.build_input_cmd("type", 0, 0, 0, 0, 0, 0, text, "")
     }
-    fn key_cmd(&self, key: &str) -> Result<String> {
+    fn key_cmd(&self, key: &str) -> Result<NativeCmd> {
         self.build_input_cmd("key", 0, 0, 0, 0, 0, 0, "", key)
     }
-    fn key_combo_cmd(&self, keys: &str) -> Result<String> {
+    fn key_combo_cmd(&self, keys: &str) -> Result<NativeCmd> {
         self.build_input_cmd("combo", 0, 0, 0, 0, 0, 0, "", keys)
     }
-    fn clipboard_set_cmd(&self, text: &str) -> Result<String> {
+    fn clipboard_set_cmd(&self, text: &str) -> Result<NativeCmd> {
         self.build_input_cmd("clipboard_set", 0, 0, 0, 0, 0, 0, text, "")
     }
-    fn clipboard_get_cmd(&self) -> Result<String> {
+    fn clipboard_get_cmd(&self) -> Result<NativeCmd> {
         self.build_input_cmd("clipboard_get", 0, 0, 0, 0, 0, 0, "", "")
     }
-    fn window_focus_cmd(&self, title: &str) -> Result<String> {
+    fn window_focus_cmd(&self, title: &str) -> Result<NativeCmd> {
         self.build_input_cmd("window_focus", 0, 0, 0, 0, 0, 0, "", title)
     }
-    fn cursor_pos_cmd(&self) -> Result<String> {
+    fn cursor_pos_cmd(&self) -> Result<NativeCmd> {
         OsComputerUse::cursor_pos_cmd(self)
     }
-    fn key_state_cmd(&self, key: &str) -> Result<String> {
+    fn key_state_cmd(&self, key: &str) -> Result<NativeCmd> {
         OsComputerUse::key_state_cmd(self, key)
     }
-    fn idle_time_cmd(&self) -> Result<String> {
+    fn idle_time_cmd(&self) -> Result<NativeCmd> {
         OsComputerUse::idle_time_cmd(self)
     }
 }
@@ -563,6 +666,23 @@ pub fn map_locate_coords(
     let sx = if shot_w > 0.0 { real_w / shot_w } else { 1.0 };
     let sy = if shot_h > 0.0 { real_h / shot_h } else { 1.0 };
     (px * sx, py * sy)
+}
+
+/// grounding 结果元数据（网关据此透出 `grounding` 字段；字段名与 [`GuiGrounding`] 既有返回一致）。
+fn grounding_metadata(
+    x: f64,
+    y: f64,
+    confidence: f64,
+    description: &str,
+) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("grounding.x".to_string(), format!("{x:.1}"));
+    m.insert("grounding.y".to_string(), format!("{y:.1}"));
+    m.insert("grounding.confidence".to_string(), format!("{confidence:.2}"));
+    if !description.is_empty() {
+        m.insert("grounding.description".to_string(), description.to_string());
+    }
+    m
 }
 
 /// 读取 capture 写入的「真实屏幕区域设备像素」侧车文件（`<截图>.dim`，内容 `"w h"`）。
@@ -621,7 +741,10 @@ mod tests {
         assert!((y - 456.0).abs() < 1e-6, "y={y}");
         // 归一化坐标在缺截图尺寸时必然塌缩为 (0,0)：无法凭空还原，但绝不能 panic/除零
         let (nx, ny) = map_locate_coords(0.5, 0.5, true, 0.0, 0.0, 2560.0, 1440.0);
-        assert!(nx.is_finite() && ny.is_finite(), "normalized collapse must stay finite");
+        assert!(
+            nx.is_finite() && ny.is_finite(),
+            "normalized collapse must stay finite"
+        );
         assert_eq!((nx, ny), (0.0, 0.0));
     }
 
@@ -637,6 +760,114 @@ mod tests {
     fn read_dim_sidecar_missing_returns_none() {
         assert_eq!(read_dim_sidecar("__definitely_missing__.dim"), None);
     }
+
+    /// D2 诚实性守卫：非零退出必须是 `Error`（历史实现无条件 `Success`，把「没生效」报成成功）
+    #[test]
+    fn finish_nonzero_exit_is_error() {
+        match finish("", "Processing -File '…' failed: Illegal characters in path.", -196608) {
+            ToolResult::Error { message, code } => {
+                assert_eq!(code, "NONZERO_EXIT");
+                assert!(message.contains("-196608"), "message={message}");
+                assert!(message.contains("Illegal characters"), "message={message}");
+            }
+            other => panic!("非零退出必须是 Error，实际: {other:?}"),
+        }
+    }
+
+    /// 退出码 0 才允许报成功；stderr 里的诊断信息不得被吞掉
+    #[test]
+    fn finish_zero_exit_is_success_and_keeps_diagnostics() {
+        let ok = finish("960,540\n", "", 0);
+        assert!(ok.is_success());
+        assert_eq!(ok.data(), Some("960,540"));
+
+        let warn = finish("ok", "warning: something", 0);
+        assert!(warn.is_success(), "退出码 0 即成功");
+        assert!(warn.data().unwrap().contains("warning: something"));
+    }
+
+    /// D1 回归守卫：Windows 的 PowerShell 路径必须走 argv 直连（`NativeCmd::Ps1`），
+    /// 绝不能再拼成 `powershell -File "…"` 交给 `cmd /C`（cmd 不认 Rust 的 `\"` 转义，
+    /// 实测会让 `-File` 收到带字面引号的路径 → 脚本根本没跑起来）。
+    #[test]
+    fn windows_ps1_paths_use_direct_argv() {
+        if !cfg!(windows) {
+            return; // 仅 Windows 走 PowerShell 路径
+        }
+        let cu = OsComputerUse::new(std::env::temp_dir());
+        let cmds = [
+            cu.capture_cmd("C:/tmp/a.png", CaptureMode::Primary, 0)
+                .unwrap(),
+            cu.click_cmd(1, 2).unwrap(),
+            cu.cursor_pos_cmd().unwrap(),
+            cu.key_state_cmd("shift").unwrap(),
+            cu.idle_time_cmd().unwrap(),
+            cu.perceive_cmd().unwrap(),
+        ];
+        for c in cmds {
+            match c {
+                NativeCmd::Ps1(path) => {
+                    assert_eq!(path.extension().and_then(|e| e.to_str()), Some("ps1"));
+                    let body = std::fs::read_to_string(&path).expect("脚本必须真的落盘");
+                    // P2-8 中文乱码修复不得回归
+                    assert!(body.contains("[Console]::OutputEncoding"));
+                    let _ = std::fs::remove_file(&path);
+                }
+                NativeCmd::Shell(s) => {
+                    panic!("Windows PowerShell 路径不得拼成 shell 命令行: {s}")
+                }
+            }
+        }
+    }
+
+    /// D1 端到端单元复验（Windows）：真跑一次 PowerShell，退出码必须被如实透出。
+    /// 修复前 `.ps1` 从未被执行，却是「ok=true + 引号报错」；此用例锁死两个方向。
+    #[tokio::test]
+    async fn ps1_roundtrip_reports_real_exit_code() {
+        if !cfg!(windows) {
+            return;
+        }
+        let cu = OsComputerUse::new(std::env::temp_dir());
+
+        let ok_cmd = cu.ps1_cmd("Write-Output 'marg_cu_ok'").unwrap();
+        let r = cu.run_cmd(ok_cmd).await.unwrap();
+        assert!(r.is_success(), "脚本真的执行成功: {r:?}");
+        assert!(r.data().unwrap().contains("marg_cu_ok"), "data={:?}", r.data());
+
+        let bad_cmd = cu.ps1_cmd("exit 3").unwrap();
+        let r = cu.run_cmd(bad_cmd).await.unwrap();
+        match r {
+            ToolResult::Error { message, code } => {
+                assert_eq!(code, "NONZERO_EXIT");
+                assert!(message.contains('3'), "message={message}");
+            }
+            other => panic!("非零退出必须报错，实际: {other:?}"),
+        }
+
+        // 语句级 .NET 异常：实测 PowerShell 自身退出码仍为 0，必须靠脚本尾部兜底判错
+        let soft = cu
+            .ps1_cmd("[System.IO.File]::ReadAllText('C:/__marg_cu_missing_zz__')")
+            .unwrap();
+        let r = cu.run_cmd(soft).await.unwrap();
+        assert!(r.is_error(), "语句级异常也不得报成功: {r:?}");
+    }
+
+    /// 护栏在 Ps1 路径上仍然接线（改走 argv 直连后不得被静默摘掉）
+    #[tokio::test]
+    async fn ps1_path_still_passes_command_guard() {
+        let dir = std::env::temp_dir().join("marg-cu-guard-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 文件名刻意让 `sudo` 两侧为非单词字符（`_sudo_` 因下划线算 `\w` 不构成词边界）
+        let path = dir.join("marg-cu-sudo.ps1");
+        std::fs::write(&path, "Write-Output 'never'").unwrap();
+        let cu = OsComputerUse::new(std::env::temp_dir());
+        let err = cu
+            .run_cmd(NativeCmd::Ps1(path.clone()))
+            .await
+            .expect_err("命令行命中拒绝模式时必须被拦下");
+        assert!(err.to_string().contains("command blocked"), "err={err}");
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// ───────────────────────────────────────────────────────────────────────────
@@ -648,7 +879,6 @@ mod tests {
 /// 无关的纯几何/排序核心」，真实像素裁剪由 `crop_png` 注入（当前未编入 image 后端，
 /// 退化为整图单 patch）。坐标缝合与 C3 的 `map_locate_coords` 共用同一套 scale 反推思路。
 /// ───────────────────────────────────────────────────────────────────────────
-
 /// 全图坐标系下的一个 patch 矩形（截图像素，含相邻重叠）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Patch {
@@ -822,7 +1052,7 @@ pub async fn ground_via_patches(
     _threshold: f64,
 ) -> Option<Vec<GroundedCandidate>> {
     let meta = image_metadata(bytes);
-    let (w, h) = (meta.width? as u32, meta.height? as u32);
+    let (w, h) = (meta.width?, meta.height?);
     let long = w.max(h);
     // 仅高分辨率截图才值得分块（ScreenSpot-Pro 针对 4K/retina）
     if long < 1600 {
@@ -835,7 +1065,8 @@ pub async fn ground_via_patches(
         let cropped = crop_png(bytes, p)?;
         if let Some(r) = v.locate(&cropped, description).await {
             let norm = r.x.abs() <= 1.0 && r.y.abs() <= 1.0;
-            let (fx, fy) = stitch_patch_coords(p, r.x, r.y, norm, p.width() as f64, p.height() as f64);
+            let (fx, fy) =
+                stitch_patch_coords(p, r.x, r.y, norm, p.width() as f64, p.height() as f64);
             cands.push(GroundedCandidate {
                 x: fx,
                 y: fy,
@@ -859,7 +1090,12 @@ mod patch_grounding_tests {
         // 100×100, patch 50, overlap 0.5 → stride 25 → 起点 {0,25,50} → 3×3=9 patch
         let g = build_patch_grid(100, 100, 50, 0.5);
         assert_eq!(g.len(), 9);
-        assert!(g.contains(&Patch { x0: 0, y0: 0, x1: 50, y1: 50 }));
+        assert!(g.contains(&Patch {
+            x0: 0,
+            y0: 0,
+            x1: 50,
+            y1: 50
+        }));
         assert!(g.contains(&Patch {
             x0: 50,
             y0: 50,
@@ -873,7 +1109,15 @@ mod patch_grounding_tests {
         // patch 大于图像 → 退化为单张整图 patch
         let g = build_patch_grid(100, 100, 200, 0.0);
         assert_eq!(g.len(), 1);
-        assert_eq!(g[0], Patch { x0: 0, y0: 0, x1: 100, y1: 100 });
+        assert_eq!(
+            g[0],
+            Patch {
+                x0: 0,
+                y0: 0,
+                x1: 100,
+                y1: 100
+            }
+        );
     }
 
     #[test]
@@ -892,7 +1136,12 @@ mod patch_grounding_tests {
     #[test]
     fn stitch_native_resolution_identity() {
         // patch (100,100,300,300) 原生裁剪渲染 200×200，模型归一化(0.5,0.5) → 全图(200,200)
-        let p = Patch { x0: 100, y0: 100, x1: 300, y1: 300 };
+        let p = Patch {
+            x0: 100,
+            y0: 100,
+            x1: 300,
+            y1: 300,
+        };
         let (x, y) = stitch_patch_coords(&p, 0.5, 0.5, true, 200.0, 200.0);
         assert!((x - 200.0).abs() < 1e-6, "x={x}");
         assert!((y - 200.0).abs() < 1e-6, "y={y}");
@@ -901,7 +1150,12 @@ mod patch_grounding_tests {
     #[test]
     fn stitch_downscaled_patch_rescales_up() {
         // patch 原生 200×200，但模型看到降采样到 100×100；绝对(50,50) → 全图(200,200)
-        let p = Patch { x0: 100, y0: 100, x1: 300, y1: 300 };
+        let p = Patch {
+            x0: 100,
+            y0: 100,
+            x1: 300,
+            y1: 300,
+        };
         let (x, y) = stitch_patch_coords(&p, 50.0, 50.0, false, 100.0, 100.0);
         assert!((x - 200.0).abs() < 1e-6, "x={x}");
         assert!((y - 200.0).abs() < 1e-6, "y={y}");
@@ -910,13 +1164,29 @@ mod patch_grounding_tests {
     #[test]
     fn rank_keeps_highest_conf_within_merge_dist() {
         let cands = vec![
-            GroundedCandidate { x: 100.0, y: 100.0, confidence: 0.9 },
-            GroundedCandidate { x: 101.0, y: 100.0, confidence: 0.95 }, // 邻近，置信度更高
-            GroundedCandidate { x: 500.0, y: 500.0, confidence: 0.5 },  // 远离
+            GroundedCandidate {
+                x: 100.0,
+                y: 100.0,
+                confidence: 0.9,
+            },
+            GroundedCandidate {
+                x: 101.0,
+                y: 100.0,
+                confidence: 0.95,
+            }, // 邻近，置信度更高
+            GroundedCandidate {
+                x: 500.0,
+                y: 500.0,
+                confidence: 0.5,
+            }, // 远离
         ];
         let out = rank_grounding_candidates(cands, 10.0);
         assert_eq!(out.len(), 2);
-        assert!((out[0].confidence - 0.95).abs() < 1e-9, "top={}", out[0].confidence);
+        assert!(
+            (out[0].confidence - 0.95).abs() < 1e-9,
+            "top={}",
+            out[0].confidence
+        );
     }
 
     #[test]
@@ -943,6 +1213,25 @@ mod patch_grounding_tests {
         });
         assert_eq!(norm.len(), 1);
         assert!((norm[0].x - 50.0).abs() < 1e-6 && (norm[0].y - 50.0).abs() < 1e-6);
+    }
+
+    /// grounding 结果元数据契约：坐标/置信度齐备，字段名稳定（网关据此透出 `grounding`）。
+    #[test]
+    fn grounding_metadata_exposes_coords_and_confidence() {
+        let m = grounding_metadata(12.34, 56.78, 0.912, "右上角搜索按钮");
+        assert_eq!(m.get("grounding.x").map(String::as_str), Some("12.3"));
+        assert_eq!(m.get("grounding.y").map(String::as_str), Some("56.8"));
+        assert_eq!(
+            m.get("grounding.confidence").map(String::as_str),
+            Some("0.91")
+        );
+        assert_eq!(
+            m.get("grounding.description").map(String::as_str),
+            Some("右上角搜索按钮")
+        );
+        // 空描述不注入 description（保持字段最小化）
+        let empty = grounding_metadata(0.0, 0.0, 0.0, "");
+        assert!(!empty.contains_key("grounding.description"));
     }
 }
 
@@ -996,31 +1285,52 @@ pub async fn dispatch(
             let path = cu.screenshot_path();
             let p = path.to_string_lossy().to_string();
             let cmd = cu.capture_cmd(&p, mode, max_edge)?;
-            cu.run_cmd(&cmd).await
+            match cu.run_cmd(cmd).await? {
+                // 如实回报产物路径：否则调用方拿到「成功」却无从使用这张图
+                ToolResult::Success { data, mut metadata } => {
+                    metadata.insert("screenshot.path".to_string(), p.clone());
+                    let mut out = format!("截图已保存: {p}");
+                    if !data.is_empty() {
+                        out.push('\n');
+                        out.push_str(&data);
+                    }
+                    Ok(ToolResult::Success {
+                        data: out,
+                        metadata,
+                    })
+                }
+                other => Ok(other),
+            }
         }
-        "click" => cu.run_cmd(&cu.click_cmd(x, y)?).await,
-        "double_click" => cu.run_cmd(&cu.double_click_cmd(x, y)?).await,
-        "right_click" => cu.run_cmd(&cu.right_click_cmd(x, y)?).await,
-        "middle_click" => cu.run_cmd(&cu.middle_click_cmd(x, y)?).await,
-        "drag" => cu.run_cmd(&cu.drag_cmd(x, y, x2, y2)?).await,
-        "scroll" => cu.run_cmd(&cu.scroll_cmd(x, y, dx, dy)?).await,
-        "move" => cu.run_cmd(&cu.move_cmd(x, y)?).await,
-        "type" => cu.run_cmd(&cu.type_cmd(&text)?).await,
-        "key" => cu.run_cmd(&cu.key_cmd(&key)?).await,
-        "key_combo" => cu.run_cmd(&cu.key_combo_cmd(&key)?).await,
-        "clipboard_set" => cu.run_cmd(&cu.clipboard_set_cmd(&text)?).await,
-        "clipboard_get" => cu.run_cmd(&cu.clipboard_get_cmd()?).await,
-        "window_focus" => cu.run_cmd(&cu.window_focus_cmd(&key)?).await,
-        "cursor_pos" => cu.run_cmd(&cu.cursor_pos_cmd()?).await,
-        "key_state" => cu.run_cmd(&cu.key_state_cmd(&key)?).await,
-        "idle_time" => cu.run_cmd(&cu.idle_time_cmd()?).await,
-        "perceive" => cu.run_cmd(&cu.perceive_cmd()?).await,
+        "click" => cu.run_cmd(cu.click_cmd(x, y)?).await,
+        "double_click" => cu.run_cmd(cu.double_click_cmd(x, y)?).await,
+        "right_click" => cu.run_cmd(cu.right_click_cmd(x, y)?).await,
+        "middle_click" => cu.run_cmd(cu.middle_click_cmd(x, y)?).await,
+        "drag" => cu.run_cmd(cu.drag_cmd(x, y, x2, y2)?).await,
+        "scroll" => cu.run_cmd(cu.scroll_cmd(x, y, dx, dy)?).await,
+        "move" => cu.run_cmd(cu.move_cmd(x, y)?).await,
+        "type" => cu.run_cmd(cu.type_cmd(&text)?).await,
+        "key" => cu.run_cmd(cu.key_cmd(&key)?).await,
+        "key_combo" => cu.run_cmd(cu.key_combo_cmd(&key)?).await,
+        "clipboard_set" => cu.run_cmd(cu.clipboard_set_cmd(&text)?).await,
+        "clipboard_get" => cu.run_cmd(cu.clipboard_get_cmd()?).await,
+        "window_focus" => cu.run_cmd(cu.window_focus_cmd(&key)?).await,
+        "cursor_pos" => cu.run_cmd(cu.cursor_pos_cmd()?).await,
+        "key_state" => cu.run_cmd(cu.key_state_cmd(&key)?).await,
+        "idle_time" => cu.run_cmd(cu.idle_time_cmd()?).await,
+        "perceive" => cu.run_cmd(cu.perceive_cmd()?).await,
         "locate" => {
             let path = cu.screenshot_path();
             let p = path.to_string_lossy().to_string();
             // 1) 截图（屏幕感知层；多屏/降采样由 mode/max_edge 控制）
+            //    失败必须如实上报：否则下游会把「读不到截图文件」误报成根因
             let cmd = cu.capture_cmd(&p, mode, max_edge)?;
-            cu.run_cmd(&cmd).await?;
+            if let ToolResult::Error { message, code } = cu.run_cmd(cmd).await? {
+                return Ok(ToolResult::Error {
+                    message: format!("截图失败: {message}"),
+                    code,
+                });
+            }
             // 2) 读字节，交给视觉能力做 GUI 定位（grounding 层）
             match std::fs::read(&path) {
                 Ok(bytes) => match vision.as_ref() {
@@ -1043,22 +1353,24 @@ pub async fn dispatch(
                                         top.x, top.y, false, shot_w, shot_h, rw as f64, rh as f64,
                                     );
                                     let low_conf = top.confidence < threshold;
-                                    if auto_click && !low_conf {
-                                        let _ = cu
-                                            .run_cmd(&cu.move_cmd(cx.round() as i64, cy.round() as i64)?)
-                                            .await;
-                                        let _ = cu
-                                            .run_cmd(&cu.click_cmd(cx.round() as i64, cy.round() as i64)?)
-                                            .await;
-                                    }
+                                    let clicked = auto_click
+                                        && !low_conf
+                                        && cu
+                                            .auto_click(cx.round() as i64, cy.round() as i64)
+                                            .await?;
                                     let _ = std::fs::remove_file(format!("{p}.dim"));
                                     let status = if low_conf { "[低置信度] " } else { "" };
                                     return Ok(ToolResult::Success {
                                         data: format!(
                                             "{status}[分块grounding] 定位成功: x={:.1}, y={:.1}, confidence={:.2}\n截图: {}\n自动点击: {}",
-                                            cx, cy, top.confidence, p, auto_click && !low_conf
+                                            cx, cy, top.confidence, p, clicked
                                         ),
-                                        metadata: HashMap::new(),
+                                        metadata: grounding_metadata(
+                                            cx,
+                                            cy,
+                                            top.confidence,
+                                            &description,
+                                        ),
                                     });
                                 }
                             }
@@ -1071,14 +1383,9 @@ pub async fn dispatch(
                                     r.x, r.y, normalized, shot_w, shot_h, rw as f64, rh as f64,
                                 );
                                 let low_conf = r.confidence < threshold;
-                                if auto_click && !low_conf {
-                                    let _ = cu
-                                        .run_cmd(&cu.move_cmd(cx.round() as i64, cy.round() as i64)?)
-                                        .await;
-                                    let _ = cu
-                                        .run_cmd(&cu.click_cmd(cx.round() as i64, cy.round() as i64)?)
-                                        .await;
-                                }
+                                let clicked = auto_click
+                                    && !low_conf
+                                    && cu.auto_click(cx.round() as i64, cy.round() as i64).await?;
                                 let _ = std::fs::remove_file(format!("{p}.dim"));
                                 let status = if low_conf {
                                     "[低置信度] "
@@ -1088,9 +1395,9 @@ pub async fn dispatch(
                                 Ok(ToolResult::Success {
                                     data: format!(
                                         "{status}定位成功: x={:.1}, y={:.1}, confidence={:.2}\n截图: {}\n自动点击: {}",
-                                        cx, cy, r.confidence, p, auto_click && !low_conf
+                                        cx, cy, r.confidence, p, clicked
                                     ),
-                                    metadata: HashMap::new(),
+                                    metadata: grounding_metadata(cx, cy, r.confidence, &description),
                                 })
                             }
                             None => Ok(ToolResult::Success {
@@ -1171,12 +1478,13 @@ fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
     });
     registry.register_local(make_local_tool(
         "desktop_launch",
-        "启动一个已注册的桌面应用，返回句柄 id；后续 desktop_action 使用该句柄。\
-         目前支持 wps_ppt（WPS 演示）。调用约定：先用本工具拿到句柄，再把句柄传给 desktop_action 执行具体动作。",
+        "启动/附着一个桌面应用，返回句柄 id；后续 desktop_action 使用该句柄。\
+         支持两类：wps_ppt（WPS 演示，COM 驱动）与 generic（附着当前前台应用，UIA 驱动）。\
+         调用约定：先用本工具拿到句柄，再把句柄传给 desktop_action 执行具体动作。",
         json!({
             "type": "object",
             "properties": {
-                "app_kind": { "type": "string", "description": "应用标识，如 wps_ppt" }
+                "app_kind": { "type": "string", "description": "应用标识：wps_ppt（WPS 演示）或 generic（附着当前前台应用，走 UI Automation）" }
             },
             "required": ["app_kind"]
         }),
@@ -1242,9 +1550,12 @@ fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
     });
     registry.register_local(make_local_tool(
         "desktop_action",
-        "对句柄执行一次 UI 动作。参数 action 是 UiAction 的 JSON 字符串；\
-         例如生成 WPS PPT：\
-         {\"kind\":\"generate_presentation\",\"params\":{\"outline\":{\"slides\":[{\"title\":\"周一\",\"bullets\":[\"晨会\",\"需求评审\"]},{\"title\":\"周二\",\"bullets\":[\"编码\"]}]},\"output_path\":\"C:/Users/Administrator/Desktop/weekly-plan.pptx\"}}。\
+        "对句柄执行一次 UI 动作。参数 action 是 UiAction 的 JSON 字符串。\
+         generic（UIA，附着前台应用）支持两类动作：\
+         {\"kind\":\"snapshot\",\"params\":{}} 读取前台窗口控件树（回执里给出每个控件的 ref_id/name/bounds/clickable）；\
+         {\"kind\":\"click\",\"params\":{\"ref_id\":\"<snapshot 里的 ref_id>\"}} 或 {\"kind\":\"click\",\"params\":{\"name\":\"确定\"}} 激活控件。\
+         wps_ppt 支持 generate_presentation，例如：\
+         {\"kind\":\"generate_presentation\",\"params\":{\"outline\":{\"slides\":[{\"title\":\"周一\",\"bullets\":[\"晨会\",\"需求评审\"]}]},\"output_path\":\"C:/Users/Administrator/Desktop/weekly-plan.pptx\"}}。\
          可选 approved（敏感动作需 \"true\"）、session_key（审计会话键）。",
         json!({
             "type": "object",

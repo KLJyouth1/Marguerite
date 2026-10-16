@@ -86,6 +86,14 @@ pub enum EventType {
     ArtifactUpdated,
     /// 桌面动作完成（Epic C：对齐 Web UI 顶层事件 `desktop.action_done`）
     DesktopActionDone,
+    /// 升级路径（M2-C4：护栏决定「停下问人」——高影响副作用/意图歧义/超时/成本超预算，
+    /// 输出结构化 escalation；对齐 Web UI `session.event.escalation`）
+    Escalation,
+    /// 记忆召回（联想记忆网络：对齐 Web UI `session.event.memory_recall`；
+    /// 仅在有命中时发布，前端据「有无事件」决定是否构建筑）
+    MemoryRecall,
+    /// 回合保活心跳（Rust 引擎侧；对齐 Web UI `session.event.run_heartbeat`）
+    RunHeartbeat,
 }
 
 impl EventType {
@@ -114,6 +122,9 @@ impl EventType {
             EventType::SessionsChanged => "sessions_changed",
             EventType::ArtifactUpdated => "artifact_updated",
             EventType::DesktopActionDone => "desktop_action_done",
+            EventType::Escalation => "escalation",
+            EventType::MemoryRecall => "memory_recall",
+            EventType::RunHeartbeat => "run_heartbeat",
         }
     }
 }
@@ -401,6 +412,33 @@ impl Envelope {
         )
     }
 
+    /// 结构化错误事件（R65/B1）
+    ///
+    /// 在 [`Envelope::error`] 之上附加**可本地化插值**的结构化上下文字段
+    /// （如计划步骤的 `step_id` / `step_title`）。前端按稳定 `code` 选文案模板、
+    /// 用上下文插值，从而既人话化又不把内部术语拼进后端文案。
+    ///
+    /// `context` 必须是 JSON 对象；其中的键会并入 payload 顶层（不覆盖 `code` /
+    /// `message`）。非对象 context 被忽略（保持载荷仍是合法错误帧）。
+    pub fn error_structured(
+        session: &str,
+        code: &str,
+        message: &str,
+        context: serde_json::Value,
+    ) -> Self {
+        let mut payload = json!({ "code": code, "message": message });
+        if let (Some(target), Some(extra)) = (payload.as_object_mut(), context.as_object()) {
+            for (key, value) in extra {
+                // 保护权威字段：code / message 由签名决定，上下文不得覆写。
+                if key == "code" || key == "message" {
+                    continue;
+                }
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        Envelope::new(EventType::Error, payload, session)
+    }
+
     /// 并行集成推理进度事件（Bloom 双模型并行 → Web UI `session.event.ensemble_progress`）
     ///
     /// 负载序列化失败时降级为空对象，保证事件仍然抵达前端（不静默丢帧）。
@@ -442,6 +480,27 @@ impl Envelope {
                 "key": session,
                 "run_status": run_status,
                 "occasion": occasion,
+            }),
+            session,
+        )
+    }
+
+    /// 回合保活心跳：长回合期间周期性发布，证明「这一轮还活着」。
+    ///
+    /// 为什么必须在 Rust 侧发：前端的 `session.event.run_heartbeat` 消费与
+    /// `DEFAULT_STREAM_IDLE_TIMEOUT_MS`（630s 收不到任何帧即判死并掐断本轮）是配套设计，
+    /// 而此事件此前**只有 Python 侧车发**。侧车离线/未安装时由 Rust 跑回合，长工具执行或
+    /// 长思考期间一个帧都不发 → 健康的回合在 10.5 分钟后被前端误杀。
+    ///
+    /// `phase` 取 `"turn"`：相位无关的保活（不是阶段跃迁），前端只据此刷新存活时间，
+    /// **不覆盖**当前活动文案。
+    pub fn run_heartbeat(session: &str, task_id: &str, phase: &str) -> Self {
+        Envelope::new(
+            EventType::RunHeartbeat,
+            json!({
+                "session_key": session,
+                "task_id": task_id,
+                "phase": phase,
             }),
             session,
         )
@@ -524,6 +583,31 @@ mod tests {
         assert_eq!(env, back);
     }
 
+    /// R65/B1：结构化错误帧把上下文并入 payload 顶层，且不改写 code / message。
+    #[test]
+    fn test_error_structured_merges_context_without_clobbering() {
+        let env = Envelope::error_structured(
+            "ws.s1",
+            "PLAN_STEP_FAILED",
+            "Plan step step-2 failed.",
+            json!({ "step_id": "step-2", "step_title": "生成 HTML", "code": "IGNORED" }),
+        );
+        assert_eq!(env.r#type, EventType::Error);
+        let p = &env.payload;
+        assert_eq!(p["code"], "PLAN_STEP_FAILED");
+        assert_eq!(p["message"], "Plan step step-2 failed.");
+        assert_eq!(p["step_id"], "step-2");
+        assert_eq!(p["step_title"], "生成 HTML");
+    }
+
+    /// 非对象 context 被安全忽略（载荷仍为合法错误帧，不 panic）。
+    #[test]
+    fn test_error_structured_ignores_non_object_context() {
+        let env = Envelope::error_structured("s", "OTHER", "msg", json!("not-an-object"));
+        assert_eq!(env.payload["code"], "OTHER");
+        assert_eq!(env.payload["message"], "msg");
+    }
+
     #[test]
     fn test_e2_v_missing_defaults_to_current() {
         let json = r#"{"type":"status","payload":{},"ts":"2026-08-04T00:00:00Z","session":"core","trace_id":"t1"}"#;
@@ -600,6 +684,8 @@ mod tests {
             (EventType::SessionsChanged, "sessions_changed"),
             (EventType::ArtifactUpdated, "artifact_updated"),
             (EventType::DesktopActionDone, "desktop_action_done"),
+            (EventType::MemoryRecall, "memory_recall"),
+            (EventType::RunHeartbeat, "run_heartbeat"),
         ];
         for (ty, name) in all {
             assert_eq!(ty.as_str(), name);

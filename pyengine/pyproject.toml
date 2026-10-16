@@ -154,6 +154,14 @@ artifacts = ["src/opensquilla/gateway/static/dist/**"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# The package is a src-layout (`packages = ["src/opensquilla"]`, see
+# [tool.hatch.build.targets.wheel] below). Without this entry a bare `pytest`
+# from a source checkout cannot import `opensquilla` at all, and the suite
+# collapses into collection errors that look like hundreds of independent
+# breakages. Measured on this repository before/after adding this one line:
+#   1553 tests collected, 1146 errors   ->   20539 tests collected, 22 errors
+# `pythonpath` is a built-in pytest option (pytest >= 7.0); no plugin needed.
+pythonpath = ["src"]
 norecursedirs = ["tests/_private", "tests/fixtures", ".omx", ".codex", ".claude"]
 markers = [
     "llm: marks tests that make real external model/provider API calls (deselect with '-m \"not llm\"')",

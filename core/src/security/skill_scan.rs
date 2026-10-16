@@ -147,9 +147,7 @@ impl SkillInstallScanner {
 /// `stage` 标识阻断发生的链路位置：`"load"`（运行时加载防篡改）、`"install"`（落盘前安装）、
 /// `"tool_create"`（工具层 create_skill 生成）。
 pub fn log_skill_block(stage: &str, name: &str, path: Option<&Path>, verdict: &SkillScanVerdict) {
-    let path_str = path
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let path_str = path.map(|p| p.display().to_string()).unwrap_or_default();
 
     // 通道一：结构化 tracing 字段（默认 warn 级别输出）
     warn!(
@@ -288,7 +286,8 @@ mod tests {
     /// `log_skill_block` 应产出结构化审计 JSON 行，且绝不回显命中原文（防密钥/代码泄露）。
     #[test]
     fn log_skill_block_writes_structured_audit_line() {
-        let dir = std::env::temp_dir().join(format!("marguerite_audit_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("marguerite_audit_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let yaml_path = dir.join("evil.yaml");

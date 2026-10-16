@@ -26,7 +26,10 @@ impl UsageStats {
 
     /// 记录一次 Agent 调用（累加）。
     pub fn record_agent_invocation(&mut self, agent_id: &str) {
-        *self.agent_invocations.entry(agent_id.to_string()).or_insert(0) += 1;
+        *self
+            .agent_invocations
+            .entry(agent_id.to_string())
+            .or_insert(0) += 1;
     }
 
     /// 面板打开 Top-N（降序，平局按 id 字典序稳定）。

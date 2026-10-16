@@ -1124,6 +1124,29 @@ def test_router_evaluator_flags_required_missing_runtime_as_action_required() ->
     assert "opensquilla configure router --router disabled" in findings[0].fix_steps[0].command
 
 
+def test_router_evaluator_gives_git_lfs_pointer_recovery() -> None:
+    """Weights-not-fetched must not be answered with "disable/reinstall"."""
+
+    findings = evaluate_router(
+        {
+            "enabled": True,
+            "rolloutPhase": "full",
+            "strategy": "v4_phase3",
+            "tierProfile": "openrouter",
+            "runtimeValid": False,
+            "requireRouterRuntime": True,
+            "runtimeErrorKind": "router_weights_not_fetched",
+            "error": "incomplete V4 router bundle: lgbm_main.bin: Git LFS pointer, not model data",
+        }
+    )
+
+    finding = findings[0]
+    assert finding.id == "router.runtime.missing"
+    assert finding.title == "Router model weights were not fetched"
+    assert "git lfs pull" in finding.fix_steps[0].command
+    assert finding.evidence["runtimeErrorKind"] == "router_weights_not_fetched"
+
+
 def test_router_evaluator_gives_macos_libomp_recovery() -> None:
     findings = evaluate_router(
         {

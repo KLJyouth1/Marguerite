@@ -13,12 +13,101 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 pub mod semantic;
+pub mod hitcache;
+pub mod selfcheck;
+
+/// 进程级多层语义缓存接驳位（Task #5）。
+///
+/// 设计要点：本进程把 `MultiTierCache` 的 Tier 0 绑定到调用方共享的 `Arc<PrefixCache>`
+/// （网关路径即 `gateway_prefix_cache()`），使三层缓存与既有精确缓存**同源同对象**：
+/// - 精确命中由共享 `PrefixCache` 统一计量（不重复计数）；
+/// - `model::llm` 在精确未命中后，用 [`semantic::TierPolicy`] 逐层短路补命中；
+/// - 落盘由 `install_semantic_layer` 的调用方负责（避免双写）。
+///
+/// 默认开启 Tier 1（规范化精确，假阳性极低）；Tier 2（语义近似）默认关闭，需显式
+/// `with_semantic_enabled(true)`，呼应 CHANGELOG「100% 缓存命中率」但**绝不冒充**——
+/// 命中率由 [`semantic::MultiTierStats`] 诚实统计，UI 如实展示三层来源。
+static SEMANTIC_LAYER: OnceLock<Arc<semantic::MultiTierCache>> = OnceLock::new();
+
+/// 安装进程级多层语义缓存（网关冷启动时调用一次）。`exact` 为共享精确缓存（如网关前缀缓存），
+/// 可选 `restore_path` 用于从磁盘恢复 Tier 1/2（不覆盖共享的 Tier 0）。已安装则幂等返回既有实例。
+///
+/// 嵌入器走 [`semantic::ProviderEmbedder`]：真实后端由 `EmbeddingProvider::configure`
+/// （读 `config.embeddings.backend`）在启动时定好，故 `backend=model` + `real-embed` 时
+/// 语义层**真的**用真实模型向量；默认仍是零依赖本地后端，行为不变。
+/// （此前这里写死 `LocalNgramEmbedder`，于是配置了真实嵌入后端也不会被语义缓存使用。）
+///
+/// Tier 2（语义近似）按 `MARGUERITE_SEMANTIC_CACHE=on` **显式选入**：不设时保持
+/// 「精确 + 规范化精确」的零近似假阳性契约不变。
+pub fn install_semantic_layer(
+    exact: Arc<PrefixCache>,
+    restore_path: Option<&std::path::Path>,
+) -> &'static Arc<semantic::MultiTierCache> {
+    SEMANTIC_LAYER.get_or_init(|| {
+        let layer = match restore_path {
+            Some(p) => semantic::MultiTierCache::open_with_shared_exact(
+                p,
+                exact,
+                Box::new(semantic::ProviderEmbedder::new()),
+                0.92,
+            ),
+            None => semantic::MultiTierCache::with_shared_exact(
+                exact,
+                1024,
+                Box::new(semantic::ProviderEmbedder::new()),
+                0.92,
+            ),
+        };
+        let layer = layer.with_semantic_enabled(semantic::tier2_opted_in_from_env());
+        Arc::new(layer)
+    })
+}
+
+/// 取进程级多层语义缓存（未安装返回 `None`）。`model::llm` 据此判断是否接驳三层缓存。
+#[must_use]
+pub fn semantic_layer() -> Option<&'static Arc<semantic::MultiTierCache>> {
+    SEMANTIC_LAYER.get()
+}
+
+/// 生产路径的进程级默认精确缓存（惰性单例），也是 `cache.status` 观测聚合所读的句柄。
+///
+/// 与 `default_prefix_cache()` 分离的原因：`cargo test` 在同一进程内并行跑上千个用例，
+/// 若测试也共享同一份缓存，用例之间会互相污染——例如某用例写入的响应被另一用例命中，
+/// 使后者「网络失败必须报错」的断言失效（已实测复现）。因此测试构建下
+/// `default_prefix_cache()` 保持「每次新建」的历史隔离语义，而本函数始终编译：
+/// 生产路径用它实现跨轮共享，观测端点用它聚合进程级真实指标，单测可直接验证它。
+pub(crate) fn process_prefix_cache() -> Arc<PrefixCache> {
+    static CACHE: OnceLock<Arc<PrefixCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(PrefixCache::new(2048))).clone()
+}
+
+/// 进程级**默认精确前缀缓存**：网关路径已安装语义层时，直接复用其 Tier 0（即
+/// `install_semantic_layer` 传入的共享缓存）；未安装（CLI / TUI）时退化为
+/// **进程级单例**——否则 `ModelRouter::new` 每次拿到新实例，各组件各自持有独立缓存表，
+/// 键虽稳定、跨轮查找却落在不同表里，Tier 0 命中率恒为 0。
+///
+/// 存在的意义（M2 降耗根因之一）：`ModelRouter::new` 此前无条件
+/// `Arc::new(PrefixCache::new(2048))`，而 `AgentRuntime` 等组件正是走这条构造路径，
+/// 于是它们各自持有**独立**缓存实例，跨轮重复请求永不命中。经此函数收敛后，同一进程内
+/// 所有默认构造的 Router 与网关共享同一份缓存，跨轮重复请求方可命中。
+///
+/// 测试构建下刻意**不共享**：并行用例需要隔离（见 [`process_prefix_cache`]）。
+#[must_use]
+pub fn default_prefix_cache() -> Arc<PrefixCache> {
+    if let Some(layer) = SEMANTIC_LAYER.get() {
+        return layer.exact_arc().clone();
+    }
+    if cfg!(test) {
+        return Arc::new(PrefixCache::new(2048));
+    }
+    process_prefix_cache()
+}
 
 /// FNV-1a 64 位哈希：快、无依赖、足够做缓存键（精确命中不需要密码学强度）。
 pub fn hash_text(s: &str) -> u64 {
@@ -29,6 +118,12 @@ pub fn hash_text(s: &str) -> u64 {
     }
     h
 }
+
+/// `prefix_seen` 集合上限：防止「每个不同稳定前缀一条」无界增长（并随 `PersistedCache` 落盘膨胀）。
+///
+/// 采用最简单的安全策略：超限时驱逐任意一条（`HashSet` 无序）。被驱逐的前缀下次会被当作
+/// 「新前缀」（不计复用），**绝不产生假阳性复用**——指标只会短暂少算，不会虚报命中。
+const MAX_PREFIX_SEEN: usize = 4096;
 
 /// 缓存可观测性：命中率与"省下 token"比例，没有它缓存就是黑箱。
 #[derive(Clone, Copy, Debug, Default)]
@@ -128,6 +223,16 @@ pub(crate) struct PersistedCache {
     prefix_seen: std::collections::HashSet<u64>,
 }
 
+impl PersistedCache {
+    /// 空载荷：共享 `exact` 层由外部负责落盘时，避免重复写入与双写漂移。
+    fn empty() -> Self {
+        Self {
+            map: HashMap::new(),
+            prefix_seen: std::collections::HashSet::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     map: HashMap<u64, CacheEntry>,
@@ -159,6 +264,15 @@ impl PrefixCache {
             capacity: capacity.max(1),
             dirty: AtomicBool::new(false),
         }
+    }
+
+    /// 清空所有缓存条目和统计（仅供测试隔离使用）。
+    #[cfg(test)]
+    pub fn clear(&self) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.map.clear();
+        g.stats = CacheStats::default();
+        g.prefix_seen.clear();
     }
 
     /// 精确命中查询；命中则更新 LRU 时间戳并计入 stats，否则计入一次 miss。
@@ -210,6 +324,13 @@ impl PrefixCache {
             true
         } else {
             g.prefix_seen.insert(hash);
+            // 有界：超过上限时驱逐任意一条（HashSet 无序）。驱逐只会让该前缀下次被当作
+            // 「新前缀」，不计复用——绝不产生假阳性复用（见 MAX_PREFIX_SEEN 文档）。
+            if g.prefix_seen.len() > MAX_PREFIX_SEEN {
+                if let Some(victim) = g.prefix_seen.iter().next().copied() {
+                    g.prefix_seen.remove(&victim);
+                }
+            }
             false
         }
     }
@@ -465,6 +586,12 @@ impl PrefixCacheTracker {
     }
 }
 
+impl Default for PrefixCacheTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 进程级前缀缓存追踪器快照。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PrefixCacheTrackerStats {
@@ -525,7 +652,10 @@ mod tests {
         assert!(c.is_dirty(), "写入后应置脏");
         assert!(c.save_if_dirty(&path).unwrap(), "有写入应落盘");
         assert!(!c.is_dirty(), "落盘后应清脏");
-        assert!(!c.save_if_dirty(&path).unwrap(), "无新写入零 IO（不重复落盘）");
+        assert!(
+            !c.save_if_dirty(&path).unwrap(),
+            "无新写入零 IO（不重复落盘）"
+        );
     }
 
     #[test]
@@ -540,7 +670,9 @@ mod tests {
         assert!(!b.is_dirty());
         b.absorb(&path);
         assert!(b.is_dirty(), "并入后应置脏（待落盘合并结果）");
-        let hit = b.get(42).expect("冷上下文并入后应命中——可重复请求 100% 复用的证明");
+        let hit = b
+            .get(42)
+            .expect("冷上下文并入后应命中——可重复请求 100% 复用的证明");
         assert_eq!(hit.content, "冷上下文");
     }
 
@@ -676,6 +808,22 @@ mod tests {
     }
 
     #[test]
+    fn prefix_seen_is_bounded() {
+        // 缺陷回归：`prefix_seen` 曾无界增长（每个不同稳定前缀一条，且随落盘膨胀）。
+        // 插入远超上限的互异前缀后，集合必须保持有界。
+        let c = PrefixCache::new(8);
+        for i in 0..(MAX_PREFIX_SEEN as u64 + 500) {
+            c.note_prefix(i, 1);
+        }
+        let g = c.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            g.prefix_seen.len() <= MAX_PREFIX_SEEN,
+            "prefix_seen 必须保持有界（<= {MAX_PREFIX_SEEN}），实际 {}",
+            g.prefix_seen.len()
+        );
+    }
+
+    #[test]
     fn open_missing_file_returns_empty_cache() {
         let path =
             std::env::temp_dir().join(format!("marg_prefix_missing_{}.json", std::process::id()));
@@ -704,7 +852,10 @@ mod tests {
             t.observe_stable_prefix("system-prefix-v1"),
             "首次登记应返回 true"
         );
-        assert!(t.observe_stable_prefix("system-prefix-v1"), "相同前缀应无漂移");
+        assert!(
+            t.observe_stable_prefix("system-prefix-v1"),
+            "相同前缀应无漂移"
+        );
         assert!(
             !t.observe_stable_prefix("system-prefix-v2-changed"),
             "前缀变化应检出漂移并返回 false"
@@ -718,6 +869,45 @@ mod tests {
         let a = prefix_cache_tracker() as *const PrefixCacheTracker;
         let b = prefix_cache_tracker() as *const PrefixCacheTracker;
         assert_eq!(a, b, "prefix_cache_tracker() 应返回同一全局实例");
+    }
+
+    #[test]
+    fn process_prefix_cache_is_singleton_and_shared() {
+        // 生产语义回归守卫：进程级句柄必须是同一实例，否则 `ModelRouter::new` 各自持有
+        // 独立缓存表，跨轮查找永不命中（Tier 0 命中率恒 0）。
+        let a = process_prefix_cache();
+        let b = process_prefix_cache();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "process_prefix_cache() 必须是进程级单例，否则跨轮命中率恒为 0"
+        );
+        // 写入经一个句柄，另一个句柄必须看得到（真正共享，而非同指针巧合）
+        let key = hash_text("process-prefix-cache-singleton-probe");
+        a.put(
+            key,
+            CacheEntry {
+                content: "shared".into(),
+                prompt_tokens: 7,
+                completion_tokens: 1,
+                last_used_ms: 1,
+            },
+        );
+        assert!(
+            b.get(key).is_some(),
+            "同一进程内两次获取的进程级缓存必须共享条目（跨轮复用前提）"
+        );
+    }
+
+    #[test]
+    fn default_prefix_cache_isolates_under_test_build() {
+        // 测试隔离契约：并行用例不得互相污染，故测试构建下每次返回独立实例。
+        // （生产路径由 `default_prefix_cache() -> process_prefix_cache()` 保证共享。）
+        let a = default_prefix_cache();
+        let b = default_prefix_cache();
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "测试构建下 default_prefix_cache() 必须隔离，避免并行用例互相污染缓存"
+        );
     }
 
     #[test]
@@ -752,5 +942,94 @@ mod tests {
         assert!(c2.note_prefix(42, 100), "已观测前缀应从落盘恢复");
         assert_eq!(c2.stats().stored_prompt_tokens, 30, "stored token 应恢复");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- R46：生产语义路径必须经 EmbeddingProvider（文档 1「语义缓存未接真实 embedding」）----
+
+    /// 取 `marker` 之后第一个函数体（按花括号配对截取，故函数上方的文档注释不计入）
+    fn fn_body<'a>(src: &'a str, marker: &str) -> &'a str {
+        let at = src.find(marker).expect("marker 必须存在") + marker.len();
+        let open = src[at..].find('{').expect("函数应带函数体") + at;
+        let mut depth = 0usize;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open..=open + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数体花括号不配对: {marker}");
+    }
+
+    /// 生产接线守卫（有牙）：两处**默认**语义相似度实现都必须经 `EmbeddingProvider`。
+    ///
+    /// 此前它们分别写死 `LocalNgramEmbedder` / `LocalEmbedding`，于是
+    /// `embeddings.backend=model` + `real-embed` 配好了真实嵌入后端，语义缓存却仍然只用
+    /// 本地特征哈希——配置形同虚设。改回写死实现，本用例必须失败。
+    #[test]
+    fn production_semantic_paths_route_through_embedding_provider() {
+        let own = include_str!("mod.rs");
+        let bloom = include_str!("../agent/bloom_cache.rs");
+
+        let install = fn_body(own, "pub fn install_semantic_layer");
+        assert!(
+            install.contains("ProviderEmbedder::new()"),
+            "install_semantic_layer 必须用 ProviderEmbedder（否则真实嵌入后端配了也不生效）"
+        );
+        assert!(
+            !install.contains("LocalNgramEmbedder"),
+            "install_semantic_layer 不得写死本地 n-gram 嵌入器"
+        );
+
+        let sim = fn_body(bloom, "pub fn embedding_similarity");
+        assert!(
+            sim.contains("EmbeddingProvider::global()"),
+            "Bloom 语义意图缓存的默认相似度必须走 EmbeddingProvider"
+        );
+        assert!(
+            !sim.contains("LocalEmbedding::"),
+            "默认相似度不得直连 LocalEmbedding（否则真实嵌入后端配了也不生效）"
+        );
+
+        // ③ 光把嵌入器接对还不够：Tier 2 必须能被显式选入，且 LLM 文本路径必须按选入
+        //    选策略——否则语义层在生产里永远走不到（配了真实嵌入也无从生效）。
+        assert!(
+            install.contains("tier2_opted_in_from_env()"),
+            "install_semantic_layer 必须按选入开关决定 Tier 2 是否参与"
+        );
+        let llm = include_str!("../model/llm.rs");
+        let at = llm
+            .find("if let Some(layer) = layer {")
+            .expect("llm 文本路径应存在 `if let Some(layer) = layer {` 分支");
+        let window = &llm[at..(at + 600).min(llm.len())];
+        assert!(
+            window.contains("text_path_policy("),
+            "LLM 文本路径必须用 text_path_policy 决定 Tier 2 是否参与"
+        );
+        assert!(
+            !window.contains("TierPolicy::NormalizedOnly"),
+            "LLM 文本路径不得写死 NormalizedOnly（那会让语义层在生产里永远不生效）"
+        );
+    }
+
+    /// 安装点必须把 Tier 2 开关**落到真实实例**上：`semantic_enabled` 恒等于选入开关。
+    ///
+    /// - 全套跑（env 未设）：两边都是 false —— 属性仍成立且不因安装顺序而 flaky；
+    /// - 单跑 `MARGUERITE_SEMANTIC_CACHE=on cargo test … install_applies_tier2_opt_in_to_the_layer`：
+    ///   选入为 true，若安装点漏了 `.with_semantic_enabled(...)`，断言立刻失败（选入形同虚设）。
+    #[test]
+    fn install_applies_tier2_opt_in_to_the_layer() {
+        let exact = Arc::new(PrefixCache::new(8));
+        let layer = install_semantic_layer(exact, None);
+        assert_eq!(
+            layer.semantic_enabled(),
+            crate::cache::semantic::tier2_opted_in_from_env(),
+            "安装出来的多层缓存必须如实反映 Tier 2 选入开关"
+        );
     }
 }

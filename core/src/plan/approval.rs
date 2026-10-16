@@ -69,27 +69,48 @@ impl PlanApproval {
     /// 提交审批（Draft → PendingApproval）；即 exit_plan_mode 的落点。
     pub fn submit(&mut self) -> Result<()> {
         if self.state != PlanApprovalState::Draft {
-            return Err(anyhow!("仅 draft 状态可提交审批，当前为 {}", self.state.as_str()));
+            return Err(anyhow!(
+                "仅 draft 状态可提交审批，当前为 {}",
+                self.state.as_str()
+            ));
         }
         self.state = PlanApprovalState::PendingApproval;
         self.feedback = None;
+        // M3-D1 产品事件：审批请求
+        crate::events::product::emit(
+            crate::events::product::APPROVAL_REQUESTED,
+            "core",
+            serde_json::json!({ "approval": "plan", "state": "pending_approval" }),
+        );
         Ok(())
     }
 
     /// 批准（PendingApproval → Approved）；批准后离开计划模式。
     pub fn approve(&mut self) -> Result<()> {
         if self.state != PlanApprovalState::PendingApproval {
-            return Err(anyhow!("仅 pending_approval 状态可批准，当前为 {}", self.state.as_str()));
+            return Err(anyhow!(
+                "仅 pending_approval 状态可批准，当前为 {}",
+                self.state.as_str()
+            ));
         }
         self.state = PlanApprovalState::Approved;
         self.feedback = None;
+        // M3-D1 产品事件：审批放行
+        crate::events::product::emit(
+            crate::events::product::APPROVAL_GRANTED,
+            "core",
+            serde_json::json!({ "approval": "plan", "state": "approved" }),
+        );
         Ok(())
     }
 
     /// 驳回（PendingApproval → Rejected），记录反馈理由。
     pub fn reject(&mut self, feedback: &str) -> Result<()> {
         if self.state != PlanApprovalState::PendingApproval {
-            return Err(anyhow!("仅 pending_approval 状态可驳回，当前为 {}", self.state.as_str()));
+            return Err(anyhow!(
+                "仅 pending_approval 状态可驳回，当前为 {}",
+                self.state.as_str()
+            ));
         }
         let f = feedback.trim();
         if f.is_empty() {
@@ -97,13 +118,22 @@ impl PlanApproval {
         }
         self.state = PlanApprovalState::Rejected;
         self.feedback = Some(f.to_string());
+        // M3-D1 产品事件：审批驳回
+        crate::events::product::emit(
+            crate::events::product::APPROVAL_DENIED,
+            "core",
+            serde_json::json!({ "approval": "plan", "state": "rejected", "feedback": f }),
+        );
         Ok(())
     }
 
     /// 修订（Rejected → Draft），清空反馈、返回计划模式继续拟定。
     pub fn revise(&mut self) -> Result<()> {
         if self.state != PlanApprovalState::Rejected {
-            return Err(anyhow!("仅 rejected 状态可修订，当前为 {}", self.state.as_str()));
+            return Err(anyhow!(
+                "仅 rejected 状态可修订，当前为 {}",
+                self.state.as_str()
+            ));
         }
         self.state = PlanApprovalState::Draft;
         self.feedback = None;

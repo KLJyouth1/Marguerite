@@ -11,6 +11,7 @@
 
 pub mod bus;
 pub mod envelope;
+pub mod product;
 
 pub use bus::EventBus;
 pub use envelope::{EnsembleProgress, Envelope, EventError, EventType, CURRENT_EVENT_VERSION};
@@ -47,6 +48,8 @@ pub mod topics {
     pub const CHAIN_DONE: &str = "chain.done";
     /// 审批请求
     pub const APPROVAL: &str = "approval.request";
+    /// 升级路径（M2-C4：护栏输出「需要确认」的 escalation 事件）
+    pub const ESCALATION: &str = "escalation";
     /// 进度播报
     pub const PROGRESS: &str = "progress";
 }

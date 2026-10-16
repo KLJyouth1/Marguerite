@@ -39,41 +39,36 @@ use crate::plugins::manifest::PluginManifest;
 /// 走"识图→注入 notes"路径；否则直接放行。
 /// 注入的 notes 文本可被上层 agent loop 在拼装 prompt 时拼入 context。
 pub fn install_modlens_hook(runner: &HookRunner) {
-    runner.register_fn(
-        HookPhase::PreToolCall,
-        "dsh-modlens-prepare",
-        |ctx| {
-            // 检查是否有待识图附件
-            let path_candidate = ctx
-                .args
-                .get("image_path")
-                .cloned()
-                .or_else(|| ctx.args.get("attachments").cloned())
-                .filter(|s| !s.is_empty());
-            let Some(path) = path_candidate else {
-                return Ok(HookDecision::Continue);
-            };
-            // A 阶段：降级到 metadata_fallback（纯本地，不联网）。
-            // B 阶段可替换为 ModLens::analyze（需要真实模型后端）。
-            let bytes = std::fs::read(&path).unwrap_or_default();
-            use crate::vision::modlens::ModLens;
-            let doc = ModLens::metadata_fallback(&bytes);
-            let summary = format!(
-                "[modlens-ocr] image={} summary={} blocks={}",
-                path,
-                doc.summary,
-                doc.blocks.len()
-            );
-            // 注入 notes：等效「上下文注入识别结果」
-            let mut next = ctx.clone();
-            next.notes.push(summary.clone());
-            // 把识别结果作为 arg 回写，供工具侧消费
-            next.args.insert("ocr_summary".into(), summary);
-            next.args
-                .insert("ocr_layout_json".into(), doc.to_json());
-            Ok(HookDecision::Modify(next))
-        },
-    );
+    runner.register_fn(HookPhase::PreToolCall, "dsh-modlens-prepare", |ctx| {
+        // 检查是否有待识图附件
+        let path_candidate = ctx
+            .args
+            .get("image_path")
+            .cloned()
+            .or_else(|| ctx.args.get("attachments").cloned())
+            .filter(|s| !s.is_empty());
+        let Some(path) = path_candidate else {
+            return Ok(HookDecision::Continue);
+        };
+        // A 阶段：降级到 metadata_fallback（纯本地，不联网）。
+        // B 阶段可替换为 ModLens::analyze（需要真实模型后端）。
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        use crate::vision::modlens::ModLens;
+        let doc = ModLens::metadata_fallback(&bytes);
+        let summary = format!(
+            "[modlens-ocr] image={} summary={} blocks={}",
+            path,
+            doc.summary,
+            doc.blocks.len()
+        );
+        // 注入 notes：等效「上下文注入识别结果」
+        let mut next = ctx.clone();
+        next.notes.push(summary.clone());
+        // 把识别结果作为 arg 回写，供工具侧消费
+        next.args.insert("ocr_summary".into(), summary);
+        next.args.insert("ocr_layout_json".into(), doc.to_json());
+        Ok(HookDecision::Modify(next))
+    });
 }
 
 // -------------------- T-1.4.2 Usage PostToolUse 聚合器 --------------------
@@ -130,7 +125,7 @@ impl UsageAggregator {
 
 fn day_key_ms(ts_ms: i64) -> String {
     // 本地时区换算简化（以 UTC 日键，避免额外 chrono 依赖）
-    let secs = (ts_ms / 1000) as i64;
+    let secs = ts_ms / 1000;
     let days = secs.div_euclid(86400);
     format!("day_{days}")
 }
@@ -221,12 +216,7 @@ pub fn install_usage_hook_with_projection(
             guard.push(rec.clone());
             let total = guard.total_tokens();
             drop(guard);
-            publish_usage_accumulated(
-                bus_for_hook.as_deref(),
-                session_post.as_str(),
-                &rec,
-                total,
-            );
+            publish_usage_accumulated(bus_for_hook.as_deref(), session_post.as_str(), &rec, total);
             // 凭证/投影缝：把样本折叠进会话 tokenUsage 投影（best-effort，失败不阻断记账）
             if let Some(proj) = proj_for_hook.as_ref() {
                 let event = json!({
@@ -275,12 +265,7 @@ pub fn install_usage_hook_with_projection(
             guard.push(rec.clone());
             let total = guard.total_tokens();
             drop(guard);
-            publish_usage_accumulated(
-                bus_for_err.as_deref(),
-                session_err.as_str(),
-                &rec,
-                total,
-            );
+            publish_usage_accumulated(bus_for_err.as_deref(), session_err.as_str(), &rec, total);
             Ok(HookDecision::Continue)
         },
     );
@@ -289,21 +274,16 @@ pub fn install_usage_hook_with_projection(
 
 // -------------------- T-1.4.3 Pet Notification 状态机 --------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PetState {
+    #[default]
     Idle,
     Thinking,
     Running,
     Sleeping,
     Eating,
     Petted,
-}
-
-impl Default for PetState {
-    fn default() -> Self {
-        PetState::Idle
-    }
 }
 
 impl PetState {
@@ -319,10 +299,7 @@ impl PetState {
     }
 
     /// 事件路由键匹配：哪些 Status payload kind 触发什么状态
-    fn from_event_type_and_payload(
-        event: EventType,
-        kind: Option<&str>,
-    ) -> Option<PetState> {
+    fn from_event_type_and_payload(event: EventType, kind: Option<&str>) -> Option<PetState> {
         match (event, kind) {
             // 工具回路开始 / 计划开始 → running
             (EventType::StepStart, _) | (EventType::PlanRun, _) => Some(PetState::Running),
@@ -391,21 +368,17 @@ impl Default for DshPetBridge {
 // -------------------- T-1.5 Router 3 模式 Profile --------------------
 
 /// Router 3 模式 profile（T-1.5 主数据结构）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterProfile {
     Plan,
     Execute,
+    #[default]
     Weak,
 }
 
-impl Default for RouterProfile {
-    fn default() -> Self {
-        RouterProfile::Weak
-    }
-}
-
 impl RouterProfile {
+    #[allow(clippy::should_implement_trait)] // 命名仿 FromStr 但返回 anyhow::Error，保留为解析辅助
     pub fn from_str(s: &str) -> Result<Self> {
         Ok(match s.to_ascii_lowercase().as_str() {
             "plan" | "planner" | "planning" => RouterProfile::Plan,
@@ -531,7 +504,8 @@ impl DshRouterBridge {
 
     /// 根据 manifest 构建 FleetRouter（已存在 FleetRouter::from_manifest；这里仅薄封装，合并多个）
     pub fn fleet_from_manifests(manifests: &[PluginManifest]) -> FleetRouter {
-        let mut routes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut routes: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for m in manifests {
             for (k, v) in &m.capability_models {
                 routes.insert(k.clone(), v.clone());
@@ -602,8 +576,8 @@ pub fn default_bus() -> EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::hooks::{HookContext, HookOutcome};
     use crate::events::bus::DEFAULT_HISTORY_CAPACITY;
+    use crate::harness::hooks::{HookContext, HookOutcome};
 
     // ---- T-1.4 TR-R1: Modlens PreToolUse 注入 OCR notes ----
     #[test]
@@ -621,11 +595,11 @@ mod tests {
                 let ocr = c.notes.iter().find(|n| n.starts_with("[modlens-ocr]"));
                 assert!(ocr.is_some(), "notes 里应有 OCR 摘要：{:?}", c.notes);
                 assert!(
-                    c.args.get("ocr_summary").is_some(),
+                    c.args.contains_key("ocr_summary"),
                     "args 应注入 ocr_summary"
                 );
                 assert!(
-                    c.args.get("ocr_layout_json").is_some(),
+                    c.args.contains_key("ocr_layout_json"),
                     "args 应注入 ocr_layout_json"
                 );
             }
@@ -685,19 +659,24 @@ mod tests {
         let projections = Arc::new(Mutex::new(
             crate::projection::ProjectionStore::open(None).unwrap(),
         ));
-        let agg = install_usage_hook_with_projection(&runner, None, "s1", Some(projections.clone()));
+        let agg =
+            install_usage_hook_with_projection(&runner, None, "s1", Some(projections.clone()));
 
         let ctx = HookContext::new(HookPhase::PostToolCall, temp_dir_marker())
             .with_tool("run_code")
             .with_arg("tokens_in", "100")
             .with_arg("tokens_out", "50");
-        let _ = runner.run_tool_call(ctx, |_| Ok("ok1".to_string())).unwrap();
+        let _ = runner
+            .run_tool_call(ctx, |_| Ok("ok1".to_string()))
+            .unwrap();
         // 新一步（工具不同 → step_key 不同）
         let ctx2 = HookContext::new(HookPhase::PostToolCall, temp_dir_marker())
             .with_tool("web_search")
             .with_arg("tokens_in", "30")
             .with_arg("tokens_out", "10");
-        let _ = runner.run_tool_call(ctx2, |_| Ok("ok2".to_string())).unwrap();
+        let _ = runner
+            .run_tool_call(ctx2, |_| Ok("ok2".to_string()))
+            .unwrap();
 
         let store = projections.lock().unwrap();
         let view = store
@@ -776,12 +755,18 @@ mod tests {
     // ---- T-1.5 TR-R1: RouterProfile from_str / roundtrip ----
     #[test]
     fn router_3_profiles_enum() {
-        assert_eq!(RouterProfile::from_str("plan").unwrap(), RouterProfile::Plan);
+        assert_eq!(
+            RouterProfile::from_str("plan").unwrap(),
+            RouterProfile::Plan
+        );
         assert_eq!(
             RouterProfile::from_str("execute").unwrap(),
             RouterProfile::Execute
         );
-        assert_eq!(RouterProfile::from_str("weak").unwrap(), RouterProfile::Weak);
+        assert_eq!(
+            RouterProfile::from_str("weak").unwrap(),
+            RouterProfile::Weak
+        );
         assert_eq!(
             RouterProfile::from_str("auto").unwrap(),
             RouterProfile::Weak
@@ -809,9 +794,11 @@ mod tests {
         let store = RouterProfileStore::new(&path);
         let mut bridge = DshRouterBridge::new(store);
 
-        bridge.apply_cmd(&RouterCmd::Set {
-            mode: RouterMode::Plan,
-        }).unwrap();
+        bridge
+            .apply_cmd(&RouterCmd::Set {
+                mode: RouterMode::Plan,
+            })
+            .unwrap();
         // 重启：new 一个 store 读同一路径
         let store2 = RouterProfileStore::new(&path);
         let bridge2 = DshRouterBridge::new(store2);
@@ -824,9 +811,11 @@ mod tests {
         let dir = temp_dir_marker();
         let store = RouterProfileStore::new(dir.join("r.json"));
         let mut bridge = DshRouterBridge::new(store);
-        bridge.apply_cmd(&RouterCmd::Set {
-            mode: RouterMode::Execute,
-        }).unwrap();
+        bridge
+            .apply_cmd(&RouterCmd::Set {
+                mode: RouterMode::Execute,
+            })
+            .unwrap();
         let r = bridge.apply_cmd(&RouterCmd::Query).unwrap();
         assert!(r.contains("execute"), "query 应答应含模式名: {r}");
     }
@@ -850,11 +839,8 @@ mod tests {
 
     // 辅助：创建一个临时目录（不写文件），路径唯一即可
     fn temp_dir_marker() -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "mgr-dsh-t-{}-{}",
-            std::process::id(),
-            rand_like()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("mgr-dsh-t-{}-{}", std::process::id(), rand_like()));
         std::fs::create_dir_all(&base).ok();
         base
     }

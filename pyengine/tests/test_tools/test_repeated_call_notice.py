@@ -1,12 +1,23 @@
 """Repeated-identical-call notice at the dispatch layer.
 
-Covers OPENSQUILLA_REPEATED_CALL_NOTICE (off by default). When armed with a
-threshold N, a read-only tool call whose canonicalized arguments and raw
-result are byte-identical to the previous identical call gets a notice
-injected into the finalized content from the Nth repeat onward, plus a
-``dispatch.repeated_call_notice`` runtime event. Error results, tools outside
-the read-only allowlist, and changed results never trigger the notice, and
-counters are scoped per session_key.
+Two paths with **opposite** defaults, because the two cases have opposite
+semantics:
+
+* **Success** — ``OPENSQUILLA_REPEATED_CALL_NOTICE`` (off by default). When
+  armed with a threshold N, a read-only tool call whose canonicalized arguments
+  and raw result are byte-identical to the previous identical call gets a notice
+  injected into the finalized content from the Nth repeat onward, plus a
+  ``dispatch.repeated_call_notice`` runtime event. Tools outside the read-only
+  allowlist and changed results never trigger it. Repeats of a *successful* call
+  can be legitimate (data refresh, state change), hence opt-in.
+* **Failure** — ``OPENSQUILLA_REPEATED_FAILURE_NOTICE`` (**on by default**,
+  threshold 3; set to ``0`` to disable). A repeated *identical failure* is a
+  death loop: same tool, same arguments, same error — the Nth repeat carries no
+  new information. No tool allowlist applies, because byte-identical failure
+  output is positive proof the call had *no* side effect (the inverse of the
+  rationale that excludes execution/write tools on the success path).
+
+Counters are scoped per session_key on both paths.
 """
 
 from __future__ import annotations
@@ -192,26 +203,20 @@ async def test_changed_result_resets_the_counter(
 
 
 @pytest.mark.asyncio
-async def test_error_results_and_non_allowlisted_tools_are_never_noticed(
+async def test_non_allowlisted_tool_successes_are_never_noticed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """成功路径的契约**未变**：只读白名单之外的工具，成功也不提示。
+
+    （成功路径的重复可能是合法的——数据刷新、状态变化——所以只在显式
+    配置时提示，且限定结果为其参数的纯函数的那批只读工具。）
+    """
     monkeypatch.setenv("OPENSQUILLA_REPEATED_CALL_NOTICE", "1")
     events: list[dict[str, object]] = []
     handler = build_tool_handler(
         _build_registry(),
         ToolContext(on_runtime_event=events.append, session_key="agent:main:excluded"),
     )
-
-    for index in range(3):
-        error_result = await handler(
-            ToolCall(
-                tool_use_id=f"tc-err-{index}",
-                tool_name="git_status",
-                arguments={"path": "."},
-            )
-        )
-        assert error_result.is_error is True
-        assert _NOTICE_PREFIX not in error_result.content
 
     for index in range(3):
         probe_result = await handler(
@@ -223,6 +228,124 @@ async def test_error_results_and_non_allowlisted_tools_are_never_noticed(
         )
         assert probe_result.is_error is False
         assert probe_result.content == "identical probe output"
+
+    assert _notice_events(events) == []
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_failures_are_noticed_for_any_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**核心回归**：相同失败重复到达默认阈值（3）即提示，且**不设工具白名单**。
+
+    这是「死循环」的正解。真机实测：agent 以 2–4 秒间隔重复调用
+    `shell_exec()` / `code_exec()` 并失败，持续数分钟、累计 63 次 FAILED ——
+    而旧实现**恰好跳过失败**（`final_result.is_error` 早退）**且**默认阈值 0
+    （功能整体关闭），两道门同时把它挡在门外。
+
+    失败路径不设白名单的理由：成功路径的白名单是「执行/写工具字节相同的
+    输出不能证明没有副作用」；对失败而言，字节相同的失败恰恰**证明没有副作用**。
+    """
+    monkeypatch.delenv("OPENSQUILLA_REPEATED_FAILURE_NOTICE", raising=False)
+    events: list[dict[str, object]] = []
+    handler = build_tool_handler(
+        _build_registry(),
+        ToolContext(on_runtime_event=events.append, session_key="agent:main:failing"),
+    )
+
+    # git_status 不在成功白名单里，但它**失败** —— 必须照样被计数。
+    for index in range(2):
+        result = await handler(
+            ToolCall(
+                tool_use_id=f"tc-fail-{index}",
+                tool_name="git_status",
+                arguments={"path": "."},
+            )
+        )
+        assert result.is_error is True
+        assert _NOTICE_PREFIX not in result.content, "未到阈值不应提示"
+
+    third = await handler(
+        ToolCall(
+            tool_use_id="tc-fail-2",
+            tool_name="git_status",
+            arguments={"path": "."},
+        )
+    )
+    assert third.is_error is True
+    assert third.content.startswith(
+        f"{_NOTICE_PREFIX} This exact git_status call has already failed 3 times"
+    )
+    # 提示必须明确要求**换法子**，而不只是「你已经试过了」。
+    assert "change approach" in third.content
+    assert [event["repeat_count"] for event in _notice_events(events)] == [3]
+
+
+@pytest.mark.asyncio
+async def test_repeated_failure_notice_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式设 0 可关闭失败提示（与成功路径「默认关、显式开」相反的默认值）。"""
+    monkeypatch.setenv("OPENSQUILLA_REPEATED_FAILURE_NOTICE", "0")
+    events: list[dict[str, object]] = []
+    handler = build_tool_handler(
+        _build_registry(),
+        ToolContext(on_runtime_event=events.append, session_key="agent:main:off-fail"),
+    )
+
+    for index in range(5):
+        result = await handler(
+            ToolCall(
+                tool_use_id=f"tc-off-fail-{index}",
+                tool_name="git_status",
+                arguments={"path": "."},
+            )
+        )
+        assert _NOTICE_PREFIX not in result.content
+
+    assert _notice_events(events) == []
+
+
+@pytest.mark.asyncio
+async def test_changed_failure_signature_resets_the_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**不同**的失败不得累计 —— 否则「换了法子但仍失败」会被误判成死循环。
+
+    失败签名只依赖 (异常/错误内容)，不掺时间戳/耗时/tool_use_id。
+    """
+    monkeypatch.delenv("OPENSQUILLA_REPEATED_FAILURE_NOTICE", raising=False)
+    events: list[dict[str, object]] = []
+    registry = _build_registry()
+    call_index = {"value": 0}
+
+    async def alternating_failure(path: str) -> str:
+        call_index["value"] += 1
+        raise ValueError(f"boom-{call_index['value']}")
+
+    registry.register(
+        ToolSpec(
+            name="flaky_probe",
+            description="fails differently each time",
+            parameters={"path": {"type": "string"}},
+            required=["path"],
+        ),
+        alternating_failure,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(on_runtime_event=events.append, session_key="agent:main:changing"),
+    )
+
+    for index in range(5):
+        result = await handler(
+            ToolCall(
+                tool_use_id=f"tc-change-{index}",
+                tool_name="flaky_probe",
+                arguments={"path": "."},
+            )
+        )
+        assert _NOTICE_PREFIX not in result.content, "签名变化必须重置计数"
 
     assert _notice_events(events) == []
 

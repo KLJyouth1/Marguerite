@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
 from opensquilla.provider import openai as openai_module
 from opensquilla.provider.anthropic import AnthropicProvider
@@ -331,12 +332,43 @@ def _large_schema_tool() -> ToolDefinition:
             properties={
                 "payload": {
                     "type": "string",
-                    "description": "schema details " * 120,
+                    # Sized so the compaction fixtures hold under *both* token
+                    # estimator tiers. Tool schemas are not compacted, so a schema
+                    # that alone exceeds the admission ceiling can never be sent --
+                    # the request is refused instead of compacted.
+                    "description": "schema details " * 10,
                 }
             },
             required=["payload"],
         ),
     )
+
+
+class _TokenizerTierEncoding:
+    """Stand-in for ``tiktoken``'s cl100k_base: roughly four characters per token."""
+
+    def encode(self, text: str, disallowed_special: Any = ()) -> list[int]:
+        return [0] * max(1, len(text) // 4)
+
+
+def _pin_token_estimator_tier(monkeypatch: Any, tier: str) -> None:
+    """Pin the runtime token-estimator tier for one test run.
+
+    ``opensquilla.token_estimation`` uses ``tiktoken`` when the optional extra is
+    installed and otherwise falls back to a conservative utf8-bytes/2 estimate,
+    while the request proof derives its token ceiling from the *char* budget
+    (``budget // 4``). The two tiers therefore reach different admission verdicts
+    for the same envelope, so a fixture calibrated to whichever tier the machine
+    happens to have is green or red by accident. Pinning both makes each run
+    reproducible and keeps the tighter (conservative) one covered everywhere.
+    """
+
+    import opensquilla.token_estimation as token_estimation
+
+    if tier == "tokenizer":
+        monkeypatch.setattr(token_estimation, "_get_encoding", _TokenizerTierEncoding)
+    else:
+        monkeypatch.setattr(token_estimation, "_get_encoding", lambda: None)
 
 
 def test_openai_request_proof_serialization_failure_is_controlled(
@@ -379,18 +411,25 @@ def test_openai_request_proof_serialization_failure_is_controlled(
     assert events[0].message == "Provider request could not be serialized."
 
 
+@pytest.mark.parametrize("tier", ("conservative", "tokenizer"))
 def test_openai_final_request_proof_compacts_adapter_payload_with_tools(
     monkeypatch: Any,
+    tier: str,
 ) -> None:
     # Exercise the documented one-version rollback path for installations
     # that still permit request-only rewriting of recent/unresolved results.
+    _pin_token_estimator_tier(monkeypatch, tier)
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_RECENT_RESULTS", "0")
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_ERROR_RESULTS", "0")
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_UNRESOLVED_RESULTS", "0")
     requests: list[httpx.Request] = []
     payloads: list[dict[str, Any]] = []
     proofs: list[dict[str, Any]] = []
-    budget = 3600
+    # The token ceiling is derived as ``budget // 4`` while the conservative
+    # estimator reports ~utf8 bytes/2, so an ASCII envelope has to stay under
+    # half the char budget *and* must have been compacted once -- see
+    # ``_large_schema_tool``. 5200 leaves that margin on either tier.
+    budget = 5200
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -469,18 +508,22 @@ def test_openai_final_request_proof_compacts_adapter_payload_with_tools(
     assert proof["top_level_chars"] > 0
 
 
+@pytest.mark.parametrize("tier", ("conservative", "tokenizer"))
 def test_anthropic_final_request_proof_compacts_adapter_payload_with_tools(
     monkeypatch: Any,
+    tier: str,
 ) -> None:
     # Exercise the documented one-version rollback path for installations
     # that still permit request-only rewriting of recent/unresolved results.
+    _pin_token_estimator_tier(monkeypatch, tier)
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_RECENT_RESULTS", "0")
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_ERROR_RESULTS", "0")
     monkeypatch.setenv("OPENSQUILLA_PROVIDER_COMPACTION_PROTECT_UNRESOLVED_RESULTS", "0")
     requests: list[httpx.Request] = []
     payloads: list[dict[str, Any]] = []
     proofs: list[dict[str, Any]] = []
-    budget = 3600
+    # Same margin as the OpenAI variant: see ``_large_schema_tool``.
+    budget = 5200
     body = _anthropic_sse_body(
         [
             {

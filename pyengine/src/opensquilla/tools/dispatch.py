@@ -93,6 +93,10 @@ _REPEATED_CALL_NOTICE_MAX_ENTRIES = 1024
 # results are pure functions of their arguments and observed state. Execution
 # and write tools stay excluded: byte-identical output from them is no proof
 # the call had no effect.
+#
+# ⚠️ 该理由**只对成功成立**，对失败正好相反 —— 见
+# [`_REPEATED_FAILURE_NOTICE_ENV`]：相同失败恰恰证明**没有**产生副作用，
+# 所以失败路径**不做**白名单过滤。
 _REPEATED_CALL_NOTICE_SAFE_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "read_file",
@@ -107,6 +111,23 @@ _REPEATED_CALL_NOTICE_SAFE_TOOL_NAMES: frozenset[str] = frozenset(
         "git_log",
     }
 )
+
+# 连续**相同失败**的检测开关与默认阈值。
+#
+# 为什么失败路径**默认开启**、且不设工具白名单（与成功路径相反）：
+# - 成功路径的重复可能是合法的（数据刷新、状态变化），所以只在显式配置时提示；
+#   而**相同失败的重复一定是死循环** —— 同一工具、同一参数、同一错误，
+#   第 3 次已无任何信息增量。
+# - 成功路径的白名单理由是「执行/写工具字节相同的输出不能证明没有副作用」；
+#   对失败而言，字节相同的失败恰恰**证明没有副作用**，故无需白名单。
+#
+# 真机实测（本缺陷的成因）：agent 以 2–4 秒间隔重复调用
+# `shell_exec()` / `code_exec()` 并失败，持续数分钟，累计 63 次
+# `shell_exec -> FAILED`；而原检测器**恰好跳过失败**（`final_result.is_error`
+# 早退）**且**默认阈值为 0（`_repeated_call_notice_threshold()` 在环境变量
+# 未设时返回 0 ⇒ 整个功能默认关闭）—— 两道门同时把它挡在门外。
+_REPEATED_FAILURE_NOTICE_ENV = "OPENSQUILLA_REPEATED_FAILURE_NOTICE"
+_DEFAULT_REPEATED_FAILURE_THRESHOLD = 3
 
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1118,39 @@ def _repeated_call_notice_threshold() -> int:
         return 0
 
 
+def _repeated_failure_notice_threshold() -> int:
+    """连续相同失败的阈值。
+
+    与成功路径不同：**未配置时取默认值 3（功能开启）**，因为相同失败的重复
+    不存在「合法重复」的解释空间。显式设为 `0` 可关闭。
+    """
+    raw = os.environ.get(_REPEATED_FAILURE_NOTICE_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_REPEATED_FAILURE_THRESHOLD
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_REPEATED_FAILURE_THRESHOLD
+
+
+def _failure_signature(
+    final_result: ToolResult,
+    exception: BaseException | None,
+) -> str:
+    """失败的稳定身份串，用于「是否还是同一个失败」的判定。
+
+    必须**只依赖 (异常/错误内容)**，不得掺入时间戳、耗时、`tool_use_id` 等
+    易变字段 —— 否则每次失败签名都不同，计数永远到不了阈值，检测形同虚设。
+
+    `build_tool_failure_envelope` 的字段（status/tool/error_class/user_message/
+    retry_allowed）全部由 `(exc, tool_name)` 确定，天然稳定，故可直接哈希其内容。
+    """
+    if exception is not None:
+        return f"{type(exception).__name__}:{exception}"
+    content = final_result.content
+    return content if isinstance(content, str) else repr(content)
+
+
 def _record_repeated_call_notice_event(
     effective_ctx: ToolContext | None,
     tool_call: ToolCall,
@@ -1152,16 +1206,28 @@ def _maybe_apply_repeated_call_notice(
     exception: BaseException | None,
     seen: OrderedDict[tuple[str, str, str], tuple[int, str]],
 ) -> ToolResult:
-    threshold = _repeated_call_notice_threshold()
-    if threshold <= 0:
-        return final_result
-    if (
-        exception is not None
-        or final_result.is_error
-        or tool_call.tool_name not in _REPEATED_CALL_NOTICE_SAFE_TOOL_NAMES
-        or not isinstance(raw_result, str)
-    ):
-        return final_result
+    # 失败与成功走**不同**的闸门（见常量区注释）：
+    # - 失败：默认开启、不设工具白名单 —— 相同失败 = 死循环，无合法重复的解释空间。
+    # - 成功：沿用原契约（env 显式开启 + 只读工具白名单）—— 不动既有已验证行为。
+    is_failure = exception is not None or final_result.is_error
+    if is_failure:
+        threshold = _repeated_failure_notice_threshold()
+        if threshold <= 0:
+            return final_result
+        signature_source = _failure_signature(final_result, exception)
+    else:
+        threshold = _repeated_call_notice_threshold()
+        if threshold <= 0:
+            return final_result
+        if (
+            tool_call.tool_name not in _REPEATED_CALL_NOTICE_SAFE_TOOL_NAMES
+            or not isinstance(raw_result, str)
+        ):
+            return final_result
+        # Hash the pre-budget result: the per-turn budget tracker is stateful, so
+        # finalized content is not byte-stable across identical calls.
+        signature_source = raw_result
+
     arguments_payload = json.dumps(
         tool_call.arguments,
         ensure_ascii=False,
@@ -1169,9 +1235,7 @@ def _maybe_apply_repeated_call_notice(
         default=str,
     )
     args_sha = hashlib.sha256(arguments_payload.encode("utf-8")).hexdigest()
-    # Hash the pre-budget result: the per-turn budget tracker is stateful, so
-    # finalized content is not byte-stable across identical calls.
-    result_sha = hashlib.sha256(raw_result.encode("utf-8")).hexdigest()
+    result_sha = hashlib.sha256(signature_source.encode("utf-8")).hexdigest()
     # Subagents share the handler closure via current_tool_context; keying on
     # session_key keeps their counters independent of the parent's. Callers
     # with no session identity are never counted: an id()-derived fallback
@@ -1192,11 +1256,22 @@ def _maybe_apply_repeated_call_notice(
         seen.popitem(last=False)
     if count < threshold:
         return final_result
-    notice = (
-        f"[repeated_call_notice] This exact {tool_call.tool_name} call has "
-        f"already been run {count} times this session and returned an "
-        "identical result each time."
-    )
+    if is_failure:
+        # 明确要求**换法子**，而不只是「你已经试过了」——实测的死循环里，
+        # 模型缺的正是「重试同一调用不可能成功」这个判断。
+        notice = (
+            f"[repeated_call_notice] This exact {tool_call.tool_name} call has "
+            f"already failed {count} times this session with the same error. "
+            "Retrying it unchanged cannot succeed. Stop repeating it and change "
+            "approach: use different arguments, a different tool, or report the "
+            "blocker to the user."
+        )
+    else:
+        notice = (
+            f"[repeated_call_notice] This exact {tool_call.tool_name} call has "
+            f"already been run {count} times this session and returned an "
+            "identical result each time."
+        )
     final_result.content = _inject_repeated_call_notice(final_result.content, notice)
     _record_repeated_call_notice_event(
         effective_ctx,
@@ -1608,6 +1683,15 @@ def build_tool_handler(
         artifact_start = (
             len(effective_ctx.published_artifacts) if effective_ctx is not None else 0
         )
+        # 最终结果**先记到变量、出 try/finally 后再 return**。
+        #
+        # 绝不能在 `finally` 里 `return`（Python 3.14 起会报 SyntaxWarning
+        # `'return' in a 'finally' block`）：`finally` 中的 `return` 会**静默吞掉
+        # 正在传播的异常**。这里原实现正是在 `finally` 内 return，于是
+        # `KeyboardInterrupt` / `SystemExit` 这类不被 `except Exception` 捕获的
+        # BaseException 会在完成收尾后被吃掉、变成一个正常的 ToolResult ——
+        # 中断丢不出、失败看不出，正是「静默失败」的来源。
+        dispatch_result: ToolResult | None = None
         try:
             sandbox_descriptor = registered.spec.sandbox
             if sandbox_descriptor.enforce:
@@ -1688,7 +1772,7 @@ def build_tool_handler(
                     # Applied after finalize so the notice survives every
                     # ToolResultBudgetPolicy cap; hooks above still observe
                     # the unmodified raw outcome.
-                    return _maybe_apply_repeated_call_notice(
+                    dispatch_result = _maybe_apply_repeated_call_notice(
                         final_result,
                         tool_call=tool_call,
                         effective_ctx=effective_ctx,
@@ -1698,5 +1782,14 @@ def build_tool_handler(
                     )
             finally:
                 current_tool_context.reset(token)
+
+        # 到这里只可能是「未在收尾中重新抛出」的正常路径；
+        # 若上面发生了 CancelledError 等传播中的异常，本行根本不会被执行。
+        if dispatch_result is None:  # pragma: no cover - 仅在收尾被异常打断时可达
+            raise RuntimeError(
+                "tool dispatch finished without a result "
+                f"(tool={tool_call.tool_name})"
+            )
+        return dispatch_result
 
     return _handler

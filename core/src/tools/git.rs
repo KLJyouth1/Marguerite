@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
 use crate::agent::tool_cycle::ToolResult;
+use crate::proc::SilentCommand;
 use crate::tools::fs_path::safe_resolve;
 
 /// git 调用输出
@@ -49,10 +50,42 @@ const ALLOWED_SUBCOMMANDS: &[&str] = &[
     "rev-list",
     "ls-files",
     "config",
+    // 并行任务隔离：`git worktree add/list/remove/prune` 是多代理并行开发的
+    // 基础设施（每个子代理独占一棵工作树，互不踩工作区）。remove/prune 不带
+    // `--force` 不会丢未提交改动，且 `--force/-f/--hard` 均在 DENIED_FLAGS 里
+    // fail-closed 拦截，故可安全纳入白名单。
+    "worktree",
 ];
 
 fn is_allowed(subcommand: &str) -> bool {
     ALLOWED_SUBCOMMANDS.contains(&subcommand)
+}
+
+/// 危险 flag 黑名单（fail-closed：命中即拒绝）。
+///
+/// 子命令白名单只约束「做什么」，约束不了「怎么做」——`git push --force`、
+/// `git config --global ...`、`git commit --no-verify` 都能在白名单子命令下
+/// 造成不可逆破坏 / 越出工作区 / 绕过钩子。这些 flag 在任何子命令下都不放行。
+const DENIED_FLAGS: &[&str] = &[
+    "--force",
+    "-f",
+    "--force-with-lease",
+    "--hard",
+    "--global",
+    "--system",
+    "--no-verify",
+    "--mirror",
+    "--prune",
+    "--delete",
+    "-D",
+];
+
+/// 返回 `extra` 中首个命中的危险 flag（若有）。
+fn denied_flag(extra: &[String]) -> Option<&str> {
+    extra
+        .iter()
+        .find(|a| DENIED_FLAGS.contains(&a.as_str()))
+        .map(String::as_str)
 }
 
 /// git 执行器抽象：便于测试注入 mock。
@@ -73,7 +106,7 @@ impl GitRunner for SystemGitRunner {
             ));
         }
         let mut cmd = Command::new("git");
-        cmd.arg(subcommand).args(extra).current_dir(repo);
+        cmd.silent().arg(subcommand).args(extra).current_dir(repo);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let output = cmd
             .output()
@@ -141,10 +174,19 @@ fn resolve_invocation(
     };
 
     // 额外参数：以空白切分（git 参数无需 shell 解析，安全）。
-    let extra = args
+    let mut extra: Vec<String> = args
         .get("extra")
         .map(|s| s.split_whitespace().map(|x| x.to_string()).collect())
         .unwrap_or_default();
+
+    // commit 消息：作为**独立 argv 元素**追加，避免多词消息被空白切散
+    // （此前把 `-m "msg"` 拼进 extra 串再 split_whitespace → `["-m","\"fix","bug\""]`）。
+    if subcommand == "commit" {
+        if let Some(msg) = args.get("message").filter(|m| !m.is_empty()) {
+            extra.push("-m".to_string());
+            extra.push(msg.clone());
+        }
+    }
 
     Ok((subcommand, repo, extra))
 }
@@ -155,7 +197,7 @@ pub fn git_tool(
     runner: Arc<dyn GitRunner>,
 ) -> Box<dyn crate::mcp::registry::ToolExecutor> {
     let name = "git";
-    let description = "版本控制：在限定工作区内执行白名单内的 git 子命令（status/diff/add/commit/log/branch/checkout/push/pull/clone/blame/init 等）。";
+    let description = "版本控制：在限定工作区内执行白名单内的 git 子命令（status/diff/add/commit/log/branch/checkout/push/pull/clone/blame/init/worktree 等）。worktree 用于为并行子任务创建隔离工作树（git worktree add <path> <branch>）。";
     let schema = json!({
         "type": "object",
         "properties": {
@@ -174,20 +216,8 @@ pub fn git_tool(
         Arc::new(move |args: &HashMap<String, String>| {
             let workspace = workspace.clone();
             let runner = runner.clone();
-            let subcommand_arg = args.get("op").cloned();
-            let message = args.get("message").cloned();
             Box::pin(async move {
-                // 合并 message 到 extra（op=commit 时 -m <msg>）
-                let mut args = args.clone();
-                if let (Some("commit"), Some(msg)) = (subcommand_arg.as_deref(), message) {
-                    let existing = args.get("extra").cloned().unwrap_or_default();
-                    args.insert(
-                        "extra".to_string(),
-                        format!("-m \"{}\" {}", msg.replace('"', "'"), existing),
-                    );
-                }
-
-                let (subcommand, repo, extra) = match resolve_invocation(&workspace, &args) {
+                let (subcommand, repo, extra) = match resolve_invocation(&workspace, args) {
                     Ok(v) => v,
                     Err(e) => {
                         return Ok(ToolResult::Error {
@@ -201,6 +231,17 @@ pub fn git_tool(
                     return Ok(ToolResult::Error {
                         message: format!("git 子命令 '{}' 不在白名单，已拒绝", subcommand),
                         code: "FORBIDDEN_OP".to_string(),
+                    });
+                }
+
+                // 子命令白名单之上的参数级复核：危险 flag 一律拒绝（fail-closed）。
+                if let Some(flag) = denied_flag(&extra) {
+                    return Ok(ToolResult::Error {
+                        message: format!(
+                            "git 参数 '{}' 属于危险操作（force/global/no-verify 等），已拒绝",
+                            flag
+                        ),
+                        code: "FORBIDDEN_FLAG".to_string(),
                     });
                 }
 
@@ -251,6 +292,52 @@ mod tests {
         assert!(!is_allowed("clean"));
         // push 在白名单内（允许，但受工作区路径守卫约束）
         assert!(is_allowed("push"));
+    }
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 危险 flag 在**任何**子命令下都不放行：force/global/no-verify 等。
+    #[test]
+    fn denied_flags_reject_force_and_global() {
+        assert_eq!(denied_flag(&v(&["--force"])), Some("--force"));
+        assert_eq!(denied_flag(&v(&["-f"])), Some("-f"));
+        assert_eq!(
+            denied_flag(&v(&["--global", "user.name", "x"])),
+            Some("--global")
+        );
+        assert_eq!(denied_flag(&v(&["--no-verify"])), Some("--no-verify"));
+        assert_eq!(denied_flag(&v(&["--hard"])), Some("--hard"));
+        // 良性 flag 不受影响
+        assert!(denied_flag(&v(&["--oneline", "-n", "5"])).is_none());
+        assert!(denied_flag(&[]).is_none());
+    }
+
+    /// commit 多词消息必须保持为**单个** argv 元素，不能被空白切散。
+    #[test]
+    fn commit_message_kept_as_single_argv_element() {
+        let ws = PathBuf::from("/work");
+        let mut args = HashMap::new();
+        args.insert("op".to_string(), "commit".to_string());
+        args.insert("message".to_string(), "fix: multi word message".to_string());
+        let (op, _repo, extra) = resolve_invocation(&ws, &args).unwrap();
+        assert_eq!(op, "commit");
+        assert_eq!(
+            extra,
+            vec!["-m".to_string(), "fix: multi word message".to_string()]
+        );
+    }
+
+    /// 非 commit 子命令不注入 -m。
+    #[test]
+    fn non_commit_ignores_message() {
+        let ws = PathBuf::from("/work");
+        let mut args = HashMap::new();
+        args.insert("op".to_string(), "status".to_string());
+        args.insert("message".to_string(), "ignored".to_string());
+        let (_, _, extra) = resolve_invocation(&ws, &args).unwrap();
+        assert!(extra.is_empty());
     }
 
     #[test]

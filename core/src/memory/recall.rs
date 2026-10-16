@@ -141,15 +141,27 @@ impl PersistentKV {
     }
 
     /// 落盘（仅 `path` 有值）。任何失败静默忽略，保证主流程健壮。
+    ///
+    /// **原子写**：先写同目录临时文件，再 `rename` 覆盖目标。
+    ///
+    /// 历史缺陷用 `std::fs::write`（**先截断再写**）：进程在写入中途被杀 / 断电会留下
+    /// **半截 JSON**，而 [`load_json_map`] 解析失败即返回 `None` —— 等于**整份召回记忆丢失**。
+    /// `rename` 在同一文件系统内是原子的，读者要么看到旧内容、要么看到完整新内容。
     fn save(&self) {
-        if let Some(p) = &self.path {
-            if let Ok(json) = serde_json::to_string_pretty(&self.map) {
-                if let Some(parent) = p.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(p, json);
-            }
+        let Some(p) = &self.path else { return };
+        let Ok(json) = serde_json::to_string_pretty(&self.map) else {
+            return;
+        };
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, json.as_bytes()).is_ok() && std::fs::rename(&tmp, p).is_ok() {
+            return;
+        }
+        // 退路：临时文件不可用（权限 / 跨设备 rename）时退回直接写 ——
+        // 尽力而为，至少不让本次更新静默丢失。
+        let _ = std::fs::write(p, json);
     }
 }
 
@@ -520,6 +532,29 @@ mod tests {
             kv.as_map().get("name").map(String::as_str),
             Some("喜欢 Rust")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原子写：每次落盘后**不残留** `.tmp`，且目标文件始终是**完整可解析** JSON
+    /// （`std::fs::write` 的「先截断再写」在崩溃时会留下半截 → 整份记忆丢失）。
+    #[test]
+    fn persistent_kv_save_is_atomic_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!("marg_mem_atomic_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("user.json");
+        let _ = std::fs::remove_file(&path);
+        let tmp = path.with_extension("json.tmp");
+
+        let mut kv = PersistentKV::new("user", Some(&dir));
+        for i in 0..20 {
+            kv.insert(format!("k{i}"), format!("v{i}"));
+            assert!(!tmp.exists(), "不应残留临时文件");
+            let raw = std::fs::read_to_string(&path).expect("目标文件应存在");
+            let parsed: std::collections::HashMap<String, String> =
+                serde_json::from_str(&raw).expect("目标文件必须是完整 JSON（原子写）");
+            assert_eq!(parsed.len(), i + 1);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

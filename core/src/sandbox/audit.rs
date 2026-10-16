@@ -171,11 +171,14 @@ mod tests {
     fn test_prune_removes_old_files() {
         let dir = std::env::temp_dir().join(format!("marguerite_audit_p_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        // 写入 40 天前的旧文件
-        let old = dir.join("audit-2026-06-01.jsonl");
+        // 40 天前的旧文件（相对当前日期动态计算，避免硬编码日期随时间漂移过期）
+        let now = Local::now();
+        let old_day = (now - chrono::Duration::days(40)).format("%Y-%m-%d");
+        let today = now.format("%Y-%m-%d");
+        let old = dir.join(format!("audit-{old_day}.jsonl"));
         fs::write(&old, "{}").unwrap();
-        // 新文件
-        let new = dir.join("audit-2026-08-04.jsonl");
+        // 今天的文件
+        let new = dir.join(format!("audit-{today}.jsonl"));
         fs::write(&new, "{}").unwrap();
         let sink = AuditSink::new(dir.clone());
         sink.record(&test_record()); // 触发 prune

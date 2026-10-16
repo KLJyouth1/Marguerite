@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::governance::review::extract_json_object;
 use crate::model::llm::LLMClient;
+use crate::proc::SilentCommand;
 use crate::types::Message;
 
 /// 一次校验命令的执行结果
@@ -155,7 +156,6 @@ pub fn parse_verdict(raw: &str, _run: Option<&VerifyRun>) -> Result<Verdict> {
 
 /// 真实 OS shell 校验命令执行器（跨平台）。
 pub struct OsShellRunner;
-
 impl VerifyRunner for OsShellRunner {
     fn run(&self, command: &str) -> VerifyRun {
         let (shell, flag) = if cfg!(windows) {
@@ -164,6 +164,7 @@ impl VerifyRunner for OsShellRunner {
             ("sh", "-c")
         };
         let output = std::process::Command::new(shell)
+            .silent()
             .arg(flag)
             .arg(command)
             .output();
@@ -178,6 +179,75 @@ impl VerifyRunner for OsShellRunner {
                 stdout: String::new(),
                 stderr: format!("命令执行失败: {e}"),
             },
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 完成判定的**可选** LLM 验收（opt-in，默认关闭）
+//
+// 背景：`Verifier` 此前**零生产调用者** —— 验收层从未在生产路径生效。
+// 但 LLM 验收会为每次完成判定增加一次模型调用（成本/延迟），属产品决策，
+// 故这里做成**显式开关**：默认关闭时零行为变化；开启后才在确定性门禁放行之后复核。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 环境变量开关：`MARGUERITE_COMPLETION_VERIFY=1` 启用完成判定的 LLM 验收。
+pub const COMPLETION_VERIFY_ENV: &str = "MARGUERITE_COMPLETION_VERIFY";
+
+/// 解析开关真值（`1` / `true` / `yes` / `on`，大小写不敏感；其余一律为关闭）。
+fn parse_completion_verify(v: Option<&str>) -> bool {
+    matches!(
+        v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// 是否启用完成判定的 LLM 验收（opt-in，默认关闭）。
+pub fn completion_verify_enabled() -> bool {
+    parse_completion_verify(std::env::var(COMPLETION_VERIFY_ENV).ok().as_deref())
+}
+
+/// 由应用配置构造验收用的 LLM 配置（无 API key → `None`）。
+pub fn llm_config_from(cfg: &crate::persistence::config::Config) -> Option<LLMClient> {
+    let m = &cfg.model;
+    if m.api_key.trim().is_empty() {
+        return None;
+    }
+    Some(LLMClient::new(crate::model::llm::LLMConfig {
+        provider: crate::model::llm::LLMProvider::Custom {
+            base_url: m.base_url.clone(),
+        },
+        model: m.model_name.clone(),
+        api_key: m.api_key.clone(),
+        base_url: m.base_url.clone(),
+        max_tokens: 1024,
+        temperature: 0.0,
+        timeout_secs: 30,
+        thinking: crate::model::thinking::ThinkingEffort::Off,
+        context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+    }))
+}
+
+/// 完成判定的可选 LLM 验收：仅当开关开启且配置了 API key 时执行。
+///
+/// **fail-open**：未启用 / 无 key / 网络失败 / 解析失败一律返回 `None` ——
+/// 确定性门禁已先行裁决，本层只是可选增强，绝不因基础设施抖动把正常完成误判为失败。
+pub async fn verify_completion_if_enabled(task: &str, change_summary: &str) -> Option<Verdict> {
+    if !completion_verify_enabled() {
+        return None;
+    }
+    let cfg = crate::persistence::config::Config::load().ok()?;
+    let client = llm_config_from(&cfg)?;
+    let spec = VerifySpec::new(change_summary, &[task]);
+    let verifier = Verifier::new(client, Box::new(OsShellRunner));
+    match verifier.verify(&spec).await {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "完成判定的 LLM 验收调用失败（fail-open：不影响确定性门禁裁决）"
+            );
+            None
         }
     }
 }
@@ -226,6 +296,31 @@ mod tests {
             runner.run("true")
         };
         assert!(run.success, "退出码 0 应判定成功");
+    }
+
+    /// opt-in 开关解析：仅 1/true/yes/on 视为开启，其余一律关闭。
+    #[test]
+    fn completion_verify_flag_parsing() {
+        assert!(!parse_completion_verify(None));
+        assert!(!parse_completion_verify(Some("")));
+        assert!(!parse_completion_verify(Some("0")));
+        assert!(!parse_completion_verify(Some("off")));
+        assert!(!parse_completion_verify(Some("no")));
+        assert!(parse_completion_verify(Some("1")));
+        assert!(parse_completion_verify(Some("true")));
+        assert!(parse_completion_verify(Some("TRUE")));
+        assert!(parse_completion_verify(Some(" yes ")));
+        assert!(parse_completion_verify(Some("On")));
+    }
+
+    /// 无 API key → 不构造客户端（opt-in 层静默不生效，fail-open）。
+    #[test]
+    fn llm_config_from_requires_api_key() {
+        let mut cfg = crate::persistence::config::Config::default();
+        cfg.model.api_key = String::new();
+        assert!(llm_config_from(&cfg).is_none(), "无 key 不应构造客户端");
+        cfg.model.api_key = "k".into();
+        assert!(llm_config_from(&cfg).is_some(), "有 key 应构造客户端");
     }
 
     async fn mock_server(responses: Vec<(u16, String)>) -> String {

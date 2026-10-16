@@ -471,7 +471,10 @@ pub(crate) fn precheck_code(path: &str, content: &str) -> std::result::Result<()
 
 /// 注册全部宝塔面板工具到 registry。
 ///
-/// 工具命名：`baota.<action>`，与 baota_bridge 方法一一对应。
+/// 工具命名：`baota_<action>`（下划线形式，与 `baota_bridge` 方法一一对应），
+/// 且**必须在调用方就写合法**——OpenAI/DeepSeek function name 规范 `^[a-zA-Z0-9_-]+$`
+/// 不接受点号。曾经这里用 `baota.<action>`，导致注册表每次都要「自动修正」
+/// 并刷 WARN（首启 stderr 噪音，P1-E）；改名后首次注册即合法，修正路径不再触发。
 /// 全部工具为真实 HTTP 调用（登录态由 client 承载）；dry_run 时写操作返回引导错误。
 pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let cfg = BaotaConfig::from_env();
@@ -481,7 +484,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.system_info",
+        "baota_system_info",
         "获取宝塔面板系统信息（CPU/内存/磁盘）",
         schema(vec![], serde_json::Map::new()),
         Arc::new(move |_args: &HashMap<String, String>| {
@@ -509,7 +512,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.network_info",
+        "baota_network_info",
         "获取面板网络信息",
         schema(vec![], serde_json::Map::new()),
         Arc::new(move |_args: &HashMap<String, String>| {
@@ -535,7 +538,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.exec_shell",
+        "baota_exec_shell",
         "在宝塔面板执行 Shell 命令（危险，需 confirm）",
         schema(
             vec!["cmd"],
@@ -574,7 +577,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.list_sites",
+        "baota_list_sites",
         "列出宝塔面板站点（分页）",
         schema(
             vec![],
@@ -611,7 +614,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.get_site_info",
+        "baota_get_site_info",
         "获取单个站点详情",
         schema(
             vec!["site_name"],
@@ -643,7 +646,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.create_site",
+        "baota_create_site",
         "创建站点（写操作，需 dry_run=false）",
         schema(
             vec!["webname", "path"],
@@ -686,7 +689,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.set_site_status",
+        "baota_set_site_status",
         "启用/停用站点（写操作，需 dry_run=false）",
         schema(
             vec!["site_name", "status"],
@@ -724,7 +727,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.list_files",
+        "baota_list_files",
         "列出目录文件",
         schema(
             vec![],
@@ -762,7 +765,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.read_file",
+        "baota_read_file",
         "读取文件内容",
         schema(
             vec!["path"],
@@ -794,7 +797,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.write_file",
+        "baota_write_file",
         "写入文件内容（写操作，需 dry_run=false；统一门禁：语法校验 → 远端备份 → 写入 → 读回校验，任一失败自动回滚）",
         schema(
             vec!["path", "content"],
@@ -833,7 +836,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.list_databases",
+        "baota_list_databases",
         "列出数据库（分页）",
         schema(
             vec![],
@@ -870,7 +873,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.create_database",
+        "baota_create_database",
         "创建数据库（写操作，需 dry_run=false）",
         schema(
             vec!["name"],
@@ -908,7 +911,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.list_ftp",
+        "baota_list_ftp",
         "列出 FTP 账号（分页）",
         schema(
             vec![],
@@ -945,7 +948,7 @@ pub fn register_baota_tools(registry: &mut ToolRegistry) -> Result<()> {
     let c = client.clone();
     let cfg2 = cfg.clone();
     registry.register_local(bt_tool(
-        "baota.create_ftp",
+        "baota_create_ftp",
         "创建 FTP 账号（写操作，需 dry_run=false）",
         schema(
             vec!["name"],
@@ -1200,11 +1203,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_baota_tools(&mut registry).expect("注册应成功");
         let tools = registry.list_tools();
-        // 注意：`ToolRegistry::register_local` 会按 OpenAI/DeepSeek function name
-        // 规范 `^[a-zA-Z0-9_-]+$` 把点号等非法的工具名字符替换为下划线，避免 LLM
-        // API 400；同时 `list_tools()` 返回的名称为 `execute_local_tool` 与
-        // MCP `tools/call` 所用的同一 sanitized 键，保证 round-trip 一致。
-        // 因此这里断言的是注册表内部实际键名（点 → 下划线）。
+        // 工具名在调用方即是合法 function name（`^[a-zA-Z0-9_-]+$`），
+        // `list_tools()` / `execute_local_tool()` / MCP `tools/call` 用的是同一个键，
+        // 因此这里断言的名字就是对外可派发的名字。
         for expected in [
             "baota_system_info",
             "baota_network_info",
@@ -1224,5 +1225,29 @@ mod tests {
             assert!(tools.contains(&expected.to_string()), "缺少工具 {expected}");
         }
         assert_eq!(tools.len(), 14, "应注册 14 个 BT 工具");
+
+        // 根因回归（P1-E）：内置工具名必须「首次注册即合法」。
+        // `legacy_aliases` 非空 ⇔ 注册时走过「非法名 → 自动修正」分支 ⇔ 又会产生
+        // stderr 噪音（曾经的 14 行 WARN 正是这条路径）。因此这张表必须为空。
+        assert!(
+            registry.legacy_aliases().is_empty(),
+            "内置 baota 工具名不得依赖注册后修正，实际别名: {:?}",
+            registry.legacy_aliases()
+        );
+
+        // 反向守卫：目录（tools.catalog 对外名）同样必须合法且可派发。
+        for item in registry.catalog() {
+            assert_eq!(
+                crate::mcp::registry::sanitize_tool_name(&item.name),
+                item.name,
+                "对外工具名 {} 含非法字符，注册后会退化为「注册后修正」",
+                item.name
+            );
+            assert!(
+                registry.has_tool(&item.name),
+                "目录名必须可直接派发: {}",
+                item.name
+            );
+        }
     }
 }

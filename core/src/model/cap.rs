@@ -18,11 +18,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::fleet::RoleKind;
+use crate::model::registry::{ModelProfile, ModelRegistry};
 
 /// 三态能力事实（蒸馏自 CodeWhale `capabilities::CapabilityState`）。
 ///
 /// 一个模型 offering 对某项能力「是否已确认支持」的诚实陈述。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityState {
     /// 该 offering 明确声明支持。
@@ -31,13 +32,8 @@ pub enum CapabilityState {
     Unsupported,
     /// 该 offering 未声明该事实（默认的「不知道」，绝不推断为支持）。
     #[serde(other)]
+    #[default]
     Unknown,
-}
-
-impl Default for CapabilityState {
-    fn default() -> Self {
-        CapabilityState::Unknown
-    }
 }
 
 impl CapabilityState {
@@ -87,6 +83,51 @@ pub struct OfferingCapabilities {
     pub prompt_caching: CapabilityState,
     #[serde(default)]
     pub parallel_tool_calls: CapabilityState,
+}
+
+/// 返回模型能力静态档案；没有证据的字段保持 `Unknown`，不做家族推断。
+#[must_use]
+pub fn capabilities_for_model_id(model_id: &str) -> OfferingCapabilities {
+    match model_id {
+        // CloudBase 内置 Hunyuan 2.0 文本模型：仅声明已知的流式文本能力。
+        "hunyuan-2.0-instruct-20251111" | "hunyuan-2-0-instruct" => OfferingCapabilities {
+            image_input: CapabilityState::Unknown,
+            streaming: CapabilityState::Supported,
+            ..Default::default()
+        },
+        // TokenHub Hy3 文档明确标注 reasoning、tool calls 和 streaming。
+        "hy3-preview" | "hunyuan-hy3-preview" => OfferingCapabilities {
+            image_input: CapabilityState::Unknown,
+            reasoning: CapabilityState::Supported,
+            native_tool_calls: CapabilityState::Supported,
+            streaming: CapabilityState::Supported,
+            ..Default::default()
+        },
+        _ => OfferingCapabilities::default(),
+    }
+}
+
+/// 将注册档案转换为能力路由使用的轻量 offering。
+#[must_use]
+pub fn offering_from_profile(profile: &ModelProfile) -> ModelOffering {
+    ModelOffering {
+        id: profile.id.clone(),
+        provider: profile.provider.clone(),
+        wire_model_id: profile.model.clone(),
+        capabilities: capabilities_for_model_id(&profile.model),
+        context_tokens: 0,
+        cost_per_1m_out: 0.0,
+    }
+}
+
+/// 将注册表中的档案转换为能力路由候选，不触发 provider 探活。
+#[must_use]
+pub fn offerings_from_registry(registry: &ModelRegistry) -> Vec<ModelOffering> {
+    registry
+        .list()
+        .into_iter()
+        .map(offering_from_profile)
+        .collect()
 }
 
 /// 候选模型（轻量视图，不依赖具体 provider 注册表，便于纯单测）。
@@ -192,16 +233,25 @@ pub fn score_role_match(req: &RoleRequirements, off: &ModelOffering) -> Option<f
     if !caps.reasoning.satisfies_requirement(req.reasoning) {
         return None;
     }
-    if !caps.native_tool_calls.satisfies_requirement(req.native_tool_calls) {
+    if !caps
+        .native_tool_calls
+        .satisfies_requirement(req.native_tool_calls)
+    {
         return None;
     }
-    if !caps.structured_output.satisfies_requirement(req.structured_output) {
+    if !caps
+        .structured_output
+        .satisfies_requirement(req.structured_output)
+    {
         return None;
     }
     if !caps.streaming.satisfies_requirement(req.streaming) {
         return None;
     }
-    if !caps.prompt_caching.satisfies_requirement(req.prompt_caching) {
+    if !caps
+        .prompt_caching
+        .satisfies_requirement(req.prompt_caching)
+    {
         return None;
     }
     if !caps
@@ -396,7 +446,7 @@ mod tests {
         let router = RoleCapRouter::new(offerings);
         let best = router.resolve(&RoleKind::Architect).expect("应有候选");
         assert_eq!(best.offering_id, "mid-full"); // 7/7 胜 6/7
-        // 同覆盖率取低成本：两个 full 候选，便宜者胜
+                                                  // 同覆盖率取低成本：两个 full 候选，便宜者胜
         let offerings2 = vec![
             offering("pricey", supported(), 64_000, 9.0),
             offering("cheap", supported(), 32_000, 1.0),
@@ -404,6 +454,37 @@ mod tests {
         let router2 = RoleCapRouter::new(offerings2);
         let best2 = router2.resolve(&RoleKind::Architect).expect("应有候选");
         assert_eq!(best2.offering_id, "cheap");
+    }
+
+    #[test]
+    fn hunyuan_static_capabilities_are_explicit_and_unknown_stays_unknown() {
+        let hy3 = capabilities_for_model_id("hy3-preview");
+        assert_eq!(hy3.reasoning, CapabilityState::Supported);
+        assert_eq!(hy3.native_tool_calls, CapabilityState::Supported);
+        assert_eq!(hy3.streaming, CapabilityState::Supported);
+        assert_eq!(hy3.image_input, CapabilityState::Unknown);
+        assert_eq!(hy3.structured_output, CapabilityState::Unknown);
+
+        let unknown = capabilities_for_model_id("hunyuan-unverified");
+        assert_eq!(unknown.reasoning, CapabilityState::Unknown);
+        assert_eq!(unknown.streaming, CapabilityState::Unknown);
+        assert!(!unknown.reasoning.is_supported());
+    }
+
+    #[test]
+    fn hunyuan_profile_is_a_route_candidate_without_provider_probe() {
+        let registry = ModelRegistry::with_seeds();
+        let offerings = offerings_from_registry(&registry);
+        let hy3 = offerings
+            .iter()
+            .find(|off| off.id == "hunyuan-hy3-preview")
+            .expect("Hunyuan profile should be a routing candidate");
+        assert_eq!(hy3.provider, "hunyuan");
+        assert_eq!(hy3.wire_model_id, "hy3-preview");
+        assert_eq!(hy3.context_tokens, 0);
+        assert_eq!(hy3.cost_per_1m_out, 0.0);
+        let routes = RoleCapRouter::new(offerings).acceptable(&RoleKind::Custom("general".into()));
+        assert!(routes.iter().any(|route| route.offering_id == "hunyuan-hy3-preview"));
     }
 
     #[test]

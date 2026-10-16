@@ -9,8 +9,12 @@ pub mod computer_use_loop;
 pub mod file_change;
 pub mod fs_path;
 pub mod git;
+pub mod ooxml;
+pub mod patch;
 pub mod skill_tools;
 pub mod terminal;
+pub mod terminal_backend;
+pub mod trash;
 pub mod versions;
 
 pub use baota::register_baota_tools;

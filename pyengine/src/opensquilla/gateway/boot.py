@@ -11,6 +11,7 @@ import socket
 import sys
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -1925,6 +1926,93 @@ def _setup_file_logging(config: GatewayConfig | None = None) -> None:
         logging.getLogger(__name__).warning("structlog bridge disabled: %s", bridge_error)
 
 
+# WinSock codes that mean "the peer went away", never "the gateway is broken":
+# 10054 WSAECONNRESET, 10053 WSAECONNABORTED, 10055 WSAECONNABORTED (datagram),
+# 10038 WSAENOTSOCK. A browser refresh / tab close / websocket disconnect makes
+# the Proactor loop's `_call_connection_lost` call `sock.shutdown()` on an
+# already-closed socket and receive one of these.
+_ASYNCIO_NOISE_WINERRORS = frozenset({10054, 10053, 10055, 10038})
+
+# Connection teardown errors that are the normal echo of a client hangup.
+_ASYNCIO_NOISE_CONNECTION_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+)
+
+_ASYNCIO_NOISE_FILTER_ATTR = "_opensquilla_asyncio_noise_filter"
+
+
+def _is_asyncio_connection_noise(context: Mapping[str, Any]) -> bool:
+    """Return True when a loop exception report is just a client hangup.
+
+    Deliberately a whitelist: anything not matched here is a real error and
+    must reach ``loop.default_exception_handler`` untouched. Swallowing unknown
+    exceptions would be worse than the log spam this filter removes.
+    """
+    exception = context.get("exception")
+    if not isinstance(exception, BaseException):
+        return False
+    message = str(context.get("message") or "")
+    if "Exception in callback" in message and isinstance(
+        exception, _ASYNCIO_NOISE_CONNECTION_EXCEPTIONS
+    ):
+        return True
+    if isinstance(exception, OSError):
+        winerror = getattr(exception, "winerror", None)
+        return isinstance(winerror, int) and winerror in _ASYNCIO_NOISE_WINERRORS
+    return False
+
+
+def _make_asyncio_connection_noise_handler() -> Callable[[Any, dict[str, Any]], None]:
+    """Build the loop exception handler that silences client-disconnect noise."""
+
+    def _handler(loop: Any, context: dict[str, Any]) -> None:
+        if _is_asyncio_connection_noise(context):
+            # Respect the existing OPENSQUILLA_LOG_LEVEL switch: at WARNING or
+            # ERROR a DEBUG line is invisible anyway, so stay silent.
+            if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
+                logging.getLogger(__name__).debug(
+                    "asyncio client disconnect noise suppressed: %s",
+                    context.get("message"),
+                )
+            return
+        loop.default_exception_handler(context)
+
+    return _handler
+
+
+def _install_asyncio_connection_noise_filter() -> None:
+    """Downgrade benign client-disconnect reports on the gateway event loop.
+
+    Must run before uvicorn starts serving so the handler is in place for the
+    very first socket teardown. Idempotent, and a failure here must never block
+    gateway boot — it is a log-hygiene filter, not a correctness requirement.
+    """
+    try:
+        try:
+            loop: Any = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop is spinning yet (e.g. a synchronous caller); fall back to
+            # the policy so the filter still lands on the loop uvicorn will use.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                loop = asyncio.get_event_loop()
+    except Exception:  # noqa: BLE001 - no loop yet means nothing to filter
+        return
+    if loop is None:
+        return
+    try:
+        if getattr(loop, _ASYNCIO_NOISE_FILTER_ATTR, False):
+            return
+        loop.set_exception_handler(_make_asyncio_connection_noise_handler())
+        setattr(loop, _ASYNCIO_NOISE_FILTER_ATTR, True)
+    except Exception as exc:  # noqa: BLE001 - logging hygiene must never block boot
+        logging.getLogger(__name__).warning(
+            "asyncio connection noise filter disabled: %s", exc
+        )
+
+
 @dataclass
 class _GatewayShutdownRelay:
     """Accept shutdown requests before the CLI runner installs its handler."""
@@ -2334,7 +2422,22 @@ def _squilla_router_bundle_dir(router_cfg: Any) -> Path:
 
 
 def validate_squilla_router_runtime(config: GatewayConfig) -> None:
-    """Validate router assets without loading the heavy ML runtime."""
+    """Validate router assets without loading the heavy ML runtime.
+
+    Two distinct failure shapes, deliberately raised as different types:
+
+    * bundle **layout** missing (``RuntimeError``) — a broken installation;
+    * layout present but the **weights unusable** (``RouterBundleDegraded``,
+      typically Git LFS pointers that were never pulled) — the app is fine on
+      the rule-based fallback, so boot degrades loudly instead of refusing to
+      start, while the doctor still surfaces it as ``runtimeValid: false``.
+
+    Before this, a pointer-filled bundle passed validation and logged
+    ``bundle_ready`` — which is exactly how "automatic model routing" stayed
+    silently dead with only an on/off switch as evidence.
+    """
+    from opensquilla.router_runtime_diagnostics import RouterBundleDegraded
+
     router_cfg = getattr(config, "squilla_router", None)
     if router_cfg is None or not getattr(router_cfg, "enabled", False):
         return
@@ -2356,7 +2459,18 @@ def validate_squilla_router_runtime(config: GatewayConfig) -> None:
             missing=missing,
         )
         return
-    log.info("build_services.squilla_router_bundle_ready", bundle_dir=str(bundle_dir))
+
+    # Imported lazily and from the dependency-free module: this path must not
+    # pull lightgbm/torch (see test_router_boot_validation_does_not_load_heavy_runtime).
+    from opensquilla.squilla_router.bundle_inspect import inspect_bundle
+
+    verdict = inspect_bundle(bundle_dir)
+    if verdict["errorKind"] is None:
+        log.info("build_services.squilla_router_bundle_ready", bundle_dir=str(bundle_dir))
+        return
+
+    detail = "; ".join(verdict["problems"]) or str(verdict["errorKind"])
+    raise RouterBundleDegraded(f"incomplete V4 router bundle at {bundle_dir}: {detail}")
 
 
 def validate_squilla_router_runtime_deep(config: GatewayConfig) -> None:
@@ -2370,6 +2484,9 @@ def validate_squilla_router_runtime_deep(config: GatewayConfig) -> None:
     if getattr(strategy, "_available", False):
         return
 
+    # Quote the adapter's own reason when it has one: a generic "did not become
+    # available" strips the marker the diagnostics classifier keys on, which is
+    # how an LFS-pointer bundle got reported as an opaque runtime failure.
     error = getattr(strategy, "error", None)
     if isinstance(error, BaseException):
         raise RuntimeError(f"V4 Phase 3 router did not become available: {error}") from error
@@ -2520,7 +2637,26 @@ async def build_services(
 
     set_session_material_cleanup(build_session_material_cleanup(config))
 
-    validate_squilla_router_runtime(config)
+    from opensquilla.router_runtime_diagnostics import (
+        RouterBundleDegraded,
+        classify_router_runtime_error,
+    )
+
+    try:
+        validate_squilla_router_runtime(config)
+    except RouterBundleDegraded as exc:
+        # Weights unusable (typically Git LFS pointers that were never pulled).
+        # ML routing is an optional enhancement and the rule-based router still
+        # serves every turn, so this must be *loud*, not fatal: refusing to boot
+        # would brick every source checkout and every release shipped without
+        # weights. `require_router_runtime` still hard-fails when the bundle
+        # *layout* is missing — that one is a genuinely broken installation.
+        log.warning(
+            "build_services.squilla_router_bundle_degraded",
+            error=str(exc),
+            runtime_error_kind=classify_router_runtime_error(exc),
+            action="continuing_with_rule_based_routing",
+        )
     from opensquilla.memory.embedding_resolver import resolve_memory_embedding
 
     resolve_memory_embedding(config.memory, local_available=lambda *_: False)
@@ -4513,6 +4649,10 @@ async def start_gateway_server(
     server_handle._preview_service = getattr(app.state, "artifact_preview_service", None)
 
     if run:
+        # Must be installed before uvicorn starts serving: the very first
+        # browser refresh or websocket disconnect already produces a benign
+        # WinError 10054 report, and it should never reach the ERROR stream.
+        _install_asyncio_connection_noise_filter()
         preview_service = server_handle._preview_service
         if preview_service is not None and config.control_ui.enabled:
             preview_socket: socket.socket | None = None

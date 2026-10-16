@@ -3,15 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The upstream console directory ``opensquilla-webui/`` was never migrated into
+# this repository; its console is ``<repo>/webui/``.
+WEBUI = ROOT.parent / "webui"
 SURFACES = [
     ROOT / "src" / "opensquilla" / "cli" / "skills_cmd.py",
-    ROOT / "opensquilla-webui" / "src" / "locales" / "en.json",
-    ROOT
-    / "opensquilla-webui"
-    / "src"
-    / "components"
-    / "skills"
-    / "SkillsRegistryPanel.vue",
+    WEBUI / "src" / "locales" / "en.json",
+    WEBUI / "src" / "components" / "skills" / "SkillsRegistryPanel.vue",
     ROOT / "src" / "opensquilla" / "skills" / "hub" / "__init__.py",
     ROOT / "src" / "opensquilla" / "skills" / "hub" / "clawhub.py",
     ROOT / "src" / "opensquilla" / "skills" / "hub" / "source.py",

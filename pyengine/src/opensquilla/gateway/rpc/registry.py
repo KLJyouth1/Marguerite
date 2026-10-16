@@ -186,6 +186,9 @@ class RpcRegistry:
 
     def __init__(self) -> None:
         self._methods: dict[str, RpcMethodEntry] = {}
+        self._prefix_fallbacks: dict[
+            str, Callable[[str, str, Any, RpcContext], Coroutine[Any, Any, ResFrame]]
+        ] = {}
         self._locked = False
 
     def register(self, name: str, handler: RpcHandlerFn, scope: str) -> None:
@@ -219,6 +222,26 @@ class RpcRegistry:
         """Remove a method by name. Returns True if it existed."""
         return self._methods.pop(name, None) is not None
 
+    def register_prefix_fallback(
+        self,
+        prefix: str,
+        handler: Callable[[str, str, Any, RpcContext], Coroutine[Any, Any, ResFrame]],
+    ) -> None:
+        """Register a gateway methods for an otherwise-unmatched ``prefix.*``.
+
+        The fallback receives the original ``method`` name (not just the
+        suffix) so a namespace such as ``ops.*`` can classify unknown members
+        itself — e.g. reject write operations with ``OPS_FORBIDDEN_WRITE`` or
+        report an unknown ``ops.*`` as ``OPS_INVALID_REQUEST``.
+        """
+        self._prefix_fallbacks[prefix] = handler
+
+    def _resolve_prefix_fallback(self, method: str) -> Callable | None:
+        if "." not in method:
+            return None
+        prefix = method.split(".", 1)[0]
+        return self._prefix_fallbacks.get(prefix)
+
     def methods(self) -> list[str]:
         """Return the list of registered method names (sorted, stable)."""
         return sorted(self._methods.keys())
@@ -235,6 +258,11 @@ class RpcRegistry:
     async def dispatch(self, req_id: str, method: str, params: Any, ctx: RpcContext) -> ResFrame:
         entry = self._methods.get(method)
         if entry is None:
+            # A prefix fallback (e.g. ``ops.*``) may classify unknown members
+            # itself rather than returning METHOD_NOT_FOUND.
+            fallback = self._resolve_prefix_fallback(method)
+            if fallback is not None:
+                return await fallback(req_id, method, params, ctx)
             return make_error_res(req_id, ERROR_METHOD_NOT_FOUND, f"Method not found: {method}")
 
         try:

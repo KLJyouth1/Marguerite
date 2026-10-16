@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::cache::{hash_text, PrefixCache};
-use crate::memory::long_term::LocalEmbedding;
 
 // ===========================================================================
 // 2. SnapshotCache —— 快照按 (agent, intent_hash) 复用
@@ -290,15 +289,20 @@ impl BloomDecisionCache {
 
 /// 语义相似度函数：返回 `[0,1]` 的相似度（越接近 1 越相似）。
 ///
-/// 默认用 [`LocalEmbedding::cosine`]（特征哈希词袋，零依赖、确定性）；
-/// 可注入自定义实现（如真实嵌入余弦）而无需改动缓存结构。
+/// 默认走 [`EmbeddingProvider`]（进程级可注入后端）：`embeddings.backend=model` + `real-embed`
+/// 时是**真实模型**余弦；默认零依赖本地后端下数值与 `LocalEmbedding::cosine` 一致。
+/// 可注入自定义实现而无需改动缓存结构。
 pub type SimilarityFn = fn(&str, &str) -> f64;
 
-/// 默认语义相似度：特征哈希词袋嵌入的余弦（复用 `memory::long_term::LocalEmbedding`）。
+/// 默认语义相似度：走进程级嵌入后端（真实模型或本地特征哈希），不再写死 `LocalEmbedding`。
+///
+/// 文档 1 的「语义缓存未接真实 embedding」在 Bloom 决策链路上的收口：此前这里直接调用
+/// `LocalEmbedding`，配置了真实嵌入后端也无法生效。
 pub fn embedding_similarity(a: &str, b: &str) -> f64 {
-    let va = LocalEmbedding::embed(a);
-    let vb = LocalEmbedding::embed(b);
-    LocalEmbedding::cosine(&va, &vb)
+    let backend = crate::memory::embedding::EmbeddingProvider::global();
+    let va = backend.embed(a);
+    let vb = backend.embed(b);
+    backend.cosine(&va, &vb)
 }
 
 /// 语义查询结果来源标记（如实上报，不冒充精确命中）。

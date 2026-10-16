@@ -17,6 +17,7 @@
 //! - **尽力而为**：预热失败静默忽略（`warmup` 已保证），去重层不改变这一点。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,21 @@ use anyhow::Result;
 
 use crate::model::llm::LLMClient;
 use crate::types::Message;
+
+/// 进程级真实计数：实际发出的预填充次数（跨 `PrefetchDedup` 实例累计）。
+static PREFETCH_WARMUPS: AtomicUsize = AtomicUsize::new(0);
+/// 进程级真实计数：因窗口内已预热而跳过（去重）的次数。
+static PREFETCH_DEDUP_SKIPS: AtomicUsize = AtomicUsize::new(0);
+
+/// 读取进程级预填充真实计数 `(warmups, dedup_skips)`。
+///
+/// 供 `cache.status` 如实上报；无任何调用时返回 `(0, 0)`，绝不编造。
+pub fn prefetch_counters() -> (u64, u64) {
+    (
+        PREFETCH_WARMUPS.load(Ordering::Relaxed) as u64,
+        PREFETCH_DEDUP_SKIPS.load(Ordering::Relaxed) as u64,
+    )
+}
 
 /// 提取消息正文（去重 key 用）。稳定前缀只含 System 消息，故取 content 即可。
 fn message_content(m: &Message) -> &str {
@@ -100,85 +116,93 @@ impl PrefetchDedup {
     /// - 窗口内同前缀已预热 → 计入 `deduped` 并跳过。
     /// - 否则发一次 `warmup`，记录前缀与时间，计入 `prefetches`。
     ///
-/// 预热失败静默忽略（尽力而为，不阻塞调用方）。
-pub async fn warmup_once(&self, messages: &[Message]) -> Result<()> {
-    // 兼容入口：无会话维度（全局窗口语义保持既有行为）
-    self.warmup_once_for_session("", messages).await
-}
-
-/// 会话级去重预填充（v10：窗口对齐会话生命周期）：
-///
-/// 键 = `session | 稳定前缀`。**会话维度的去重不受 TTL 约束**——同一会话的
-/// 稳定前缀在会话生命周期内只预热一次，服务端 KV 块在整个会话中持续复用
-/// （对齐验收报告 §4 的剩余边界：把去重窗口从固定 5 分钟拉长为会话全程）。
-/// `session` 为空时回退全局 TTL 窗口语义（向后兼容）。
-///
-/// 内存有界：会话键集合超过 `SESSION_DEDUP_CAP` 时整体清空（进程级 LRU 近似），
-/// 绝不无限膨胀。
-pub async fn warmup_once_for_session(&self, session: &str, messages: &[Message]) -> Result<()> {
-    let ordered = crate::context::optimize::reorder_stable_prefix(messages);
-    let stable: Vec<Message> = ordered
-        .into_iter()
-        .filter(|m| matches!(m, Message::System { .. }))
-        .collect();
-    if stable.is_empty() {
-        return Ok(());
+    /// 预热失败静默忽略（尽力而为，不阻塞调用方）。
+    pub async fn warmup_once(&self, messages: &[Message]) -> Result<()> {
+        // 兼容入口：无会话维度（全局窗口语义保持既有行为）
+        self.warmup_once_for_session("", messages).await
     }
-    // 稳定前缀标识：按 (role:content) 逐条拼接，去重判定只看前缀本体是否一致
-    let key = stable
-        .iter()
-        .map(|m| format!("{}:{}", m.role(), message_content(m)))
-        .collect::<Vec<_>>()
-        .join("|");
-    let now = Instant::now();
 
-    if !session.is_empty() {
-        // 会话生命周期去重：无 TTL，仅受容量上限约束
-        let session_key = format!("{session}|{key}");
-        {
-            let mut seen = self
-                .session_warmed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if seen.len() >= SESSION_DEDUP_CAP {
-                seen.clear();
+    /// 会话级去重预填充（v10：窗口对齐会话生命周期）：
+    ///
+    /// 键 = `session | 稳定前缀`。**会话维度的去重不受 TTL 约束**——同一会话的
+    /// 稳定前缀在会话生命周期内只预热一次，服务端 KV 块在整个会话中持续复用
+    /// （对齐验收报告 §4 的剩余边界：把去重窗口从固定 5 分钟拉长为会话全程）。
+    /// `session` 为空时回退全局 TTL 窗口语义（向后兼容）。
+    ///
+    /// 内存有界：会话键集合超过 `SESSION_DEDUP_CAP` 时整体清空（进程级 LRU 近似），
+    /// 绝不无限膨胀。
+    pub async fn warmup_once_for_session(&self, session: &str, messages: &[Message]) -> Result<()> {
+        let ordered = crate::context::optimize::reorder_stable_prefix(messages);
+        // M2 降耗引擎：稳定前缀 = leading run（开头连续 System 消息）。mid-sequence
+        // System 是装配层刻意放置的逐轮变化段（记忆召回 / 经验提示 / Track A 片段，
+        // 见 `agent::runtime::build_model_messages` 动态区），不得进入预热去重键——
+        // 否则键逐轮漂移，会话级去重失效、预热退化为每轮一次。
+        let stable: Vec<Message> = ordered
+            .into_iter()
+            .take_while(|m| matches!(m, Message::System { .. }))
+            .collect();
+        if stable.is_empty() {
+            return Ok(());
+        }
+        // 稳定前缀标识：按 (role:content) 逐条拼接，去重判定只看前缀本体是否一致
+        let key = stable
+            .iter()
+            .map(|m| format!("{}:{}", m.role(), message_content(m)))
+            .collect::<Vec<_>>()
+            .join("|");
+        let now = Instant::now();
+
+        if !session.is_empty() {
+            // 会话生命周期去重：无 TTL，仅受容量上限约束
+            let session_key = format!("{session}|{key}");
+            {
+                let mut seen = self
+                    .session_warmed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if seen.len() >= SESSION_DEDUP_CAP {
+                    seen.clear();
+                }
+                if !seen.insert(session_key) {
+                    let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    s.deduped = s.deduped.saturating_add(1);
+                    PREFETCH_DEDUP_SKIPS.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
-            if !seen.insert(session_key) {
-                let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-                s.deduped = s.deduped.saturating_add(1);
-                return Ok(());
+            // 真正预热
+            let _ = self.client.warmup(messages).await;
+            let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+            s.prefetches = s.prefetches.saturating_add(1);
+            PREFETCH_WARMUPS.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        // 窗口内已预热 → 跳过（去重命中）
+        {
+            let warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = warmed.get(&key) {
+                if now.duration_since(*t) < self.ttl {
+                    let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    s.deduped = s.deduped.saturating_add(1);
+                    PREFETCH_DEDUP_SKIPS.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
         }
+
         // 真正预热
         let _ = self.client.warmup(messages).await;
+
+        // 懒清理过期条目，再记录本次
+        let mut warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
+        warmed.retain(|_, t| now.duration_since(*t) < self.ttl);
+        warmed.insert(key, now);
         let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         s.prefetches = s.prefetches.saturating_add(1);
-        return Ok(());
+        PREFETCH_WARMUPS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
-
-    // 窗口内已预热 → 跳过（去重命中）
-    {
-        let warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(t) = warmed.get(&key) {
-            if now.duration_since(*t) < self.ttl {
-                let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-                s.deduped = s.deduped.saturating_add(1);
-                return Ok(());
-            }
-        }
-    }
-
-    // 真正预热
-    let _ = self.client.warmup(messages).await;
-
-    // 懒清理过期条目，再记录本次
-    let mut warmed = self.warmed.lock().unwrap_or_else(|e| e.into_inner());
-    warmed.retain(|_, t| now.duration_since(*t) < self.ttl);
-    warmed.insert(key, now);
-    let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-    s.prefetches = s.prefetches.saturating_add(1);
-    Ok(())
-}
 
     /// 当前统计快照。
     pub fn stats(&self) -> PrefetchStats {
@@ -293,10 +317,7 @@ mod tests {
         let s2 = dedup.stats();
         assert_eq!(s2.prefetches, 2, "不同会话各预热一次: {s2:?}");
         // 空会话回退全局 TTL 语义：与 s1/s2 互不影响
-        dedup
-            .warmup_once(&msgs)
-            .await
-            .expect("尽力而为不报错");
+        dedup.warmup_once(&msgs).await.expect("尽力而为不报错");
         let s3 = dedup.stats();
         assert_eq!(s3.prefetches, 3, "无会话维度仍各自预热: {s3:?}");
     }
@@ -323,9 +344,6 @@ mod tests {
             .warmup_once_for_session("s-final", &msgs)
             .await
             .expect("尽力而为不报错");
-        assert!(
-            dedup.stats().deduped >= 1,
-            "容量超限整体清空后仍能正常去重"
-        );
+        assert!(dedup.stats().deduped >= 1, "容量超限整体清空后仍能正常去重");
     }
 }

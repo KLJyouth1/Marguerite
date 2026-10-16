@@ -190,9 +190,6 @@ mod tests {
         // 父区域合法，但嵌套子区域越界 → 整体应判无效
         let mut e = sample();
         e.layout[0].children[0].bbox = [0.0, 0.0, 2.0, 0.5];
-        assert!(
-            !e.all_bboxes_in_unit(),
-            "嵌套子区域越界也应判为无效"
-        );
+        assert!(!e.all_bboxes_in_unit(), "嵌套子区域越界也应判为无效");
     }
 }

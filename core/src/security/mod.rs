@@ -28,8 +28,8 @@ pub use preflight::{
     CODE_GUARDRAIL_DENIED, CODE_MALWARE_BLOCKED,
 };
 pub use scanner_l2::{MalwareScanner, ScanCategory, ScanFinding, ScanReport, Severity};
-pub use skill_scan::{SkillInstallScanner, SkillScanVerdict, SKILL_MALWARE_BLOCKED};
 pub use scanner_l3::{GuardrailScanner, GuardrailSeverity, GuardrailVerdict, OpKind};
+pub use skill_scan::{SkillInstallScanner, SkillScanVerdict, SKILL_MALWARE_BLOCKED};
 pub use ssrf_guard::SsrfGuard;
 
 #[cfg(test)]

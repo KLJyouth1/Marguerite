@@ -1,8 +1,10 @@
 """Static contract for the web ``/meta`` slash-command wiring.
 
-The served web UI is the Vite SPA under ``opensquilla-webui/``; its slash
-dispatch lives in ``composables/chat/useChatSlashCommands.ts``. JS/TS is not
-unit-tested with a JS runner here, so we lock the SPA source text:
+The served web UI is the Vite SPA under ``webui/``; its slash dispatch lives in
+``composables/chat/useChatSlashCommands.ts``. That module has its own vitest
+coverage (``useChatSlashCommands.test.ts``); what this file pins is the
+*cross-language* contract — the gateway's ``meta.run`` path is only alive if the
+console actually calls it:
 
 - meta-skills are offered as Tab-completable **argument candidates** in the
   slash menu (not a toast), via the command's ``argumentChoices``;
@@ -12,9 +14,9 @@ The contract intentionally targets the maintained Vue source rather than a
 generated browser bundle.
 """
 
-from pathlib import Path
+from spa_source import spa
 
-SPA_SLASH = Path("opensquilla-webui/src/composables/chat/useChatSlashCommands.ts")
+SPA_SLASH = spa("src/composables/chat/useChatSlashCommands.ts")
 
 
 def _read() -> str:

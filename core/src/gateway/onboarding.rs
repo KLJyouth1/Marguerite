@@ -1,0 +1,680 @@
+//! Onboarding 方法族（从 methods.rs 分治迁出）
+//!
+//! 覆盖 `onboarding.*` 全量方法：provider 目录 / 引导状态 / 路由配置 / Bloom 集成 / 服务商配置。
+//! 侧车离线时由此模块提供最小可用实现，让设置页 / 渠道编辑器仍可渲染 provider 选择。
+
+use serde_json::{json, Value};
+
+use crate::gateway::methods::GatewayContext;
+use crate::persistence::config::Config;
+
+/// `onboarding.catalog`（Rust 离线回退）：返回内置 LLM / 搜索 / 图像 / 嵌入 provider 目录。
+pub(crate) fn onboarding_catalog() -> Value {
+    let openai_compatible_fields = json!([
+        { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+        { "name": "base_url", "label": "Base URL", "type": "text", "required": false, "placeholder": "https://api.example.com/v1" },
+        { "name": "model", "label": "Model", "type": "text", "required": true, "placeholder": "model-name" },
+    ]);
+
+    let providers = json!([
+        {
+            "providerId": "deepseek",
+            "label": "DeepSeek",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "DEEPSEEK_API_KEY",
+            "defaultBaseUrl": "https://api.deepseek.com/v1",
+            "defaultDirectModel": "deepseek-chat",
+            "suggestedModels": ["deepseek-chat", "deepseek-reasoner"],
+            "whatYouNeed": ["DeepSeek API Key"],
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+                { "name": "model", "label": "Model", "type": "text", "required": false, "default": "deepseek-chat" },
+            ],
+        },
+        {
+            "providerId": "openai",
+            "label": "OpenAI",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "OPENAI_API_KEY",
+            "defaultBaseUrl": "https://api.openai.com/v1",
+            "defaultDirectModel": "gpt-4o",
+            "suggestedModels": ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"],
+            "whatYouNeed": ["OpenAI API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "anthropic",
+            "label": "Anthropic",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "ANTHROPIC_API_KEY",
+            "defaultBaseUrl": "https://api.anthropic.com/v1",
+            "defaultDirectModel": "claude-sonnet-4-20250514",
+            "suggestedModels": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-20250514"],
+            "whatYouNeed": ["Anthropic API Key"],
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+                { "name": "model", "label": "Model", "type": "text", "required": false, "default": "claude-sonnet-4-20250514" },
+            ],
+        },
+        {
+            "providerId": "qwen",
+            "label": "Qwen (Alibaba Cloud)",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "DASHSCOPE_API_KEY",
+            "defaultBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "defaultDirectModel": "qwen-max",
+            "suggestedModels": ["qwen-max", "qwen-plus", "qwen-turbo", "qwen3-235b-a22b"],
+            "whatYouNeed": ["DashScope API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "zhipu",
+            "label": "Zhipu (Z.AI)",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "ZHIPU_API_KEY",
+            "defaultBaseUrl": "https://open.bigmodel.cn/api/paas/v4",
+            "defaultDirectModel": "glm-4-plus",
+            "suggestedModels": ["glm-4-plus", "glm-4-air", "glm-4-flash"],
+            "whatYouNeed": ["Zhipu API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "moonshot",
+            "label": "Moonshot AI (Kimi)",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "MOONSHOT_API_KEY",
+            "defaultBaseUrl": "https://api.moonshot.cn/v1",
+            "defaultDirectModel": "moonshot-v1-128k",
+            "suggestedModels": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+            "whatYouNeed": ["Moonshot API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "siliconflow",
+            "label": "SiliconFlow",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "SILICONFLOW_API_KEY",
+            "defaultBaseUrl": "https://api.siliconflow.cn/v1",
+            "defaultDirectModel": "deepseek-ai/DeepSeek-V3",
+            "suggestedModels": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct"],
+            "whatYouNeed": ["SiliconFlow API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "openrouter",
+            "label": "OpenRouter",
+            "runtimeSupported": true,
+            "routerSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "OPENROUTER_API_KEY",
+            "defaultBaseUrl": "https://openrouter.ai/api/v1",
+            "defaultDirectModel": "deepseek/deepseek-chat",
+            "whatYouNeed": ["OpenRouter API Key"],
+            "fields": &openai_compatible_fields,
+        },
+        {
+            "providerId": "custom",
+            "label": "Custom OpenAI-compatible endpoint",
+            "runtimeSupported": true,
+            "routerSupported": false,
+            "acceptsApiKey": true,
+            "requiresApiKey": false,
+            "deployment": "custom",
+            "whatYouNeed": ["OpenAI-compatible API endpoint", "API Key (if required)"],
+            "fields": &openai_compatible_fields,
+        },
+    ]);
+
+    let search_providers = json!([
+        {
+            "providerId": "tavily",
+            "label": "Tavily Search",
+            "runtimeSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "TAVILY_API_KEY",
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+            ],
+        },
+        {
+            "providerId": "serper",
+            "label": "Serper.dev",
+            "runtimeSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "SERPER_API_KEY",
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+            ],
+        },
+    ]);
+
+    let image_providers = json!([
+        {
+            "providerId": "siliconflow",
+            "label": "SiliconFlow Image Generation",
+            "runtimeSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "SILICONFLOW_API_KEY",
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+            ],
+        },
+    ]);
+
+    let embedding_providers = json!([
+        {
+            "providerId": "siliconflow",
+            "label": "SiliconFlow Embeddings",
+            "runtimeSupported": true,
+            "acceptsApiKey": true,
+            "requiresApiKey": true,
+            "envKey": "SILICONFLOW_API_KEY",
+            "fields": [
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+            ],
+        },
+    ]);
+
+    let channels = json!([
+        {
+            "type": "slack",
+            "label": "Slack",
+            "description": "Slack 频道（Bot Token + App Token）",
+            "transport": "websocket",
+            "requiresPublicUrl": false,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "bot_token", "label": "Bot Token (xoxb-)", "type": "password", "required": true, "secret": true },
+                { "name": "app_token", "label": "App Token (xapp-)", "type": "password", "required": true, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+        {
+            "type": "discord",
+            "label": "Discord",
+            "description": "Discord 机器人（Gateway WebSocket）",
+            "transport": "websocket",
+            "requiresPublicUrl": false,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "bot_token", "label": "Bot Token", "type": "password", "required": true, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+        {
+            "type": "telegram",
+            "label": "Telegram",
+            "description": "Telegram 机器人（Long Polling）",
+            "transport": "polling",
+            "requiresPublicUrl": false,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "bot_token", "label": "Bot Token", "type": "password", "required": true, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+        {
+            "type": "feishu",
+            "label": "飞书 / Lark",
+            "description": "飞书自建应用（事件回调）",
+            "transport": "webhook",
+            "requiresPublicUrl": true,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "app_id", "label": "App ID", "type": "text", "required": true },
+                { "name": "app_secret", "label": "App Secret", "type": "password", "required": true, "secret": true },
+                { "name": "verification_token", "label": "Verification Token", "type": "password", "required": false, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+        {
+            "type": "wecom",
+            "label": "企业微信",
+            "description": "企业微信自建应用（回调）",
+            "transport": "webhook",
+            "requiresPublicUrl": true,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "corp_id", "label": "Corp ID", "type": "text", "required": true },
+                { "name": "agent_id", "label": "Agent ID", "type": "text", "required": true },
+                { "name": "secret", "label": "Secret", "type": "password", "required": true, "secret": true },
+                { "name": "token", "label": "Callback Token", "type": "password", "required": false, "secret": true },
+                { "name": "encoding_aes_key", "label": "Encoding AES Key", "type": "password", "required": false, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+        {
+            "type": "dingtalk",
+            "label": "钉钉",
+            "description": "钉钉机器人（Stream 模式）",
+            "transport": "websocket",
+            "requiresPublicUrl": false,
+            "restartRequired": true,
+            "canProbe": true,
+            "fields": [
+                { "name": "name", "label": "Channel name", "type": "text", "required": true },
+                { "name": "client_id", "label": "Client ID", "type": "text", "required": true },
+                { "name": "client_secret", "label": "Client Secret", "type": "password", "required": true, "secret": true },
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": true, "advanced": true },
+            ],
+        },
+    ]);
+
+    let audio_providers = json!([
+        {
+            "providerId": "elevenlabs",
+            "label": "ElevenLabs Audio",
+            "runtimeSupported": true,
+            "requiresApiKey": true,
+            "envKey": "ELEVENLABS_API_KEY",
+            "defaultBaseUrl": "https://api.elevenlabs.io",
+            "defaultTtsModel": "eleven_multilingual_v2",
+            "defaultTtsVoice": "21m00Tcm4TlvDq8ikWAM",
+            "deployment": "cloud",
+            "blocking": false,
+            "canProbe": true,
+            "whatYouNeed": ["ElevenLabs API Key"],
+            "fields": [
+                { "name": "enabled", "label": "Enabled", "type": "bool", "required": false, "default": false },
+                { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+            ],
+        },
+    ]);
+
+    json!({
+        "providers": providers,
+        "channels": channels,
+        "searchProviders": search_providers,
+        "routerProfiles": { "profiles": [], "defaultTier": "auto" },
+        "memoryEmbeddingProviders": embedding_providers,
+        "imageGenerationProviders": image_providers,
+        "audioProviders": audio_providers,
+    })
+}
+
+/// `llmProfileStatus`：从 models.json 汇总各服务商档案的就绪行。
+///
+/// 与 `config.get llm_profiles` 同一数据源与过滤规则（非内置模板 + 当前主
+/// provider）。凭据可用性以「主 provider 已配置（env/.env 注入）或档案自带
+/// key」近似——Rust 回退不维护逐档案密钥台账，诚实标注 credentialSource。
+fn llm_profile_status(live: &Config) -> Value {
+    use crate::model::selector::ModelSelector;
+    let Ok(sel) = ModelSelector::load() else {
+        return json!([]);
+    };
+    let active_id = sel.registry().active.clone();
+    let rows: Vec<Value> = sel
+        .registry()
+        .list()
+        .iter()
+        .filter(|p| !(p.builtin && p.api_key.is_empty() && p.id != active_id))
+        .map(|p| {
+            let is_active_provider = p.provider == live.model.provider;
+            let ready = (is_active_provider && !live.model.api_key.is_empty()) || !p.api_key.is_empty();
+            json!({
+                "provider": p.provider,
+                "ready": ready,
+                "credentialSource": if !p.api_key.is_empty() { "explicit" } else if ready { "env" } else { "none" },
+                "credentialEnv": "",
+                "endpointSource": "",
+                "reason": "",
+                "primaryEligible": true,
+                "primaryBlockReason": "",
+            })
+        })
+        .collect();
+    json!(rows)
+}
+
+/// `onboarding.status`（Rust 离线回退）：返回最小引导状态。
+pub(crate) fn onboarding_status(ctx: &GatewayContext) -> Value {
+    let live = Config::load().unwrap_or_else(|_| ctx.config.clone());
+    // v3 修复：Config::load() 已叠加 env/.env 覆盖，api_key 非空即视为已配置。
+    // 此前这里只看 YAML 的 api_key 字段（现已 skip_serializing 恒为空），
+    // 导致 .env 有密钥也误报「网关尚未就绪」。
+    let llm_configured = !live.model.api_key.is_empty();
+    let llm_source = if llm_configured { "config" } else { "none" };
+    // configPath 的语义是**配置文件路径**（客户端据此展示/复制「更多选项在此文件」并拼
+    // `--config <path>`）。此前误传 `Config::data_dir()`（数据目录），导致前端页脚把目录
+    // 当成配置文件、`--config <目录>` 亦是坏命令；pyengine 侧契约测试明确要求
+    // `payload["configPath"] == cfg.config_path`（文件），两侧语义必须一致。
+    let config_path = Config::config_path().to_string_lossy().to_string();
+    json!({
+        "needsOnboarding": !llm_configured,
+        "hasConfig": llm_configured,
+        "llmConfigured": llm_configured,
+        "llmSource": llm_source,
+        "channelCount": 0,
+        "channelsConfigured": false,
+        "searchConfigured": false,
+        "imageGenerationConfigured": false,
+        "configPath": config_path,
+        "sections": {
+            "llm": if llm_configured { "complete" } else { "incomplete" },
+            // 非阻断分区：本地能力默认可用，不再恒报 incomplete 触发横幅
+            "search": "optional",
+            "imageGeneration": "optional",
+            "memory": if llm_configured { "complete" } else { "incomplete" },
+        },
+        // 就绪摘要依赖 sectionDetails 判定 blocking/actionRequired；
+        // 空对象曾使 needsOnboarding 单独驱动横幅。现在如实给出明细。
+        "sectionDetails": {
+            "llm": {
+                "status": if llm_configured { "complete" } else { "missing" },
+                "blocking": !llm_configured,
+                "actionRequired": !llm_configured,
+                "label": "Model Service",
+                "detail": if llm_configured {
+                    format!("provider={} model={}", live.model.provider, live.model.model_name)
+                } else {
+                    "尚未配置模型服务商或 API Key".to_string()
+                },
+            },
+        },
+        // v3.1：主凭据状态（webui 凭证面板/档案卡 ready 判定的数据源）
+        "llmCredentialStatus": {
+            "provider": live.model.provider,
+            "available": llm_configured,
+            "source": if llm_configured { "env" } else { "none" },
+            "envKey": if llm_configured { "MARGUERITE_API_KEY" } else { "" },
+            "masked": "",
+            "revealAllowed": false,
+        },
+        // v3.1：已存档案的就绪状态行（与 config.get llm_profiles 对齐）。
+        // 数据源 = models.json 非内置模板 + 当前主 provider；webui 档案卡的
+        // ready/primaryEligible 判定依赖此列表。
+        "llmProfileStatus": llm_profile_status(&live),
+        "warnings": if llm_configured { Value::Array(vec![]) } else { json!(["LLM API Key 未配置（离线降级可用）"]) },
+    })
+}
+
+/// `onboarding.router.configure`：保存模型路由配置。
+pub(crate) fn onboarding_router_configure(ctx: &GatewayContext, params: &Value) -> Value {
+    let mut cfg = Config::load().unwrap_or_else(|_| ctx.config.clone());
+    if let Some(mode) = params.get("mode").and_then(Value::as_str) {
+        cfg.model_routing.mode = match mode {
+            "disabled" => "direct".to_string(),
+            "recommended" => "router".to_string(),
+            other => other.to_string(),
+        };
+    }
+    if let Some(fusion) = params.get("fusionModel").and_then(Value::as_str) {
+        cfg.model_routing.fusion_model = fusion.to_string();
+    }
+    if let Some(candidates) = params.get("candidateModels").and_then(Value::as_array) {
+        cfg.model_routing.candidate_models = candidates
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(fixed) = params.get("fixedModel").and_then(Value::as_str) {
+        cfg.model_routing.fixed_model = fixed.to_string();
+    }
+    if let Some(v) = params.get("crossProviderTiers").and_then(Value::as_bool) {
+        cfg.model_routing.cross_provider_tiers = v;
+    }
+    match cfg.save() {
+        Ok(()) => json!({ "ok": true, "saved": true, "restartRequired": true }),
+        Err(e) => json!({ "ok": false, "error": format!("保存路由配置失败: {e}") }),
+    }
+}
+
+/// `onboarding.ensemble.configure`：保存 Bloom 集成配置。
+pub(crate) fn onboarding_ensemble_configure(ctx: &GatewayContext, params: &Value) -> Value {
+    let mut cfg = ctx.config.clone();
+    if let Some(v) = params.get("enabled").and_then(Value::as_bool) {
+        cfg.bloom.parallel_enabled = v;
+    }
+    if let Some(v) = params.get("selectionMode").and_then(Value::as_str) {
+        cfg.bloom.selection_mode = v.to_string();
+    }
+    if let Some(v) = params.get("allFailedPolicy").and_then(Value::as_str) {
+        cfg.bloom.all_failed_policy = v.to_string();
+    }
+    if let Some(candidates) = params.get("candidates") {
+        cfg.bloom.candidates = candidates.clone();
+    }
+    match cfg.save() {
+        Ok(()) => json!({ "ok": true, "saved": true }),
+        Err(e) => json!({ "ok": false, "error": format!("保存集成配置失败: {e}") }),
+    }
+}
+
+/// `onboarding.provider.configure`：保存模型服务商配置。
+///
+/// v3.1 修复「保存了但没生效」：同时接受 webui 发送的 camelCase `model`
+/// 字段（此前只认 modelName/model_name，模型名永远存不上 → 页面仍显示空状态）；
+/// 收到 apiKey 时经 [`Config::write_env_key`] 转写 `.env`（凭证护栏，YAML 不落钥）。
+pub(crate) fn onboarding_provider_configure(ctx: &GatewayContext, params: &Value) -> Value {
+    let mut cfg = ctx.config.clone();
+    let mut changed = false;
+    if let Some(v) = params
+        .get("provider")
+        .or_else(|| params.get("providerId"))
+        .and_then(Value::as_str)
+    {
+        if !v.trim().is_empty() {
+            cfg.model.provider = v.to_string();
+            changed = true;
+        }
+    }
+    // model 字段三形态兼容（webui 发 camelCase 单数形式）
+    let model_value = params
+        .get("model")
+        .or_else(|| params.get("modelName"))
+        .or_else(|| params.get("model_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(v) = model_value {
+        cfg.model.model_name = v.to_string();
+        changed = true;
+    }
+    let explicit_key = params
+        .get("apiKey")
+        .or_else(|| params.get("api_key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if !explicit_key.is_empty() {
+        // 凭证护栏：YAML 永不落钥，转写 .env；内存保留供本次会话立即可用
+        Config::write_env_key(&explicit_key);
+        cfg.model.api_key = explicit_key;
+        changed = true;
+    }
+    if let Some(v) = params
+        .get("baseUrl")
+        .or_else(|| params.get("base_url"))
+        .and_then(Value::as_str)
+    {
+        if !v.trim().is_empty() {
+            cfg.model.base_url = v.to_string();
+            changed = true;
+        }
+    }
+    if !changed {
+        return json!({ "ok": false, "error": "没有需要保存的字段" });
+    }
+    match cfg.save() {
+        Ok(()) => json!({ "ok": true, "saved": true, "restart_required": false }),
+        Err(e) => json!({ "ok": false, "error": format!("保存服务商配置失败: {e}") }),
+    }
+}
+
+/// `onboarding.provider.probe`：验证 API Key 并尝试连接模型服务商。
+pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
+    let api_key = params
+        .get("apiKey")
+        .or_else(|| params.get("api_key"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let base_url = params
+        .get("baseUrl")
+        .or_else(|| params.get("base_url"))
+        .and_then(Value::as_str)
+        .unwrap_or("https://api.deepseek.com")
+        .to_string();
+    let model_name = params
+        .get("modelName")
+        .or_else(|| params.get("model_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("deepseek-chat")
+        .to_string();
+    let provider = params
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("deepseek")
+        .to_string();
+
+    if api_key.is_empty() {
+        return json!({ "ok": false, "error": "API 密钥不能为空" });
+    }
+
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 5,
+        "stream": false,
+    });
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": format!("HTTP 客户端创建失败: {e}") }),
+    };
+
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                json!({
+                    "ok": true,
+                    "connected": true,
+                    "provider": provider,
+                    "model": model_name,
+                    "message": "连接成功"
+                })
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                let detail = if text.len() > 200 {
+                    &text[..200]
+                } else {
+                    &text
+                };
+                json!({
+                    "ok": false,
+                    "connected": false,
+                    "error": format!("服务商返回错误 {}: {}", status.as_u16(), detail)
+                })
+            }
+        }
+        Err(e) => json!({
+            "ok": false,
+            "connected": false,
+            "error": format!("连接失败: {e}")
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `onboarding.status` 的 `configPath` 必须是**配置文件**路径，不是数据目录。
+    ///
+    /// 回归背景：Rust 侧曾传 `Config::data_dir()`（`%LOCALAPPDATA%\Marguerite`，一个目录），
+    /// 而 pyengine 侧契约测试要求 `payload["configPath"] == cfg.config_path`（文件）——
+    /// 同一 RPC 字段两套语义。前端据此展示「More options live in &lt;path&gt;」并拼
+    /// `--config &lt;path&gt;`，传目录即是坏命令。真机实测（18801）：字段值
+    /// `C:\Users\...\AppData\Local\Marguerite`，`isDirectory()==true`。
+    ///
+    /// 钉法：只看 `onboarding_status` 函数体窗口，确认唯一合法来源 = `Config::config_path()`。
+    /// 改回 `Config::data_dir()` 或另起字符串拼接，本用例必须失败。
+    #[test]
+    fn onboarding_status_config_path_points_at_the_config_file() {
+        let src = include_str!("onboarding.rs");
+        let start = src
+            .find("pub(crate) fn onboarding_status")
+            .expect("onboarding_status 必须存在");
+        let rest = &src[start..];
+        // 函数体窗口：到下一个顶层 `pub(crate) fn` 为止，避免命中文件里其它函数
+        let end = rest[1..]
+            .find("\npub(crate) fn ")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+
+        // 按**行**取窗口（而非字节切片）：本文件含中文注释，按字节切会落在字符中间 panic。
+        // 再剥掉注释行 —— 守卫注释里正当地引用了 `Config::data_dir()` 说明历史缺陷，
+        // 那是噪声不是违规（仓库既有教训：源码扫描必须处理「注释里的方法名」）。
+        // 窗口 = 整个函数体的**代码行**（已按函数边界收窄，无需再猜偏移）。
+        let window = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(window.contains("\"configPath\""), "必须返回 configPath 字段");
+
+        assert!(
+            window.contains("Config::config_path()"),
+            "configPath 必须来自 Config::config_path()（配置文件），窗口:\n{window}"
+        );
+        assert!(
+            !window.contains("Config::data_dir()"),
+            "configPath 不得使用 Config::data_dir()（那是数据目录），窗口:\n{window}"
+        );
+        // 反向自检：扫描规则真的能命中违规写法（否则本守卫是空转的）
+        let probe = "let x = Config::data_dir().to_string_lossy().to_string();\n\"configPath\": x,";
+        let pwindow = probe
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pwindow.contains("Config::data_dir()"), "扫描窗口必须能覆盖到赋值处");
+    }
+}

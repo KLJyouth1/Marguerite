@@ -143,16 +143,9 @@ impl AuthorizationRegistry {
     }
 
     /// 登记一个流（幂等：同 key 重复登记以最新元数据覆盖，保留 in_flight）。
-    pub fn register(
-        &self,
-        key: &CredentialKey,
-        label: &str,
-        methods: Vec<AuthorizationMethod>,
-    ) {
+    pub fn register(&self, key: &CredentialKey, label: &str, methods: Vec<AuthorizationMethod>) {
         let mut guard = self.flows.lock().unwrap_or_else(|e| e.into_inner());
-        let in_flight = guard
-            .get(&key.to_string())
-            .is_some_and(|f| f.in_flight);
+        let in_flight = guard.get(&key.to_string()).is_some_and(|f| f.in_flight);
         guard.insert(
             key.to_string(),
             FlowRegistration {
@@ -268,14 +261,16 @@ impl AuthorizationRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::config::Config;
     use std::path::PathBuf;
 
     fn tmp_store(name: &str) -> Arc<CredentialsStore> {
-        let dir = std::env::temp_dir().join(format!(
-            "mgt_auth_{name}_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("mgt_auth_{name}_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        // 测试隔离：config_dir 指向本用例临时目录 + 初始化 vault，
+        // 避免写真实 `~/.marguerite/`，且满足 byok 加解密所需主口令派生密钥。
+        Config::set_config_dir_override(dir.clone());
+        crate::vault::set_master_passphrase("test-vault-pass").unwrap();
         Arc::new(CredentialsStore::load(
             &PathBuf::from(&dir).join("credentials.json"),
         ))
@@ -315,9 +310,7 @@ mod tests {
         let reg = AuthorizationRegistry::new(store.clone());
         let key = CredentialKey::new("llm", "deepseek");
         reg.register(&key, "DeepSeek", methods());
-        let outcome = reg
-            .begin(&key, CredentialRecord::api_key("sk-ok"))
-            .unwrap();
+        let outcome = reg.begin(&key, CredentialRecord::api_key("sk-ok")).unwrap();
         assert_eq!(outcome.status, AuthorizationStatus::Authorized);
         assert!(!reg.is_in_flight(&key), "提交后应清 in_flight");
         assert_eq!(

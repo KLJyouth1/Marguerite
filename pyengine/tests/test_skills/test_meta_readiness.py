@@ -549,6 +549,11 @@ def test_awesome_webpage_secondary_profile_satisfies_readiness_and_runtime_env(
         config=config,
         validated_plan=plan,
         verify_capabilities=False,
+        # Pin the bin probe: the members declare ``bins: [python3]``, a POSIX-only
+        # binary name absent from a stock Windows install, so ``.auto()`` would
+        # report ``missing_bins=('python3',)`` and fail this test on the host
+        # instead of on the provider-profile behaviour it is checking.
+        ctx=EligibilityContext(os_name="linux", has_bin_cache={"python3": True}),
     )
     runtime_env = configured_meta_skill_runtime_env(
         config,

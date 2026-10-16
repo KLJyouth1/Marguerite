@@ -24,6 +24,12 @@
 //! 必须接 `guard::gateway::ApprovalGate`（其非交互路径 fail-closed），
 //! 而不是在此处开一个无条件绕过的口子。
 
+//! 跨平台终端后端：WSL / Docker / Native 自动探测与切换。
+//!
+//! 让 Windows 用户也能在 Linux 环境里跑命令，详见 [backend]。
+pub mod ansi;
+pub mod backend;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -299,43 +305,9 @@ fn spawn_reader<R: Read + Send + 'static>(r: Option<R>) -> thread::JoinHandle<St
 
 /// 剥离 ANSI 转义序列（CSI / OSC / 其他 ESC 引导序列），保留可见文本。
 ///
-/// 算法：
-/// - CSI（`ESC [`）：跳过 `[` 后直到终止字节（`0x40..=0x7E`，即 `@A-Z[\]^_`a-z`），
-///   参数字节（数字/`;`）低于 `@` 故不被误判为终止；
-/// - OSC（`ESC ]`）：跳过直到 BEL（`0x07`）或 ST（`ESC \`）；
-/// - 其它 ESC 序列：跳过紧随的一个字节。
-///   对 `ESC[m` / `ESC[31;1m` / `ESC]0;titleBEL` 等均安全。
+/// 本函数保留原签名对外兼容，内部转发到 [`ansi::strip_ansi`]。
 pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1B}' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek().copied() {
-            Some('[') => {
-                chars.next(); // 消费 '['
-                for n in chars.by_ref() {
-                    if ('@'..='~').contains(&n) {
-                        break; // 终止字节（如 m）
-                    }
-                }
-            }
-            Some(']') => {
-                chars.next(); // 消费 ']'
-                for n in chars.by_ref() {
-                    if n == '\u{07}' || n == '\u{1B}' {
-                        break; // BEL 或 ST 起始
-                    }
-                }
-            }
-            Some(_) | None => {
-                chars.next(); // 消费紧随的一个字节（若有）
-            }
-        }
-    }
-    out
+    ansi::strip_ansi(s)
 }
 
 #[cfg(test)]
@@ -348,37 +320,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("marguerite_term_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         TerminalSession::new_in(dir).without_audit()
-    }
-
-    #[test]
-    fn strip_ansi_removes_csi_color() {
-        assert_eq!(strip_ansi("\u{1B}[31mred\u{1B}[0m"), "red");
-    }
-
-    #[test]
-    fn strip_ansi_removes_multi_param() {
-        assert_eq!(
-            strip_ansi("\u{1B}[1;32;40mhello\u{1B}[0m world"),
-            "hello world"
-        );
-    }
-
-    #[test]
-    fn strip_ansi_keeps_plain_text() {
-        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
-    }
-
-    #[test]
-    fn strip_ansi_handles_os_title() {
-        // OSC 序列 ESC ] 0 ; title BEL
-        let input = "before\u{1B}]0;my title\u{07}after";
-        assert_eq!(strip_ansi(input), "beforeafter");
-    }
-
-    #[test]
-    fn strip_ansi_handles_lone_esc() {
-        // 尾部孤立 ESC 被跳过
-        assert_eq!(strip_ansi("ab\u{1B}"), "ab");
     }
 
     #[test]

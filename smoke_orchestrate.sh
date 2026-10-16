@@ -4,21 +4,31 @@
 # fresh, writable SQLite DBs and never conflicts with the live gateway (which
 # holds ~/.marguerite/sessions.db read-only for other writers). Non-disruptive.
 set -u
-BIN="D:/tp_build_fresh1/release/marguerite-core.exe"
-ROOT="D:/Downloads/Marguerite/marguerite"
+# Paths are derived, never hardcoded. This script used to be pinned to one
+# machine's build dir ("D:/tp_build_fresh1/...") and checkout path, so it would
+# only ever run for its author. Each value can still be overridden from the env.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="${MARGUERITE_BIN:-$ROOT/target/debug/marguerite-core.exe}"
 LOG="$ROOT/smoke_gw_run.log"
 RESULT="$ROOT/smoke_result_iso.json"
-SMOKE_PORT=18799
-SMOKE_HOME="D:/tp_smoke_home"
+SMOKE_PORT="${MARGUERITE_SMOKE_PORT:-18799}"
+SMOKE_HOME="${MARGUERITE_SMOKE_HOME:-${TMPDIR:-/tmp}/marguerite-smoke-home-$$}"
 WS_URL="ws://127.0.0.1:$SMOKE_PORT/ws"
 
 now(){ date +"%Y-%m-%dT%H:%M:%S"; }
 log(){ echo "[$(now)] $*"; }
 
-# Load API key/model from project .env (so the engine can call the LLM if reachable)
-API_KEY=$(grep -E '^MARGUERITE_API_KEY=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-API_MODEL=$(grep -E '^MARGUERITE_MODEL=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-API_KEY="${API_KEY:-sk-bfd59e486be843889b6ef3503f6429f4}"
+# Credentials are NEVER hardcoded here. Resolution order:
+#   1) environment variable (MARGUERITE_API_KEY / MARGUERITE_MODEL)
+#   2) the project .env, which is git-ignored and therefore never published
+# A missing API key is a hard failure: this script has no built-in fallback key.
+API_KEY="${MARGUERITE_API_KEY:-$(grep -E '^MARGUERITE_API_KEY=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)}"
+API_MODEL="${MARGUERITE_MODEL:-$(grep -E '^MARGUERITE_MODEL=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)}"
+if [ -z "$API_KEY" ]; then
+  log "ERROR: MARGUERITE_API_KEY is unset and $ROOT/.env carries no MARGUERITE_API_KEY entry."
+  log "       Refusing to start: export MARGUERITE_API_KEY=<key> (or write it into .env) first."
+  exit 5
+fi
 API_MODEL="${API_MODEL:-deepseek-v4-pro}"
 
 log "orchestrator start; waiting for fresh binary: $BIN"
@@ -49,7 +59,10 @@ mkdir -p "$SMOKE_HOME"
 
 log "launching gateway (isolated home=$SMOKE_HOME, port=$SMOKE_PORT)"
 cd "$ROOT" || exit 3
-USERPROFILE="$SMOKE_HOME" HOME="$SMOKE_HOME" \
+# MARGUERITE_CONFIG_DIR 必须显式给：Windows 上 dirs::home_dir() 走 Known Folder API，
+# 不认 USERPROFILE/HOME，只改 HOME 时冒烟网关会读写真实 ~/.marguerite。
+USERPROFILE="$SMOKE_HOME" HOME="$SMOKE_HOME" LOCALAPPDATA="$SMOKE_HOME/AppData/Local" \
+  MARGUERITE_CONFIG_DIR="$SMOKE_HOME/.marguerite" \
   MARGUERITE_API_KEY="$API_KEY" MARGUERITE_MODEL="$API_MODEL" \
   nohup "$BIN" gateway --port "$SMOKE_PORT" > "$LOG" 2>&1 &
 GW_PID=$!

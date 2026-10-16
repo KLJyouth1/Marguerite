@@ -82,9 +82,10 @@ pub enum ModlensMode {
 }
 
 /// `/usage` 作用域
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageScope {
+    #[default]
     Day,
     Week,
     Month,
@@ -92,25 +93,14 @@ pub enum UsageScope {
     Heatmap,
 }
 
-impl Default for UsageScope {
-    fn default() -> Self {
-        UsageScope::Day
-    }
-}
-
 /// `/pet` 动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PetAction {
     Pet,
     Feed,
+    #[default]
     Status,
-}
-
-impl Default for PetAction {
-    fn default() -> Self {
-        PetAction::Status
-    }
 }
 
 /// `/games` 子命令
@@ -139,6 +129,7 @@ pub enum RouterMode {
 }
 
 impl RouterMode {
+    #[allow(clippy::should_implement_trait)] // 命名仿 FromStr 但返回 Option，保留为解析辅助
     pub fn from_str(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "plan" => RouterMode::Plan,
@@ -232,7 +223,7 @@ pub enum SlashParseError {
 /// 由上层（repl.handle_slash）继续走原有分支。
 pub fn parse_dslash(input: &str) -> Result<DshSlashCommand, SlashParseError> {
     let raw = input.trim().to_string();
-    let mut parts = input.trim().split_whitespace();
+    let mut parts = input.split_whitespace();
     let cmd = parts.next().unwrap_or("");
     if !cmd.starts_with('/') {
         return Err(SlashParseError::NotDsh);
@@ -260,11 +251,7 @@ pub fn parse_dslash(input: &str) -> Result<DshSlashCommand, SlashParseError> {
         DshSlashKind::Sidebar => parse_sidebar(&args)?,
         DshSlashKind::Schedule => parse_schedule(&args)?,
     };
-    Ok(DshSlashCommand {
-        kind,
-        payload,
-        raw,
-    })
+    Ok(DshSlashCommand { kind, payload, raw })
 }
 
 fn parse_modlens(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
@@ -280,7 +267,9 @@ fn parse_modlens(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
                 .get(1)
                 .copied()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| SlashParseError::MissingArg("/modlens json 需要 <path>".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/modlens json 需要 <path>".to_string())
+                })?
                 .to_string();
             ModlensMode::Json { path }
         }
@@ -369,7 +358,9 @@ fn parse_market(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
             let name = rest
                 .first()
                 .copied()
-                .ok_or_else(|| SlashParseError::MissingArg("/market install 需要 <name>".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/market install 需要 <name>".to_string())
+                })?
                 .to_string();
             MarketCmd::Install { name }
         }
@@ -377,7 +368,9 @@ fn parse_market(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
             let name = rest
                 .first()
                 .copied()
-                .ok_or_else(|| SlashParseError::MissingArg("/market upgrade 需要 <name>".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/market upgrade 需要 <name>".to_string())
+                })?
                 .to_string();
             MarketCmd::Upgrade { name }
         }
@@ -441,7 +434,9 @@ fn parse_sidebar(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
             let slot = rest
                 .first()
                 .copied()
-                .ok_or_else(|| SlashParseError::MissingArg("/sidebar pin 需要 <slotId>".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/sidebar pin 需要 <slotId>".to_string())
+                })?
                 .to_string();
             SidebarCmd::Pin { slot }
         }
@@ -498,7 +493,9 @@ fn parse_schedule(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
             let iso = rest
                 .first()
                 .copied()
-                .ok_or_else(|| SlashParseError::MissingArg("/schedule at 需要 ISO 时刻".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/schedule at 需要 ISO 时刻".to_string())
+                })?
                 .to_string();
             let message = rest
                 .iter()
@@ -539,7 +536,9 @@ fn parse_schedule(args: &[&str]) -> Result<DshSlashPayload, SlashParseError> {
             let id = rest
                 .first()
                 .copied()
-                .ok_or_else(|| SlashParseError::MissingArg("/schedule cancel 需要 <id>".to_string()))?
+                .ok_or_else(|| {
+                    SlashParseError::MissingArg("/schedule cancel 需要 <id>".to_string())
+                })?
                 .to_string();
             ScheduleCmd::Cancel { id }
         }

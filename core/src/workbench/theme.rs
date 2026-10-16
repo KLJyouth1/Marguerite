@@ -111,7 +111,14 @@ mod tests {
         for skin in skins {
             let t = tokens_for(skin);
             for tok in [
-                &t.bg, &t.fg, &t.accent, &t.panel_bg, &t.border, &t.success, &t.warning, &t.danger,
+                &t.bg,
+                &t.fg,
+                &t.accent,
+                &t.panel_bg,
+                &t.border,
+                &t.success,
+                &t.warning,
+                &t.danger,
                 &t.muted,
             ] {
                 assert!(!tok.0.is_empty(), "token 引用不能为空");

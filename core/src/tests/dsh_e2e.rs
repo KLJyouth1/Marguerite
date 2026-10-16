@@ -73,10 +73,7 @@ fn dsh_workflow_closed_loop_4_stages() {
     ];
     let card = Widget::Card(Card {
         title: "DSH 工作台 3 按钮卡片".into(),
-        body: vec![
-            "请选择一个执行档位：".into(),
-            "A=弱  B=执行  C=规划".into(),
-        ],
+        body: vec!["请选择一个执行档位：".into(), "A=弱  B=执行  C=规划".into()],
         actions: buttons.clone(),
     });
     match &card {
@@ -99,8 +96,8 @@ fn dsh_workflow_closed_loop_4_stages() {
     // Stage 3 — Router：RouterProfile::from_str("execute") == Execute
     // =====================================================
     use crate::harness::dsh_bridge::RouterProfile;
-    let profile = RouterProfile::from_str("execute")
-        .expect("RouterProfile::from_str(\"execute\") 应成功");
+    let profile =
+        RouterProfile::from_str("execute").expect("RouterProfile::from_str(\"execute\") 应成功");
     assert_eq!(
         profile,
         RouterProfile::Execute,
@@ -127,8 +124,8 @@ fn dsh_workflow_closed_loop_4_stages() {
         .expect("构建查询服务");
     // 用 SQL 直接写入今天（UTC 日边界），绕过 ledger.record 真实 now()
     let today = Utc::now().date_naive();
-    let start_ms = super::super::usage::query_service::tests_exports::naive_date_to_ms(today)
-        as i64;
+    let start_ms =
+        super::super::usage::query_service::tests_exports::naive_date_to_ms(today) as i64;
     let insert_one = |offset_ms: i64| {
         let conn = svc.ledger_conn_for_e2e();
         conn.execute(

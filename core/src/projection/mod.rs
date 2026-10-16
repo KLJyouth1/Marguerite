@@ -121,7 +121,9 @@ impl ProjectionStore {
         base_seq: u64,
     ) -> Result<Value, String> {
         let mut state: U::State = match self.state_of(unit.key(), session_id) {
-            Some(json) if self.state_version_of(unit.key(), session_id) == Some(unit.state_version()) => {
+            Some(json)
+                if self.state_version_of(unit.key(), session_id) == Some(unit.state_version()) =>
+            {
                 serde_json::from_value(json)
                     .map_err(|e| format!("投影状态反序列化失败({}): {e}", unit.key()))?
             }
@@ -155,12 +157,9 @@ impl ProjectionStore {
     }
 
     /// 客户端视图（host-only 单元返回 None）。
-    pub fn view_of<U: ProjectionUnit>(
-        &self,
-        unit: &U,
-        session_id: &str,
-    ) -> Option<Value> {
-        let state: U::State = serde_json::from_value(self.state_of(unit.key(), session_id)?).ok()?;
+    pub fn view_of<U: ProjectionUnit>(&self, unit: &U, session_id: &str) -> Option<Value> {
+        let state: U::State =
+            serde_json::from_value(self.state_of(unit.key(), session_id)?).ok()?;
         unit.view(&state)
     }
 
@@ -195,7 +194,10 @@ impl ProjectionUnit for TurnCounterUnit {
     }
 
     fn apply(&self, state: &Self::State, event: &Value) -> Self::State {
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let is_turn = matches!(kind, "user/message" | "assistant/message");
         if !is_turn {
             return state.clone();
@@ -305,10 +307,7 @@ impl ProjectionUnit for TokenUsageUnit {
         let tokens_out = usage.get("tokens_out").and_then(Value::as_u64).unwrap_or(0);
         let step_key = format!("{tool_name}@{ts}");
         // 同一步重复样本：替换旧值（-prev +next），否则累加
-        let is_repeat = state
-            .last
-            .as_ref()
-            .is_some_and(|l| l.step_key == step_key);
+        let is_repeat = state.last.as_ref().is_some_and(|l| l.step_key == step_key);
         let (prev_in, prev_out, steps) = if is_repeat {
             let l = state.last.as_ref().expect("is_repeat 必有 last");
             (l.tokens_in, l.tokens_out, state.totals.steps)
@@ -417,10 +416,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(state["turns"], 2);
-            assert_eq!(
-                store.state_version_of(TurnCounterUnit.key(), "s1"),
-                Some(1)
-            );
+            assert_eq!(store.state_version_of(TurnCounterUnit.key(), "s1"), Some(1));
         }
         // 重开：状态仍在（事件日志持有状态之外的持久化投影表）
         let store = ProjectionStore::open(Some(db)).unwrap();
@@ -474,7 +470,12 @@ mod tests {
             .project(&HostAuditUnit, "a", &[turn("user/message")], 0)
             .unwrap();
         store
-            .project(&HostAuditUnit, "b", &[turn("user/message"), turn("assistant/message")], 0)
+            .project(
+                &HostAuditUnit,
+                "b",
+                &[turn("user/message"), turn("assistant/message")],
+                0,
+            )
             .unwrap();
         let a = store.state_of(HostAuditUnit.key(), "a").unwrap();
         let b = store.state_of(HostAuditUnit.key(), "b").unwrap();
@@ -508,7 +509,10 @@ mod tests {
         // 同一步（同 tool@ts）重复样本：替换旧值而非双计（addReplacing）
         let replaced = ProjectionStore::replay(
             &TokenUsageUnit,
-            &[usage_event("run_code", 1000, 100, 50), usage_event("run_code", 1000, 130, 70)],
+            &[
+                usage_event("run_code", 1000, 100, 50),
+                usage_event("run_code", 1000, 130, 70),
+            ],
         );
         assert_eq!(replaced.totals.tokens_in, 130, "同一步应替换");
         assert_eq!(replaced.totals.tokens_out, 70);
@@ -534,7 +538,8 @@ mod tests {
 
     #[test]
     fn token_usage_store_roundtrip_across_reopen() {
-        let dir = std::env::temp_dir().join(format!("mgt_projection_usage_{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("mgt_projection_usage_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("projection.db");
         {

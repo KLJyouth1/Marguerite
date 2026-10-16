@@ -303,6 +303,8 @@ pub struct WorkbenchState {
     pub active_activity: ActivityKind,
     /// 当前侧边面板
     pub active_sidebar: SlotId,
+    /// 侧边栏待聚焦/展开的路径（`/open <path>` 设置，文件树消费）
+    pub sidebar_open_path: Option<PathBuf>,
     /// 主区 Tab
     pub main_tab: MainTab,
     /// 右栏 Tab
@@ -374,6 +376,7 @@ impl WorkbenchState {
             focus: WorkbenchRegion::Activity,
             active_activity: ActivityKind::Files,
             active_sidebar: SlotId::LeftSidebarFileTree,
+            sidebar_open_path: None,
             main_tab: MainTab::Chat,
             rail_tab: RailTab::Agent,
             mode: ModeKind::Agent,
@@ -785,6 +788,35 @@ impl WorkbenchState {
             EventType::ArtifactUpdated => {}
             // 桌面动作完成（Epic C）：TUI 忽略，仅 Web UI 渲染审计回执。
             EventType::DesktopActionDone => {}
+            // 记忆召回（联想记忆网络）：TUI 不经网关总线，忽略（Web UI 据此构建筑）。
+            EventType::MemoryRecall => {}
+            // 回合保活心跳：只证明「这一轮还活着」，不携带任何视图状态。
+            // TUI 的存活判据是事件流本身（每帧刷新 last_event_at），故此处无副作用。
+            EventType::RunHeartbeat => {}
+            // 升级路径（M2-C4）：护栏决定「停下问人」，四场景结构化 escalation。
+            // TUI 复用审批视图（AwaitingApproval），展示触发场景 + 原因，fail-closed 等待确认。
+            EventType::Escalation => {
+                let id = str_of(&env.payload, "id").to_string();
+                let trigger = str_of(&env.payload, "trigger").to_string();
+                let reason = str_of(&env.payload, "reason").to_string();
+                let operation = env
+                    .payload
+                    .get("context")
+                    .and_then(|c| c.get("operation"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.approval = Some(PendingApprovalView {
+                    id,
+                    tool: format!("escalation:{trigger}"),
+                    args: if operation.is_empty() {
+                        reason.clone()
+                    } else {
+                        format!("{operation} · {reason}")
+                    },
+                    risk: trigger,
+                });
+                self.interaction = InteractionState::AwaitingApproval;
+            }
         }
     }
 }

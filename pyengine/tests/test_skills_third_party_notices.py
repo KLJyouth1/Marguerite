@@ -6,6 +6,9 @@ from pathlib import Path
 from opensquilla.skills.loader import SkillLoader
 
 ROOT = Path(__file__).resolve().parents[1]
+# The upstream console directory ``opensquilla-webui/`` was never migrated into
+# this repository; its console is ``<repo>/webui/``.
+WEBUI = ROOT.parent / "webui"
 BUNDLED = ROOT / "src" / "opensquilla" / "skills" / "bundled"
 NOTICES = ROOT / "THIRD_PARTY_NOTICES.md"
 ORIGINALS = {
@@ -95,7 +98,17 @@ def test_all_bundled_skills_have_complete_provenance(tmp_path: Path) -> None:
             "openclaw-derived",
             "clawhub-mit",
             "clawhub-mit0",
+            "marguerite-derived",
         }, skill.name
+        if provenance.origin == "marguerite-derived":
+            # Authored in this workbench (adapted from the upstream harness), so
+            # the origin is self-attribution and the maintainer is this
+            # repository. The parts that still have to be declared are the
+            # license and where the adapted work came from.
+            assert provenance.maintained_by == "Marguerite", skill.name
+            assert provenance.upstream_url, skill.name
+            assert provenance.license == "MIT", skill.name
+            continue
         assert provenance.maintained_by == "OpenSquilla", skill.name
         if provenance.origin == "bundled-derived":
             assert provenance.upstream_url == "https://github.com/bundled/bundled"
@@ -125,6 +138,9 @@ def test_third_party_notices_match_bundled_provenance(tmp_path: Path) -> None:
     )
     clawhub_mit = sorted(name for name, origin in skills.items() if origin == "clawhub-mit")
     clawhub_derived = sorted(name for name, origin in skills.items() if origin == "clawhub-mit0")
+    marguerite_derived = sorted(
+        name for name, origin in skills.items() if origin == "marguerite-derived"
+    )
 
     assert "## OpenClaw-derived bundled skill descriptors" in text
     assert "## OpenSquilla-original bundled skills" in text
@@ -132,6 +148,8 @@ def test_third_party_notices_match_bundled_provenance(tmp_path: Path) -> None:
         assert "## ClawHub-derived bundled skill descriptors" in text
     if clawhub_mit:
         assert "## ClawHub MIT bundled skill descriptors" in text
+    if marguerite_derived:
+        assert "## Marguerite-derived bundled skills" in text
     for name in derived:
         assert f"- `{name}`" in text
     for name in originals:
@@ -141,6 +159,8 @@ def test_third_party_notices_match_bundled_provenance(tmp_path: Path) -> None:
     for name in clawhub_mit:
         assert f"- `{name}`" in text
     for name in clawhub_derived:
+        assert f"- `{name}`" in text
+    for name in marguerite_derived:
         assert f"- `{name}`" in text
 
     listed = {
@@ -193,9 +213,7 @@ def test_frontend_static_assets_are_covered_by_third_party_notices() -> None:
     ]:
         assert expected in text
 
-    package = json.loads(
-        (ROOT / "opensquilla-webui" / "package.json").read_text(encoding="utf-8")
-    )
+    package = json.loads((WEBUI / "package.json").read_text(encoding="utf-8"))
     bundled_direct_dependencies = {
         name for name in package["dependencies"] if not name.startswith("@types/")
     }
@@ -212,25 +230,13 @@ def test_frontend_static_assets_are_covered_by_third_party_notices() -> None:
         assert removed not in text
 
     for path in [
-        ROOT / "opensquilla-webui" / "package.json",
-        ROOT / "opensquilla-webui" / "package-lock.json",
-        ROOT / "opensquilla-webui" / "src" / "composables" / "chat" / "useChatTextRendering.ts",
-        ROOT / "opensquilla-webui" / "src" / "assets" / "fonts" / "ibm-plex-sans-400.woff2",
-        ROOT / "opensquilla-webui" / "src" / "assets" / "fonts" / "space-grotesk-400.woff2",
-        ROOT
-        / "opensquilla-webui"
-        / "src"
-        / "themes"
-        / "out-of-register"
-        / "fonts"
-        / "fraunces-400.woff2",
-        ROOT
-        / "opensquilla-webui"
-        / "src"
-        / "themes"
-        / "out-of-register"
-        / "fonts"
-        / "newsreader-400.woff2",
+        WEBUI / "package.json",
+        WEBUI / "package-lock.json",
+        WEBUI / "src" / "composables" / "chat" / "useChatTextRendering.ts",
+        WEBUI / "src" / "assets" / "fonts" / "ibm-plex-sans-400.woff2",
+        WEBUI / "src" / "assets" / "fonts" / "space-grotesk-400.woff2",
+        WEBUI / "src" / "themes" / "out-of-register" / "fonts" / "fraunces-400.woff2",
+        WEBUI / "src" / "themes" / "out-of-register" / "fonts" / "newsreader-400.woff2",
     ]:
         assert path.is_file(), path
 

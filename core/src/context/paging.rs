@@ -151,10 +151,9 @@ impl PagingEngine {
             if total <= max_total {
                 break;
             }
-            if page.summary.is_some() {
+            if let Some(summary) = &page.summary {
                 page.expanded = false;
-                total =
-                    total.saturating_sub(page.content.len() - page.summary.as_ref().unwrap().len());
+                total = total.saturating_sub(page.content.len() - summary.len());
             }
         }
         pages.sort_by_key(|p| p.id);

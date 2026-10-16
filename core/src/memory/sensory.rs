@@ -211,6 +211,8 @@ impl SensoryMemory {
                     input: tool_input.unwrap_or_default(),
                     output: tool_output.unwrap_or_default(),
                     timestamp,
+                    // 该读路径不带耗时列（历史耗时经 sessions.db 快照还原）。
+                    elapsed_ms: None,
                 },
                 _ => Message::System { content, timestamp },
             };
@@ -445,6 +447,7 @@ mod tests {
                     input: "1+1".to_string(),
                     output: "2".to_string(),
                     timestamp: now,
+                    elapsed_ms: None,
                 })
                 .unwrap();
             memory.save().unwrap();
@@ -482,6 +485,7 @@ mod tests {
                 input: "1+1".to_string(),
                 output: "Result: 2".to_string(),
                 timestamp: now,
+                elapsed_ms: None,
             })
             .unwrap();
 

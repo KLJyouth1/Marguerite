@@ -15,11 +15,13 @@
 //! `run_isolated()` 把钩子、预算、并发、路由四者串成一次完整的隔离执行。
 
 pub mod checkpoint;
-pub mod distill;
 pub mod dispatch;
+pub mod distill;
 pub mod dsh_bridge;
+pub mod eval;
 pub mod evolve;
 pub mod hooks;
+pub mod meta;
 pub mod registry;
 pub mod routing;
 pub mod subagent;
@@ -37,16 +39,21 @@ use crate::mcp::registry::ToolRegistry;
 use crate::model::router::{Complexity, IntentType, ModelRouter};
 
 pub use checkpoint::{Checkpoint, CheckpointId, GitCheckpoints};
-pub use dispatch::{
-    dispatch, dispatch_many, DispatchRequest, DispatchResult, DispatchTarget,
-};
+pub use dispatch::{dispatch, dispatch_many, DispatchRequest, DispatchResult, DispatchTarget};
 pub use dsh_bridge::{
     default_bus, install_dsh_bridges, install_dsh_bridges_with_projection, install_modlens_hook,
     install_usage_hook, install_usage_hook_with_projection, DshPetBridge, DshRouterBridge,
     PetState, RouterProfile, RouterProfileStore, UsageAggregator, UsageRecord,
 };
+pub use eval::{eval_suite, levenshtein, similarity, summarize, EvalEntry, EvalSummary, EvalTask};
 pub use evolve::{EvolutionRecord, EvolutionRunner};
 pub use hooks::{HookContext, HookDecision, HookFn, HookOutcome, HookPhase, HookRunner};
+pub use meta::{
+    diagnose, evaluate_candidate, extract_signals, observe_recent, plan_improvement, ChangeTarget,
+    Diagnosis, EvalOutcome, FailureSignal, ImprovementPlan, MetaAgent, MetaCycleReport, MetaLedger,
+    MetaPolicy, PromotionCriteria, PromotionVerdict, RiskLevel, RolloutStage, RootCause,
+    SignalKind, VersionSnapshot,
+};
 pub use registry::{CapabilityInfo, CapabilityRegistry, Maturity, NativeCapability};
 pub use routing::{HarnessRouter, RoutingPolicy};
 pub use subagent::{

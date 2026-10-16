@@ -1,0 +1,142 @@
+# =============================================================================
+# Marguerite — tagged release
+# -----------------------------------------------------------------------------
+# Triggered by an annotated tag matching `v*` (e.g. `v0.3.0`). Builds the two
+# command-line products of the Rust workspace and attaches one archive per
+# target triple to the GitHub Release:
+#
+#   marguerite-core-$TAG-$TARGET.tar.gz   (Linux, macOS)
+#   marguerite-core-$TAG-$TARGET.zip      (Windows)
+#
+# Each archive contains BOTH binaries:
+#   marguerite-core  — engine + CLI (the `marguerite` command surface)
+#   marguerite-tui   — ratatui terminal workbench
+#
+# The Tauri desktop shell (gui/) and the Vue console (webui/) are intentionally
+# NOT built here: `cargo tauri build` needs per-OS installer toolchains (WiX /
+# NSIS / bundling) and the console bundle is produced by scripts/package_app.cmd.
+# This workflow covers the portable, dependency-free binaries.
+#
+# Same two environment quirks as ci.yml:
+#   * rust-toolchain.toml pins the Windows msvc host triple -> RUSTUP_TOOLCHAIN
+#     selects the host-native 1.95.0 that is installed first.
+#   * NO_COLOR is unset so the two theme tests do not take the monochrome path.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      # One broken target must not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # tree-sitter grammar crates compile C, so a host compiler must exist.
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      # bash is available on all three runner images, so $GITHUB_ENV is written
+      # the same way everywhere. `--target` is passed explicitly so the job does
+      # not depend on the runner being the same architecture as the target
+      # (macos-latest has already flipped between x86_64 and arm64 once).
+      - name: Select host-native Rust ${{ env.RUST_VERSION }}
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal \
+            --target "${{ matrix.target }}"
+          echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build marguerite-core (release)
+        shell: bash
+        run: |
+          unset NO_COLOR
+          cargo build --release --target "${{ matrix.target }}" \
+            -p marguerite-core --bin marguerite-core
+
+      - name: Build marguerite-tui (release)
+        shell: bash
+        run: |
+          unset NO_COLOR
+          cargo build --release --target "${{ matrix.target }}" \
+            -p marguerite-tui --bin marguerite-tui
+
+      # ---- package: Windows (.zip via Compress-Archive, no external `zip`) ----
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          $rel = "target/${{ matrix.target }}/release"
+          foreach ($bin in @("marguerite-core.exe", "marguerite-tui.exe")) {
+            if (-not (Test-Path "$rel/$bin")) { throw "missing release binary: $rel/$bin" }
+            Copy-Item "$rel/$bin" "$staging/" -Force
+          }
+          $name = "marguerite-core-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "$staging/*" -DestinationPath $name -Force
+          Write-Host "created $name"
+          Get-ChildItem $name | Select-Object Name, Length
+
+      # ---- package: Linux/macOS (.tar.gz) ----
+      - name: Package archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="target/${{ matrix.target }}/release"
+          for bin in marguerite-core marguerite-tui; do
+            test -f "$rel/$bin" || { echo "missing release binary: $rel/$bin"; exit 1; }
+          done
+          name="marguerite-core-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$name" -C "$rel" marguerite-core marguerite-tui
+          echo "created $name"
+          ls -l "$name"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: marguerite-core-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true

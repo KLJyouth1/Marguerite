@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -2300,6 +2301,130 @@ def test_router_boot_validation_still_fails_when_required_bundle_missing(tmp_pat
 
     with pytest.raises(RuntimeError, match="missing V4 bundle files"):
         validate_squilla_router_runtime(config)
+
+
+def test_router_boot_validation_rejects_a_git_lfs_pointer_bundle(tmp_path: Path) -> None:
+    """Layout-complete but pointer-filled must NOT validate as ready.
+
+    Regression for the M02 finding: every weight in the shipped bundle is a
+    Git LFS pointer, yet this validation passed and logged ``bundle_ready``, so
+    "automatic model routing" stayed dead with only an on/off switch as
+    evidence. The raise is deliberately *not* gated on ``require_router_runtime``
+    — the caller decides: boot degrades, the doctor reports.
+    """
+
+    bundle_dir = tmp_path / "v4_bundle"
+    (bundle_dir / "runtime_src").mkdir(parents=True)
+    (bundle_dir / "router.runtime.yaml").write_text("v4: {}\n", encoding="utf-8")
+    pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 39684725\n"
+    (bundle_dir / "lgbm_main.bin").write_bytes(pointer)
+    (bundle_dir / "artifact_manifest.json").write_text(
+        json.dumps({"files": [{"path": "lgbm_main.bin", "size_bytes": 39684725}]}),
+        encoding="utf-8",
+    )
+
+    config = GatewayConfig()
+    config.squilla_router.v4_bundle_dir = str(bundle_dir)
+    config.squilla_router.require_router_runtime = False
+
+    from opensquilla.router_runtime_diagnostics import (
+        ROUTER_WEIGHTS_NOT_FETCHED,
+        RouterBundleDegraded,
+        classify_router_runtime_error,
+    )
+
+    with pytest.raises(RouterBundleDegraded, match="Git LFS pointer") as excinfo:
+        validate_squilla_router_runtime(config)
+
+    # A degraded bundle must be distinguishable from a broken installation.
+    assert not isinstance(excinfo.value, SystemExit)
+    assert classify_router_runtime_error(excinfo.value) == ROUTER_WEIGHTS_NOT_FETCHED
+
+
+@pytest.mark.asyncio
+async def test_build_services_degrades_loudly_on_a_pointer_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Boot must survive unusable weights — loudly, not fatally.
+
+    ML routing is an optional enhancement; refusing to boot would brick every
+    source checkout. The warning (and its classification) is the evidence that
+    keeps the degradation from being silent.
+    """
+
+    from opensquilla.gateway import boot
+
+    monkeypatch.setattr(
+        "opensquilla.sandbox.integration.configure_runtime",
+        lambda settings, **kwargs: SimpleNamespace(
+            effective=SimpleNamespace(
+                sandbox_enabled=True, as_dict=lambda: {"sandbox_enabled": True}
+            )
+        ),
+    )
+
+    bundle_dir = tmp_path / "v4_bundle"
+    (bundle_dir / "runtime_src").mkdir(parents=True)
+    (bundle_dir / "router.runtime.yaml").write_text("v4: {}\n", encoding="utf-8")
+    (bundle_dir / "lgbm_main.bin").write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 39684725\n"
+    )
+    (bundle_dir / "artifact_manifest.json").write_text(
+        json.dumps({"files": [{"path": "lgbm_main.bin", "size_bytes": 39684725}]}),
+        encoding="utf-8",
+    )
+
+    config = GatewayConfig(
+        state_dir=str(tmp_path / "state"),
+        workspace_dir=str(tmp_path / "workspace"),
+        control_ui={"enabled": False},
+        channels={"channels": []},
+        mcp={"enabled": False},
+        memory={"flush_enabled": False},
+        sandbox={"auto_setup": False},
+    )
+    config.squilla_router.v4_bundle_dir = str(bundle_dir)
+
+    services = await boot.build_services(
+        config=config,
+        session_db_path=str(tmp_path / "sessions.sqlite"),
+        seed_agent_workspaces=False,
+    )
+
+    assert services is not None, "boot must not die on unusable router weights"
+    # structlog's PrintLogger writes to stdout, not through `logging` — hence
+    # capsys rather than caplog.
+    captured = capsys.readouterr().out
+    assert "build_services.squilla_router_bundle_degraded" in captured, captured
+    assert "router_weights_not_fetched" in captured, captured
+
+
+def test_router_boot_validation_is_quiet_for_a_complete_bundle(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bundle with real bytes must still validate as ready (no false alarm)."""
+
+    bundle_dir = tmp_path / "v4_bundle"
+    (bundle_dir / "runtime_src").mkdir(parents=True)
+    (bundle_dir / "router.runtime.yaml").write_text("v4: {}\n", encoding="utf-8")
+    (bundle_dir / "lgbm_main.bin").write_bytes(b"\x00real-weights\x01")
+    (bundle_dir / "artifact_manifest.json").write_text(
+        json.dumps({"files": [{"path": "lgbm_main.bin", "size_bytes": 14}]}),
+        encoding="utf-8",
+    )
+
+    config = GatewayConfig()
+    config.squilla_router.v4_bundle_dir = str(bundle_dir)
+    config.squilla_router.require_router_runtime = True
+
+    with caplog.at_level("WARNING"):
+        validate_squilla_router_runtime(config)  # must not raise
+
+    assert not any(
+        "degraded" in record.message for record in caplog.records
+    ), [r.message for r in caplog.records]
 
 
 def test_skill_filter_banner_accepts_tokenizers_without_transformers(

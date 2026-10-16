@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,16 @@ _HOST_SHELL_ENV = "OPENSQUILLA_WORKSPACE_WRITE_DENY_HOST_SHELL"
 _COMMAND_TARGETS_ENV = "OPENSQUILLA_WORKSPACE_WRITE_DENY_COMMAND_TARGETS"
 _INTERPRETER_TARGETS_ENV = "OPENSQUILLA_WORKSPACE_WRITE_DENY_INTERPRETER_TARGETS"
 _GUIDANCE_ENV = "OPENSQUILLA_WORKSPACE_WRITE_DENY_GUIDANCE"
+# Cases that really *execute* a one-liner need an interpreter that exists on this
+# host, and a hardcoded ``python3`` is not one: a stock Windows install exposes
+# only ``python`` (measured: ``python3 -c "print(1)"`` there exits 1 with no
+# stderr). The running interpreter is used instead, unquoted -- the tool rewrites
+# an unquoted ``python``/``python3`` *path* into a single-quoted ``-FilePath``
+# argument, so this stays correct when the path contains spaces, while a
+# hand-quoted head is not a valid PowerShell statement. The literal
+# ``"python3 …"`` strings elsewhere in this module are analyzer *input* that is
+# never executed, and stay as they are on purpose.
+_PYTHON = sys.executable
 
 
 @pytest.fixture(autouse=True)
@@ -331,7 +342,7 @@ async def test_exec_command_interpreter_write_passes_through_by_default(
     _configure_ctx(workspace, ["tests/**"])
 
     result = await shell.exec_command(
-        "python3 -c \"open('tests/test_a.py','w').write('assert b')\"",
+        f"{_PYTHON} -c \"open('tests/test_a.py','w').write('assert b')\"",
         workdir=str(workspace),
     )
 
@@ -351,7 +362,7 @@ async def test_exec_command_interpreter_reads_stay_unblocked_with_lever_on(
     _configure_ctx(workspace, ["tests/**"])
 
     result = await shell.exec_command(
-        "python3 -c \"print(open('tests/test_a.py').read())\"",
+        f"{_PYTHON} -c \"print(open('tests/test_a.py').read())\"",
         workdir=str(workspace),
     )
 

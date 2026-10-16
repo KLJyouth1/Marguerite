@@ -1,15 +1,17 @@
 """Vue Control UI wiring contracts for the meta-run surfaces.
 
-Interactive behavior is covered by ``opensquilla-webui/e2e/meta-ribbon.spec.ts``;
-these focused checks keep the active Vue components mounted after the vanilla
+Interactive behavior is covered by ``webui/e2e/meta-ribbon.spec.ts``; these
+focused checks keep the active Vue components mounted after the vanilla
 frontend assets are removed.
 """
 
 from pathlib import Path
 
-META_RIBBON = Path("opensquilla-webui/src/components/chat/MetaRibbon.vue")
-META_PREFLIGHT = Path("opensquilla-webui/src/components/chat/MetaPreflightCard.vue")
-CHAT_VIEW = Path("opensquilla-webui/src/views/ChatView.vue")
+from spa_source import spa
+
+META_RIBBON = spa("src/components/chat/MetaRibbon.vue")
+META_PREFLIGHT = spa("src/components/chat/MetaPreflightCard.vue")
+CHAT_VIEW = spa("src/views/ChatView.vue")
 
 
 def _read(path: Path) -> str:

@@ -41,7 +41,9 @@ impl Slot for DshBetterSidebarSlot {
     fn render(&self, frame: &mut Frame, area: Rect, _state: &WorkbenchState) {
         let title = Line::from(Span::styled(
             "[DSH Better Sidebar]",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
         let lines: Vec<Line> = vec![
             title,
@@ -62,7 +64,9 @@ impl Slot for DshBetterSidebarSlot {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -92,7 +96,9 @@ impl Slot for DshUsageSlot {
         let title = Line::from(vec![
             Span::styled(
                 "Daily Usage ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("(TOKEN)", Style::default().fg(Color::Yellow)),
         ]);
@@ -113,7 +119,9 @@ impl Slot for DshUsageSlot {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -206,7 +214,9 @@ impl Slot for DshPetWhaleSlot {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Rgb(0, 130, 180)));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -223,7 +233,7 @@ impl Slot for DshMiniGamesSlot {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, _state: &WorkbenchState) {
-        let lines: Vec<Line> = vec![
+        let mut lines: Vec<Line> = vec![
             Line::from(Span::styled(
                 "Mini Games (DSH)",
                 Style::default()
@@ -231,16 +241,24 @@ impl Slot for DshMiniGamesSlot {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("  2048           ↑↓←→ 方向键"),
-            Line::from("  TicTacToe      小键盘 1-9"),
-            Line::from("  Snake          WASD"),
-            Line::from(""),
-            Line::from("  （输入对应按键进入游戏）"),
         ];
+        // 单一事实源：与 games::catalog()（引擎/REPL/capabilities）一致，杜绝漂移
+        for g in crate::games::catalog() {
+            lines.push(Line::from(format!(
+                "  {:<10} {:<16}（已实装）",
+                g.id, g.name
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "  /games play <id> <动作> 可玩，以 capabilities 为准",
+        ));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -273,7 +291,9 @@ impl Slot for DshGenUiSlot {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -317,7 +337,9 @@ impl Slot for DshMarketSlot {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Rgb(255, 160, 0)));
-        let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 }
@@ -358,7 +380,7 @@ mod tests {
 
     #[test]
     fn dsh_better_sidebar_contains_identifier() {
-        let buf = render_into(&DshBetterSidebarSlot::default(), 40, 15);
+        let buf = render_into(&DshBetterSidebarSlot, 40, 15);
         assert!(
             buf.contains("[DSH Better Sidebar]"),
             "缓冲区应包含标题标识串，实际前 500 字节：{}",
@@ -368,15 +390,12 @@ mod tests {
 
     #[test]
     fn dsh_usage_contains_identifier() {
-        let buf = render_into(&DshUsageSlot::default(), 40, 15);
+        let buf = render_into(&DshUsageSlot, 40, 15);
         assert!(
             buf.contains("Daily Usage"),
             "缓冲区应包含 'Daily Usage'，实际：{buf}"
         );
-        assert!(
-            buf.contains("TOKEN"),
-            "缓冲区应包含 'TOKEN'，实际：{buf}"
-        );
+        assert!(buf.contains("TOKEN"), "缓冲区应包含 'TOKEN'，实际：{buf}");
         assert!(
             buf.contains("Total: 12,345 TOKENS"),
             "缓冲区应包含 TOKENS 合计行"
@@ -385,15 +404,12 @@ mod tests {
 
     #[test]
     fn dsh_pet_whale_contains_identifier() {
-        let buf = render_into(&DshPetWhaleSlot::default(), 40, 15);
+        let buf = render_into(&DshPetWhaleSlot, 40, 15);
         assert!(
             buf.contains("Whale") || buf.contains("🐋"),
             "缓冲区应包含 Whale/🐋 标题标识"
         );
-        assert!(
-            buf.contains("Mood:"),
-            "缓冲区应包含 Mood 行，实际：{buf}"
-        );
+        assert!(buf.contains("Mood:"), "缓冲区应包含 Mood 行，实际：{buf}");
         assert!(
             buf.contains("energy: 80") || buf.contains("energy: 100"),
             "缓冲区应显示能量值（默认 80 或其他合法值）"
@@ -402,11 +418,8 @@ mod tests {
 
     #[test]
     fn dsh_mini_games_contains_identifier() {
-        let buf = render_into(&DshMiniGamesSlot::default(), 40, 15);
-        assert!(
-            buf.contains("Mini Games (DSH)"),
-            "缓冲区应包含标题标识串"
-        );
+        let buf = render_into(&DshMiniGamesSlot, 40, 15);
+        assert!(buf.contains("Mini Games (DSH)"), "缓冲区应包含标题标识串");
         assert!(buf.contains("2048"), "应列出 2048");
         assert!(buf.contains("TicTacToe"), "应列出 TicTacToe");
         assert!(buf.contains("Snake"), "应列出 Snake");
@@ -414,11 +427,8 @@ mod tests {
 
     #[test]
     fn dsh_genui_contains_identifier() {
-        let buf = render_into(&DshGenUiSlot::default(), 40, 15);
-        assert!(
-            buf.contains("GenUI (DSH)"),
-            "缓冲区应包含标题标识串"
-        );
+        let buf = render_into(&DshGenUiSlot, 40, 15);
+        assert!(buf.contains("GenUI (DSH)"), "缓冲区应包含标题标识串");
         assert!(buf.contains("[ A ]"), "应包含按钮 [ A ]");
         assert!(buf.contains("[ B ]"), "应包含按钮 [ B ]");
         assert!(buf.contains("[ C ]"), "应包含按钮 [ C ]");
@@ -426,22 +436,13 @@ mod tests {
 
     #[test]
     fn dsh_market_contains_identifier() {
-        let buf = render_into(&DshMarketSlot::default(), 40, 15);
-        assert!(
-            buf.contains("Market (DSH)"),
-            "缓冲区应包含标题标识串"
-        );
+        let buf = render_into(&DshMarketSlot, 40, 15);
+        assert!(buf.contains("Market (DSH)"), "缓冲区应包含标题标识串");
         assert!(
             buf.contains("dsh-harness-core"),
             "应列出 dsh-harness-core 插件"
         );
-        assert!(
-            buf.contains("dsh-router"),
-            "应列出 dsh-router 插件"
-        );
-        assert!(
-            buf.contains("/market install"),
-            "底部应给出 install 提示"
-        );
+        assert!(buf.contains("dsh-router"), "应列出 dsh-router 插件");
+        assert!(buf.contains("/market install"), "底部应给出 install 提示");
     }
 }

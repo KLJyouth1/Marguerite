@@ -5,11 +5,29 @@ from __future__ import annotations
 from typing import Any
 
 ROUTER_ASSETS_MISSING = "router_assets_missing"
+ROUTER_WEIGHTS_NOT_FETCHED = "router_weights_not_fetched"
 MACOS_LIBOMP_MISSING = "macos_libomp_missing"
 WINDOWS_VC_RUNTIME_MISSING = "windows_vc_runtime_missing"
 ROUTER_PYTHON_DEPENDENCY_MISSING = "router_python_dependency_missing"
 ROUTER_NATIVE_DEPENDENCY_MISSING = "router_native_dependency_missing"
 ROUTER_RUNTIME_UNAVAILABLE = "router_runtime_unavailable"
+
+#: Marker inside a bundle error message that proves the file on disk is a
+#: Git LFS pointer rather than the artifact the manifest describes.
+LFS_POINTER_MARKER = "git lfs pointer"
+
+
+class RouterBundleDegraded(RuntimeError):
+    """Bundle layout is intact but its weights are unusable.
+
+    Raised by the gateway's *shallow* asset validation so the caller decides
+    what to do. The doctor lets it propagate (it means "report this"); boot
+    catches it (it means "degrade loudly, do not refuse to start"), because ML
+    routing is an optional enhancement and the rule-based router still serves
+    every turn. A bundle whose *layout* is missing raises a plain
+    ``RuntimeError`` instead — that one is a genuinely broken installation.
+    """
+
 
 
 def _error_text(error: BaseException | str | None) -> str:
@@ -46,6 +64,11 @@ def classify_router_runtime_error(error: BaseException | str | None) -> str:
     lower = text.lower()
     if "missing v4 bundle files" in lower:
         return ROUTER_ASSETS_MISSING
+    if LFS_POINTER_MARKER in lower or "incomplete v4 router artifact bundle" in lower:
+        # The bundle *layout* is fine; the bytes are Git LFS pointers because
+        # the weights were never pulled. Classifying this as a generic
+        # "runtime unavailable" hid a one-command fix behind "reinstall".
+        return ROUTER_WEIGHTS_NOT_FETCHED
     if (
         "libomp.dylib" in lower
         and (
@@ -94,6 +117,15 @@ def router_runtime_hint(kind: str) -> str:
             "Bundled SquillaRouter assets are missing. Reinstall "
             "`opensquilla[recommended]`, or if running from source, run "
             '`git lfs pull --include="src/opensquilla/squilla_router/models/**"`.'
+        )
+    if kind == ROUTER_WEIGHTS_NOT_FETCHED:
+        return (
+            "SquillaRouter model weights are Git LFS pointers, not real model "
+            "data (the bundle layout is intact, the bytes were never pulled). "
+            'Fix with `git lfs install && git lfs pull --include='
+            '"src/opensquilla/squilla_router/models/**"`, or reinstall a release '
+            "build that ships the weights. Routing falls back to the default "
+            "tier until then."
         )
     if kind == ROUTER_PYTHON_DEPENDENCY_MISSING:
         return (

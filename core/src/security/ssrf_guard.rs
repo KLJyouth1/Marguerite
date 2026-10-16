@@ -42,6 +42,7 @@ impl SsrfGuard {
         // 2) 主机名语义拦截
         let h = host.to_lowercase();
         if h == "localhost"
+            || h == "localhost.localdomain"
             || h.ends_with(".local")
             || h.ends_with(".internal")
             || h.ends_with(".svc")

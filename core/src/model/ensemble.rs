@@ -121,6 +121,9 @@ pub struct EnsembleOrchestrator<B: ChatBackend> {
     /// 开启后 `run` 走 DeepReasoning，以 Captain 作 solver、Copilot 作 critic；
     /// 默认关（既有单测/调用方行为不变）。
     pub deep: bool,
+    /// 深度推理轮数计划（由 `ModeSpec`/`BloomSpec` 的 thinking_depth /
+    /// verification_passes 派生）。默认 = 历史四阶段行为。
+    pub deep_plan: crate::model::ensemble_deep::DeepPlan,
     events: Option<(Arc<EventBus>, String)>,
     /// 决策缓存（KV-Cache「重算变复用」在调度层）：注入后相同意图命中即跳过双模型编排。
     decision_cache: Option<Arc<EnsembleDecisionCache>>,
@@ -143,6 +146,7 @@ impl<B: ChatBackend + Sync> EnsembleOrchestrator<B> {
             copilot: None,
             prefetch: true,
             deep: false,
+            deep_plan: crate::model::ensemble_deep::DeepPlan::default(),
             events: None,
             decision_cache: None,
             semantic_cache: None,
@@ -158,6 +162,7 @@ impl<B: ChatBackend + Sync> EnsembleOrchestrator<B> {
             copilot: Some(copilot),
             prefetch: true,
             deep: false,
+            deep_plan: crate::model::ensemble_deep::DeepPlan::default(),
             events: None,
             decision_cache: None,
             semantic_cache: None,
@@ -182,8 +187,21 @@ impl<B: ChatBackend + Sync> EnsembleOrchestrator<B> {
     /// 开启四阶段深度推理管线（Solve→Critique→Rewrite→Select）。
     ///
     /// 默认关；`dispatch_bloom` 显式开启以获得更高质量答案。
+    /// 轮数取历史默认（1 轮打磨 + 1 遍验证）；需按模式深度加深时用
+    /// [`Self::with_deep_plan`]。
     pub fn with_deep(mut self) -> Self {
         self.deep = true;
+        self
+    }
+
+    /// 开启深度推理管线并指定轮数计划（模式规格接线入口）。
+    ///
+    /// 由 `ModeSpec`/`BloomSpec` 的 `thinking_depth` / `verification_passes` 经
+    /// [`DeepPlan::from_mode_spec`](crate::model::ensemble_deep::DeepPlan::from_mode_spec)
+    /// 派生，使模式声明的思考深度真正驱动打磨轮数与验证遍数。
+    pub fn with_deep_plan(mut self, plan: crate::model::ensemble_deep::DeepPlan) -> Self {
+        self.deep = true;
+        self.deep_plan = plan;
         self
     }
 
@@ -320,7 +338,8 @@ impl<B: ChatBackend + Sync> EnsembleOrchestrator<B> {
                         &self.copilot_model,
                         "deepseek",
                     ));
-                    let dr = crate::model::ensemble_deep::DeepReasoning::dual(&self.captain, cop);
+                    let dr = crate::model::ensemble_deep::DeepReasoning::dual(&self.captain, cop)
+                        .with_plan(self.deep_plan);
                     match dr.run(prompt).await {
                         Ok(deep) => {
                             let spent = elapsed_ms(t0);

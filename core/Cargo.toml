@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-core"
-version = "0.1.5"
+version = "0.2.12"
 edition = "2021"
 description = "Marguerite CLI Workbench - Core Engine"
 
@@ -20,8 +20,8 @@ futures-util = "0.3.7"
 tokio = { version = "1.44.2", features = ["full"] }
 chrono = { version = "0.4.20", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-# 自包含 SQLite：本机已确认装有 MSVC BuildTools 2022（cl.exe + vcruntime.h），
-# 可正常编译 bundled sqlite3.c，无需外部分发 sqlite3.dll。
+# 自包含 SQLite：`bundled` 直接把 sqlite3.c 编进二进制，无需外部 sqlite3.dll，
+# 因此终端用户不需要单独装 SQLite。
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "6"
 async-trait = "0.1"
@@ -30,21 +30,30 @@ tokio-stream = "0.1"
 ratatui = "0.28"
 crossterm = "0.28"
 
-# 浏览器桥：Chrome DevTools Protocol over WebSocket（本地 ws://，无需 TLS）
+# 删除转回收站（软删除）：不用外部 `trash` crate，而是自有 TrashStore
+# （`.marguerite/trash/<id>/{entry.json,payload/}`）——跨平台行为一致、可单元测试、
+# 自带路径穿越/跨工作区防护与冲突安全命名，且不依赖 OS 回收站 API 的方言差异。
+# 实现见 core/src/tools/trash.rs。
+
+# 浏览器桥：Chrome DevTools Protocol over WebSocket（只连本机 ws://，不需要 TLS）。
 tokio-tungstenite = "0.24"
 
-# 会话回滚：增量 tar 快照 + sha256（原始未压缩，避免 C 工具链依赖）
+# 会话回滚：增量 tar 快照 + sha256（原样未压缩，避开对 C 工具链的依赖）。
 sha2 = "0.10"
 md5 = "0.8"
 tar = "0.4.36"
 ruzstd = "0.9"
 
-# 模型密钥加密（BYOK）：纯 Rust AES-256-GCM（Fernet 风格令牌，无 openssl 依赖，Windows MSVC 可直接编译）
+# 模型密钥加密（BYOK）：纯 Rust 的 AES-256-GCM（Fernet 风格令牌），
+# 不依赖 openssl，Windows MSVC 下可直接编译。
 aes-gcm = "0.10.3"
 base64 = "0.22"
 rand = "0.8"
 
-# 幻觉护栏：语法检查（tree-sitter）
+# Vault 主口令派生：PBKDF2-HMAC-SHA256，从用户主口令派生 32 字节主密钥（RustCrypto 实现）。
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+
+# 幻觉护栏：对模型给出的代码做语法检查（tree-sitter 语法树）。
 tree-sitter = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
@@ -52,24 +61,29 @@ tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-go = "0.25"
 
-# 统一网关：HTTP 静态托管 + WebSocket JSON-RPC（仅回环 127.0.0.1）
+# 统一网关：HTTP 静态托管 + WebSocket JSON-RPC（仅监听回环 127.0.0.1）。
 axum = { version = "0.8", features = ["ws"] }
 
-# 真实语义嵌入后端（可选，feature=real-embed）：本地 MiniLM 等 sentence-transformers 模型。
-# 首次使用需下载模型权重（约 80MB），离线不可用；未启用 feature 时引擎保持零依赖特征哈希。
+# 真实语义嵌入后端（可选，feature = real-embed）：用本地 MiniLM 等
+# sentence-transformers 模型。首次使用需要下载模型权重（约 80MB），离线不可用；
+# 未启用该 feature 时引擎走零依赖的特征哈希。
 fastembed = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+# 供 examples/tui_frame.rs 使用：ratatui 渲染宽字符时把后续单元格清成**空格**
+# 而不是标记为 skip，所以要忠实还原一帧就必须知道字形的真实显示宽度。
+# 它本来就在 lockfile 里（ratatui 依赖 0.1.x），不会新增外部 crate。
+unicode-width = "0.1"
 
-# OS 级沙箱：Linux Landlock 仅在 linux target 编译，不影响 Windows/macOS 构建。
+# OS 级沙箱：Linux Landlock 只在 linux target 编译，不影响 Windows/macOS 构建。
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 
-# 桌面自动化（Epic C）：WPS 演示经 Windows COM 生成 .pptx。仅 Windows target 编译，
-# 非 Windows（linux/macOS）下 desktop_automation 模块的 COM 驱动不进入编译（cfg(windows)）。
-# uiautomation / enigo 暂不引入（UiaDriver / InputDriver 为可编译骨架，返回 UnsupportedAction，
-# 避免与 windows 0.62 的 Win32 COM/OLE 类型产生版本冲突；优先级：crate 必须可编译）。
+# 桌面自动化：Windows COM/OLE + UI Automation。只在 Windows target 编译；
+# 非 Windows（linux/macOS）下 desktop_automation 的 COM/UIA 驱动不参与编译（cfg(windows)）。
+# 不引入第三方 uiautomation / enigo：直接用 windows crate 的 Win32 原生绑定，
+# 避免与其内部 `windows` 依赖版本冲突（此前冲突正是 uiautomation 版本不兼容的根因）。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.1", features = [
     "Win32_Foundation",
@@ -77,12 +91,19 @@ windows = { version = "0.62.1", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_Globalization",
+    # B1：UIA 桥。IUIAutomation / IUIAutomationElement / IUIAutomationTreeWalker /
+    # IUIAutomationInvokePattern(Toggle/SelectionItem) 全部位于 Win32_UI_Accessibility
+    # 之后，未启用时连 `use` 都会编译失败（这正是此前 WindowsUiaSource 只能软失败的硬约束）。
+    "Win32_UI_Accessibility",
+    # 前台窗口句柄：GetForegroundWindow / SetForegroundWindow。
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
-# 测试工具导出：允许 desktop/tui 等消费 crate 在集成测试中复用 RecordingGitRunner 等桩。
 [features]
+# 测试工具导出：让 desktop / tui 等下游 crate 在集成测试里复用 RecordingGitRunner 等。
 test-utils = []
-# 真实语义嵌入后端：编译进 fastembed + OrtEmbedding，config.embeddings.backend=model 时生效。
-# 注意：ort 的 download-binaries 构建脚本需 TLS 提供方，须额外 `ort = { version = "=2.0.0-rc.13",
-# optional = true, features = ["tls-rustls"] }` 并在 real-embed 中加 "dep:ort"（见交付说明）。
+# 真实语义嵌入后端：编入 fastembed + OrtEmbedding，config.embeddings.backend=model 时生效。
+# 注意：ort 的 download-binaries 构建脚本需要 TLS provider，必须额外写
+# `ort = { version = "=2.0.0-rc.13", optional = true, features = ["tls-rustls"] }`
+# 并在 real-embed 里加 "dep:ort"（见交付说明）。
 real-embed = ["dep:fastembed"]

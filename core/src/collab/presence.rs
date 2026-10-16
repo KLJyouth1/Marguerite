@@ -7,9 +7,9 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use yrs::sync::{Awareness, AwarenessUpdate};
-use yrs::Doc;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
+use yrs::Doc;
 
 /// 在场状态：包裹 yrs::Awareness（内部持有一个独立 Doc 以确保 awareness 生命周期有效）。
 ///
@@ -107,9 +107,7 @@ mod tests {
         let (cid, state) = &peers[0];
         assert_eq!(*cid, a.client_id(), "peer id 应为 A 的 client_id");
 
-        let cursor = state
-            .get("cursor")
-            .expect("远端状态应包含 cursor 字段");
+        let cursor = state.get("cursor").expect("远端状态应包含 cursor 字段");
         assert_eq!(
             cursor.get("field").and_then(|v| v.as_str()),
             Some("main.rs"),

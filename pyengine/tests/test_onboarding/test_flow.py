@@ -1527,8 +1527,19 @@ def test_interactive_feishu_websocket_prompts_only_core_fields(tmp_path, monkeyp
     assert "OPENSQUILLA_INSTALL_EXTRAS" not in normalized_out
     assert "uv tool install --python 3.12 --force" in normalized_out
     assert "opensquilla[recommended]" in normalized_out
-    assert "https://github.com/opensquilla/opensquilla/releases/download/" in out
-    assert "v0.5.2" in out
+    # Which reinstall line is correct depends on the build, by design: a
+    # published wheel can name its own URL, while a source checkout has only the
+    # sentinel version and is pointed at the latest release page instead of a
+    # guessed URL (`_installed_reinstall_command_lines`). Pin the release branch
+    # to the *running* version so a stale pinned tag cannot come back.
+    from opensquilla import __version__
+
+    if flow._RELEASE_VERSION_RE.match(__version__):
+        assert "https://github.com/opensquilla/opensquilla/releases/download/" in out
+        assert f"opensquilla-{__version__}-py3-none-any.whl" in out
+    else:
+        assert "<wheel-url>" in normalized_out
+        assert "https://github.com/opensquilla/opensquilla/releases/latest" in out
     assert "opensquilla.ai/install." not in normalized_out
     assert "uv sync --extra recommended" in normalized_out
     assert "--extra feishu" not in normalized_out

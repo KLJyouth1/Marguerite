@@ -12,6 +12,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use crate::proc::SilentCommand;
+
 /// 语法预检超时
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// 错误输出截断长度
@@ -86,7 +88,7 @@ pub fn precheck(path: &Path) -> PrecheckOutcome {
     };
 
     let mut command = Command::new(program);
-    command.args(prefix).arg(path);
+    command.silent().args(prefix).arg(path);
     let outcome = match run_with_timeout(&mut command, TIMEOUT) {
         Err(e) => PrecheckOutcome {
             file,

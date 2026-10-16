@@ -25,7 +25,7 @@
 //!   「禁止全上下文重注入」。
 
 use std::any::{Any, TypeId};
-use std::collections::{HashMap, VecDeque, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -245,7 +245,8 @@ impl PluginRegistryFile {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let bytes = std::fs::read(path).with_context(|| format!("读注册表失败: {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("读注册表失败: {}", path.display()))?;
         let this: Self = if bytes.is_empty() {
             Self::new()
         } else {
@@ -263,8 +264,7 @@ impl PluginRegistryFile {
             }
         }
         let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, json)
-            .with_context(|| format!("写注册表失败: {}", path.display()))?;
+        std::fs::write(path, json).with_context(|| format!("写注册表失败: {}", path.display()))?;
         Ok(())
     }
 
@@ -296,7 +296,10 @@ impl PluginRegistryFile {
 /// - 软链如果是目录，对应插件名 = 链接名；entry = 目标绝对路径；source="symlink"
 /// - 软链如果是 `.dll`/`.wasm` 文件，同样按名称处理
 /// - 真实目录/文件（非 symlink）可作为 fallback 一并收集（非 symlink 走 local 来源）
-pub fn discover_symlinks(plugins_root: &Path, include_local_fallback: bool) -> Result<Vec<PluginRegistryEntry>> {
+pub fn discover_symlinks(
+    plugins_root: &Path,
+    include_local_fallback: bool,
+) -> Result<Vec<PluginRegistryEntry>> {
     let managed = plugins_root.join("managed");
     if !managed.exists() {
         return Ok(Vec::new());
@@ -318,10 +321,7 @@ pub fn discover_symlinks(plugins_root: &Path, include_local_fallback: bool) -> R
         if name.starts_with('.') {
             continue;
         }
-        let is_symlink = entry
-            .file_type()
-            .map(|ft| ft.is_symlink())
-            .unwrap_or(false);
+        let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
         if !is_symlink && !include_local_fallback {
             continue;
         }
@@ -366,10 +366,7 @@ fn version_and_deps_from_entry(target: &Path) -> Option<(String, Vec<String>)> {
         // 文件型：读取同名 + .plugin.json 或 sibling
         let stem = target.file_stem()?.to_os_string();
         let mut sib = target.parent()?.to_path_buf();
-        sib.push(format!(
-            "{}.plugin.json",
-            stem.to_string_lossy()
-        ));
+        sib.push(format!("{}.plugin.json", stem.to_string_lossy()));
         sib
     };
     if !manifest_path.exists() {
@@ -402,11 +399,7 @@ pub fn registry_topological_order(
     for e in entries.values() {
         for dep in &e.depends_on {
             if !entries.contains_key(dep) {
-                return Err(anyhow!(
-                    "插件 '{}' 依赖未出现在注册表中：'{}'",
-                    e.name,
-                    dep
-                ));
+                return Err(anyhow!("插件 '{}' 依赖未出现在注册表中：'{}'", e.name, dep));
             }
             edges.entry(dep.clone()).or_default().push(e.name.clone());
             *in_deg.get_mut(&e.name).unwrap() += 1;
@@ -539,18 +532,28 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
                     Some(e.entry.join("plugin.json"))
                 } else {
                     let stem = e.entry.file_stem().map(|s| s.to_os_string());
-                    stem.and_then(|stem| {
+                    stem.map(|stem| {
                         let mut p = sib.to_path_buf();
                         p.push(format!("{}.plugin.json", stem.to_string_lossy()));
-                        Some(p)
+                        p
                     })
                 };
                 if let Some(manifest) = check {
                     if manifest.exists() {
-                        if let Ok(bytes) = std::fs::read(&manifest) {
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                let obj = v.as_object();
-                                if let Some(map) = obj {
+                        // ⚠️ 这里是**安全审计**（找出声明了 system_prompt/full_context 的
+                        // 上下文泄漏嫌疑插件），因此读/解析失败**不能静默忽略** ——
+                        // 那会让一个坏清单悄悄变成「审计干净」，是**漏报**。
+                        // 与 `gateway/market.rs` 的既有纪律一致（禁用 `if let Ok(..)`
+                        // 静默丢弃）。策略取 **fail-closed**：读不出/解析不了就记为嫌疑，
+                        // 因为本方法的语义本就「不拒绝，只是记录，便于上层审计」（见上）。
+                        match std::fs::read(&manifest)
+                            .map_err(|e| e.to_string())
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<serde_json::Value>(&bytes)
+                                    .map_err(|e| e.to_string())
+                            }) {
+                            Ok(v) => {
+                                if let Some(map) = v.as_object() {
                                     if map.contains_key("system_prompt")
                                         || map.contains_key("full_context")
                                     {
@@ -559,6 +562,17 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
                                             .insert(e.name.clone());
                                     }
                                 }
+                            }
+                            Err(reason) => {
+                                tracing::warn!(
+                                    plugin = %e.name,
+                                    manifest = %manifest.display(),
+                                    reason = %reason,
+                                    "插件清单读取/解析失败：安全审计取 fail-closed，记为上下文泄漏嫌疑（避免漏报）"
+                                );
+                                self.invariants
+                                    .context_leak_suspects
+                                    .insert(e.name.clone());
                             }
                         }
                     }
@@ -571,7 +585,12 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
 
     /// 当前被识别为「包含 system_prompt/full_context 风险」的插件名列表。
     pub fn context_leak_suspects(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.invariants.context_leak_suspects.iter().cloned().collect();
+        let mut out: Vec<String> = self
+            .invariants
+            .context_leak_suspects
+            .iter()
+            .cloned()
+            .collect();
         out.sort();
         out
     }
@@ -602,7 +621,11 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
         for name in &order {
             let entry = enabled.get(name).unwrap();
             let plugin = self.dynamic.load(entry).with_context(|| {
-                format!("动态加载插件 '{}' 失败（entry={}）", name, entry.entry.display())
+                format!(
+                    "动态加载插件 '{}' 失败（entry={}）",
+                    name,
+                    entry.entry.display()
+                )
             })?;
             runtime.register(plugin);
         }
@@ -761,7 +784,9 @@ mod tests {
     #[test]
     fn container_provide_get_roundtrip() {
         let mut c = ServiceContainer::new();
-        c.provide(Database { name: "main".into() });
+        c.provide(Database {
+            name: "main".into(),
+        });
         assert!(c.contains::<Database>());
         let db = c.get::<Database>().unwrap();
         assert_eq!(db.name, "main");
@@ -782,7 +807,9 @@ mod tests {
     #[test]
     fn container_remove_and_missing() {
         let mut c = ServiceContainer::new();
-        c.provide(Logger { prefix: "[x]".into() });
+        c.provide(Logger {
+            prefix: "[x]".into(),
+        });
         let removed = c.remove::<Logger>().unwrap();
         assert_eq!(removed.prefix, "[x]");
         assert!(c.get::<Logger>().is_none());
@@ -792,24 +819,38 @@ mod tests {
 
     struct DbProvider;
     impl ServicePlugin for DbProvider {
-        fn meta(&self) -> PluginMeta { meta("db") }
-        fn provides(&self) -> Vec<TypeId> { vec![TypeId::of::<Database>()] }
+        fn meta(&self) -> PluginMeta {
+            meta("db")
+        }
+        fn provides(&self) -> Vec<TypeId> {
+            vec![TypeId::of::<Database>()]
+        }
         fn apply(&self, c: &mut ServiceContainer) -> Result<()> {
-            c.provide(Database { name: "main".into() });
+            c.provide(Database {
+                name: "main".into(),
+            });
             Ok(())
         }
     }
 
     struct LoggerConsumer;
     impl ServicePlugin for LoggerConsumer {
-        fn meta(&self) -> PluginMeta { meta("logger") }
-        fn provides(&self) -> Vec<TypeId> { vec![TypeId::of::<Logger>()] }
-        fn requires(&self) -> Vec<TypeId> { vec![TypeId::of::<Database>()] }
+        fn meta(&self) -> PluginMeta {
+            meta("logger")
+        }
+        fn provides(&self) -> Vec<TypeId> {
+            vec![TypeId::of::<Logger>()]
+        }
+        fn requires(&self) -> Vec<TypeId> {
+            vec![TypeId::of::<Database>()]
+        }
         fn apply(&self, c: &mut ServiceContainer) -> Result<()> {
             let db = c
                 .get::<Database>()
                 .ok_or_else(|| anyhow!("logger 依赖的 Database 未注入"))?;
-            c.provide(Logger { prefix: db.name.clone() });
+            c.provide(Logger {
+                prefix: db.name.clone(),
+            });
             Ok(())
         }
     }
@@ -830,15 +871,27 @@ mod tests {
     fn di_load_cycle_detection() {
         struct A;
         impl ServicePlugin for A {
-            fn meta(&self) -> PluginMeta { meta("a") }
-            fn provides(&self) -> Vec<TypeId> { vec![TypeId::of::<Database>()] }
-            fn requires(&self) -> Vec<TypeId> { vec![TypeId::of::<Logger>()] }
+            fn meta(&self) -> PluginMeta {
+                meta("a")
+            }
+            fn provides(&self) -> Vec<TypeId> {
+                vec![TypeId::of::<Database>()]
+            }
+            fn requires(&self) -> Vec<TypeId> {
+                vec![TypeId::of::<Logger>()]
+            }
         }
         struct B;
         impl ServicePlugin for B {
-            fn meta(&self) -> PluginMeta { meta("b") }
-            fn provides(&self) -> Vec<TypeId> { vec![TypeId::of::<Logger>()] }
-            fn requires(&self) -> Vec<TypeId> { vec![TypeId::of::<Database>()] }
+            fn meta(&self) -> PluginMeta {
+                meta("b")
+            }
+            fn provides(&self) -> Vec<TypeId> {
+                vec![TypeId::of::<Logger>()]
+            }
+            fn requires(&self) -> Vec<TypeId> {
+                vec![TypeId::of::<Database>()]
+            }
         }
         let mut rt = DiRuntime::new();
         rt.register(Arc::new(A));
@@ -853,9 +906,15 @@ mod tests {
         static UNLOADS: AtomicUsize = AtomicUsize::new(0);
         struct Counting;
         impl ServicePlugin for Counting {
-            fn meta(&self) -> PluginMeta { meta("counting") }
-            fn apply(&self, _c: &mut ServiceContainer) -> Result<()> { Ok(()) }
-            fn on_unload(&self) { UNLOADS.fetch_add(1, Ordering::SeqCst); }
+            fn meta(&self) -> PluginMeta {
+                meta("counting")
+            }
+            fn apply(&self, _c: &mut ServiceContainer) -> Result<()> {
+                Ok(())
+            }
+            fn on_unload(&self) {
+                UNLOADS.fetch_add(1, Ordering::SeqCst);
+            }
         }
         let mut rt = DiRuntime::new();
         rt.register(Arc::new(Counting));
@@ -882,8 +941,12 @@ mod tests {
     fn di_missing_dependency_loads_without_edge() {
         struct Lone;
         impl ServicePlugin for Lone {
-            fn meta(&self) -> PluginMeta { meta("lone") }
-            fn requires(&self) -> Vec<TypeId> { vec![TypeId::of::<Database>()] }
+            fn meta(&self) -> PluginMeta {
+                meta("lone")
+            }
+            fn requires(&self) -> Vec<TypeId> {
+                vec![TypeId::of::<Database>()]
+            }
             fn apply(&self, c: &mut ServiceContainer) -> Result<()> {
                 assert!(c.get::<Database>().is_none());
                 Ok(())
@@ -944,18 +1007,10 @@ mod tests {
         .unwrap();
 
         // include_local_fallback=false → 非 symlink 不收集
-        let empty = discover_symlinks(
-            tmp.path().join("plugins").as_path(),
-            false,
-        )
-        .unwrap();
+        let empty = discover_symlinks(tmp.path().join("plugins").as_path(), false).unwrap();
         assert!(empty.is_empty());
 
-        let found = discover_symlinks(
-            tmp.path().join("plugins").as_path(),
-            true,
-        )
-        .unwrap();
+        let found = discover_symlinks(tmp.path().join("plugins").as_path(), true).unwrap();
         assert_eq!(found.len(), 1);
         let e = &found[0];
         assert_eq!(e.name, "dir_plug");
@@ -967,10 +1022,7 @@ mod tests {
     #[test]
     fn registry_topology_ok_and_rejects_cycle_and_missing() {
         let mut ok = HashMap::new();
-        ok.insert(
-            "a".into(),
-            entry("a", vec![]),
-        );
+        ok.insert("a".into(), entry("a", vec![]));
         ok.insert("b".into(), entry("b", vec!["a"]));
         let ord = registry_topological_order(&ok).unwrap();
         assert_eq!(ord, vec!["a", "b"]);
@@ -1042,7 +1094,12 @@ mod tests {
         assert!(err.to_string().contains("红线违规"));
         // TypeId 不同 → ok
         loader
-            .guarded_provide::<Logger>(&mut c, Logger { prefix: "[x]".into() })
+            .guarded_provide::<Logger>(
+                &mut c,
+                Logger {
+                    prefix: "[x]".into(),
+                },
+            )
             .unwrap();
     }
 

@@ -55,8 +55,7 @@ impl CollabDoc {
 
     /// 应用远端的状态更新（无冲突合并进本地副本）。
     pub fn apply_update(&mut self, update: &[u8]) -> Result<()> {
-        let update = Update::decode_v1(update)
-            .map_err(|e| anyhow!("decode update failed: {e}"))?;
+        let update = Update::decode_v1(update).map_err(|e| anyhow!("decode update failed: {e}"))?;
         let mut txn = self.doc.transact_mut();
         txn.apply_update(update)
             .map_err(|e| anyhow!("apply update failed: {e}"))?;

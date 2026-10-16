@@ -87,6 +87,56 @@ pub fn search(params: &Value) -> Value {
     })
 }
 
+/// `kb.search.hybrid`：BM25 + 向量 + RRF 融合检索（向量检索页数据源）。
+///
+/// 向量后端 = 进程级嵌入提供者（默认零依赖特征哈希 256 维；配置 backend=model 且启用 real-embed
+/// 时为真实模型）。语料 > 2000 块时诚实降级纯 BM25；engine 字段如实回报，不冒充。
+pub fn search_hybrid(params: &Value) -> Value {
+    ensure_seeded();
+    let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+    let top_k = params
+        .get("topK")
+        .and_then(Value::as_u64)
+        .or_else(|| params.get("top_k").and_then(Value::as_u64))
+        .unwrap_or(5) as usize;
+    if query.trim().is_empty() {
+        return json!({ "items": [], "engine": "bm25" });
+    }
+    let kb_snapshot = kb().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let chunk_count = kb_snapshot.chunk_count();
+    if chunk_count > 2000 {
+        let hits = kb_snapshot.retrieve(query, top_k.min(20));
+        return json!({
+            "engine": "bm25",
+            "items": hits.iter().map(|h| json!({
+                "doc_id": h.doc_id, "title": h.title, "chunk": h.chunk,
+                "bm25_score": h.score, "vector_score": 0.0, "fused_score": h.score,
+            })).collect::<Vec<_>>(),
+        });
+    }
+    let embedder = crate::memory::embedding::EmbeddingProvider::global();
+    let mut retriever = crate::kb::hybrid::HybridRetriever::with_embedder(kb_snapshot, embedder);
+    retriever.reindex_embeddings();
+    let engine = match crate::persistence::config::Config::load() {
+        Ok(c) if c.embeddings.backend.eq_ignore_ascii_case("model") => {
+            "bm25+vector(model)".to_string()
+        }
+        _ => "bm25+vector(hash256)".to_string(),
+    };
+    let hits = retriever.retrieve(query, top_k.min(20));
+    json!({
+        "engine": engine,
+        "items": hits.iter().map(|h| json!({
+            "doc_id": h.doc_id,
+            "title": h.title,
+            "chunk": h.chunk,
+            "bm25_score": h.bm25_score,
+            "vector_score": h.vector_score,
+            "fused_score": h.fused_score,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// `kb.ingest`：灌入一篇文档（标题 + 正文）
 ///
 /// params: `{ title: string, text: string }` → `{ ok, documents, chunks }`
@@ -208,5 +258,22 @@ mod tests {
         }));
         let after = status()["documents"].as_u64().unwrap_or(0);
         assert!(after >= before, "ingest 后文档数不应减少");
+    }
+
+    #[test]
+    fn test_kb_search_hybrid_uses_vector_engine() {
+        let _ = ingest(&json!({
+            "title": "hybrid-probe",
+            "text": "混合检索探针：特征哈希向量与 BM25 融合排序验证。",
+        }));
+        let res = search_hybrid(&json!({ "query": "混合检索", "topK": 3 }));
+        let engine = res["engine"].as_str().unwrap_or("");
+        assert!(
+            engine == "bm25" || engine.starts_with("bm25+vector"),
+            "引擎字段应如实回报（语料 > 2000 块允许诚实降级 bm25）: {res}"
+        );
+        let items = res["items"].as_array().cloned().unwrap_or_default();
+        assert!(!items.is_empty(), "融合检索应有结果: {res}");
+        assert!(items[0]["fused_score"].is_number());
     }
 }

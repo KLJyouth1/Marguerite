@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 import structlog.testing
 from laboratory import Experiment
-from test_tools.dispatch_corpus import ALL_CASES, CorpusCase  # noqa: E402
 
 from opensquilla.tool_boundary import ToolResult
 from opensquilla.tools.dispatch import build_tool_handler as _build_candidate
@@ -30,6 +29,7 @@ from opensquilla.tools.dispatch import build_tool_handler as _build_candidate
 # Both sides use the policy-pipeline factory.
 from opensquilla.tools.dispatch import build_tool_handler as _build_control
 from opensquilla.tools.types import ToolContext, current_tool_context
+from tests.test_tools.dispatch_corpus import ALL_CASES, CorpusCase
 
 # -----------------------------------------------------------------------
 # Envelope comparator

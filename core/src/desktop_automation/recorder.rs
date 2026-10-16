@@ -16,7 +16,11 @@ impl Recorder {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         home.join(".marguerite")
             .join("audit-snapshots")
-            .join(if session.is_empty() { "default" } else { session })
+            .join(if session.is_empty() {
+                "default"
+            } else {
+                session
+            })
     }
 
     /// 记录单步动作快照，返回写入的文件路径（前后屏快照路径当前为占位）。

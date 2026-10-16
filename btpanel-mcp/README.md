@@ -14,12 +14,14 @@
 
 ```powershell
 # 方式一：本地开发安装（可选，entry point 会注册 btpanel-mcp 命令）
-cd d:\Downloads\Marguerite\marguerite\btpanel-mcp
-py -3.14 -m pip install -e .
+cd btpanel-mcp                      # 仓库根目录下的 btpanel-mcp/
+python -m pip install -e .
 
-# 方式二：不安装，直接用模块路径启动
-py -3.14 -m btpanel_mcp.cli stdio
+# 方式二：不安装，直接在 btpanel-mcp/ 下用模块路径启动
+python -m btpanel_mcp.cli stdio
 ```
+
+> 用你自己的 `python`（3.12+）即可 —— 这里刻意不写死 `py -3.14` 之类的具体启动器。
 
 ## 配置（环境变量）
 
@@ -125,6 +127,6 @@ env = { BAOTA_BASE_URL = "http://127.0.0.1:8888/C70AGNQm",
 ## 自测
 
 ```powershell
-py -3.14 d:\Downloads\Marguerite\marguerite\btpanel-mcp\smoke_stdio.py
+python btpanel-mcp/smoke_stdio.py    # 在仓库根目录执行
 # 输出 PASS 即通过（无需真实面板凭据）
 ```

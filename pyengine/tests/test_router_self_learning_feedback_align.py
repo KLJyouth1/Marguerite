@@ -6,6 +6,8 @@ byte-identical to the pre-feedback behavior — pinned first, below.
 
 from __future__ import annotations
 
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -28,6 +30,17 @@ from opensquilla.squilla_router.self_learning.schema import (
 )
 
 SESSION = "agent:main:webchat:s1"
+
+# Promotion requires the self-learning trainer, which needs ``lightgbm`` -- declared
+# in pyproject's ``recommended`` extra, not in ``dependencies``. Without it the
+# trainer reports ``train_failed`` and ``promoted`` stays False, which is the
+# documented behaviour for a minimal install; the two tests below assert the
+# promotion happy path, so they are skipped (with a named reason, never silently
+# green) when the optional dependency is absent.
+_requires_lightgbm = pytest.mark.skipif(
+    importlib.util.find_spec("lightgbm") is None,
+    reason="promotion path requires the optional lightgbm extra (pyproject 'recommended')",
+)
 
 
 def _sample(
@@ -464,6 +477,7 @@ def _write_min_store(tmp_path, n_high=8) -> None:
     write_sample(calm, "main", home=tmp_path)
 
 
+@_requires_lightgbm
 def test_orchestrator_records_and_clears_downvote_baseline(tmp_path) -> None:
     from datetime import UTC, datetime
 
@@ -523,6 +537,7 @@ def test_orchestrator_records_and_clears_downvote_baseline(tmp_path) -> None:
     assert payload["pre_promotion_downvote_rate"] == pytest.approx(0.2)
 
 
+@_requires_lightgbm
 def test_orchestrator_no_feedback_baseline_is_none(tmp_path) -> None:
     """Zero recorded ratings -> unmeasured baseline (None), never 0.0."""
     from datetime import UTC, datetime

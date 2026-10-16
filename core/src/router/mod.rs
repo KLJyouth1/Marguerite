@@ -18,7 +18,7 @@ pub mod persona;
 pub mod signals;
 pub mod vision_gate;
 
-pub use classify::{classify, classify_with};
+pub use classify::{classify, classify_with, estimate_complexity, TaskComplexity};
 pub use decision_log::{DecisionLog, LogEntry, SCHEMA_VERSION};
 pub use persona::{MatchRule, Persona, PersonaCatalog};
 pub use signals::classify_input_from_turn;
@@ -98,6 +98,30 @@ pub struct RouteDecision {
     pub fallback_reason: Option<String>,
     /// 结构化可观测：本决策经历的管线步骤
     pub steps: Vec<PipelineStepRecord>,
+    /// T3 会话级思考强度：Some 时覆盖 thinking_mode 的自适应档位
+    /// （请求级 > 会话级 > 分类自适应）。None 时行为与旧版完全一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_override: Option<crate::model::thinking::ThinkingEffort>,
+}
+
+impl RouteDecision {
+    /// 应用会话级/请求级思考档位覆盖（T3）。
+    ///
+    /// 同时把 `thinking_mode` 对齐到覆盖档位（Deep/Max→T1，Off→T0，Normal→T0），
+    /// 保持既有消费方（决策日志 / router_decision 事件 / 前端）语义不回退；
+    /// 精确档位经 `effort_override` 供模型层使用。
+    pub fn with_effort_override(mut self, effort: Option<crate::model::thinking::ThinkingEffort>) -> Self {
+        if let Some(e) = effort {
+            self.effort_override = Some(e);
+            self.thinking_mode = match e {
+                crate::model::thinking::ThinkingEffort::Off => ThinkingMode::T0,
+                crate::model::thinking::ThinkingEffort::Normal => ThinkingMode::T0,
+                crate::model::thinking::ThinkingEffort::Deep => ThinkingMode::T1,
+                crate::model::thinking::ThinkingEffort::Max => ThinkingMode::T1,
+            };
+        }
+        self
+    }
 }
 
 /// 管线步骤记录（PipelineStepRecord 的对译）。

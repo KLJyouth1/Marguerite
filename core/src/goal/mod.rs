@@ -16,9 +16,12 @@
 //!   rounds_started+1 且 revision+1，stale 修订号不耗轮（对齐上游 goal-round-driver）。
 //!
 //! 持久化采用 SQLite（rusqlite bundled），路径默认 ~/.marguerite/goal.db，
-//! 测试可用 MARGUERITE_GOAL_DB 环境变量覆盖隔离。
+//! 测试可用 MARGUERITE_GOAL_DB 环境变量覆盖；单测另须走 `Config::set_config_dir_override`
+//! （线程局部），夹具绝不写进真实用户库。
 
 use std::sync::OnceLock;
+
+pub mod runner_guard;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -80,36 +83,58 @@ pub struct GoalRegistry {
 }
 
 impl Default for GoalRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GoalRegistry {
     pub fn new() -> Self {
-        Self { goal: None, armed: false }
+        Self {
+            goal: None,
+            armed: false,
+        }
     }
 
-    pub fn get(&self) -> Option<&Goal> { self.goal.as_ref() }
+    pub fn get(&self) -> Option<&Goal> {
+        self.goal.as_ref()
+    }
 
     pub fn activation(&self) -> Activation {
-        if self.armed { Activation::Armed } else { Activation::Disarmed }
+        if self.armed {
+            Activation::Armed
+        } else {
+            Activation::Disarmed
+        }
     }
 
-    pub fn is_armed(&self) -> bool { self.armed }
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
 
-    pub fn disarm(&mut self) { self.armed = false; }
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
 
     fn require_goal(&self) -> Result<&Goal> {
-        self.goal.as_ref().ok_or_else(|| anyhow!("尚无目标，请先 goal create"))
+        self.goal
+            .as_ref()
+            .ok_or_else(|| anyhow!("尚无目标，请先 goal create"))
     }
 
     pub fn create(&mut self, objective: &str, max_goal_rounds: Option<u32>) -> Result<Goal> {
         if let Some(g) = &self.goal {
             if matches!(g.phase, GoalPhase::Active | GoalPhase::Paused) {
-                return Err(anyhow!("已有进行中的目标（{}），请先 complete/pause 后再创建", g.id));
+                return Err(anyhow!(
+                    "已有进行中的目标（{}），请先 complete/pause 后再创建",
+                    g.id
+                ));
             }
         }
         let trimmed = objective.trim();
-        if trimmed.is_empty() { return Err(anyhow!("目标不可为空")); }
+        if trimmed.is_empty() {
+            return Err(anyhow!("目标不可为空"));
+        }
         let now = Utc::now().timestamp_millis();
         let goal = Goal {
             id: format!("goal-{now}"),
@@ -131,7 +156,9 @@ impl GoalRegistry {
     pub fn edit(&mut self, objective: &str) -> Result<Goal> {
         let g = self.require_goal()?.clone();
         let trimmed = objective.trim();
-        if trimmed.is_empty() { return Err(anyhow!("目标不可为空")); }
+        if trimmed.is_empty() {
+            return Err(anyhow!("目标不可为空"));
+        }
         let updated = Goal {
             objective: trimmed.to_string(),
             revision: g.revision + 1,
@@ -192,7 +219,9 @@ impl GoalRegistry {
 
     pub fn block(&mut self, reason: &str) -> Result<Goal> {
         let trimmed = reason.trim();
-        if trimmed.is_empty() { return Err(anyhow!("阻塞原因不可为空")); }
+        if trimmed.is_empty() {
+            return Err(anyhow!("阻塞原因不可为空"));
+        }
         let g = self.require_goal()?.clone();
         if g.rounds_started < MIN_BLOCKED_ROUNDS {
             return Err(anyhow!(
@@ -214,8 +243,12 @@ impl GoalRegistry {
     }
 
     pub fn can_continue(&self) -> bool {
-        let Some(g) = &self.goal else { return false; };
-        if !self.armed || g.phase != GoalPhase::Active { return false; }
+        let Some(g) = &self.goal else {
+            return false;
+        };
+        if !self.armed || g.phase != GoalPhase::Active {
+            return false;
+        }
         match g.max_goal_rounds {
             Some(cap) => g.rounds_started < cap,
             None => true,
@@ -229,7 +262,9 @@ impl GoalRegistry {
     /// 本身是一次状态变更：`rounds_started+1` 且 `revision+1`，因此两个
     /// 驱动以同一修订号并发预留时只有一个成功（不双耗）。
     pub fn begin_round_at(&mut self, expected_revision: u64) -> bool {
-        let Some(g) = &self.goal else { return false; };
+        let Some(g) = &self.goal else {
+            return false;
+        };
         if g.revision != expected_revision {
             return false; // stale：目标已被他人修改
         }
@@ -249,7 +284,9 @@ impl GoalRegistry {
 
     /// 预留一轮续轮（以当前修订号；单驱动兼容入口）。
     pub fn begin_round(&mut self) -> bool {
-        let Some(rev) = self.revision() else { return false; };
+        let Some(rev) = self.revision() else {
+            return false;
+        };
         self.begin_round_at(rev)
     }
 
@@ -260,22 +297,24 @@ impl GoalRegistry {
 
     /// 持有修订号是否已过期（目标被他人修改）。无目标时任何持有号都视为过期。
     pub fn is_stale(&self, revision: u64) -> bool {
-        self.goal
-            .as_ref()
-            .is_none_or(|g| g.revision != revision)
+        self.goal.as_ref().is_none_or(|g| g.revision != revision)
     }
 }
 
 pub fn sqlite_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("MARGUERITE_GOAL_DB") {
-        if !p.trim().is_empty() { return std::path::PathBuf::from(p); }
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
     }
     crate::persistence::config::Config::config_dir().join("goal.db")
 }
 
 fn open_db() -> Result<rusqlite::Connection> {
     let path = sqlite_path();
-    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let db = rusqlite::Connection::open(&path)?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS goals (
@@ -295,7 +334,9 @@ fn open_db() -> Result<rusqlite::Connection> {
 
 impl GoalRegistry {
     pub fn persist(&self) -> Result<()> {
-        let Some(g) = &self.goal else { return Ok(()); };
+        let Some(g) = &self.goal else {
+            return Ok(());
+        };
         let db = open_db()?;
         db.execute(
             "INSERT INTO goals
@@ -308,8 +349,15 @@ impl GoalRegistry {
                 max_goal_rounds=excluded.max_goal_rounds, blocked_reason=excluded.blocked_reason,
                 created_at_ms=excluded.created_at_ms, updated_at_ms=excluded.updated_at_ms",
             rusqlite::params![
-                g.id, g.revision, g.objective, g.phase.as_str(), g.rounds_started,
-                g.max_goal_rounds, g.blocked_reason, g.created_at_ms, g.updated_at_ms,
+                g.id,
+                g.revision,
+                g.objective,
+                g.phase.as_str(),
+                g.rounds_started,
+                g.max_goal_rounds,
+                g.blocked_reason,
+                g.created_at_ms,
+                g.updated_at_ms,
             ],
         )?;
         Ok(())
@@ -379,15 +427,28 @@ mod tests {
 
     static TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 隔离夹具：注入**线程局部**配置目录覆盖后，注册表读写只落临时目录。
+    ///
+    /// 此前这里用进程级环境变量 MARGUERITE_GOAL_DB 隔离，并行测试与未加锁的
+    /// 用例（如 `runner_guard` 的测试）会漏写真实用户库——真实 goal.db 因此
+    /// 积累了 978 行夹具目标，进程重启后 `restore_from_sqlite` 把最新一行
+    /// 夹具当成当前目标，导致每次交互式请求都以 `not_armed` 终止。
     fn isolated_db(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("marguerite_goal_test_{}_{}", tag, Utc::now().timestamp_millis()));
+        let dir = std::env::temp_dir().join(format!(
+            "marguerite_goal_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("goal.db");
-        std::env::set_var("MARGUERITE_GOAL_DB", db.to_string_lossy().to_string());
-        db
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+        dir.join("goal.db")
     }
 
     #[test]
@@ -535,7 +596,7 @@ mod tests {
         let mut r = GoalRegistry::new();
         let g = r.create("x", None).unwrap();
         let snapshot = g.revision; // 1
-        // 另一个驱动已消耗一轮（修订号推进）
+                                   // 另一个驱动已消耗一轮（修订号推进）
         assert!(r.begin_round());
         // 本驱动仍持旧修订号：stale → 不耗轮（race-fenced 不双耗）
         assert!(!r.begin_round_at(snapshot));

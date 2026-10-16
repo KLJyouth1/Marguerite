@@ -10,21 +10,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// 风险等级
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
     /// 低风险（只读/无害）
+    #[default]
     Low,
     /// 中风险（写操作）
     Medium,
     /// 高风险（破坏性/出网）
     High,
-}
-
-impl Default for RiskLevel {
-    fn default() -> Self {
-        Self::Low
-    }
 }
 
 /// 审批/权限预设的来源（对齐上游 PR #2608 `permission/preset` 的
@@ -158,6 +153,20 @@ impl ApprovalGate {
         self.pending.lock().unwrap().clone()
     }
 
+    /// 当前挂起且**未超时**的审批（只读，不改变门控状态）。
+    ///
+    /// 与 [`ApprovalGate::outcome`] 的分工：`outcome` 是**消费式**查询 —— 非交互模式直接
+    /// 判 `Denied`、超时推进为 `Timeout`，都会改写状态；清单类只读接口（WebUI 快照）不能
+    /// 走它，否则「看一眼列表」就把待裁决项判掉了。
+    pub fn live_pending(&self) -> Option<PendingApproval> {
+        self.pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|p| p.created_at.elapsed() <= self.timeout)
+            .cloned()
+    }
+
     /// 批准指定审批（仅当 ID 匹配且未超时）
     pub fn approve(&self, id: &str) -> bool {
         let mut guard = self.pending.lock().unwrap();
@@ -249,7 +258,14 @@ impl ApprovalGate {
 
 impl Default for ApprovalGate {
     fn default() -> Self {
-        Self::new(Duration::from_secs(60))
+        // v3.3.1：`guard.approval_timeout_secs` 非 0 时覆盖默认 60s
+        let secs = crate::mode::approval_timeout_secs();
+        let timeout = if secs > 0 {
+            Duration::from_secs(secs)
+        } else {
+            Duration::from_secs(60)
+        };
+        Self::new(timeout)
     }
 }
 

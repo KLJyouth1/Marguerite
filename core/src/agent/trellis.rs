@@ -78,7 +78,8 @@ pub async fn trellis_wait_all(
     let mut rx = bus.subscribe("**.tool_result");
     let pending: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(wait_for.iter().cloned().collect()));
-    let done: Arc<Mutex<Vec<TrellisDone>>> = Arc::new(Mutex::new(Vec::with_capacity(wait_for.len())));
+    let done: Arc<Mutex<Vec<TrellisDone>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(wait_for.len())));
 
     // 先做初始快照：已经处于终态的直接收集（避免我们 subscribe 前事件已被发
     // 出而丢失——EventBus 的历史回放可以作为双保险，但先锁 agents 检查更确定）。
@@ -100,7 +101,7 @@ pub async fn trellis_wait_all(
         }
         if p.is_empty() {
             let mut d = done.lock().await;
-            return Ok(take_sorted(&mut *d));
+            return Ok(take_sorted(&mut d));
         }
     }
 
@@ -114,7 +115,7 @@ pub async fn trellis_wait_all(
         try_handle_end_env(&env, &pending, &done, manager).await;
         if pending.lock().await.is_empty() {
             let mut guard = done.lock().await;
-            return Ok(take_sorted(&mut *guard));
+            return Ok(take_sorted(&mut guard));
         }
     }
 
@@ -132,7 +133,7 @@ pub async fn trellis_wait_all(
 
     let result = {
         let mut guard = done.lock().await;
-        take_sorted(&mut *guard)
+        take_sorted(&mut guard)
     };
     Ok(result)
 }
@@ -201,9 +202,7 @@ pub async fn trellis_wait_any(
 fn is_terminal(s: &SubAgentStatus) -> bool {
     matches!(
         s,
-        SubAgentStatus::Completed { .. }
-            | SubAgentStatus::Failed { .. }
-            | SubAgentStatus::TimedOut
+        SubAgentStatus::Completed { .. } | SubAgentStatus::Failed { .. } | SubAgentStatus::TimedOut
     )
 }
 
@@ -369,9 +368,13 @@ mod tests {
             .build()
             .unwrap();
         let mgr = make_manager();
-        let out = rt.block_on(trellis_wait_all(&mgr, None, Vec::new())).unwrap();
+        let out = rt
+            .block_on(trellis_wait_all(&mgr, None, Vec::new()))
+            .unwrap();
         assert!(out.is_empty());
-        let any = rt.block_on(trellis_wait_any(&mgr, None, Vec::new())).unwrap();
+        let any = rt
+            .block_on(trellis_wait_any(&mgr, None, Vec::new()))
+            .unwrap();
         assert!(any.is_none());
     }
 

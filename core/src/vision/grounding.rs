@@ -122,9 +122,7 @@ fn no_match_reason(target: &GroundingTarget) -> String {
         parts.push(format!("版面树中无角色为「{}」的区域", r));
     }
     if parts.is_empty() {
-        parts.push(
-            "仅提供 index_hint，但需配合 text 或 role 才能定位（已忽略索引提示）".into(),
-        );
+        parts.push("仅提供 index_hint，但需配合 text 或 role 才能定位（已忽略索引提示）".into());
     }
     format!("未匹配到目标：{}", parts.join("；"))
 }
@@ -216,7 +214,7 @@ pub fn locate(evidence: &VisionEvidence, target: &GroundingTarget) -> GroundingR
 /// 统计 OCR 中能匹配 `text`（精确或子串）的片段数，用于 reason 说明歧义规模。
 fn count_top(ocr: &[OcrSpan], text: &str) -> usize {
     ocr.iter()
-        .filter(|s| &s.text == text || s.text.contains(text))
+        .filter(|s| s.text == text || s.text.contains(text))
         .count()
 }
 
@@ -233,11 +231,23 @@ mod tests {
     }
 
     fn ev_with_ocr(spans: Vec<OcrSpan>) -> VisionEvidence {
-        VisionEvidence::new("deepseek-vl", "2026-08-18T12:00:00Z", spans, vec![], empty_semantics())
+        VisionEvidence::new(
+            "deepseek-vl",
+            "2026-08-18T12:00:00Z",
+            spans,
+            vec![],
+            empty_semantics(),
+        )
     }
 
     fn ev_with_layout(regions: Vec<LayoutRegion>) -> VisionEvidence {
-        VisionEvidence::new("deepseek-vl", "2026-08-18T12:00:00Z", vec![], regions, empty_semantics())
+        VisionEvidence::new(
+            "deepseek-vl",
+            "2026-08-18T12:00:00Z",
+            vec![],
+            regions,
+            empty_semantics(),
+        )
     }
 
     // ① 按 text 精确命中返回真实 bbox
@@ -278,7 +288,11 @@ mod tests {
             },
         );
         assert!(r.matched, "应按 role 命中");
-        assert_eq!(r.bbox, Some([0.1, 0.1, 0.3, 0.3]), "应返回 layout 真实 bbox");
+        assert_eq!(
+            r.bbox,
+            Some([0.1, 0.1, 0.3, 0.3]),
+            "应返回 layout 真实 bbox"
+        );
         assert!(!r.reason.is_empty());
     }
 
@@ -329,7 +343,10 @@ mod tests {
         );
         assert!(!r.matched, "无匹配应 matched=false");
         assert_eq!(r.bbox, None, "无匹配 bbox 必须为 None");
-        assert!(!r.reason.is_empty(), "UIA 式静默 None 缺陷已修复：reason 必须非空");
+        assert!(
+            !r.reason.is_empty(),
+            "UIA 式静默 None 缺陷已修复：reason 必须非空"
+        );
     }
 
     // ⑤ bbox 含负值 / NaN 被拒绝返回无匹配（不回填无效几何）

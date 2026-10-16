@@ -1,11 +1,12 @@
 """Focused Vue chat wiring contracts retained after the vanilla UI removal."""
 
-from pathlib import Path
+from spa_source import spa
 
-CHAT_VIEW = Path("opensquilla-webui/src/views/ChatView.vue")
-CHAT_SEND = Path("opensquilla-webui/src/composables/chat/useChatSend.ts")
-CHAT_MESSAGE_ACTIONS = Path("opensquilla-webui/src/composables/chat/useChatMessageActions.ts")
-ROUTER_FX = Path("opensquilla-webui/src/components/chat/RouterFxStrip.vue")
+CHAT_VIEW = spa("src/views/ChatView.vue")
+CHAT_VIEW_STATE = spa("src/views/chat/useChatViewState.ts")
+CHAT_SEND = spa("src/composables/chat/useChatSend.ts")
+CHAT_MESSAGE_ACTIONS = spa("src/composables/chat/useChatMessageActions.ts")
+ROUTER_FX = spa("src/components/chat/RouterFxStrip.vue")
 
 
 def test_router_fx_cells_expose_only_model_names() -> None:
@@ -19,10 +20,14 @@ def test_router_fx_cells_expose_only_model_names() -> None:
 
 def test_chat_view_wires_middle_edit_branch_fork_id() -> None:
     view = CHAT_VIEW.read_text(encoding="utf-8")
+    state = CHAT_VIEW_STATE.read_text(encoding="utf-8")
     send = CHAT_SEND.read_text(encoding="utf-8")
     actions = CHAT_MESSAGE_ACTIONS.read_text(encoding="utf-8")
 
-    assert "const pendingForkBeforeMessageId = ref<string | null>(null)" in view
+    # The ref is owned by the chat view-state composable (it was declared inline
+    # in ChatView before that state was extracted) and is consumed through the
+    # destructuring below.
+    assert "const pendingForkBeforeMessageId = ref<string | null>(null)" in state
 
     actions_start = view.index("const chatMessageActions = useChatMessageActions({")
     actions_end = view.index("})\nconst {", actions_start)

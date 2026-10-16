@@ -85,6 +85,30 @@ from opensquilla.session.keys import parse_agent_id
 _d = get_dispatcher()
 _RUN_MODE_PREFERENCE_CHANGED_EVENT = "sandbox.run_mode.preference.changed"
 _WINDOWS_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# ERROR_CANT_RESOLVE_FILENAME: what NTFS reports for a symlink loop. The same
+# constant is already treated as an unresolvable symlink target by
+# ``sandbox.directory_listing``.
+_WINDOWS_ERROR_CANT_RESOLVE_FILENAME = 1921
+
+
+def _resolve_strict(path: Path) -> Path:
+    """``Path.resolve(strict=True)`` with a portable symlink-loop failure.
+
+    POSIX ``pathlib`` reports a symlink loop as ``RuntimeError("Symlink loop
+    from ...")``, while Windows routes it through ``ntpath.realpath``, which
+    reports the loop as ``OSError`` 1921. Callers get an uncatchable-by-design
+    difference otherwise: ``_path_list_start`` treats this failure as "the
+    workspace is unusable" (fall back to home) or as "the explicitly requested
+    path is invalid" (stay strict), and neither decision can be made if the two
+    platforms raise unrelated types.
+    """
+
+    try:
+        return path.resolve(strict=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != _WINDOWS_ERROR_CANT_RESOLVE_FILENAME:
+            raise
+        raise RuntimeError(f"Symlink loop from {str(path)!r}") from exc
 
 
 def _require_params(params: dict | None) -> dict[str, Any]:
@@ -487,11 +511,11 @@ async def _path_list_start(
                 or not Path(base_raw).expanduser().is_absolute()
             ):
                 raise ValueError("relative path requires absolute basePath")
-            base = Path(base_raw).expanduser().resolve(strict=True)
+            base = _resolve_strict(Path(base_raw).expanduser())
             if not stat.S_ISDIR(base.stat().st_mode):
                 raise NotADirectoryError(str(base))
             candidate = base / candidate
-        return candidate.resolve(strict=True)
+        return _resolve_strict(candidate)
 
     manager = _require_session_manager(ctx)
     session = await _session_for_key(manager, session_key)
@@ -512,14 +536,14 @@ async def _path_list_start(
     workspace = _default_workspace_for_session(session, session_key, ctx.config)
     if workspace is not None:
         try:
-            candidate = Path(workspace).expanduser().resolve(strict=True)
+            candidate = _resolve_strict(Path(workspace).expanduser())
             workspace_mode = candidate.stat().st_mode
         except (FileNotFoundError, NotADirectoryError, RuntimeError):
             pass
         else:
             if stat.S_ISDIR(workspace_mode):
                 return candidate
-    return Path.home().resolve(strict=True)
+    return _resolve_strict(Path.home())
 
 
 async def _context_for_session(

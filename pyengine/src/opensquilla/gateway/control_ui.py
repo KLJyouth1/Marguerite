@@ -101,7 +101,46 @@ class _CachedStaticFiles(StaticFiles):
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
-_DIST_DIR = _STATIC_DIR / "dist"
+
+
+def _install_root_from(module_file: str | Path) -> Path | None:
+    """从 ``control_ui.py`` 的路径推出**安装根**（``.../resources`` 的上级）。
+
+    安装布局：``<root>/resources/pyengine/src/opensquilla/gateway/control_ui.py``
+    -> parents[0]=gateway, [1]=opensquilla, [2]=src, [3]=pyengine, [4]=resources, [5]=<root>。
+
+    层数不足（源码签出等布局）时返回 ``None`` —— 调用方回退规范路径，绝不 panic。
+    """
+    try:
+        return Path(module_file).resolve().parents[5]
+    except (IndexError, OSError):
+        return None
+
+
+def _resolve_dist_dir() -> Path:
+    """解析已构建的 Vue 控制台目录。
+
+    候选顺序：
+    1. ``static/dist`` —— 打包器复制进来的规范位置（随 pyengine 一起分发）；
+    2. ``<安装根>/webui/dist`` —— Tauri ``bundle.resources`` 的默认落点
+       （``gui/src-tauri/webui/dist`` -> ``<install>/webui/dist``）。
+
+    历史缺陷（2026-10-12，桌面安装实测）：解析只认第 1 个候选，而 Tauri 实际把
+    控制台装到第 2 个位置，桌面端 Control UI 于是只显示「资源不可用」告示。
+    两个候选都试，任一命中即用；都不命中返回第 1 个，由调用方输出可操作诊断。
+    """
+    primary = _STATIC_DIR / "dist"
+    if primary.is_dir():
+        return primary
+    root = _install_root_from(__file__)
+    if root is not None:
+        alt = root / "webui" / "dist"
+        if alt.is_dir():
+            return alt
+    return primary
+
+
+_DIST_DIR = _resolve_dist_dir()
 
 _TEMPLATE_VERSION_SUFFIX = str(int(time.time()))
 

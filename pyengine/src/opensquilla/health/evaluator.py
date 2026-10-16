@@ -10,6 +10,7 @@ from opensquilla.router_runtime_diagnostics import (
     ROUTER_NATIVE_DEPENDENCY_MISSING,
     ROUTER_PYTHON_DEPENDENCY_MISSING,
     ROUTER_RUNTIME_UNAVAILABLE,
+    ROUTER_WEIGHTS_NOT_FETCHED,
     WINDOWS_VC_RUNTIME_MISSING,
     classify_router_runtime_error,
     router_runtime_hint,
@@ -963,6 +964,32 @@ def _router_runtime_missing_guidance(
                     command="opensquilla configure router --router recommended",
                 ),
                 FixStep(label="Restart gateway", command="opensquilla gateway restart"),
+            ],
+        )
+    if kind == ROUTER_WEIGHTS_NOT_FETCHED:
+        # Distinct from missing assets: the bundle layout is intact, the bytes
+        # were never pulled. One command fixes it, so do not send the operator
+        # down the "disable / reinstall the router" path.
+        return (
+            "Router model weights were not fetched",
+            error,
+            [
+                FixStep(
+                    label="Pull the Git LFS model weights",
+                    command='git lfs install && git lfs pull --include="src/opensquilla/squilla_router/models/**"',
+                ),
+                FixStep(
+                    label="Reinstall a release that ships the weights",
+                    detail=(
+                        "Release builds bundle the real weights; a source checkout "
+                        "needs git-lfs installed before the first checkout/pull."
+                    ),
+                ),
+                FixStep(label="Restart gateway", command="opensquilla gateway restart"),
+                FixStep(
+                    label="Disable local router",
+                    command="opensquilla configure router --router disabled",
+                ),
             ],
         )
     if kind in {ROUTER_NATIVE_DEPENDENCY_MISSING, ROUTER_PYTHON_DEPENDENCY_MISSING}:

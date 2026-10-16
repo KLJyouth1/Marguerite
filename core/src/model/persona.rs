@@ -149,11 +149,21 @@ impl Moli {
         let i = intent.to_lowercase();
         let mut out = Vec::new();
 
-        let tech = ["代码", "bug", "编译", "部署", "运维", "重构", "架构", "code", "build", "deploy", "api"];
-        let warm = ["陪", "情绪", "累", "难过", "安慰", "谢谢", "晚安", "加油", "emo", "聊天"];
-        let art = ["设计", "配色", "排版", "文案", "ui", "样式", "美化", "海报", "design", "css"];
-        let life = ["吃", "玩", "周末", "游戏", "电影", "音乐", "笑话", "闲聊", "今天"];
-        let guard = ["风险", "安全", "删", "生产", "线上", "回滚", "权限", "决定", "评估", "审计"];
+        let tech = [
+            "代码", "bug", "编译", "部署", "运维", "重构", "架构", "code", "build", "deploy", "api",
+        ];
+        let warm = [
+            "陪", "情绪", "累", "难过", "安慰", "谢谢", "晚安", "加油", "emo", "聊天",
+        ];
+        let art = [
+            "设计", "配色", "排版", "文案", "ui", "样式", "美化", "海报", "design", "css",
+        ];
+        let life = [
+            "吃", "玩", "周末", "游戏", "电影", "音乐", "笑话", "闲聊", "今天",
+        ];
+        let guard = [
+            "风险", "安全", "删", "生产", "线上", "回滚", "权限", "决定", "评估", "审计",
+        ];
 
         if tech.iter().any(|k| i.contains(k)) {
             out.push(SourceArchetype::Jarvis);
@@ -175,7 +185,9 @@ impl Moli {
         // 无命中 → 五面合一（空侧重）。
         let unique = {
             let mut seen = std::collections::HashSet::new();
-            out.into_iter().filter(|a| seen.insert(*a)).collect::<Vec<_>>()
+            out.into_iter()
+                .filter(|a| seen.insert(*a))
+                .collect::<Vec<_>>()
         };
         self.accent = unique.clone();
         unique
@@ -224,7 +236,10 @@ mod tests {
     fn five_archetypes_all_present() {
         // 五大源人格固定顺序，保证提示词确定性。
         assert_eq!(SourceArchetype::ALL.len(), 5);
-        let names: Vec<&str> = SourceArchetype::ALL.iter().map(|a| a.profile().name).collect();
+        let names: Vec<&str> = SourceArchetype::ALL
+            .iter()
+            .map(|a| a.profile().name)
+            .collect();
         assert_eq!(names, vec!["贾维斯", "星黎", "爱马仕", "龙虾", "莫斯"]);
     }
 
@@ -244,9 +259,18 @@ mod tests {
     fn tech_intent_focuses_jarvis_and_moss() {
         let mut m = Moli::new();
         let acc = m.accent_for_intent("帮我重构这个模块并部署上线");
-        assert!(acc.contains(&SourceArchetype::Jarvis), "技术任务应侧重贾维斯");
-        assert!(acc.contains(&SourceArchetype::Moss), "部署上线涉及风险应侧重莫斯");
-        assert!(!acc.contains(&SourceArchetype::Xingli), "纯技术任务不应侧重星黎");
+        assert!(
+            acc.contains(&SourceArchetype::Jarvis),
+            "技术任务应侧重贾维斯"
+        );
+        assert!(
+            acc.contains(&SourceArchetype::Moss),
+            "部署上线涉及风险应侧重莫斯"
+        );
+        assert!(
+            !acc.contains(&SourceArchetype::Xingli),
+            "纯技术任务不应侧重星黎"
+        );
     }
 
     #[test]
@@ -283,12 +307,18 @@ mod tests {
         let mut m = Moli::new();
         m.accent_for_intent("写代码修 bug");
         let p = m.system_prompt();
-        assert!(p.contains("当前任务，请更多地以以下面向来回应"), "有侧重时提示词应标注侧重");
+        assert!(
+            p.contains("当前任务，请更多地以以下面向来回应"),
+            "有侧重时提示词应标注侧重"
+        );
         assert!(p.contains("贾维斯"), "侧重提示词应列出贾维斯");
 
         m.clear_accent();
         assert!(m.accent().is_empty());
-        assert!(!m.system_prompt().contains("当前任务，请更多地"), "清除后提示词无侧重标注");
+        assert!(
+            !m.system_prompt().contains("当前任务，请更多地"),
+            "清除后提示词无侧重标注"
+        );
     }
 
     #[test]

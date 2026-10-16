@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod graph;
 pub mod hybrid;
 pub mod integrity;
+pub mod project_graph;
 pub mod store;
 
 pub use denoiser::{filter_documents, noise_reason, NoiseReport};

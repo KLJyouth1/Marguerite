@@ -37,16 +37,17 @@ pub async fn sandboxed_exec(
 ) -> Result<ExecOutput> {
     guard.check(cmd)?;
 
-    let (shell, flag) = if cfg!(windows) {
-        ("cmd", "/C")
+    let (shell, flag, exec_cmd) = if cfg!(windows) {
+        // 先切换到 UTF-8 代码页（65001），避免中文路径/输出乱码
+        ("cmd", "/C", format!("chcp 65001 >nul && {}", cmd))
     } else {
-        ("sh", "-c")
+        ("sh", "-c", cmd.to_string())
     };
 
     let mut command = Command::new(shell);
     command
         .arg(flag)
-        .arg(cmd)
+        .arg(&exec_cmd)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

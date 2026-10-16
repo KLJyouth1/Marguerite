@@ -64,16 +64,59 @@ pub struct ToolCache {
     is_idempotent: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
 
-/// 默认幂等判定（启发式，可覆盖）：工具名含「写/发/删/建/改/上传」等变更动词者视为非幂等，
-/// 其余（搜索/读取/计算类）视为幂等。命中即缓存，避免重跑只读工具。
+/// 默认幂等判定：**只对已知只读工具开启缓存（白名单）**。
+///
+/// ⚠️ 历史缺陷：此前是「工具名含 write/send/delete/create… 等动词才排除」的
+/// **黑名单**。于是 `shell_exec` / `code_exec` / `git` / `copy_file` / `move_file` /
+/// `make_dir` / `str_replace_editor` / `office_automation` / `system_control` /
+/// `browser` 等**有副作用**的工具（名字里恰好没有那些动词）被当成幂等并缓存 ——
+/// 第二次相同调用直接返回缓存、根本不执行：改文件、跑脚本、git 提交被静默跳过。
+///
+/// 白名单方向是安全的：漏判只是「少缓存、变慢」，绝不会把写操作缓存成假结果。
+/// 新增只读工具时按需补入；有副作用的工具一律**不要**加进来。
 pub fn default_is_idempotent(tool: &str) -> bool {
-    let t = tool.to_ascii_lowercase();
-    ![
-        "write", "send", "post", "put", "patch", "delete", "create", "update", "add", "remove",
-        "upload",
-    ]
-    .iter()
-    .any(|v| t.contains(v))
+    matches!(
+        tool,
+        // 文件系统只读
+        "read_file"
+            | "read"
+            | "list_dir"
+            | "grep"
+            | "find_files"
+            | "glob_file_search"
+            | "codebase_search"
+            | "count_lines"
+            | "file_info"
+            | "json_query"
+            | "read_env"
+            | "diff"
+            // git 只读子命令
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            // 检索 / 网络只读
+            | "web_fetch"
+            | "web_search"
+            | "web_research"
+            | "http_request"
+            | "research"
+            | "vision"
+            // 代码智能 / 环境 / 记忆只读
+            | "code_intel"
+            | "doctor"
+            | "memory_list"
+            | "memory_search"
+            // 通用只读别名（历史用例 / 外部注册）
+            | "search"
+    )
+}
+
+/// 把一个片段以 `len:content` 形式追加到规范化串，长度前缀消除拼接歧义。
+fn push_len_prefixed(out: &mut String, piece: &str) {
+    out.push_str(&piece.len().to_string());
+    out.push(':');
+    out.push_str(piece);
+    out.push('\u{0}');
 }
 
 impl ToolCache {
@@ -106,17 +149,18 @@ impl ToolCache {
     }
 
     /// 生成缓存键：按参数 key 排序后规范化为稳定字符串再哈希（HashMap 无序，必须排序保确定性）。
+    ///
+    /// ⚠️ 每个片段用**长度前缀**分隔，避免歧义拼接导致的键碰撞：`{a:"x;b=y"}`
+    /// 与 `{a:"x", b:"y"}` 在旧的 `k=v;` 朴素拼接下会生成同一个键（`a=x;b=y;`），
+    /// 于是两个不同调用互相命中对方的缓存结果。
     fn cache_key(tool: &str, args: &HashMap<String, String>) -> u64 {
         let mut parts: Vec<(&String, &String)> = args.iter().collect();
         parts.sort_by(|a, b| a.0.cmp(b.0));
         let mut s = String::new();
-        s.push_str(tool);
-        s.push('\u{0}');
+        push_len_prefixed(&mut s, tool);
         for (k, v) in parts {
-            s.push_str(k);
-            s.push('=');
-            s.push_str(v);
-            s.push(';');
+            push_len_prefixed(&mut s, k);
+            push_len_prefixed(&mut s, v);
         }
         hash_text(&s)
     }
@@ -380,11 +424,39 @@ mod tests {
 
     #[test]
     fn default_idempotent_classifies_tools() {
-        assert!(default_is_idempotent("search"));
-        assert!(default_is_idempotent("read_file"));
-        assert!(!default_is_idempotent("write_file"));
-        assert!(!default_is_idempotent("send_email"));
-        assert!(!default_is_idempotent("delete_record"));
+        // 只读工具 → 可缓存。
+        for t in [
+            "search",
+            "read_file",
+            "grep",
+            "list_dir",
+            "git_status",
+            "web_search",
+        ] {
+            assert!(default_is_idempotent(t), "{t} 应可缓存");
+        }
+        // 有副作用工具 → 永不缓存。含此前被黑名单**漏掉**的真实工具名
+        // （shell_exec/code_exec/git/copy_file/… 名字里没有变更动词，却被误判幂等）。
+        for t in [
+            "write_file",
+            "send_email",
+            "delete_record",
+            "shell_exec",
+            "code_exec",
+            "git",
+            "copy_file",
+            "move_file",
+            "make_dir",
+            "str_replace_editor",
+            "office_automation",
+            "system_control",
+            "browser",
+            "apply_patch",
+        ] {
+            assert!(!default_is_idempotent(t), "{t} 有副作用，不得缓存");
+        }
+        // 未知工具 → 默认不缓存（安全方向：宁可少缓存，不可缓存写操作）。
+        assert!(!default_is_idempotent("some_future_tool"));
     }
 
     #[test]
@@ -393,5 +465,13 @@ mod tests {
         let k1 = ToolCache::cache_key("search", &args(&[("a", "1"), ("b", "2")]));
         let k2 = ToolCache::cache_key("search", &args(&[("b", "2"), ("a", "1")]));
         assert_eq!(k1, k2, "参数顺序不应影响缓存键");
+    }
+
+    #[test]
+    fn cache_key_does_not_collide_on_separators() {
+        // 旧实现用 `k=v;` 朴素拼接 → `{a:"x;b=y"}` 与 `{a:"x",b:"y"}` 同键。
+        let a = ToolCache::cache_key("t", &args(&[("a", "x;b=y")]));
+        let b = ToolCache::cache_key("t", &args(&[("a", "x"), ("b", "y")]));
+        assert_ne!(a, b, "含分隔符的参数不得与拆分后的多参数碰撞");
     }
 }

@@ -43,7 +43,17 @@ impl Policy {
     pub fn scan_injection(action: &UiAction) -> Option<String> {
         let s = action.params.to_string();
         let patterns = [
-            ";", "&&", "||", "|", "$(", "`", "..\\", "../", "cmd", "powershell", "regsvr32",
+            ";",
+            "&&",
+            "||",
+            "|",
+            "$(",
+            "`",
+            "..\\",
+            "../",
+            "cmd",
+            "powershell",
+            "regsvr32",
         ];
         for p in patterns {
             if s.contains(p) {

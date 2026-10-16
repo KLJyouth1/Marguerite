@@ -26,10 +26,16 @@ DEFAULTS = {
     "AwesomeWebpageMetaSkill",
     "ai-video-script",
     "audio-cog",
+    # Third-party integration pipeline: standalone, trigger-driven and visible to
+    # the model (each declares `always: false` plus its own triggers), so they are
+    # default-index skills rather than meta-skill-internal fragments.
+    "audit-third-party",
+    "clone-third-party",
     "code-task",
     "cron",
     "deep-research",
     "docx",
+    "explore-third-party",
     "filesystem",
     "git-diff",
     "github",
@@ -178,12 +184,17 @@ async def test_default_prompt_only_injects_retained_bundled_skills(
         EligibilityContext(
             os_name="linux",
             has_bin_cache={
+                # What the third-party integration pipeline declares in
+                # ``requires.bins``; a Linux host -- which is what this fake
+                # context models -- always has both.
+                "bash": True,
                 "bibtex": True,
                 "codex": True,
                 "curl": True,
                 "ffmpeg": True,
                 "ffprobe": True,
                 "gh": True,
+                "git": True,
                 "xelatex": True,
                 "nano-pdf": True,
                 "python": True,

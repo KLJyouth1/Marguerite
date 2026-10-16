@@ -40,6 +40,8 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::proc::SilentCommand;
+
 /// 支持的外部 agent 目标（11 个，与策划 §三.2 一一对应）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,11 +248,7 @@ impl DispatchTarget {
             },
             DispatchTarget::CodeWhale => CmdTemplate {
                 bin: "codewhale".into(),
-                args: vec![
-                    "--batch".into(),
-                    "--project".into(),
-                    "{workspace}".into(),
-                ],
+                args: vec!["--batch".into(), "--project".into(), "{workspace}".into()],
                 pass_task_via_stdin: true,
                 cwd_arg: None,
                 extra_env: HashMap::new(),
@@ -318,7 +316,11 @@ fn default_timeout() -> u64 {
 }
 
 impl DispatchRequest {
-    pub fn new(target: DispatchTarget, task: impl Into<String>, workspace: impl AsRef<Path>) -> Self {
+    pub fn new(
+        target: DispatchTarget,
+        task: impl Into<String>,
+        workspace: impl AsRef<Path>,
+    ) -> Self {
         Self {
             target,
             task: task.into(),
@@ -444,6 +446,7 @@ pub async fn dispatch(req: DispatchRequest) -> Result<DispatchResult> {
 
     // 3) 启动子进程：无头 → 接管 stdin；合并 env
     let mut cmd = Command::new(&tmpl.bin);
+    cmd.silent();
     cmd.args(&args);
     cmd.current_dir(match &tmpl.cwd_arg {
         Some(cwd_tmpl) => PathBuf::from(cwd_tmpl.replace("{workspace}", &workspace_str)),
@@ -525,6 +528,7 @@ pub async fn dispatch(req: DispatchRequest) -> Result<DispatchResult> {
                     if let Some(pid) = id {
                         // 使用 nix 风格的信号发送，简单起见用命令行 kill fallback
                         let _ = std::process::Command::new("kill")
+                            .silent()
                             .arg("-9")
                             .arg(pid.to_string())
                             .status();
@@ -537,6 +541,7 @@ pub async fn dispatch(req: DispatchRequest) -> Result<DispatchResult> {
                 {
                     if let Some(pid) = id {
                         let _ = std::process::Command::new("taskkill")
+                            .silent()
                             .args(["/F", "/PID", &pid.to_string()])
                             .status();
                         true
@@ -578,9 +583,7 @@ pub async fn dispatch_many(
     timeout_secs_each: u64,
     max_parallel: Option<usize>,
 ) -> Vec<Result<DispatchResult>> {
-    let parallel = max_parallel
-        .unwrap_or_else(|| targets.len())
-        .clamp(1, 32);
+    let parallel = max_parallel.unwrap_or(targets.len()).clamp(1, 32);
     let sem = Arc::new(tokio::sync::Semaphore::new(parallel));
     let mut set = JoinSet::new();
     for t in targets.iter().copied() {
@@ -623,7 +626,11 @@ pub(crate) fn which_locate(bin_name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     let exts = if cfg!(windows) {
         env::var_os("PATHEXT")
-            .map(|v| env::split_paths(&v).map(|p| p.to_string_lossy().to_string()).collect())
+            .map(|v| {
+                env::split_paths(&v)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect()
+            })
             .unwrap_or_else(|| vec![".EXE;.CMD;.BAT;.COM;.PS1".to_string()])
     } else {
         Vec::new()
@@ -711,11 +718,12 @@ async fn binary_exists(bin: &Path) -> bool {
     } else {
         ("which", bin_name)
     };
-    if let Ok(out) = Command::new(probe).arg(arg).output().await {
+    if let Ok(out) = Command::new(probe).silent().arg(arg).output().await {
         return out.status.success();
     }
     // 回退：尝试以空 arg 构造一次（有些平台 `where` 不装）。
     Command::new(bin_name)
+        .silent()
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

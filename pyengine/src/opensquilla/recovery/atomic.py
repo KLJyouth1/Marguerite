@@ -70,19 +70,30 @@ _PROFILE_OPAQUE_DIRECTORIES = frozenset({"code-task"})
 _WINDOWS_PROFILE_OPAQUE_DIRECTORIES = frozenset({"sandbox"})
 
 
-def _chmod_open_file(fd: int, mode: int) -> None:
-    """Apply a POSIX mode when the host exposes descriptor chmod.
+def can_harden_posix_mode() -> bool:
+    """Is descriptor mode hardening meaningful on this host?
 
-    Windows CPython does not expose ``os.fchmod``. Recovery files still request
-    restrictive creation modes where the host supports them, while
-    Windows-specific config paths preserve their DACL separately. Descriptor
-    mode hardening is an additional POSIX capability, not a portable
-    prerequisite.
+    Descriptor mode hardening is a POSIX capability, not a portable
+    prerequisite: recovery files still request restrictive creation modes where
+    the host supports them, while Windows preserves the source DACL through the
+    no-replace move instead.
+
+    Probing ``os.fchmod`` alone is not enough to decide -- CPython exposes it on
+    Windows from 3.13 on, but there it only maps to the read-only attribute and
+    raises ``PermissionError`` (WinError 5) for a descriptor opened read-only,
+    and NTFS never reports a POSIX ``0o600``. Every caller here therefore opens
+    read-only to compare identity before hardening, and a bare capability probe
+    turned hardening into a hard failure on Windows 3.13+.
     """
 
-    fchmod = getattr(os, "fchmod", None)
-    if callable(fchmod):
-        fchmod(fd, mode)
+    return os.name != "nt" and callable(getattr(os, "fchmod", None))
+
+
+def _chmod_open_file(fd: int, mode: int) -> None:
+    """Apply a POSIX mode when the host has POSIX descriptor semantics."""
+
+    if can_harden_posix_mode():
+        os.fchmod(fd, mode)
 
 
 class _WindowsFileAttributeTagInfo(ctypes.Structure):

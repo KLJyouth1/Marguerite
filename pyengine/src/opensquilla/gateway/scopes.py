@@ -137,6 +137,14 @@ METHOD_SCOPES: dict[str, str] = {
     "system-presence": READ_SCOPE,
     "doctor.status": READ_SCOPE,
     "doctor.memory.status": READ_SCOPE,
+    # Read-only host operations (marguerite-core ops contract). These expose
+    # configuration/temperature read-only SSH commands; every write op is
+    # rejected inside the handler with OPS_FORBIDDEN_WRITE. Classified read.
+    "ops.list_hosts": READ_SCOPE,
+    "ops.status": READ_SCOPE,
+    "ops.list_files": READ_SCOPE,
+    "ops.tail_logs": READ_SCOPE,
+    "ops.inspect_process": READ_SCOPE,
     "diagnostics.status": READ_SCOPE,
     "logs.status": READ_SCOPE,
     "logs.tail": READ_SCOPE,

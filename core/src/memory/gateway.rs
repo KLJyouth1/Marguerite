@@ -25,20 +25,28 @@ fn memory_dir() -> PathBuf {
 }
 
 /// 短期记忆进程单例（FTS5，首次访问时 init）。
+///
+/// ⚠️ 必须与**写入侧**同路径：对话运行时在 `gateway/chat.rs::memory_stack` 里写的是
+/// `data_dir/marguerite_short_term.db`。历史缺陷：这里读的是
+/// `data_dir/memory/short_term.db` —— 两个文件根本不是同一个，于是
+/// `memory.short_term.search` / `layers_status` 永远返回空/0，运维会以为「没有记忆」。
 fn short_term() -> &'static Mutex<ShortTermMemory> {
     static ST: OnceLock<Mutex<ShortTermMemory>> = OnceLock::new();
     ST.get_or_init(|| {
-        let mut m = ShortTermMemory::new(&memory_dir().join("short_term.db"));
+        let mut m = ShortTermMemory::new(&Config::data_dir().join("marguerite_short_term.db"));
         let _ = m.init();
         Mutex::new(m)
     })
 }
 
 /// 长期记忆进程单例（语义向量，首次访问时 init）。
+///
+/// ⚠️ 同 [`short_term`]：写入侧是 `data_dir/marguerite_ltm_gw.db`（见
+/// `gateway/chat.rs::build_evolution` / `memory_stack`），读取侧必须一致。
 fn long_term() -> &'static Mutex<LongTermMemory> {
     static LT: OnceLock<Mutex<LongTermMemory>> = OnceLock::new();
     LT.get_or_init(|| {
-        let mut m = LongTermMemory::new(&memory_dir().join("long_term.db"));
+        let mut m = LongTermMemory::new(&Config::data_dir().join("marguerite_ltm_gw.db"));
         let _ = m.init();
         Mutex::new(m)
     })
@@ -178,6 +186,42 @@ pub fn recall_search(params: &Value) -> Value {
     })
 }
 
+/// `memory.synapse.status`：联想记忆网络（突触图）状态。
+///
+/// **隐私红线**：仅暴露节点/边计数、累计计数、平均权重与 top 边（≤10 条，形如
+/// `{a,b,weight}`）；`a`/`b` 为**哈希 id**，**不含任何记忆正文**。
+/// 字段名为 camelCase，与仓库既有返回风格一致。
+pub fn synapse_status(_params: &Value) -> Value {
+    let graph = crate::memory::synapse::global_graph();
+    let s = graph
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .stats();
+    let top_edges: Vec<Value> = s
+        .top_edges
+        .iter()
+        .take(10)
+        .map(|e| {
+            json!({
+                "a": e.a,
+                "b": e.b,
+                "weight": (e.weight * 10_000.0).round() / 10_000.0,
+            })
+        })
+        .collect();
+    json!({
+        "ok": true,
+        "enabled": crate::memory::synapse::synapse_enabled(),
+        "nodes": s.nodes,
+        "edges": s.edges,
+        "reinforced": s.reinforced,
+        "decayed": s.decayed,
+        "activations": s.activations,
+        "averageWeight": s.average_weight,
+        "topEdges": top_edges,
+    })
+}
+
 /// `memory.layers.status`：7 层记忆端到端审计视图（真实计数 + RPC 可达性）。
 ///
 /// sensory / short_term / long_term / recall 四层返回真实计数（本轮补齐的 RPC）；
@@ -242,6 +286,50 @@ mod tests {
         }
     }
 
+    /// 前端契约守卫：`MemoryLayersPanel.vue` 要求 `layers` 是**数组**，每项含
+    /// `id/name/module/reachable/rpc/count`，且 `count` 只能是数字或 null。
+    ///
+    /// 此前该 RPC 分派到一个把 `layers` 返回成「按 id 键控对象」的桩，前端
+    /// `Array.isArray(data.layers)` 判假 → 七层记忆面板整块渲染为空。本测试锁住真实形状。
+    #[test]
+    fn layers_status_satisfies_memory_layers_panel_contract() {
+        let v = layers_status(&Value::Null);
+        let layers = v["layers"]
+            .as_array()
+            .expect("layers 必须是数组（前端 Array.isArray 判真才渲染）");
+        assert!(!layers.is_empty(), "至少一层");
+        for l in layers {
+            for key in ["id", "name", "module", "reachable", "rpc", "count"] {
+                assert!(
+                    l.get(key).is_some(),
+                    "层 {l} 缺少前端必需字段 `{key}`"
+                );
+            }
+            assert!(l["id"].as_str().is_some_and(|s| !s.is_empty()), "id 非空");
+            assert!(l["reachable"].is_boolean(), "reachable 必须是布尔");
+            assert!(l["rpc"].is_array(), "rpc 必须是数组");
+            // count 允许 null（无计数能力的层），但不允许是字符串等其它类型
+            assert!(
+                l["count"].is_null() || l["count"].is_u64(),
+                "count 必须是数字或 null，实际 {}",
+                l["count"]
+            );
+        }
+        // 前端按 `settings.memoryLayers.layers.<id>` 取标签，故 7 个 id 必须齐全
+        let ids: Vec<&str> = layers.iter().filter_map(|l| l["id"].as_str()).collect();
+        for expected in [
+            "sensory",
+            "short_term",
+            "long_term",
+            "experience",
+            "recall",
+            "behavior",
+            "cross_project",
+        ] {
+            assert!(ids.contains(&expected), "缺少层 id `{expected}`（前端标签键会落空）");
+        }
+    }
+
     #[test]
     fn recall_search_defaults_to_user_category() {
         let v = recall_search(&json!({ "query": "" }));
@@ -262,5 +350,33 @@ mod tests {
     #[test]
     fn sensory_search_requires_session_and_query() {
         assert_eq!(sensory_search(&json!({})), json!({ "items": [] }));
+    }
+
+    /// 契约守卫：`memory.synapse.status` 字段齐全、camelCase、topEdges 仅含 id+权重
+    /// （隐私红线：绝不泄露记忆正文）。
+    #[test]
+    fn synapse_status_contract_is_privacy_safe() {
+        let v = synapse_status(&Value::Null);
+        for key in [
+            "ok",
+            "enabled",
+            "nodes",
+            "edges",
+            "reinforced",
+            "decayed",
+            "activations",
+            "averageWeight",
+            "topEdges",
+        ] {
+            assert!(v.get(key).is_some(), "memory.synapse.status 缺少字段 `{key}`");
+        }
+        assert_eq!(v["ok"], true);
+        let top = v["topEdges"].as_array().expect("topEdges 必须是数组");
+        assert!(top.len() <= 10, "topEdges 上限 10");
+        for e in top {
+            let obj = e.as_object().expect("边必须是对象");
+            assert!(obj.contains_key("a") && obj.contains_key("b") && obj.contains_key("weight"));
+            assert_eq!(obj.len(), 3, "边只含 a/b/weight，不得夹带记忆正文: {e}");
+        }
     }
 }

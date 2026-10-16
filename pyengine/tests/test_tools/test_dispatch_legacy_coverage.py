@@ -22,7 +22,6 @@ import types
 from pathlib import Path
 
 import pytest
-from test_tools.dispatch_corpus import ALL_CASES
 
 import opensquilla.tools.dispatch as _dispatch_module
 from opensquilla.engine.hooks import NoopToolHook
@@ -31,6 +30,7 @@ from opensquilla.tool_boundary import ToolCall, ToolContinuation
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import ToolContext, ToolSpec, current_tool_context
+from tests.test_tools.dispatch_corpus import ALL_CASES
 
 _DISPATCH_SOURCE: Path = Path(_dispatch_module.__file__).resolve()
 

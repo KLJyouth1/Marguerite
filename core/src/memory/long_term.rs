@@ -7,11 +7,14 @@
 //! - 分层检索：感知 → 短期 → 长期（带置信度与降级）
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::Connection;
+use tracing::warn;
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::sensory::SensoryMemory;
@@ -21,6 +24,14 @@ use crate::memory::short_term::ShortTermMemory;
 const VEC_DIM: usize = 256;
 /// 余弦相似度阈值（低于视为无相关）
 const SIM_THRESHOLD: f64 = 0.35;
+
+/// 已触发过「维度不符 → 自动重建」的后端标识集合（`名:维度`）。
+/// 进程内每个后端至多自动重建一次，避免每次检索都重建（有界、不阻塞）。
+static REINDEXED_BACKENDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn reindexed_backends() -> &'static Mutex<HashSet<String>> {
+    REINDEXED_BACKENDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// 记忆条目
 #[derive(Debug, Clone)]
@@ -209,14 +220,18 @@ impl LongTermMemory {
             None => true,
         };
         if need_load {
-            let rows = self.load_index_rows()?;
+            let (rows, skipped) = self.load_index_rows()?;
+            // B2：存在维度不符的旧向量（如切换嵌入后端后）→ 自动重建一次并告警，
+            // 否则这些历史记忆会被静默跳过、检索结果为空且用户无任何信号。
+            let rows = if skipped > 0 && self.maybe_reindex_dim_mismatch(skipped)? {
+                self.load_index_rows()?.0
+            } else {
+                rows
+            };
             *self.index.borrow_mut() = Some((version, rows));
         }
         let index = self.index.borrow();
-        let rows = &index
-            .as_ref()
-            .expect("索引刚加载")
-            .1;
+        let rows = &index.as_ref().expect("索引刚加载").1;
 
         let mut scored = Vec::new();
         for row in rows {
@@ -247,7 +262,9 @@ impl LongTermMemory {
     }
 
     /// 从 DB 全量加载并解析索引行（维度不符的旧向量跳过，与旧逐行检索逻辑一致）。
-    fn load_index_rows(&self) -> Result<Vec<IndexRow>> {
+    ///
+    /// 返回 `(可用行, 因维度不符被跳过的行数)`；后者用于触发 B2 的自动重建。
+    fn load_index_rows(&self) -> Result<(Vec<IndexRow>, usize)> {
         let db = self.db()?;
         let dim = EmbeddingProvider::global().dim();
         let mut stmt =
@@ -261,6 +278,7 @@ impl LongTermMemory {
             ))
         })?;
         let mut rows = Vec::new();
+        let mut skipped = 0usize;
         for item in iter.flatten() {
             let vec: Vec<f64> = item
                 .2
@@ -268,6 +286,7 @@ impl LongTermMemory {
                 .filter_map(|s| s.parse::<f64>().ok())
                 .collect();
             if vec.len() != dim {
+                skipped += 1;
                 continue;
             }
             rows.push(IndexRow {
@@ -277,13 +296,40 @@ impl LongTermMemory {
                 vec,
             });
         }
-        Ok(rows)
+        Ok((rows, skipped))
+    }
+
+    /// 维度不符时的自动重建（每「后端名:维度」进程内至多一次）。
+    ///
+    /// 返回是否实际执行了重建。用全局集合做防抖，避免每次检索都重建；
+    /// 重建是惰性触发（仅在检索命中失配时），不阻塞启动。
+    fn maybe_reindex_dim_mismatch(&self, skipped: usize) -> Result<bool> {
+        let provider = EmbeddingProvider::global();
+        let key = format!("{}:{}", provider.name(), provider.dim());
+        let first = {
+            let mut done = reindexed_backends()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            done.insert(key)
+        };
+        if !first {
+            return Ok(false);
+        }
+        warn!(
+            skipped,
+            backend = provider.name(),
+            dim = provider.dim(),
+            "长期记忆：检测到旧向量维度与当前嵌入后端不符，自动重建向量索引（每个后端仅一次）"
+        );
+        let updated = self.reindex_all()?;
+        warn!(updated, "长期记忆：向量索引自动重建完成");
+        Ok(true)
     }
 
     /// 用当前嵌入后端重建全部向量（模型切换后调用，使旧维度向量对齐新后端）
     ///
     /// 返回重建的条目数。若某条目内容无法嵌入会跳过该条（理论上不会失败）。
-    pub fn reindex_all(&mut self) -> Result<usize> {
+    pub fn reindex_all(&self) -> Result<usize> {
         let db = self.db()?;
         let rows = db
             .prepare("SELECT id, content FROM long_term_memory")?
@@ -478,6 +524,48 @@ mod tests {
         let results = mem.search("tokio 异步配置", 5).unwrap();
         assert!(!results.is_empty());
         assert!(results[0].content.contains("tokio"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_auto_reindex_on_dimension_mismatch() {
+        // B2 回归：切换嵌入后端后历史向量维度不符，旧行为静默跳过 → 检索为空。
+        // 现应在检索时检测到失配并自动重建（每后端一次），恢复可检索性。
+        let path = temp_db("auto_reindex");
+        let _ = std::fs::remove_file(&path);
+        let mut mem = LongTermMemory::new(&path);
+        mem.init().unwrap();
+        mem.store("如何配置 tokio 异步运行时", "s1").unwrap();
+
+        // 人为把持久化向量改成错误维度（模拟换后端前的历史向量）。
+        let wrong: String = (0..4)
+            .map(|i| (i as f64).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        mem.db
+            .as_ref()
+            .unwrap()
+            .execute(
+                "UPDATE long_term_memory SET vector = ?1",
+                rusqlite::params![wrong],
+            )
+            .unwrap();
+
+        let hits = mem.search("tokio 异步配置", 5).unwrap();
+        assert!(
+            hits.iter().any(|h| h.content.contains("tokio")),
+            "维度不符时应自动重建索引并恢复检索: {hits:?}"
+        );
+        // 重建后持久化向量维度应与当前后端一致。
+        let dim_now: String = mem
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row("SELECT vector FROM long_term_memory LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(dim_now.split(',').count(), EmbeddingProvider::global().dim());
         let _ = std::fs::remove_file(&path);
     }
 

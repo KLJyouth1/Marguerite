@@ -40,6 +40,10 @@ pub enum Message {
         output: String,
         /// 时间戳
         timestamp: DateTime<Utc>,
+        /// P2-10/T14：该次工具执行的**实测耗时**（毫秒）。仅在可精确归因单次调用时
+        /// 记录（单轮单工具）；批量调用或多路并行无法拆分时保持 `None`（诚实：宁可
+        /// 不显示，也不给一个错的耗时）。旧数据 `None` → 历史卡不显示耗时。
+        elapsed_ms: Option<u64>,
     },
 }
 
@@ -97,6 +101,7 @@ mod tests {
             input: "input".to_string(),
             output: "output".to_string(),
             timestamp: now,
+            elapsed_ms: None,
         };
         assert_eq!(tool_msg.role(), "tool");
     }

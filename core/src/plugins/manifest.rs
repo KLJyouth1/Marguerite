@@ -14,6 +14,7 @@
 //! 此处保持接口完整、不越权实现整段 SDK。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -100,6 +101,90 @@ pub struct SkillRef {
     pub from: Option<String>,
 }
 
+/// 插件激活方式（P0 S3）。
+///
+/// 缺省 `Restart`（保守）：未声明 `entry` 的清单**不会**被假装成可热加载。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Activation {
+    /// 需重启进程方可生效（缺省）
+    #[default]
+    Restart,
+    /// 运行期热加载（要求同时声明 `entry`，见 `manifest.hot_without_entry`）
+    Hot,
+}
+
+/// 插件权限声明（P0 S3 最小可用集：fs / net / exec / event / slot）。
+///
+/// 序列化形态为内部标签：`{"kind":"exec","allow":["git"]}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Permission {
+    /// 文件系统访问
+    Fs {
+        /// 允许的路径范围（**不做 glob 解释**，仅登记）
+        #[serde(default)]
+        scope: Vec<String>,
+        /// 是否允许写
+        #[serde(default)]
+        write: bool,
+    },
+    /// 网络访问
+    Net {
+        /// 允许的目标主机
+        #[serde(default)]
+        allow_hosts: Vec<String>,
+    },
+    /// 外部命令执行
+    Exec {
+        /// 允许的命令白名单
+        #[serde(default)]
+        allow: Vec<String>,
+    },
+    /// 事件总线收发
+    Event {
+        /// 允许发布的事件模式
+        #[serde(default)]
+        publish: Vec<String>,
+        /// 允许订阅的事件模式
+        #[serde(default)]
+        subscribe: Vec<String>,
+    },
+    /// 槽位注册
+    Slot {
+        /// 允许注册的槽位名
+        #[serde(default)]
+        register: Vec<String>,
+        /// 是否可影响槽位顺序
+        #[serde(default)]
+        order: bool,
+    },
+}
+
+/// 清单自洽性诊断（P0 S3）。
+///
+/// **本模块自有**类型：刻意不与 `plugins::patch::PatchDiagnostic` 统一 —— S2 的
+/// patch 诊断已过全量门禁，提前统一会引入无关回归。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestDiagnostic {
+    /// 机器可读诊断码，如 `manifest.hot_without_entry`
+    pub code: &'static str,
+    /// 产生该诊断的清单 `name`
+    pub manifest: String,
+    /// 人类可读说明
+    pub message: String,
+}
+
+impl ManifestDiagnostic {
+    fn new(code: &'static str, manifest: &str, message: String) -> Self {
+        Self {
+            code,
+            manifest: manifest.to_string(),
+            message,
+        }
+    }
+}
+
 /// 声明式插件清单（主流终端工作台插件 融合核心数据结构）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -137,12 +222,56 @@ pub struct PluginManifest {
     /// 供 `agent::multi_strategy` 的 fleet 路由消费（每能力指定目标模型）。
     #[serde(default)]
     pub capability_models: HashMap<String, String>,
+
+    // ── P0 S3 新增字段：全部 `#[serde(default)]`，16 份既有 JSON 必须仍能解析 ──
+    /// 原生入口：**相对 manifest 所在目录**的路径；`None` = 纯声明式（无原生实现）。
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// 激活方式；缺省 `Restart`（保守，不假装能热加载）。
+    #[serde(default)]
+    pub activation: Activation,
+    /// 卸载入口：相对 manifest 所在目录的路径。
+    #[serde(default)]
+    pub dispose: Option<String>,
+    /// 声明的权限（最小可用集）。
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
 }
 
 impl PluginManifest {
     /// 从 TOML/YAML 字符串解析（Cargo 生态用 TOML；此处用 serde 透传 JSON 以统一测试）。
     pub fn from_json(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(Into::into)
+    }
+
+    /// 批量装载某目录下的全部 `*.plugin.json` 为 `PluginManifest`。
+    ///
+    /// 逐项失败一律响亮（读目录/读目录项/读文件/解析任一失败 → `anyhow::bail!` 带路径）。
+    /// 与 `market::collect_plugin_items` 的「逐项 skipped」不同：此处装配需要**结构体**，
+    /// 故任一条损坏即整体失败（boot 装配不应带半截清单跑）。
+    pub fn load_dir(dir: &Path) -> Result<Vec<PluginManifest>> {
+        let rd = std::fs::read_dir(dir)
+            .map_err(|e| anyhow::anyhow!("读取插件清单目录失败 {}: {e}", dir.display()))?;
+        let mut out: Vec<PluginManifest> = Vec::new();
+        for entry in rd {
+            let entry = entry
+                .map_err(|e| anyhow::anyhow!("读取插件清单目录项失败（{}）: {e}", dir.display()))?;
+            let path = entry.path();
+            let is_manifest = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".plugin.json"))
+                .unwrap_or(false);
+            if !is_manifest {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("读取插件清单文件失败 {}: {e}", path.display()))?;
+            let m = Self::from_json(&text)
+                .map_err(|e| anyhow::anyhow!("解析插件清单文件失败 {}: {e:?}", path.display()))?;
+            out.push(m);
+        }
+        Ok(out)
     }
 
     /// 推导能力名集合（显式 capabilities + 各子结构自动登记键 + events 派生订阅能力）。
@@ -192,6 +321,85 @@ impl PluginManifest {
     /// 与 `EventBus` 主题模式一致，可用通配；用于订阅自动注册与能力对账。
     pub fn events(&self) -> &[String] {
         &self.events
+    }
+
+    /// 是否**纯声明式**（P0 S3）：既无原生入口、也未声明任何权限。
+    ///
+    /// 当前 16 份 DSH 清单全部为 `true` —— 即「声明了但没实现」，须在 UI / doctor 可见。
+    pub fn is_declarative_only(&self) -> bool {
+        self.entry.is_none() && self.permissions.is_empty()
+    }
+
+    /// 清单自洽性校验（P0 S3）：一次报全，不短路。
+    ///
+    /// 覆盖四类 code：
+    /// ① `manifest.hot_without_entry`：`activation == Hot` 却无 `entry`（无从热加载）；
+    /// ② `manifest.undeclared_side_effect`：`capabilities` 出现 `fs.`/`exec.`/`net.` 前缀，
+    ///    但 `permissions` 为空；
+    /// ③ `manifest.empty_shell`：`capabilities`/`hooks`/`slash_commands`/`subagents`/
+    ///    `skills`/`events` 全空（空壳清单）；
+    /// ④ `manifest.exec_without_decl`：声明了 `Permission::Exec`，却无任何 `exec.` 前缀能力。
+    pub fn validate(&self) -> Vec<ManifestDiagnostic> {
+        let mut diags = Vec::new();
+
+        // ① 声明热加载但无原生入口
+        if self.activation == Activation::Hot && self.entry.is_none() {
+            diags.push(ManifestDiagnostic::new(
+                "manifest.hot_without_entry",
+                &self.name,
+                "activation=hot 但未声明 entry，热加载无从谈起".to_string(),
+            ));
+        }
+
+        // ② 副作用能力未声明权限
+        let side_effects: Vec<&str> = self
+            .capabilities
+            .iter()
+            .map(String::as_str)
+            .filter(|c| {
+                c.starts_with("fs.") || c.starts_with("exec.") || c.starts_with("net.")
+            })
+            .collect();
+        if self.permissions.is_empty() && !side_effects.is_empty() {
+            diags.push(ManifestDiagnostic::new(
+                "manifest.undeclared_side_effect",
+                &self.name,
+                format!("声明了副作用能力 {side_effects:?}，但 permissions 为空（未声明权限）"),
+            ));
+        }
+
+        // ③ 空壳清单
+        let is_empty_shell = self.capabilities.is_empty()
+            && self.hooks.is_empty()
+            && self.slash_commands.is_empty()
+            && self.subagents.is_empty()
+            && self.skills.is_empty()
+            && self.events.is_empty();
+        if is_empty_shell {
+            diags.push(ManifestDiagnostic::new(
+                "manifest.empty_shell",
+                &self.name,
+                "capabilities/hooks/slash_commands/subagents/skills/events 全空（空壳清单）"
+                    .to_string(),
+            ));
+        }
+
+        // ④ 声明 exec 权限却无 exec. 能力
+        let has_exec_perm = self
+            .permissions
+            .iter()
+            .any(|p| matches!(p, Permission::Exec { .. }));
+        let has_exec_cap = self.capabilities.iter().any(|c| c.starts_with("exec."));
+        if has_exec_perm && !has_exec_cap {
+            diags.push(ManifestDiagnostic::new(
+                "manifest.exec_without_decl",
+                &self.name,
+                "声明了 exec 权限，但 capabilities 中无 exec. 前缀能力（权限与能力不对齐）"
+                    .to_string(),
+            ));
+        }
+
+        diags
     }
 }
 
@@ -699,38 +907,75 @@ mod tests {
         assert!(caps.contains(&"slash.commands".to_string()));
     }
 
-    // ---- T-1.2：8 份 DSH manifest 实装验证 ----
+    // ---- T-1.2：DSH manifest 实装验证 ----
 
-    /// 从工作区 manifests 目录加载全部 DSH manifest（允许环境变量覆盖路径）。
-    fn load_dsh_manifests_from_disk() -> Vec<(std::path::PathBuf, PluginManifest)> {
-        let base = std::env::var("DSH_MANIFEST_DIR")
+    /// DSH 清单目录：`DSH_MANIFEST_DIR` 覆盖 > 默认 `<repo>/plugins/manifests`。
+    ///
+    /// `CARGO_MANIFEST_DIR` = `<repo>/core`，故上溯**一层**即仓库根。
+    ///
+    /// 历史缺陷：此处曾写成 `.join("..").join("..")`（多一层）→ 解析到
+    /// `<repo>/../plugins/manifests`（工作区之外，本项目实测为 `D:\Downloads\plugins\manifests`）
+    /// → 目录不存在 → `read_dir` 返回 Err → 清单列表为空 → 本模块两条 DSH 清单测试
+    /// 走 `if list.is_empty() { return }` **空转通过**。门禁 16/16 全绿，实际零验证
+    /// —— 比 FAIL 更隐蔽（vacuous pass）。
+    fn dsh_manifest_dir() -> std::path::PathBuf {
+        std::env::var("DSH_MANIFEST_DIR")
             .ok()
+            .filter(|v| !v.trim().is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                // 相对当前 cargo manifest dir：core → workspace root → plugins/manifests
-                let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("..")
                     .join("plugins")
-                    .join("manifests");
-                root
-            });
-        let mut out = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&base) {
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("dsh-") && n.ends_with(".plugin.json"))
-                    .unwrap_or(false)
-                {
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        if let Ok(m) = PluginManifest::from_json(&text) {
-                            out.push((path, m));
-                        }
-                    }
+                    .join("manifests")
+            })
+    }
+
+    /// 是否由 `DSH_MANIFEST_DIR` 显式覆盖目录。
+    ///
+    /// 覆盖模式下目录缺失视为调用方的选择（允许跳过）；**默认路径下缺失视为缺陷**
+    /// （路径解析错或清单被删），必须失败而不是静默跳过。
+    fn dsh_manifest_dir_is_override() -> bool {
+        std::env::var("DSH_MANIFEST_DIR")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 从 DSH 清单目录加载全部 `dsh-*.plugin.json`。
+    ///
+    /// 读取失败或 JSON 解析失败**直接 panic 并带上路径** —— 曾经这两处都是
+    /// `if let Ok(..)`，坏清单会被静默丢弃，表现为「份数莫名少一份」，
+    /// 与上文空转缺陷同类。门禁宁可响亮失败，也不静默减计数。
+    fn load_dsh_manifests_from_disk() -> Vec<(std::path::PathBuf, PluginManifest)> {
+        let base = dsh_manifest_dir();
+        let rd = match std::fs::read_dir(&base) {
+            Ok(rd) => rd,
+            Err(e) => {
+                if dsh_manifest_dir_is_override() {
+                    return Vec::new();
                 }
+                panic!(
+                    "默认 DSH 清单目录 {} 不可读（{e}）—— 路径解析缺陷或清单目录被删",
+                    base.display()
+                );
+            }
+        };
+        let mut out = Vec::new();
+        for entry in rd {
+            let path = entry
+                .unwrap_or_else(|e| panic!("读取目录项失败（{}）: {e}", base.display()))
+                .path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("dsh-") && n.ends_with(".plugin.json"))
+                .unwrap_or(false)
+            {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("读取清单 {} 失败: {e}", path.display()));
+                let m = PluginManifest::from_json(&text)
+                    .unwrap_or_else(|e| panic!("解析清单 {} 失败: {e:?}", path.display()));
+                out.push((path, m));
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -738,29 +983,42 @@ mod tests {
     }
 
     #[test]
-    fn load_all_8_dsh_manifests_success() {
+    fn load_all_dsh_manifests_success() {
         let list = load_dsh_manifests_from_disk();
-        // 如果运行环境里找不到 manifests 目录（例如 CI 只编译 core），则跳过而非失败。
+        // 仅当调用方用 DSH_MANIFEST_DIR 显式指定目录时，空目录才允许跳过。
+        // 默认路径下空 = 缺陷（见 dsh_manifest_dir 的历史空转说明），必须响亮失败。
         if list.is_empty() {
+            assert!(
+                dsh_manifest_dir_is_override(),
+                "默认清单目录 {} 下未找到任何 dsh-*.plugin.json —— 路径解析缺陷或清单缺失\
+                 （本测试曾因多一层 `..` 而空转通过，不得再静默跳过）",
+                dsh_manifest_dir().display()
+            );
             eprintln!(
-                "skip: no dsh-*.plugin.json found under DSH_MANIFEST_DIR or default path"
+                "skip: DSH_MANIFEST_DIR={} 下无 dsh-*.plugin.json（显式覆盖，允许跳过）",
+                dsh_manifest_dir().display()
             );
             return;
         }
-        assert_eq!(
+        // 动态下界：磁盘实际份数（基线 16）。下界而非等式，避免新增清单时再度漂移；
+        // 但仍设下限，防止「只剩 1 份也绿」。
+        assert!(
+            list.len() >= 16,
+            "应至少找到 16 份 DSH 二创 manifest，实际 {} 份：{:?}",
             list.len(),
-            8,
-            "应找到 8 份 DSH 二创 manifest，实际 {} 份：{:?}",
-            list.len(),
-            list.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>()
+            list.iter()
+                .map(|(p, _)| p.display().to_string())
+                .collect::<Vec<_>>()
         );
         for (path, m) in &list {
-            // 8 字段齐全：name/version/description/capabilities/hooks/slash_commands/subagents/skills
+            // 字段齐全：name/version/description 非空；dependencies/events 至少其一非空。
             assert!(!m.name.is_empty(), "name empty @ {}", path.display());
             assert!(!m.version.is_empty(), "version empty @ {}", path.display());
-            assert!(!m.description.is_empty(), "description empty @ {}", path.display());
-            // capabilities / hooks / slash_commands / subagents / skills 字段必须存在
-            // （结构上均为 Vec，空也视为"存在"；此处用 manifest 结构本身保证）
+            assert!(
+                !m.description.is_empty(),
+                "description empty @ {}",
+                path.display()
+            );
             let has_ext = !m.dependencies.is_empty() || !m.events.is_empty();
             assert!(
                 has_ext,
@@ -773,8 +1031,14 @@ mod tests {
     #[test]
     fn at_least_6_manifests_have_ext_fields_populated() {
         let list = load_dsh_manifests_from_disk();
+        // 与 load_all_dsh_manifests_success 同口径：默认路径空必须失败，不得静默跳过。
         if list.is_empty() {
-            eprintln!("skip: no manifests on disk");
+            assert!(
+                dsh_manifest_dir_is_override(),
+                "默认清单目录 {} 下无清单，无法统计扩展字段实装率",
+                dsh_manifest_dir().display()
+            );
+            eprintln!("skip: DSH_MANIFEST_DIR override with no manifests on disk");
             return;
         }
         let n = list
@@ -782,5 +1046,71 @@ mod tests {
             .filter(|(_, m)| !m.dependencies.is_empty() || !m.events.is_empty())
             .count();
         assert!(n >= 6, "至少 6 份 manifest 实装了扩展字段，实际 {n}");
+    }
+
+    // ---- P0 S3：entry / activation / dispose / permissions 新字段 ----
+
+    /// 旧 JSON（无新字段）必须仍能解析，且缺省值保守。
+    #[test]
+    fn p0_s3_new_fields_default_conservatively() {
+        let m = PluginManifest::from_json(
+            r#"{"name":"legacy","version":"0.1.0","description":"无新字段的旧清单"}"#,
+        )
+        .unwrap();
+        assert_eq!(m.entry, None);
+        assert_eq!(m.activation, Activation::Restart);
+        assert_eq!(m.dispose, None);
+        assert!(m.permissions.is_empty());
+        assert!(m.is_declarative_only());
+    }
+
+    /// 五种权限的 serde 内部标签（`kind`）往返。
+    #[test]
+    fn p0_s3_permission_variants_roundtrip() {
+        let json = r#"{
+            "name":"native-demo",
+            "version":"0.2.0",
+            "description":"带原生入口与权限",
+            "entry":"bin/demo.exe",
+            "activation":"hot",
+            "dispose":"bin/demo-stop.exe",
+            "capabilities":["exec.shell","demo.run"],
+            "permissions":[
+                {"kind":"fs","scope":["work"],"write":true},
+                {"kind":"net","allow_hosts":["api.example.com"]},
+                {"kind":"exec","allow":["git"]},
+                {"kind":"event","publish":["demo.out"],"subscribe":["tool.**"]},
+                {"kind":"slot","register":["tools"],"order":true}
+            ]
+        }"#;
+        let m = PluginManifest::from_json(json).unwrap();
+        assert_eq!(m.entry.as_deref(), Some("bin/demo.exe"));
+        assert_eq!(m.activation, Activation::Hot);
+        assert_eq!(m.dispose.as_deref(), Some("bin/demo-stop.exe"));
+        assert_eq!(m.permissions.len(), 5);
+        assert!(!m.is_declarative_only());
+        assert!(
+            m.validate().iter().all(|d| d.code != "manifest.exec_without_decl"),
+            "已声明 exec. 能力时不应报 exec_without_decl"
+        );
+        // 内部标签序列化 → 反序列化保持同一形态
+        let text = serde_json::to_string(&m.permissions).unwrap();
+        let back: Vec<Permission> = serde_json::from_str(&text).unwrap();
+        assert!(matches!(
+            back[0],
+            Permission::Fs { write: true, .. }
+        ));
+        assert!(matches!(back[4], Permission::Slot { order: true, .. }));
+    }
+
+    /// 热加载但无入口 → 自相矛盾，必须报 `manifest.hot_without_entry`。
+    #[test]
+    fn p0_s3_hot_without_entry_is_flagged() {
+        let m = PluginManifest::from_json(
+            r#"{"name":"hot-ghost","version":"0.1.0","description":"d","activation":"hot","capabilities":["x.run"]}"#,
+        )
+        .unwrap();
+        let codes: Vec<&str> = m.validate().iter().map(|d| d.code).collect();
+        assert!(codes.contains(&"manifest.hot_without_entry"), "{codes:?}");
     }
 }

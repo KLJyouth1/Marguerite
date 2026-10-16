@@ -13,6 +13,7 @@ from starlette.routing import Route
 
 from opensquilla.attachment_refs import transcript_material_path
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.session_key import request_session_key
 from opensquilla.paths import media_root_from_config, native_io_path
 
 
@@ -59,12 +60,7 @@ def register_attachment_routes(
 
     async def download_handler(request: Request) -> FileResponse | JSONResponse:
         sha = str(request.path_params.get("sha256", "")).lower()
-        session_key = (
-            request.query_params.get("sessionKey")
-            or request.query_params.get("session_key")
-            or request.headers.get("x-opensquilla-session-key")
-            or ""
-        )
+        session_key = request_session_key(request)
         session_id = await _session_id_for_download(session_manager, session_key)
         if not session_id:
             return JSONResponse(

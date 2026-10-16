@@ -1,5 +1,14 @@
 # mode/ensemble.yaml — Ensemble 受控强编排模式（MAX+YOLO 融合二次升级版）
 # 对齐 MAX 模式（4 阶段推理 + 特权模型）+ TUI 工作台 YOLO（免确认 + 沙箱分层 + 快照安全网）
+#
+# 【schema 修复】原版把 `thinking_depth` / `verification_passes` / `sandbox` /
+# `privileges` 写在顶层或 `ensemble:` 键下，而 `ModeSpec` 只识别 `bloom:` 键
+# （见 core/src/mode/spec.rs 的 `pub bloom: Option<BloomSpec>`），
+# 导致本文件既未被 include_str! 引用、即便引用也会整块落空为 None。
+# 现按规范 schema 重排，数值逐字保留，不改变任何既定语义。
+#
+# Ensemble 与 Bloom 的唯一实质差异：Ensemble = 扁平强编排（不做锚定冷启动
+# 三阶段晋升），Bloom = 锚定 + PTC 单调扩展。故此处 anchoring.enabled=false。
 name: ensemble
 description: Ensemble 融合模式：MAX 四阶段推理（生成→自批判→改进→验证）+ YOLO 免确认全自动（受沙箱白名单约束）
 allowed_tools: []
@@ -11,7 +20,13 @@ model_params:
   reasoning_effort: max
 anti_patterns: []
 risk_level: high
-ensemble:
+approval_policy:
+  mutating: allow
+  exec_write: allow
+  network: allow
+  desktop: allow
+  fallback_timeout_sec: 60
+bloom:
   privileges:
     auto_approve: true
     skip_permissions: false
@@ -21,20 +36,16 @@ ensemble:
     unrestricted_filesystem: false
     allow_network_all: true
     allow_shell_all: true
-sandbox:
-  type: workspace-write
-  network_access: true
-thinking_depth: 3
-verification_passes: 3
-reasoning_effort: max
-temperature: 0.1
-snapshot_enabled: true
-auto_revert_max: 2
-max_swarm_shards: 11
-auto_retry_failures: 5
-approval_policy:
-  mutating: allow
-  exec_write: allow
-  network: allow
-  desktop: allow
-  fallback_timeout_sec: 60
+  sandbox:
+    type: workspace-write
+    network_access: true
+  thinking_depth: 3
+  verification_passes: 3
+  reasoning_effort: max
+  temperature: 0.1
+  snapshot_enabled: true
+  auto_revert_max: 2
+  max_swarm_shards: 11
+  auto_retry_failures: 5
+  anchoring:
+    enabled: false

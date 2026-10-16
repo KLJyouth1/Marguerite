@@ -164,15 +164,12 @@ impl ModLens {
                 meta.height.unwrap_or(0)
             ),
             semantics: "metadata_fallback".to_string(),
-            bbox: meta
-                .width
-                .zip(meta.height)
-                .map(|(w, h)| BBox {
-                    x: 0.0,
-                    y: 0.0,
-                    width: w as f32,
-                    height: h as f32,
-                }),
+            bbox: meta.width.zip(meta.height).map(|(w, h)| BBox {
+                x: 0.0,
+                y: 0.0,
+                width: w as f32,
+                height: h as f32,
+            }),
         };
         VisionDocument {
             summary: format!("{} 图片（离线降级，未调用视觉模型）", meta.format),
@@ -242,7 +239,12 @@ mod tests {
                     kind: BlockKind::Title,
                     text: "标题".into(),
                     semantics: "页面标题".into(),
-                    bbox: Some(BBox { x: 0.0, y: 0.0, width: 64.0, height: 8.0 }),
+                    bbox: Some(BBox {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 64.0,
+                        height: 8.0,
+                    }),
                 },
                 VisionBlock {
                     id: "b1".into(),
@@ -252,7 +254,10 @@ mod tests {
                     bbox: None,
                 },
             ],
-            layout: VisionLayout { columns: 1, regions: vec!["header".into(), "body".into()] },
+            layout: VisionLayout {
+                columns: 1,
+                regions: vec!["header".into(), "body".into()],
+            },
         };
         let json = doc.to_json();
         let back = VisionDocument::from_json(&json).expect("应可反序列化");
@@ -308,7 +313,9 @@ mod tests {
     #[tokio::test]
     async fn analyze_falls_back_when_reply_is_not_json() {
         let resolver = MockVisionResolver { capable: true };
-        let transport = MockVisionTransport { reply: "我不懂你说什么".into() };
+        let transport = MockVisionTransport {
+            reply: "我不懂你说什么".into(),
+        };
         let doc = ModLens::analyze(&resolver, &transport, &png(), "x").await;
         assert_eq!(doc.source, "metadata-fallback");
     }

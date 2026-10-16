@@ -20,6 +20,10 @@ use crate::persistence::config::Config;
 
 /// 行为日志文件（相对 data_dir/memory）
 const BEHAVIOR_FILE: &str = "behavior.jsonl";
+/// 行为日志文件字节上限；超过则截断保留最近行（防 append-only 无界增长）
+const MAX_BEHAVIOR_BYTES: u64 = 1_000_000;
+/// 截断后保留的最近行数（须使保留体积 < [`MAX_BEHAVIOR_BYTES`]，否则会反复重写）
+const BEHAVIOR_KEEP_LINES: usize = 2000;
 /// 单会话最大 observation 数（超出丢弃最旧）
 const MAX_PER_SESSION: usize = 200;
 /// detail 截断字符数
@@ -118,6 +122,36 @@ impl BehaviorLedger {
             self.events
                 .retain(|e| e.session != session || e.seq > drop_until);
         }
+        // 有界：文件按字节上限截断（保留最近行，绝不丢最新事件）
+        self.compact_file_if_needed();
+    }
+
+    /// 文件超过 [`MAX_BEHAVIOR_BYTES`] 时，截断为最近 [`BEHAVIOR_KEEP_LINES`] 行。
+    ///
+    /// 在持有台账互斥锁时调用，无并发写；只保留最新行，绝不丢最近事件。
+    fn compact_file_if_needed(&self) {
+        let len = match std::fs::metadata(&self.path) {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+        if len <= MAX_BEHAVIOR_BYTES {
+            return;
+        }
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        if lines.len() <= BEHAVIOR_KEEP_LINES {
+            return; // 行数不多（单行过长）：不裁剪，避免丢数据
+        }
+        let keep = &lines[lines.len() - BEHAVIOR_KEEP_LINES..];
+        let mut buf = String::new();
+        for l in keep {
+            buf.push_str(l);
+            buf.push('\n');
+        }
+        let _ = std::fs::write(&self.path, buf);
     }
 
     /// 某会话时间线（按 seq 升序）
@@ -146,6 +180,57 @@ pub fn record_behavior(session: &str, kind: &str, detail: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .record(session, kind, detail);
+}
+
+/// 工具结果事件 → 台账 `detail` 文本（纯函数，便于单测）。
+///
+/// **为什么值得单独抽出来**：此前失败分支恒写字面量 `"FAILED"`，把事件里本已
+/// 携带的错误文本在**写入点**丢掉。实测后果 —— 支持包里只剩
+/// `shell_exec -> FAILED` × 63，既没有预检拒绝原因，也分不清「越界 / 护栏拦截 /
+/// spawn 失败 / 超时」，失败**完全无法归因**（这是上一轮排查卡住的主因）。
+///
+/// 契约：成功 → 用 `summary`；失败 → 尽力拼出 `FAILED[code] reason`，
+/// 依次尝试 `summary` / `error` / `message` / `detail` 四个字段取第一个非空文本。
+/// 全都为空时**只**留 `FAILED` —— 不臆造原因。
+pub fn describe_tool_result(tool: &str, ok: bool, payload: &Value) -> String {
+    if ok {
+        let summary = payload
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return format!("{tool} -> {summary}");
+    }
+    let reason = ["summary", "error", "message", "detail"]
+        .iter()
+        .find_map(|k| {
+            payload
+                .get(*k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_default();
+    let code = payload
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default();
+    match (code.is_empty(), reason.is_empty()) {
+        (false, false) => format!("{tool} -> FAILED[{code}] {reason}"),
+        (false, true) => format!("{tool} -> FAILED[{code}]"),
+        (true, false) => format!("{tool} -> FAILED {reason}"),
+        (true, true) => format!("{tool} -> FAILED"),
+    }
+}
+
+/// 最近 `limit` 条行为事件（全局，按 seq 升序）。
+///
+/// 供元智能体监控层抽取失败信号（[`crate::harness::meta`]）——只读快照，
+/// 不触发任何写入，也不改变台账的有界裁剪语义。
+pub fn recent_events(limit: usize) -> Vec<BehaviorEvent> {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .timeline(None, limit)
 }
 
 /// `memory.behavior.list`：行为时间线（timeline）
@@ -235,7 +320,7 @@ fn aggregate(events: &[BehaviorEvent], active: Option<String>) -> Value {
         }
         m.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     };
-    tool_uses.sort_by(|a, b| b.1.cmp(&a.1));
+    tool_uses.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     json!({
         "session": active.or_else(|| events.last().map(|e| e.session.clone())),
         "events": events.len(),
@@ -324,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn test_behavior_file_stays_bounded() {
+        // B4 回归：behavior.jsonl 曾为 append-only 无上限 → 无界增长。
+        let (mut l, dir) = tmp_ledger("filebound");
+        let padding = "y".repeat(180);
+        let n = 5000usize;
+        for i in 0..n {
+            l.record("s", "tool_call", &format!("tool_{i}_{padding}"));
+        }
+        let len = std::fs::metadata(&l.path).unwrap().len();
+        assert!(
+            len <= MAX_BEHAVIOR_BYTES + 4096,
+            "行为日志文件应有界: {len} 字节"
+        );
+        // 最近事件不得丢失
+        let raw = std::fs::read_to_string(&l.path).unwrap();
+        assert!(
+            raw.contains(&format!("tool_{}_", n - 1)),
+            "最新事件不得丢失"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_behavior_summary_aggregates() {
         let (mut l, _d) = tmp_ledger("summary");
         l.record("s4", "user_message", "修复 bug");
@@ -364,5 +472,59 @@ mod tests {
         assert_eq!(tools[1]["count"], 1);
         // 画像含语言偏好信号（语言关键词出现在 user_message 细节中）
         assert!(l.events.iter().any(|e| e.detail.contains("Rust")));
+    }
+
+    /* ── 工具结果台账：失败必须可归因（回归钉子） ───────────────────────── */
+
+    /// 成功：直接用 summary，不带任何 "FAILED" 前缀。
+    #[test]
+    fn describe_tool_result_success_uses_summary() {
+        let p = json!({ "tool": "shell_exec", "ok": true, "summary": "exit 0" });
+        assert_eq!(describe_tool_result("shell_exec", true, &p), "shell_exec -> exit 0");
+    }
+
+    /// **核心回归**：失败时必须保留真实原因 —— 这正是旧实现丢掉的东西。
+    /// 旧行为恒为 `"shell_exec -> FAILED"`，本用例把它钉死。
+    #[test]
+    fn describe_tool_result_failure_keeps_reason() {
+        let p = json!({
+            "tool": "shell_exec",
+            "ok": false,
+            "summary": "命令被 L2 护栏拒绝：rm -rf"
+        });
+        let out = describe_tool_result("shell_exec", false, &p);
+        assert_ne!(out, "shell_exec -> FAILED", "不得退化为无信息的 FAILED");
+        assert!(out.contains("L2 护栏拒绝"), "必须保留真实原因: {out}");
+    }
+
+    /// 有稳定错误码时，码与原因并存（前端/人工都按码归因）。
+    #[test]
+    fn describe_tool_result_failure_includes_code_when_present() {
+        let p = json!({ "ok": false, "code": "EXEC_ERROR", "error": "spawn 失败" });
+        assert_eq!(
+            describe_tool_result("shell_exec", false, &p),
+            "shell_exec -> FAILED[EXEC_ERROR] spawn 失败"
+        );
+    }
+
+    /// 字段回退顺序：summary → error → message → detail（第一个非空者胜出）。
+    #[test]
+    fn describe_tool_result_falls_back_across_fields() {
+        let only_message = json!({ "ok": false, "message": "超时 120s" });
+        assert!(describe_tool_result("t", false, &only_message).contains("超时 120s"));
+
+        let only_detail = json!({ "ok": false, "detail": "无工作区" });
+        assert!(describe_tool_result("t", false, &only_detail).contains("无工作区"));
+
+        // 空白串不算「有原因」，必须继续回退。
+        let blank_then_real = json!({ "ok": false, "summary": "   ", "error": "真的原因" });
+        assert!(describe_tool_result("t", false, &blank_then_real).contains("真的原因"));
+    }
+
+    /// 全空时**只**留 FAILED —— 绝不臆造原因。
+    #[test]
+    fn describe_tool_result_never_invents_reason() {
+        let empty = json!({ "ok": false });
+        assert_eq!(describe_tool_result("shell_exec", false, &empty), "shell_exec -> FAILED");
     }
 }

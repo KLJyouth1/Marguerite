@@ -18,6 +18,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::automation::ledger::RunStatus;
+use crate::proc::SilentCommand;
 
 /// 审计结果
 pub struct AuditOutcome {
@@ -109,6 +110,7 @@ fn probe_tool(args: &[&str]) -> bool {
         return false;
     }
     let mut cmd = Command::new(args[0]);
+    cmd.silent();
     for a in &args[1..] {
         cmd.arg(a);
     }

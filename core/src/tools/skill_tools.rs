@@ -17,29 +17,48 @@ use crate::mcp::registry::ToolRegistry;
 use crate::security::skill_scan::{log_skill_block, SkillInstallScanner};
 use crate::skills::loader::SkillLoader;
 
-/// 解析技能目录：相对路径从 cwd 逐级上溯，与网关 `skills_dir()` 同构。
+/// 解析技能目录：相对路径按 进程 cwd → 逐级上溯 → 可执行文件旁(打包 bundled) 顺序探测，
+/// 仍不存在则回退到数据目录 `skills/`（首次自动创建）。与网关技能页同构。
 pub fn resolve_skills_dir(configured: &str) -> PathBuf {
     let p = PathBuf::from(configured);
     if p.is_absolute() {
         if p.is_dir() {
             return p;
         }
-    } else if let Ok(cwd) = std::env::current_dir() {
-        let direct = cwd.join(&p);
-        if direct.is_dir() {
-            return direct;
-        }
-        let mut base = cwd.as_path();
-        for _ in 0..6 {
-            match base.parent() {
-                Some(parent) => {
-                    let candidate = parent.join(&p);
-                    if candidate.is_dir() {
-                        return candidate;
+    } else {
+        if let Ok(cwd) = std::env::current_dir() {
+            let direct = cwd.join(&p);
+            if direct.is_dir() {
+                return direct;
+            }
+            let mut base = cwd.as_path();
+            for _ in 0..6 {
+                match base.parent() {
+                    Some(parent) => {
+                        let candidate = parent.join(&p);
+                        if candidate.is_dir() {
+                            return candidate;
+                        }
+                        base = parent;
                     }
-                    base = parent;
+                    None => break,
                 }
-                None => break,
+            }
+        }
+        // 打包/便携场景：技能目录可能位于可执行文件旁（`<app>/skills` 或 `<app>/bin/skills`），
+        // 与启动 cwd 无关，确保「开箱即用」与「双击 exe 技能页不为空」。
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let bundled = exe_dir.join(&p);
+                if bundled.is_dir() {
+                    return bundled;
+                }
+                if let Some(app_dir) = exe_dir.parent() {
+                    let sibling = app_dir.join(&p);
+                    if sibling.is_dir() {
+                        return sibling;
+                    }
+                }
             }
         }
     }
@@ -322,13 +341,29 @@ mod tests {
     /// 良性技能 YAML 渲染正确且通过安全扫描。
     #[test]
     fn render_create_skill_yaml_benign_and_passes_scan() {
-        let content =
-            render_create_skill_yaml("my-skill", "求和技能", "请对给定数字求和并返回结果。", &["sum".into()]);
+        let content = render_create_skill_yaml(
+            "my-skill",
+            "求和技能",
+            "请对给定数字求和并返回结果。",
+            &["sum".into()],
+        );
         assert!(content.contains("name: my-skill"));
         assert!(content.contains("prompt_template:"));
         assert!(content.contains("  - sum"));
         let v = crate::security::skill_scan::SkillInstallScanner::new().scan(&content);
         assert!(v.is_allowed(), "良性技能内容应放行: {:?}", v.reason);
+    }
+
+    /// resolve_skills_dir：绝对存在的目录原样返回（回归守卫，不触真实数据目录）。
+    #[test]
+    fn resolve_skills_dir_returns_absolute_existing_dir() {
+        let base =
+            std::env::temp_dir().join(format!("marguerite-skills-abs-{}", std::process::id()));
+        let skills = base.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        let resolved = resolve_skills_dir(skills.to_str().unwrap());
+        assert_eq!(resolved, skills);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// create_skill 路径：prompt_template 内嵌 eval → 落盘前必须被安全层拒绝。

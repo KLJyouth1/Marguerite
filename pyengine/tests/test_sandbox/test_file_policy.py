@@ -103,6 +103,14 @@ def test_builtin_rules_cannot_be_removed_by_empty_custom_policy(tmp_path: Path) 
     assert decision.rule_source == "builtin"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "pins platform='linux' while resolving a native Windows home path: the "
+        "compiled POSIX patterns keep the backslashes of that path, while the "
+        "host resolver returns a drive-qualified path, so the two can never match"
+    ),
+)
 def test_safe_profile_compiles_write_baseline_and_read_only_carveouts(
     tmp_path: Path,
 ) -> None:

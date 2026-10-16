@@ -29,6 +29,10 @@ pub struct SessionInfo {
     pub tokens_used: u32,
     /// 关联的项目路径（None = 未关联到具体项目）
     pub project_path: Option<String>,
+    /// 会话级思考强度覆盖（off/normal/deep/max；None = 回退全局模型配置）
+    pub reasoning_effort: Option<String>,
+    /// 会话级上下文窗口覆盖（token 数；None = 回退全局模型配置）
+    pub context_window: Option<u32>,
 }
 
 /// 会话快照
@@ -87,6 +91,7 @@ impl SessionManager {
                 tool_name TEXT,
                 tool_input TEXT,
                 tool_output TEXT,
+                elapsed_ms INTEGER,
                 timestamp TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );",
@@ -96,9 +101,39 @@ impl SessionManager {
             .prepare("PRAGMA table_info(sessions)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
-            .any(|name| name == "project_path");
+            .any(|name| name == "project_path"); // 幂等迁移范本（本文件后续迁移照此）
         if !has_project_col {
             db.execute_batch("ALTER TABLE sessions ADD COLUMN project_path TEXT;")?;
+        }
+        // 迁移（P2-10/T14）：为旧库补充工具耗时列。**只增列**，旧快照该列为 NULL
+        // → 历史工具卡不显示耗时（诚实降级）。
+        let has_elapsed_col: bool = db
+            .prepare("PRAGMA table_info(session_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "elapsed_ms");
+        if !has_elapsed_col {
+            db.execute_batch("ALTER TABLE session_messages ADD COLUMN elapsed_ms INTEGER;")?;
+        }
+        // 迁移（成本治理）：会话级「思考强度 + 上下文窗口」持久化。会话可独立
+        // 于全局模型配置指定 reasoning_effort（off/normal/deep/max）与 context_window，
+        // 重启后按会话恢复，避免长程任务被全局默认档位拖垮成本或质量。
+        // 幂等：只增列，旧库 NULL → 回退全局配置（诚实降级）。
+        let has_effort_col: bool = db
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "reasoning_effort");
+        if !has_effort_col {
+            db.execute_batch("ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT;")?;
+        }
+        let has_ctx_col: bool = db
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "context_window");
+        if !has_ctx_col {
+            db.execute_batch("ALTER TABLE sessions ADD COLUMN context_window INTEGER;")?;
         }
         self.db = Some(db);
         Ok(())
@@ -141,11 +176,11 @@ impl SessionManager {
             )?;
 
             let mut stmt = tx.prepare(
-                "INSERT INTO session_messages (session_id, role, content, thinking, tool_name, tool_input, tool_output, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO session_messages (session_id, role, content, thinking, tool_name, tool_input, tool_output, elapsed_ms, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for msg in messages {
-                let (role, content, thinking, tool_name, tool_input, tool_output) =
+                let (role, content, thinking, tool_name, tool_input, tool_output, elapsed_ms) =
                     extract_message_fields(msg);
                 stmt.execute(rusqlite::params![
                     session_id,
@@ -155,6 +190,7 @@ impl SessionManager {
                     tool_name,
                     tool_input,
                     tool_output,
+                    elapsed_ms,
                     msg.timestamp().to_rfc3339(),
                 ])?;
             }
@@ -194,11 +230,11 @@ impl SessionManager {
             )?;
 
             let mut stmt = tx.prepare(
-                "INSERT INTO session_messages (session_id, role, content, thinking, tool_name, tool_input, tool_output, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO session_messages (session_id, role, content, thinking, tool_name, tool_input, tool_output, elapsed_ms, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for msg in messages {
-                let (role, content, thinking, tool_name, tool_input, tool_output) =
+                let (role, content, thinking, tool_name, tool_input, tool_output, elapsed_ms) =
                     extract_message_fields(msg);
                 stmt.execute(rusqlite::params![
                     session_id,
@@ -208,6 +244,7 @@ impl SessionManager {
                     tool_name,
                     tool_input,
                     tool_output,
+                    elapsed_ms,
                     msg.timestamp().to_rfc3339(),
                 ])?;
             }
@@ -224,7 +261,7 @@ impl SessionManager {
     ) -> Result<Vec<SessionInfo>> {
         let db = self.db()?;
         let mut stmt = db.prepare(
-            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path
+            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path, reasoning_effort, context_window
              FROM sessions WHERE project_path = ?1 ORDER BY updated_at DESC LIMIT ?2",
         )?;
 
@@ -239,12 +276,65 @@ impl SessionManager {
                     updated_at: row.get(5)?,
                     tokens_used: row.get::<_, i32>(6)? as u32,
                     project_path: row.get(7)?,
+                    reasoning_effort: row.get(8)?,
+                    context_window: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
                 })
             })?
             .filter_map(|r| r.ok())
             .collect();
 
         Ok(results)
+    }
+
+    /// 读取会话级「思考强度 + 上下文窗口」覆盖（成本治理）。
+    /// 返回 `(reasoning_effort, context_window)`；两者均可为 None = 未覆盖，
+    /// 调用方应回退全局模型配置（诚实降级，不撒谎说"已设置"）。
+    pub fn get_reasoning_settings(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<String>, Option<u32>)> {
+        let db = self.db()?;
+        let row = db.query_row(
+            "SELECT reasoning_effort, context_window FROM sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?.map(|v| v as u32),
+                ))
+            },
+        );
+        match row {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((None, None)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 写入会话级「思考强度 + 上下文窗口」覆盖（成本治理）。
+    /// 传 `None` 表示清除覆盖、回退全局配置；`context_window` 传 `Some(0)` 同样视为清除
+    /// （0 不是合法上下文长度）。
+    pub fn set_reasoning_settings(
+        &self,
+        session_id: &str,
+        reasoning_effort: Option<&str>,
+        context_window: Option<u32>,
+    ) -> Result<()> {
+        let db = self.db()?;
+        // 归一化：空串 / 0 一律视作"清除覆盖"，避免存入语义模糊的哨兵值。
+        let effort = reasoning_effort
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let ctx = context_window.filter(|v| *v > 0).map(|v| v as i64);
+        let n = db.execute(
+            "UPDATE sessions SET reasoning_effort = ?2, context_window = ?3 WHERE session_id = ?1",
+            rusqlite::params![session_id, effort, ctx],
+        )?;
+        if n == 0 {
+            anyhow::bail!("会话不存在: {session_id}");
+        }
+        Ok(())
     }
 
     /// 加载快照
@@ -282,7 +372,7 @@ impl SessionManager {
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionInfo>> {
         let db = self.db()?;
         let mut stmt = db.prepare(
-            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path
+            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path, reasoning_effort, context_window
              FROM sessions ORDER BY updated_at DESC LIMIT ?1",
         )?;
 
@@ -297,6 +387,8 @@ impl SessionManager {
                     updated_at: row.get(5)?,
                     tokens_used: row.get::<_, i32>(6)? as u32,
                     project_path: row.get(7)?,
+                    reasoning_effort: row.get(8)?,
+                    context_window: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -327,7 +419,7 @@ impl SessionManager {
     pub fn get_session(&self, session_id: &str) -> Result<Option<SessionInfo>> {
         let db = self.db()?;
         let result = db.query_row(
-            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path
+            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path, reasoning_effort, context_window
              FROM sessions WHERE session_id = ?1",
             rusqlite::params![session_id],
             |row| {
@@ -340,6 +432,8 @@ impl SessionManager {
                     updated_at: row.get(5)?,
                     tokens_used: row.get::<_, i32>(6)? as u32,
                     project_path: row.get(7)?,
+                    reasoning_effort: row.get(8)?,
+                    context_window: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
                 })
             },
         );
@@ -351,11 +445,40 @@ impl SessionManager {
         }
     }
 
+    /// 更新会话摘要/标题（sessions.patch RPC 后端实现）
+    pub fn update_summary(&self, session_id: &str, title: Option<&str>) -> Result<()> {
+        let db = self.db()?;
+        match title {
+            Some(t) if !t.is_empty() => {
+                db.execute(
+                    "UPDATE sessions SET summary = ?1, updated_at = ?2 WHERE session_id = ?3",
+                    rusqlite::params![t, Utc::now().to_rfc3339(), session_id],
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// 清除会话所有消息（保留会话记录本身，sessions.reset RPC 后端实现）
+    pub fn clear_messages(&self, session_id: &str) -> Result<()> {
+        let db = self.db()?;
+        db.execute(
+            "DELETE FROM session_messages WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        db.execute(
+            "UPDATE sessions SET message_count = 0, updated_at = ?1 WHERE session_id = ?2",
+            rusqlite::params![Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
+    }
+
     /// 恢复会话的所有消息
     pub fn restore_session(&self, session_id: &str) -> Result<Vec<Message>> {
         let db = self.db()?;
         let mut stmt = db.prepare(
-            "SELECT role, content, thinking, tool_name, tool_input, tool_output, timestamp
+            "SELECT role, content, thinking, tool_name, tool_input, tool_output, timestamp, elapsed_ms
              FROM session_messages WHERE session_id = ?1 ORDER BY id",
         )?;
 
@@ -368,6 +491,8 @@ impl SessionManager {
                 let tool_input: Option<String> = row.get(4)?;
                 let tool_output: Option<String> = row.get(5)?;
                 let timestamp_str: String = row.get(6)?;
+                // P2-10/T14：工具耗时列（旧库迁移后为 NULL → None，历史卡不显示耗时）。
+                let elapsed_ms: Option<i64> = row.get(7)?;
                 let timestamp = timestamp_str
                     .parse::<chrono::DateTime<Utc>>()
                     .unwrap_or_else(|_| Utc::now());
@@ -385,6 +510,7 @@ impl SessionManager {
                         input: tool_input.unwrap_or_default(),
                         output: tool_output.unwrap_or_default(),
                         timestamp,
+                        elapsed_ms: elapsed_ms.and_then(|ms| u64::try_from(ms).ok()),
                     },
                     _ => Message::System { content, timestamp },
                 };
@@ -429,7 +555,7 @@ impl SessionManager {
     }
 }
 
-/// 从消息中提取数据库字段
+/// 从消息中提取数据库字段（P2-10/T14：末位为工具耗时 `elapsed_ms`，非工具消息为 None）
 #[allow(clippy::type_complexity)]
 fn extract_message_fields(
     msg: &Message,
@@ -440,9 +566,10 @@ fn extract_message_fields(
     Option<&str>,
     Option<&str>,
     Option<&str>,
+    Option<i64>,
 ) {
     match msg {
-        Message::User { content, .. } => (msg.role(), content.as_str(), None, None, None, None),
+        Message::User { content, .. } => (msg.role(), content.as_str(), None, None, None, None, None),
         Message::Assistant {
             content, thinking, ..
         } => (
@@ -452,12 +579,14 @@ fn extract_message_fields(
             None,
             None,
             None,
+            None,
         ),
-        Message::System { content, .. } => (msg.role(), content.as_str(), None, None, None, None),
+        Message::System { content, .. } => (msg.role(), content.as_str(), None, None, None, None, None),
         Message::Tool {
             name,
             input,
             output,
+            elapsed_ms,
             ..
         } => (
             msg.role(),
@@ -466,6 +595,7 @@ fn extract_message_fields(
             Some(name.as_str()),
             Some(input.as_str()),
             Some(output.as_str()),
+            elapsed_ms.map(|ms| ms as i64),
         ),
     }
 }
@@ -605,6 +735,8 @@ mod tests {
                 input: "1+1".to_string(),
                 output: "2".to_string(),
                 timestamp: now,
+                // P2-10/T14：带上真实耗时，验证迁移列往返。
+                elapsed_ms: Some(1234),
             },
         ];
 
@@ -617,6 +749,13 @@ mod tests {
         assert_eq!(restored[0].role(), "user");
         assert_eq!(restored[1].role(), "assistant");
         assert_eq!(restored[2].role(), "tool");
+        // P2-10/T14：工具耗时列往返（迁移列 + INSERT + SELECT）。
+        match &restored[2] {
+            Message::Tool { elapsed_ms, .. } => {
+                assert_eq!(*elapsed_ms, Some(1234), "工具耗时必须原样往返")
+            }
+            other => panic!("第三条应为工具消息，实际 {:?}", other.role()),
+        }
 
         std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
     }

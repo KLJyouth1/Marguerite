@@ -523,7 +523,99 @@ pub fn handle_slash(
         }
         "/schedule" => {
             // DSH schedule 执行面（v7）：解析 + 落到提醒台账
-            println!("{}", crate::schedule::execute_slash(store.session_id(), input));
+            println!(
+                "{}",
+                crate::schedule::execute_slash(store.session_id(), input)
+            );
+        }
+        "/games" => {
+            if arg.is_empty() || arg == "list" || arg == "ls" {
+                let games = crate::games::catalog();
+                println!("已实装小游戏（{}）：", games.len());
+                for g in games {
+                    println!("  {:<10} {:<16}（{}）", g.id, g.name, g.controls);
+                }
+                println!("玩法：/games play <id> <动作...>（如 /games play tictactoe 0 3 1 4 2）");
+                println!("提示：TUI 工作台 Mini Games 面板亦可进入。");
+            } else if let Some(rest) = arg.strip_prefix("play ") {
+                let mut parts = rest.split_whitespace();
+                if let Some(id) = parts.next() {
+                    let moves: Vec<&str> = parts.collect();
+                    match crate::games::run_game(id, &moves) {
+                        Ok(out) => println!("{out}"),
+                        Err(e) => println!("玩法错误：{e}"),
+                    }
+                } else {
+                    println!("用法：/games play <id> <动作...>");
+                }
+            } else {
+                println!("用法：/games [list] 或 /games play <id> <动作...>");
+            }
+        }
+        "/pages" => {
+            let mut parts = arg.splitn(2, char::is_whitespace);
+            let action = parts.next().unwrap_or("");
+            let rest_arg = parts.next().unwrap_or("").trim();
+            let mut store = match crate::memory::PageStore::open_default() {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("知识页不可用: {e}");
+                    return SlashOutcome::Continue;
+                }
+            };
+            match action {
+                "" | "list" | "ls" => {
+                    let pages = store.list();
+                    if pages.is_empty() {
+                        println!("暂无知识页。用 /pages add <标题> | <标签,逗号> | <内容> 创建。");
+                    } else {
+                        println!("知识页（{} 个）：", pages.len());
+                        for p in &pages {
+                            println!("  [{}] {}（{} 字，{}）", p.id, p.title, p.content.chars().count(), p.tags.join(","));
+                        }
+                    }
+                }
+                "add" => {
+                    let seg: Vec<&str> = rest_arg.split('|').map(|s| s.trim()).collect();
+                    let title = seg.first().copied().unwrap_or("");
+                    if title.is_empty() {
+                        println!("用法：/pages add <标题> | <标签,逗号> | <内容>");
+                    } else {
+                        let tags: Vec<&str> = seg
+                            .get(1)
+                            .map(|s| s.split(',').map(str::trim).filter(|t| !t.is_empty()).collect())
+                            .unwrap_or_default();
+                        let content = seg.get(2).copied().unwrap_or("");
+                        match store.create(title, content, &tags) {
+                            Ok(id) => println!("已建知识页 [{id}]：{title}"),
+                            Err(e) => println!("创建失败: {e}"),
+                        }
+                    }
+                }
+                "show" => match store.get(rest_arg) {
+                    Some(p) => println!(
+                        "[{}] {}\n标签: {}\n内容:\n{}\n使用次数: {}（更新于 {}）",
+                        p.id, p.title, p.tags.join(","), p.content, p.use_count, p.updated_at
+                    ),
+                    None => println!("未找到知识页: {rest_arg}"),
+                },
+                "search" | "find" => {
+                    let hits = store.search(rest_arg, 5);
+                    if hits.is_empty() {
+                        println!("无匹配知识页。");
+                    } else {
+                        for (p, s) in &hits {
+                            println!("[{:.2}] [{}] {}（{} 字）", s, p.id, p.title, p.content.chars().count());
+                        }
+                    }
+                }
+                "rm" | "remove" | "del" => match store.remove(rest_arg) {
+                    Ok(true) => println!("已删除 {rest_arg}"),
+                    Ok(false) => println!("未找到 {rest_arg}"),
+                    Err(e) => println!("删除失败: {e}"),
+                },
+                _ => println!("用法：/pages [list | add <标题> | <标签,逗号> | <内容> | show <id> | search <q> | rm <id>]"),
+            }
         }
         other => {
             println!("未知命令：{other}（输入 /help 查看可用命令）");
@@ -543,6 +635,8 @@ fn print_help() {
          /sessions  列出最近会话\n  \
          /load <id> 切换到指定会话（支持短 id 前缀）\n  \
          /schedule  会话级提醒（list / after / at / every / cancel）\n  \
+         /games     列出已实装小游戏（2048 / 井字棋 / 贪吃蛇）\n  \
+         /pages     本地知识页管理（list / add / show / search / rm）\n  \
          /model     显示当前模型路由说明\n  \
          /exit      退出 REPL（或按 Ctrl-D）"
     );
@@ -734,6 +828,58 @@ mod tests {
         let mut history: Vec<Message> = Vec::new();
         assert_eq!(
             handle_slash("/nope", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+    }
+
+    #[test]
+    fn test_slash_games_play_returns_continue() {
+        let db = temp_db();
+        let (mut store, _) = ReplStore::open_at(&db, None, false);
+        let mut history: Vec<Message> = Vec::new();
+        // /games（列表）与 /games play（引擎运行）应返回 Continue 且不 panic
+        assert_eq!(
+            handle_slash("/games", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/games list", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/games play tictactoe 0 3 1 4 2", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/games play nope 0", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+    }
+
+    #[test]
+    fn test_slash_pages_list_returns_continue() {
+        let db = temp_db();
+        let (mut store, _) = ReplStore::open_at(&db, None, false);
+        let mut history: Vec<Message> = Vec::new();
+        // /pages 仅调用只读路径（list/search/show/rm-nope），不写真实数据目录
+        assert_eq!(
+            handle_slash("/pages", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/pages list", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/pages search demo", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/pages show p1", &mut store, &mut history),
+            SlashOutcome::Continue
+        );
+        assert_eq!(
+            handle_slash("/pages rm missing", &mut store, &mut history),
             SlashOutcome::Continue
         );
     }

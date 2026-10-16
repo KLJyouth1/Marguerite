@@ -21,6 +21,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::byok;
+
 /// 名义凭证地址：`<scope>/<id>`（scope = 拥有记录的插件注册名）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CredentialKey {
@@ -72,17 +74,13 @@ impl std::fmt::Display for CredentialRef {
 /// `api-key`：harness 自己理解的凭证（密钥 / provider 环境值 / 二者皆有；
 /// 两者皆缺表示拥有者确认该路由从**自身环境发现**认证——这不同于「无记录」）。
 /// `grant`：授权流产物，对缝不透明（JSON roundtrip 为唯一约束）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[derive(Clone, PartialEq)]
 pub enum CredentialRecord {
     /// API 密钥记录
-    #[serde(rename = "api-key")]
     ApiKey {
         /// 非空密钥值（可缺省）
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
         /// Provider 环境值（名字为 POSIX 标识符）
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
     },
     /// 授权 grant 记录（payload 不透明）
@@ -90,6 +88,87 @@ pub enum CredentialRecord {
         /// 拥有者定义的 JSON 值
         payload: serde_json::Value,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum CredentialRecordWire {
+    #[serde(rename = "api-key")]
+    ApiKey {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+    },
+    #[serde(rename = "grant")]
+    Grant { payload: serde_json::Value },
+}
+
+impl Serialize for CredentialRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = match self {
+            CredentialRecord::ApiKey { key, env } => CredentialRecordWire::ApiKey {
+                key: key
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(byok::encrypt_api_key)
+                    .transpose()
+                    .map_err(serde::ser::Error::custom)?,
+                env: env.clone(),
+            },
+            CredentialRecord::Grant { payload } => CredentialRecordWire::Grant {
+                payload: payload.clone(),
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CredentialRecordWire::deserialize(deserializer)?;
+        match wire {
+            CredentialRecordWire::ApiKey { key, env } => {
+                let decrypted = key
+                    .filter(|value| !value.is_empty())
+                    .map(|token| {
+                        if !byok::is_encrypted(&token) {
+                            return Err(serde::de::Error::custom(
+                                "明文 API key 已拒绝，请重新配置凭据",
+                            ));
+                        }
+                        byok::decrypt_api_key(&token).map_err(serde::de::Error::custom)
+                    })
+                    .transpose()?;
+                Ok(CredentialRecord::ApiKey {
+                    key: decrypted,
+                    env,
+                })
+            }
+            CredentialRecordWire::Grant { payload } => Ok(CredentialRecord::Grant { payload }),
+        }
+    }
+}
+
+impl std::fmt::Debug for CredentialRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialRecord::ApiKey { key, env } => f
+                .debug_struct("ApiKey")
+                .field("configured", &key.as_ref().is_some_and(|k| !k.is_empty()))
+                .field("env", env)
+                .finish(),
+            CredentialRecord::Grant { payload } => {
+                f.debug_struct("Grant").field("payload", payload).finish()
+            }
+        }
+    }
 }
 
 impl CredentialRecord {
@@ -134,25 +213,33 @@ pub struct CredentialsStore {
 }
 
 impl CredentialsStore {
-    /// 从指定路径加载；文件缺失或损坏 → 空台账（损坏时不静默吞错，打印告警）。
-    pub fn load(path: &Path) -> Self {
+    /// 严格加载台账；密文损坏、篡改或旧明文格式均返回可诊断错误。
+    pub fn try_load(path: &Path) -> Result<Self, String> {
+        // Encryption reuses the BYOK master key (`model.key`); this is a local key,
+        // not a user passphrase-derived key (passphrase unlock remains a future gap).
         let state = match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str::<StoreFile>(&text) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[credentials] 台账损坏（{path:?}），以空台账启动: {e}");
-                    StoreFile::default()
-                }
-            },
+            Ok(text) => serde_json::from_str::<StoreFile>(&text)
+                .map_err(|e| format!("凭据台账损坏（{path:?}）: {e}"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreFile::default(),
-            Err(e) => {
-                eprintln!("[credentials] 台账读取失败（{path:?}），以空台账启动: {e}");
-                StoreFile::default()
-            }
+            Err(e) => return Err(format!("凭据台账读取失败（{path:?}）: {e}")),
         };
-        Self {
+        Ok(Self {
             path: path.to_path_buf(),
             state: Mutex::new(state),
+        })
+    }
+
+    /// 兼容旧调用方的加载入口。新代码应使用 [`Self::try_load`] 处理错误。
+    pub fn load(path: &Path) -> Self {
+        match Self::try_load(path) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("[credentials] {error}");
+                Self {
+                    path: path.to_path_buf(),
+                    state: Mutex::new(StoreFile::default()),
+                }
+            }
         }
     }
 
@@ -162,11 +249,7 @@ impl CredentialsStore {
     }
 
     /// 写入/覆盖一份记录，并落盘。
-    pub fn set_record(
-        &self,
-        key: &CredentialKey,
-        record: CredentialRecord,
-    ) -> Result<(), String> {
+    pub fn set_record(&self, key: &CredentialKey, record: CredentialRecord) -> Result<(), String> {
         {
             let mut guard = self.state.lock().map_err(|e| e.to_string())?;
             guard.records.insert(key.to_string(), record);
@@ -206,11 +289,7 @@ impl CredentialsStore {
     }
 
     /// 建立引用：ref → 凭证地址（对齐上游 credentials/reference-updated 语义）。
-    pub fn set_reference(
-        &self,
-        r#ref: &CredentialRef,
-        key: &CredentialKey,
-    ) -> Result<(), String> {
+    pub fn set_reference(&self, r#ref: &CredentialRef, key: &CredentialKey) -> Result<(), String> {
         {
             let mut guard = self.state.lock().map_err(|e| e.to_string())?;
             guard.references.insert(r#ref.0.clone(), key.to_string());
@@ -260,9 +339,7 @@ impl CredentialsStore {
 pub fn resolve_llm_key(store: &CredentialsStore, provider: &str, fallback: &str) -> String {
     let key_hit = |record: Option<CredentialRecord>| -> Option<String> {
         match record {
-            Some(CredentialRecord::ApiKey { key: Some(k), .. }) if !k.trim().is_empty() => {
-                Some(k)
-            }
+            Some(CredentialRecord::ApiKey { key: Some(k), .. }) if !k.trim().is_empty() => Some(k),
             _ => None,
         }
     };
@@ -291,10 +368,16 @@ pub fn resolve_llm_key(store: &CredentialsStore, provider: &str, fallback: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::config::Config;
 
     fn tmp_store(name: &str) -> (CredentialsStore, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("mgt_credentials_{name}_{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("mgt_credentials_{name}_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        // 测试隔离：把 config_dir 指到本用例临时目录 + 初始化 vault，
+        // 避免写真实 `~/.marguerite/`，且满足 byok 加解密所需的主口令派生密钥。
+        Config::set_config_dir_override(dir.clone());
+        crate::vault::set_master_passphrase("test-vault-pass").unwrap();
         let path = dir.join("credentials.json");
         (CredentialsStore::load(&path), path)
     }
@@ -340,7 +423,9 @@ mod tests {
         let (store, _) = tmp_store("grant");
         let key = CredentialKey::new("auth", "oauth");
         let payload = serde_json::json!({"token": "t", "expires": 123});
-        store.set_record(&key, CredentialRecord::grant(payload.clone())).unwrap();
+        store
+            .set_record(&key, CredentialRecord::grant(payload.clone()))
+            .unwrap();
         match store.get_record(&key).unwrap() {
             CredentialRecord::Grant { payload: p } => assert_eq!(p, payload),
             _ => panic!("应为 grant 记录"),
@@ -366,13 +451,17 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_falls_back_to_empty() {
-        let dir = std::env::temp_dir().join(format!("mgt_credentials_corrupt_{}", uuid::Uuid::new_v4()));
+    fn corrupt_file_returns_diagnostic_error() {
+        let dir =
+            std::env::temp_dir().join(format!("mgt_credentials_corrupt_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "{ not json").unwrap();
-        let store = CredentialsStore::load(&path);
-        assert!(store.list_records().is_empty());
+        let error = match CredentialsStore::try_load(&path) {
+            Ok(_) => panic!("corrupt ledger must return an error"),
+            Err(error) => error,
+        };
+        assert!(error.contains("凭据台账损坏"));
     }
 
     #[test]
@@ -430,6 +519,94 @@ mod tests {
             resolve_llm_key(&store, "unknown-provider", "sk-fallback"),
             "sk-ref"
         );
+    }
+
+    #[test]
+    fn api_key_is_encrypted_on_disk() {
+        let (store, path) = tmp_store("encrypted_disk");
+        let secret = "sk-credential-secret";
+        store
+            .set_record(
+                &CredentialKey::new("llm", "deepseek"),
+                CredentialRecord::api_key(secret),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !raw.contains(secret),
+            "credentials.json must not contain plaintext API keys"
+        );
+        assert!(
+            raw.contains("mg1:"),
+            "credentials.json should contain an encrypted token"
+        );
+    }
+
+    #[test]
+    fn credential_debug_does_not_expose_api_key() {
+        let record = CredentialRecord::api_key("sk-debug-secret");
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains("sk-debug-secret"),
+            "Debug output must not expose API key"
+        );
+    }
+
+    #[test]
+    fn empty_api_key_is_not_persisted_as_secret() {
+        let (store, path) = tmp_store("empty_key");
+        let key = CredentialKey::new("llm", "empty");
+        store
+            .set_record(&key, CredentialRecord::api_key(""))
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("mg1:"));
+        let reloaded = CredentialsStore::try_load(&path).unwrap();
+        assert!(matches!(
+            reloaded.get_record(&key),
+            Some(CredentialRecord::ApiKey { key: None, .. })
+        ));
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected() {
+        let (store, path) = tmp_store("tampered");
+        store
+            .set_record(
+                &CredentialKey::new("llm", "tampered"),
+                CredentialRecord::api_key("sk-tamper-secret"),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let tampered = raw.replacen("mg1:", "mg1:A", 1);
+        std::fs::write(&path, tampered).unwrap();
+        let error = match CredentialsStore::try_load(&path) {
+            Ok(_) => panic!("tampered ciphertext must fail to load"),
+            Err(error) => error,
+        };
+        assert!(error.contains("凭据台账损坏"));
+    }
+
+    #[test]
+    fn legacy_plaintext_api_key_is_rejected() {
+        let (store, path) = tmp_store("legacy_plaintext");
+        store
+            .set_record(
+                &CredentialKey::new("llm", "legacy"),
+                CredentialRecord::grant(serde_json::json!({"ok": true})),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let legacy = raw.replace(
+            "{\n      \"kind\": \"grant\",\n      \"payload\": {\n        \"ok\": true\n      }\n    }",
+            "{\n      \"kind\": \"api-key\",\n      \"key\": \"sk-legacy-plaintext\"\n    }",
+        );
+        std::fs::write(&path, legacy).unwrap();
+        let error = match CredentialsStore::try_load(&path) {
+            Ok(_) => panic!("legacy plaintext API key must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("明文 API key 已拒绝"));
     }
 
     #[test]

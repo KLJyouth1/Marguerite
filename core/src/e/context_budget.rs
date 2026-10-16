@@ -112,7 +112,7 @@ mod tests {
         };
         assert!(b.can_accept(100)); // 恰好到上限
         assert!(!b.can_accept(101)); // 超出
-        // 即便 extra 极大也不溢出判据
+                                     // 即便 extra 极大也不溢出判据
         assert!(!b.can_accept(u64::MAX));
     }
 

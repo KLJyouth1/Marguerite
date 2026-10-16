@@ -13,6 +13,7 @@ Pins two fixes:
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from types import SimpleNamespace
 
@@ -40,7 +41,16 @@ def _openrouter_selector() -> ModelSelector:
 
 
 def test_package_version_tracks_metadata_not_stale_literal() -> None:
-    assert opensquilla.__version__ == _pkg_version("opensquilla")
+    try:
+        installed = _pkg_version("opensquilla")
+    except PackageNotFoundError:
+        # 源码树（pytest 走 ``pythonpath = ["src"]``，从未 pip install）没有 dist
+        # 元数据，按 __init__.py 的设计只能拿到哨兵值。此时仍然咬住那条真契约：
+        # **不得**把哨兵换成硬编码 semver——那正是这个模块存在的理由（它曾冻结在
+        # 0.1.0，而包已经在 0.2.x）。
+        assert opensquilla.__version__ == "0.0.0+unknown"
+        return
+    assert opensquilla.__version__ == installed
     assert opensquilla.__version__ != "0.1.0"
 
 

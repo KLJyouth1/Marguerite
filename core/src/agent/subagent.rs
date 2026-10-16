@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle};
+use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
+use crate::agent::tool_schema::{discovery_query, ToolDisclosure, DISCOVER_TOOLS_NAME};
 use crate::events::{Envelope, EventBus};
 use crate::mcp::registry::ToolRegistry;
 use crate::model::llm::ToolDef;
@@ -106,6 +107,11 @@ pub struct SubAgentManager {
     events: Option<Arc<EventBus>>,
     /// 并发闸门：限制同时运行的子代理数量（修复 max_concurrent 此前未生效）
     concurrency_gate: Arc<Semaphore>,
+    /// P5：调用方会话键。子代理跑在独立 `tokio::spawn` 里，task-local `SESSION`
+    /// **不会**自动继承；缺了它，子代理内文件工具登记产物时 `current_session()`
+    /// 为空 → 产物记到默认会话，「本次会话产物列表」永远为空
+    /// （真机告警：`record_artifact: 无可用 SESSION，回退到…默认会话`）。
+    session: Option<String>,
 }
 
 impl SubAgentManager {
@@ -125,7 +131,16 @@ impl SubAgentManager {
             model_router,
             events: None,
             concurrency_gate,
+            session: None,
         }
+    }
+
+    /// P5：登记调用方会话键（供子代理 spawn 时挂 `SESSION` task-local）。
+    ///
+    /// 与 [`Self::set_event_bus`] 同时由编排器调用；未登记时行为与既有完全一致
+    /// （不做任何作用域包裹），保证向后兼容。
+    pub fn set_session(&mut self, session: String) {
+        self.session = Some(session);
     }
 
     /// 注册事件总线（A4 事件流埋点接口）
@@ -196,6 +211,8 @@ impl SubAgentManager {
         let task_str = task.to_string();
         let context_str = context.to_string();
         let agent_id_clone = agent_id.clone();
+        // P5：把调用方会话带进 spawn（task-local 不跨任务继承）
+        let session_for_task = self.session.clone();
         tokio::spawn(async move {
             // 并发闸门：限制同时运行的子代理数量（修复 SubAgentConfig.max_concurrent 此前未生效）
             let _permit = concurrency_gate
@@ -214,7 +231,13 @@ impl SubAgentManager {
 
             // 执行任务
             let result = tokio::time::timeout(timeout, async {
-                execute_subagent_task(&task_str, &context_str, &model_router, &tool_registry).await
+                let fut =
+                    execute_subagent_task(&task_str, &context_str, &model_router, &tool_registry);
+                match &session_for_task {
+                    // 作用域包裹：子代理内的文件工具据此把产物登记到**本次会话**
+                    Some(s) => crate::usage::SESSION.scope(s.clone(), fut).await,
+                    None => fut.await,
+                }
             })
             .await;
 
@@ -226,6 +249,9 @@ impl SubAgentManager {
             };
             let mut agents = agents.lock().await;
             if let Some(agent) = agents.get_mut(&agent_id_clone) {
+                // 记录终态时刻：此前只在 cancel() 里写，正常完成/失败/超时都留空，
+                // 导致「子代理完成时间」在上层永远拿不到。
+                agent.completed_at = Some(Utc::now());
                 match result {
                     Ok(Ok(output)) => {
                         agent.status = SubAgentStatus::Completed {
@@ -318,6 +344,8 @@ impl SubAgentManager {
         let context_str = context.to_string();
         let role_str = role_prompt.to_string();
         let agent_id_clone = agent_id.clone();
+        // P5：把调用方会话带进 spawn（task-local 不跨任务继承）
+        let session_for_task = self.session.clone();
         tokio::spawn(async move {
             // 并发闸门：限制同时运行的子代理数量（修复 SubAgentConfig.max_concurrent 此前未生效）
             let _permit = concurrency_gate
@@ -334,7 +362,7 @@ impl SubAgentManager {
             }
 
             let result = tokio::time::timeout(timeout, async {
-                execute_subagent_task_spec(
+                let fut = execute_subagent_task_spec(
                     &task_str,
                     &context_str,
                     &role_str,
@@ -342,8 +370,12 @@ impl SubAgentManager {
                     complexity,
                     &model_router,
                     &tool_registry,
-                )
-                .await
+                );
+                match &session_for_task {
+                    // 作用域包裹：子代理内的文件工具据此把产物登记到**本次会话**
+                    Some(s) => crate::usage::SESSION.scope(s.clone(), fut).await,
+                    None => fut.await,
+                }
             })
             .await;
 
@@ -354,6 +386,9 @@ impl SubAgentManager {
             };
             let mut agents = agents.lock().await;
             if let Some(agent) = agents.get_mut(&agent_id_clone) {
+                // 记录终态时刻：此前只在 cancel() 里写，正常完成/失败/超时都留空，
+                // 导致「子代理完成时间」在上层永远拿不到。
+                agent.completed_at = Some(Utc::now());
                 match result {
                     Ok(Ok(output)) => {
                         agent.status = SubAgentStatus::Completed {
@@ -534,6 +569,40 @@ impl SubAgentManager {
     }
 }
 
+/// 按当前子代理已暴露的 schema 执行工具调用；发现工具只扩充目录，不进入注册表执行。
+async fn execute_disclosed_tool_calls(
+    cycle: &ToolCycle,
+    disclosure: &mut ToolDisclosure,
+    tool_calls: &[crate::model::llm::ToolCall],
+) -> Result<Vec<ToolResult>> {
+    let mut results = Vec::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        if tool_call.name == DISCOVER_TOOLS_NAME {
+            let args = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+                .unwrap_or(serde_json::Value::Null);
+            let output = discovery_query(&args)
+                .map(|query| disclosure.discover(query))
+                .unwrap_or_else(|| "发现工具需要提供字符串参数 query。".to_string());
+            results.push(ToolResult::Success {
+                data: output,
+                metadata: HashMap::new(),
+            });
+        } else if !disclosure.permits(&tool_call.name) {
+            results.push(ToolResult::Error {
+                message: format!(
+                    "工具 `{}` 尚未加载参数 schema。请先调用 `{}` 并描述所需能力，再在下一轮调用该工具。",
+                    tool_call.name, DISCOVER_TOOLS_NAME
+                ),
+                code: "TOOL_SCHEMA_NOT_LOADED".to_string(),
+            });
+        } else {
+            let call = CycleToolCall::new(&tool_call.name, parse_tool_args(&tool_call.arguments));
+            results.extend(cycle.execute_sequential(vec![call]).await?);
+        }
+    }
+    Ok(results)
+}
+
 /// 执行子代理任务
 ///
 /// 创建一个简化的运行环境，使用模型路由器执行任务。
@@ -579,13 +648,29 @@ async fn execute_subagent_task(
         return Ok(response.content);
     }
 
-    // 功能调用回路：若模型返回 tool_calls 则执行工具并回灌结果，最多 8 轮。
+    // 功能调用回路：宽工具目录按任务按需注入 schema，发现后下轮给出完整参数定义。
+    let request_text = format!("{task}\n{context}");
+    let mut disclosure =
+        ToolDisclosure::new(&tool_defs, &request_text, crate::mode::runtime_mode());
+    if disclosure.is_enabled() {
+        messages.insert(
+            0,
+            Message::System {
+                content: format!(
+                    "首轮仅暴露常用及相关工具 schema。缺少能力时先调用 `{DISCOVER_TOOLS_NAME}`，\n\
+                     用自然语言描述所需工具；发现后完整参数 schema 会在下一轮提供。不要因此声称能力不存在。"
+                ),
+                timestamp: Utc::now(),
+            },
+        );
+    }
     // 工具执行失败不再以 `?` 中断整个子专家——把错误作为 tool 结果回灌，让模型自我纠正；
     // 8 轮仍未收敛则返回最后一轮模型文本，避免「子代理工具回路未收敛」错误导致「无结果返回」。
     let cycle = ToolCycle::new(tool_registry.clone());
     let mut last_content = String::new();
     for _ in 0..8 {
-        let response = match model_router.chat_with_tools(&messages, &tool_defs).await {
+        let active_tools = disclosure.active_tools();
+        let response = match model_router.chat_with_tools(&messages, &active_tools).await {
             Ok(r) => r,
             Err(e) => return Err(anyhow!("SubAgent 模型调用失败: {e}")),
         };
@@ -595,30 +680,36 @@ async fn execute_subagent_task(
         if response.tool_calls.is_empty() {
             return Ok(response.content);
         }
-        let calls: Vec<CycleToolCall> = response
-            .tool_calls
-            .iter()
-            .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
-            .collect();
         // 整个工具批次执行异常：构造一条错误结果回灌，让模型改换策略而非抛错中断。
-        let results = match cycle.execute_sequential(calls).await {
-            Ok(r) => r,
-            Err(e) => {
-                let name = response
-                    .tool_calls
-                    .first()
-                    .map(|tc| tc.name.clone())
-                    .unwrap_or_default();
-                messages.push(Message::Tool {
-                    name,
-                    input: String::new(),
-                    output: format!("[工具执行失败] {e}"),
-                    timestamp: Utc::now(),
-                });
-                continue;
-            }
-        };
-        for (tc, res) in response.tool_calls.iter().zip(results.into_iter()) {
+        let results =
+            match execute_disclosed_tool_calls(&cycle, &mut disclosure, &response.tool_calls).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let name = response
+                        .tool_calls
+                        .first()
+                        .map(|tc| tc.name.clone())
+                        .unwrap_or_default();
+                    // P3：DeepSeek thinking 模式要求多轮回传 reasoning_content，
+                    // 否则自第二次请求起上游返回 400（同 `runtime.rs::run_tool_loop` 的既有做法：
+                    // 先落一条空正文 assistant 轮承载 thinking，再落与之配对的 tool 消息）。
+                    messages.push(Message::Assistant {
+                        content: String::new(),
+                        thinking: response.thinking.clone(),
+                        timestamp: Utc::now(),
+                    });
+                    messages.push(Message::Tool {
+                        name,
+                        input: String::new(),
+                        output: format!("[工具执行失败] {e}"),
+                        timestamp: Utc::now(),
+                        elapsed_ms: None,
+                    });
+                    continue;
+                }
+            };
+        for (tc, res) in response.tool_calls.iter().zip(results) {
             let output = match &res {
                 crate::agent::tool_cycle::ToolResult::Success { data, .. } => data.clone(),
                 crate::agent::tool_cycle::ToolResult::Error { message, code } => {
@@ -628,11 +719,19 @@ async fn execute_subagent_task(
                     format!("工具超时 {tool_name}")
                 }
             };
+            // P3：同上一处——工具结果回灌前必须先落承载 thinking 的 assistant 轮，
+            // 否则 thinking 模型多轮请求缺 reasoning_content 而 400。
+            messages.push(Message::Assistant {
+                content: String::new(),
+                thinking: response.thinking.clone(),
+                timestamp: Utc::now(),
+            });
             messages.push(Message::Tool {
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
                 output,
                 timestamp: Utc::now(),
+                elapsed_ms: None,
             });
         }
     }
@@ -692,13 +791,29 @@ async fn execute_subagent_task_spec(
         return Ok(response.content);
     }
 
-    // 功能调用回路：若模型返回 tool_calls 则执行工具并回灌结果，最多 8 轮。
+    // 功能调用回路：宽工具目录按任务按需注入 schema，发现后下轮给出完整参数定义。
+    let request_text = format!("{task}\n{context}");
+    let mut disclosure =
+        ToolDisclosure::new(&tool_defs, &request_text, crate::mode::runtime_mode());
+    if disclosure.is_enabled() {
+        messages.insert(
+            0,
+            Message::System {
+                content: format!(
+                    "首轮仅暴露常用及相关工具 schema。缺少能力时先调用 `{DISCOVER_TOOLS_NAME}`，\n\
+                     用自然语言描述所需工具；发现后完整参数 schema 会在下一轮提供。不要因此声称能力不存在。"
+                ),
+                timestamp: Utc::now(),
+            },
+        );
+    }
     // 工具执行失败不再以 `?` 中断整个子专家——把错误作为 tool 结果回灌，让模型自我纠正；
     // 8 轮仍未收敛则返回最后一轮模型文本，避免「子代理工具回路未收敛」错误导致「无结果返回」。
     let cycle = ToolCycle::new(tool_registry.clone());
     let mut last_content = String::new();
     for _ in 0..8 {
-        let response = match model_router.chat_with_tools(&messages, &tool_defs).await {
+        let active_tools = disclosure.active_tools();
+        let response = match model_router.chat_with_tools(&messages, &active_tools).await {
             Ok(r) => r,
             Err(e) => return Err(anyhow!("SubAgent 模型调用失败: {e}")),
         };
@@ -708,30 +823,36 @@ async fn execute_subagent_task_spec(
         if response.tool_calls.is_empty() {
             return Ok(response.content);
         }
-        let calls: Vec<CycleToolCall> = response
-            .tool_calls
-            .iter()
-            .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
-            .collect();
         // 整个工具批次执行异常：构造一条错误结果回灌，让模型改换策略而非抛错中断。
-        let results = match cycle.execute_sequential(calls).await {
-            Ok(r) => r,
-            Err(e) => {
-                let name = response
-                    .tool_calls
-                    .first()
-                    .map(|tc| tc.name.clone())
-                    .unwrap_or_default();
-                messages.push(Message::Tool {
-                    name,
-                    input: String::new(),
-                    output: format!("[工具执行失败] {e}"),
-                    timestamp: Utc::now(),
-                });
-                continue;
-            }
-        };
-        for (tc, res) in response.tool_calls.iter().zip(results.into_iter()) {
+        let results =
+            match execute_disclosed_tool_calls(&cycle, &mut disclosure, &response.tool_calls).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let name = response
+                        .tool_calls
+                        .first()
+                        .map(|tc| tc.name.clone())
+                        .unwrap_or_default();
+                    // P3：DeepSeek thinking 模式要求多轮回传 reasoning_content，
+                    // 否则自第二次请求起上游返回 400（同 `runtime.rs::run_tool_loop` 的既有做法：
+                    // 先落一条空正文 assistant 轮承载 thinking，再落与之配对的 tool 消息）。
+                    messages.push(Message::Assistant {
+                        content: String::new(),
+                        thinking: response.thinking.clone(),
+                        timestamp: Utc::now(),
+                    });
+                    messages.push(Message::Tool {
+                        name,
+                        input: String::new(),
+                        output: format!("[工具执行失败] {e}"),
+                        timestamp: Utc::now(),
+                        elapsed_ms: None,
+                    });
+                    continue;
+                }
+            };
+        for (tc, res) in response.tool_calls.iter().zip(results) {
             let output = match &res {
                 crate::agent::tool_cycle::ToolResult::Success { data, .. } => data.clone(),
                 crate::agent::tool_cycle::ToolResult::Error { message, code } => {
@@ -741,11 +862,19 @@ async fn execute_subagent_task_spec(
                     format!("工具超时 {tool_name}")
                 }
             };
+            // P3：同上一处——工具结果回灌前必须先落承载 thinking 的 assistant 轮，
+            // 否则 thinking 模型多轮请求缺 reasoning_content 而 400。
+            messages.push(Message::Assistant {
+                content: String::new(),
+                thinking: response.thinking.clone(),
+                timestamp: Utc::now(),
+            });
             messages.push(Message::Tool {
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
                 output,
                 timestamp: Utc::now(),
+                elapsed_ms: None,
             });
         }
     }
@@ -789,6 +918,156 @@ mod tests {
         let model_config = crate::persistence::config::Config::default();
         let model_router = Arc::new(ModelRouter::new(&model_config));
         SubAgentManager::new(config, registry, model_router)
+    }
+
+    /// 假 provider：第 1 次请求返回 `first`，其后一律返回 `second`；逐次记录请求体。
+    ///
+    /// 用于验证「工具回路第二次请求」的报文形状（`read_request_full` 复用既有测试基建）。
+    async fn two_round_provider(
+        first: &str,
+        second: &str,
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let first = first.to_string();
+        let second = second.to_string();
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let data = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&data).to_string());
+                    let body = if n == 0 {
+                        first.clone()
+                    } else {
+                        second.clone()
+                    };
+                    n += 1;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// P3 回归：子代理工具回路的多轮请求**必须回传 `reasoning_content`**。
+    ///
+    /// 上游（DeepSeek thinking 模式）原文报错：
+    /// `The reasoning_content in the thinking mode must be passed back to the API`（HTTP 400）。
+    /// 触发条件是「子代理拿到工具结果后发起第二次请求」——即工具回路进入 ≥2 轮。
+    ///
+    /// 断言第二轮请求体里含 `reasoning_content`：它由「空正文 assistant 承载 thinking」
+    /// 经 `model/llm.rs::messages_to_api` 合并进 `assistant.tool_calls` 生成。
+    /// 若删掉 subagent 工具回路里那两处 `Message::Assistant` 插入，本用例必须变红。
+    #[tokio::test]
+    async fn subagent_tool_loop_passes_reasoning_content_on_followup_request() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let url = two_round_provider(
+            // 第 1 轮：thinking + tool_calls（触发工具执行 → 产生第二次请求）
+            r#"{"choices":[{"message":{"content":"","reasoning_content":"先读该文件确认内容","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"p3-no-such-file.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            // 第 2 轮：收敛为最终文本
+            r#"{"choices":[{"message":{"content":"已完成"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            captured.clone(),
+        )
+        .await;
+
+        let mut config = Config::default();
+        config.model.api_key = "test-key".to_string();
+        config.model.base_url = url;
+        let model_router = ModelRouter::new(&config);
+
+        let mut registry = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(
+            &mut registry,
+            &std::env::temp_dir(),
+            None,
+            None,
+            None,
+        )
+        .expect("内置工具注册应成功");
+        let registry = Arc::new(registry);
+        assert!(
+            !registry.describe_tools_for_llm().is_empty(),
+            "需至少 1 个工具才会进入工具回路（否则退化为纯对话，测不到本缺陷）"
+        );
+
+        let out =
+            execute_subagent_task("读取一个不存在的文件", "ctx", &model_router, &registry).await;
+        assert!(out.is_ok(), "工具回路应返回结果而非报错: {out:?}");
+
+        let reqs = captured.lock().unwrap();
+        assert!(
+            reqs.len() >= 2,
+            "应发生多轮请求（工具结果回灌后再次调用），实际 {} 轮",
+            reqs.len()
+        );
+        assert!(
+            reqs[1].contains("reasoning_content"),
+            "第二次请求必须回传 reasoning_content（否则 thinking 模型 400）；实际请求体: {}",
+            reqs[1]
+        );
+    }
+
+    /// P5 回归：子代理在独立 task 中运行时，其文件工具登记的产物必须落在**调用方会话**下。
+    ///
+    /// 真机症状（CLI `team` 路径实测）：`record_artifact: 无可用 SESSION，回退到传入
+    /// session_key（空），记录到默认会话` —— 于是「本次会话产物列表」恒空（磁盘有文件、
+    /// 面板没条目）。根因是 task-local `SESSION` 不跨 `tokio::spawn` 继承。
+    ///
+    /// 若删掉 spawn 内的 `SESSION.scope(...)` 包裹（或去掉 `set_session` 接线），
+    /// 产物会落到默认会话，本用例必须变红。
+    #[tokio::test]
+    async fn subagent_artifact_lands_in_caller_session() {
+        let dir = std::env::temp_dir().join(format!("marg-p5-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = format!("p5.{}", Uuid::new_v4());
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // 第 1 轮：让子代理真实调用 write_file 落盘；第 2 轮收敛
+        let url = two_round_provider(
+            r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"p5_session_probe.txt\",\"content\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[{"message":{"content":"完成"},"finish_reason":"stop"}]}"#,
+            captured.clone(),
+        )
+        .await;
+
+        let mut config = Config::default();
+        config.model.api_key = "test-key".to_string();
+        config.model.base_url = url;
+        let model_router = Arc::new(ModelRouter::new(&config));
+
+        let mut registry = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(&mut registry, &dir, None, None, None)
+            .expect("内置工具注册应成功");
+        let registry = Arc::new(registry);
+
+        let mut manager = SubAgentManager::new(SubAgentConfig::default(), registry, model_router);
+        manager.set_session(session.clone());
+
+        let _ = manager
+            .spawn_with_timeout("写一个文件", "ctx", Duration::from_secs(30))
+            .await
+            .expect("spawn 应成功");
+        let _ = manager.wait_all().await;
+
+        let (items, _, _) = crate::tools::file_change::list_artifacts(&session, None, 50);
+        assert!(
+            items.iter().any(|a| a.name.contains("p5_session_probe.txt")
+                || a.id.contains("p5_session_probe.txt")),
+            "子代理产出必须登记在调用方会话 {session} 下；实际条目: {:?}",
+            items.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

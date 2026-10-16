@@ -143,6 +143,11 @@ def _current_windows_user_sid() -> str:
             ["whoami", "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
+            # 中文 Windows 上 `whoami` 输出含本机代码页（GBK）字节，默认按 UTF-8
+            # 解码会在读取线程抛 UnicodeDecodeError（实测 `0xd5` 引导字节）——
+            # 读取线程一崩，stdout 就丢了，SID 永远解析不出来。
+            # `errors="replace"` 保证不崩；本处只解析 ASCII 的 SID，不受替换影响。
+            errors="replace",
             check=False,
         )
     if completed.returncode != 0:
@@ -190,6 +195,9 @@ def _protect_private_path(
                 env=environment,
                 capture_output=True,
                 text=True,
+                # 中文 Windows 的 PowerShell 输出为 GBK；不指定 `errors` 时
+                # 读取线程会抛 UnicodeDecodeError，错误详情随之丢失。
+                errors="replace",
                 check=False,
             )
         if completed.returncode != 0:

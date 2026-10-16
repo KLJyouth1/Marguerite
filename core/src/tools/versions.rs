@@ -295,7 +295,12 @@ fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf> {
     };
     let canon_root = canonicalize_or_self(root);
     if !canonical.starts_with(&canon_root) {
-        return Err(anyhow!("path escapes workspace: {:?}", rel));
+        // P0-1b：与 fs_path::safe_resolve 同一口径——错误必须自带根 + 下一步动作
+        return Err(anyhow!(
+            "path escapes workspace (root: {}): {:?} —— 请改用该目录内的相对路径",
+            root.display(),
+            rel
+        ));
     }
     Ok(canonical)
 }

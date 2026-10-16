@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ import structlog
 import yaml
 
 from opensquilla.router_runtime_diagnostics import (
+    ROUTER_WEIGHTS_NOT_FETCHED,
     classify_router_runtime_error,
     router_runtime_hint,
 )
@@ -22,17 +22,30 @@ from opensquilla.router_tiers import (
     DEFAULT_TEXT_TIER,
     ROUTE_CLASS_TO_TIER,
 )
+from opensquilla.squilla_router.bundle_inspect import (
+    REQUIRED_BUNDLE_FILES as _REQUIRED_BUNDLE_FILES,
+)
+from opensquilla.squilla_router.bundle_inspect import (
+    ManifestScan,
+    default_bundle_dir,
+    inspect_bundle,
+    read_bundle_version,
+    scan_manifest,
+)
 from opensquilla.squilla_router.controller import TIER_ORDER, select_localized_prompt_hint
+
+__all__ = [
+    "ManifestScan",
+    "V4Phase3Strategy",
+    "default_bundle_dir",
+    "inspect_bundle",
+    "runtime_src_import_path",
+    "scan_manifest",
+]
 
 log = structlog.get_logger(__name__)
 
 _ROUTE_CLASS_TO_TIER: dict[str, str] = dict(ROUTE_CLASS_TO_TIER)
-_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-
-
-def default_bundle_dir() -> Path:
-    """Return the repository-bundled V4 Phase 3 runtime asset directory."""
-    return Path(__file__).resolve().parent / "models" / "v4.2_phase3_inference"
 
 
 @contextmanager
@@ -86,13 +99,26 @@ class V4Phase3Strategy:
         self._feature_schema_version = "unknown"
         self._available = False
         self._degraded_warned = False
+        self._init_error_kind: str | None = None
+        self._init_error: str | None = None
 
         try:
             self._init_runtime(use_aux_head=use_aux_head)
         except Exception as exc:
             error_kind = classify_router_runtime_error(exc)
+            self._init_error_kind = error_kind
+            self._init_error = str(exc)
+            # Git LFS pointers are not an initialization crash: the bundle
+            # layout is intact and the bytes were simply never pulled. Logging
+            # ``init_failed`` for them (as this used to) made a one-command
+            # operator fix look like a broken installation.
+            event = (
+                "v4_phase3.weights_not_fetched"
+                if error_kind == ROUTER_WEIGHTS_NOT_FETCHED
+                else "v4_phase3.init_failed"
+            )
             log.error(
-                "v4_phase3.init_failed",
+                event,
                 bundle_dir=str(self.bundle_dir),
                 error=str(exc),
                 runtime_error_kind=error_kind,
@@ -100,6 +126,38 @@ class V4Phase3Strategy:
             )
             if require_router_runtime:
                 raise RuntimeError(f"failed to initialize V4 Phase 3 router: {exc}") from exc
+
+    def status(self) -> dict[str, Any]:
+        """Read-only snapshot of this strategy's load outcome.
+
+        Mirrors the gateway's ``router_runtime_status()`` shape but is scoped to
+        one instance, so the doctor can quote the *specific* bundle dir and
+        failure kind rather than the process-global strategy cache.
+        """
+
+        return {
+            "available": self._available,
+            "bundleDir": str(self.bundle_dir),
+            "modelVersion": self._model_version,
+            "featureSchemaVersion": self._feature_schema_version,
+            "errorKind": self._init_error_kind,
+            "error": self._init_error,
+            "hint": (
+                router_runtime_hint(self._init_error_kind) if self._init_error_kind else ""
+            ),
+        }
+
+    @property
+    def error(self) -> str | None:
+        """Why this strategy is unavailable (``None`` when it loaded fine).
+
+        Exposed under the same attribute name the heuristic/unavailable
+        fallbacks already use, so ``router_runtime_status()`` and the gateway's
+        deep validator can quote — and classify — the real cause instead of a
+        generic "did not become available".
+        """
+
+        return self._init_error
 
     def _init_runtime(self, use_aux_head: bool | None) -> None:
         self._validate_bundle()
@@ -131,44 +189,15 @@ class V4Phase3Strategy:
         self._available = True
 
     def _validate_bundle(self) -> None:
-        required = ("runtime_src", "router.runtime.yaml")
-        missing = [name for name in required if not (self.bundle_dir / name).exists()]
+        missing = [
+            name for name in _REQUIRED_BUNDLE_FILES if not (self.bundle_dir / name).exists()
+        ]
         if missing:
             raise FileNotFoundError(f"missing V4 bundle files: {missing}")
         self._validate_artifact_manifest()
 
     def _validate_artifact_manifest(self) -> None:
-        manifest_path = self.bundle_dir / "artifact_manifest.json"
-        if not manifest_path.exists():
-            return
-
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        problems: list[str] = []
-        for entry in manifest.get("files", []):
-            raw_path = str(entry.get("path") or "")
-            if not raw_path:
-                continue
-            rel_path = Path(raw_path)
-            if rel_path.is_absolute() or ".." in rel_path.parts:
-                problems.append(f"{raw_path}: invalid manifest path")
-                continue
-
-            path = self.bundle_dir / rel_path
-            if not path.exists():
-                problems.append(f"{raw_path}: missing")
-                continue
-
-            expected_size = entry.get("size_bytes")
-            if isinstance(expected_size, int) and path.stat().st_size != expected_size:
-                problems.append(
-                    f"{raw_path}: size {path.stat().st_size} != manifest {expected_size}"
-                )
-                continue
-
-            with path.open("rb") as handle:
-                if handle.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX:
-                    problems.append(f"{raw_path}: Git LFS pointer, not model data")
-
+        problems = scan_manifest(self.bundle_dir).problems
         if problems:
             detail = "; ".join(problems[:5])
             if len(problems) > 5:
@@ -176,16 +205,7 @@ class V4Phase3Strategy:
             raise RuntimeError(f"incomplete V4 router artifact bundle: {detail}")
 
     def _read_model_version(self) -> str:
-        for name in ("version.json", "inference_manifest.json"):
-            path = self.bundle_dir / name
-            if not path.exists():
-                continue
-            data = json.loads(path.read_text(encoding="utf-8"))
-            for key in ("version", "model_version", "bundle_version"):
-                value = data.get(key)
-                if value:
-                    return str(value)
-        return "unknown"
+        return read_bundle_version(self.bundle_dir)
 
     def _compute_feature_schema_version(self) -> str:
         """Hash the fitted feature projections so captured ``features_390`` are

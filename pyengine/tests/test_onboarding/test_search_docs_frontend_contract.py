@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -7,6 +9,14 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+@pytest.mark.skip(
+    reason=(
+        "asserts the upstream product documentation (pyengine/docs/search.md, "
+        "docs/configuration.md, docs/troubleshooting.md, README.md, "
+        "README.product.md), none of which was migrated -- only "
+        "opensquilla.toml.example came across"
+    )
+)
 def test_search_docs_describe_runtime_provider_matrix() -> None:
     docs = "\n".join(
         [
@@ -42,6 +52,13 @@ def test_search_docs_describe_runtime_provider_matrix() -> None:
     assert "web search (DuckDuckGo, Bocha, Brave, IQS, Tavily, or Exa)" in docs
 
 
+@pytest.mark.skip(
+    reason=(
+        "asserts the upstream Electron desktop shell "
+        "(desktop/electron/src/main.ts), which was never migrated -- the desktop "
+        "shell here is the Tauri app in gui/, and it owns no search picker of its own"
+    )
+)
 def test_desktop_search_surfaces_use_shared_runtime_provider_catalog() -> None:
     main_ts = _read("desktop/electron/src/main.ts")
     platform_types = _read("opensquilla-webui/src/platform/types.ts")

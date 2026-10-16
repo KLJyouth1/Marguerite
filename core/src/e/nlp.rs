@@ -69,13 +69,7 @@ pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
         return 0.0;
     }
     let c = dot / (na * nb);
-    if c > 1.0 {
-        1.0
-    } else if c < -1.0 {
-        -1.0
-    } else {
-        c
-    }
+    c.clamp(-1.0, 1.0)
 }
 
 #[cfg(test)]
@@ -88,10 +82,7 @@ mod tests {
         // 中文逐字成 token
         assert_eq!(tokenize_zh("机器学习"), vec!["机", "器", "学", "习"]);
         // 混合 + 标点断词
-        assert_eq!(
-            tokenize_zh("Hello, 世界!"),
-            vec!["hello", "世", "界"]
-        );
+        assert_eq!(tokenize_zh("Hello, 世界!"), vec!["hello", "世", "界"]);
         // 大小写归一
         assert_eq!(tokenize_zh("AbC"), vec!["abc"]);
     }
@@ -111,7 +102,7 @@ mod tests {
     fn cosine_equal_orthogonal_mismatch_zero() {
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-9); // 全等
         assert!((cosine(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-9); // 正交 ~0
-        // 不等长
+                                                                  // 不等长
         assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0);
         // 零向量
         assert_eq!(cosine(&[0.0, 0.0], &[0.0, 0.0]), 0.0);

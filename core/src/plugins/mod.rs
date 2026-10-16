@@ -11,8 +11,11 @@ use anyhow::Result;
 
 pub mod di;
 pub mod manifest;
+pub mod patch;
 pub mod slot;
 
+pub use manifest::{Activation, ManifestDiagnostic, Permission};
+pub use patch::{PatchDiagnostic, PatchLayer, PatchOp, PatchReport, PatchSummary};
 pub use slot::{PluginSlot, SlotDescriptor, SlotExecutor, SlotKind, SlotResult};
 
 /// 插件上下文：提供运行时可用的核心能力

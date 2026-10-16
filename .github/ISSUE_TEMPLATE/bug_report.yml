@@ -1,0 +1,125 @@
+name: Bug report
+description: Something in Marguerite does not behave as documented.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. Marguerite is a single Rust
+        engine behind three front ends (ratatui TUI, Tauri desktop, Vue console)
+        plus a Python sidecar, so the "surface" field below matters a lot: it is
+        usually what decides who can reproduce the problem.
+
+        Before filing, please run `marguerite doctor` — it already checks the
+        toolchain, the gateway port and the on-disk state, and its output is the
+        fastest way for a maintainer to see your environment.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I am on a build from the current `master` (or I state the exact tag/commit below).
+          required: true
+        - label: I removed API keys, tokens and personal paths from every log I pasted.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The observed behaviour, as concretely as you can state it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+      description: If a document promises the expected behaviour, quote it and give the file path.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, in order. A minimal reproduction is worth more than a long narrative.
+      placeholder: |
+        1. `marguerite ...`
+        2. ...
+        3. observe ...
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      multiple: true
+      options:
+        - CLI (`marguerite ...`)
+        - TUI (`marguerite-tui`)
+        - Desktop app (Tauri, `gui/`)
+        - Web console (`webui/`, loopback gateway)
+        - Python sidecar (`pyengine/`, `workbench/`)
+        - Docs / build / packaging
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `marguerite --version`, or the commit SHA you built from.
+      placeholder: "marguerite 0.2.6 (commit abc1234)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Other (state it below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`marguerite doctor` output"
+      description: Paste the full output. Redact anything private.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / backtrace
+      description: |
+        Re-run with `RUST_BACKTRACE=1` (and `--json` where the command supports it)
+        and paste the tail. Files are easier to handle than screenshots.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Workarounds you found, when it last worked, related issues.
+    validations:
+      required: false

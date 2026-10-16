@@ -19,16 +19,16 @@ use windows::core::BSTR;
 use windows::core::GUID;
 use windows::core::PCWSTR;
 use windows::Win32::Globalization::LOCALE_USER_DEFAULT;
-use windows::Win32::System::Com::CoCreateInstance;
 use windows::Win32::System::Com::CLSIDFromProgID;
-use windows::Win32::System::Com::CLSCTX_ALL;
+use windows::Win32::System::Com::CoCreateInstance;
 use windows::Win32::System::Com::CoInitializeEx;
+use windows::Win32::System::Com::IDispatch;
+use windows::Win32::System::Com::CLSCTX_ALL;
 use windows::Win32::System::Com::COINIT_APARTMENTTHREADED;
 use windows::Win32::System::Com::DISPATCH_METHOD;
 use windows::Win32::System::Com::DISPATCH_PROPERTYGET;
 use windows::Win32::System::Com::DISPATCH_PROPERTYPUT;
 use windows::Win32::System::Com::DISPPARAMS;
-use windows::Win32::System::Com::IDispatch;
 use windows::Win32::System::Variant::VARIANT;
 
 use crate::desktop_automation::driver::*;
@@ -148,15 +148,15 @@ impl Dispatch {
 
     fn call_dispatch(&self, name: &str, args: &[VARIANT]) -> AnyResult<Dispatch> {
         let v = self.call(name, args)?;
-        let disp: IDispatch = IDispatch::try_from(&v)
-            .map_err(|e| anyhow!("无法从返回值提取 IDispatch: {e}"))?;
+        let disp: IDispatch =
+            IDispatch::try_from(&v).map_err(|e| anyhow!("无法从返回值提取 IDispatch: {e}"))?;
         Ok(Dispatch::from_dispatch(disp))
     }
 
     fn get_dispatch(&self, name: &str) -> AnyResult<Dispatch> {
         let v = self.get(name)?;
-        let disp: IDispatch = IDispatch::try_from(&v)
-            .map_err(|e| anyhow!("无法从属性提取 IDispatch: {e}"))?;
+        let disp: IDispatch =
+            IDispatch::try_from(&v).map_err(|e| anyhow!("无法从属性提取 IDispatch: {e}"))?;
         Ok(Dispatch::from_dispatch(disp))
     }
 }
@@ -218,9 +218,7 @@ impl ComDriver {
         // 可见（否则 SaveAs 可能无窗口交互异常）
         let _ = app.put("Visible", &vbool(true));
 
-        let presentations = app
-            .get_dispatch("Presentations")
-            .map_err(com_err)?;
+        let presentations = app.get_dispatch("Presentations").map_err(com_err)?;
         Recorder::record_step(
             session,
             &UiAction {
@@ -250,40 +248,57 @@ impl ComDriver {
             .and_then(|v| v.as_str())
             .unwrap_or("Untitled")
             .to_string();
-        let slide_specs: Vec<(String, Vec<String>)> = if let Some(arr) =
-            outline.get("slides").and_then(|v| v.as_array())
-        {
-            arr.iter()
-                .map(|s| {
-                    let t = s
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let b = s
-                        .get("bullets")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (t, b)
-                })
-                .collect()
-        } else if let Some(arr) = outline.get("bullets").and_then(|v| v.as_array()) {
-            let b: Vec<String> = arr
-                .iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect();
-            vec![(title.clone(), b)]
-        } else {
-            vec![(title.clone(), vec![])]
-        };
+        let slide_specs: Vec<(String, Vec<String>)> =
+            if let Some(arr) = outline.get("slides").and_then(|v| v.as_array()) {
+                arr.iter()
+                    .map(|s| {
+                        let t = s
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let b = s
+                            .get("bullets")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (t, b)
+                    })
+                    .collect()
+            } else if let Some(arr) = outline.get("bullets").and_then(|v| v.as_array()) {
+                let b: Vec<String> = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect();
+                vec![(title.clone(), b)]
+            } else {
+                vec![(title.clone(), vec![])]
+            };
 
         let slides = pres.get_dispatch("Slides").map_err(com_err)?;
         for (i, (st, bullets)) in slide_specs.iter().enumerate() {
+            // v3.3.1：逐页进度事件（artifact_progress）——前端实时渲染
+            // 「正在生成第 i/N 页」；网关总线未注册时 no-op。
+            if let Some(bus) = crate::events::global_bus() {
+                let total = slide_specs.len();
+                bus.publish(crate::events::Envelope::new(
+                    crate::events::envelope::EventType::Progress,
+                    json!({
+                        "kind": "artifact_progress",
+                        "artifact": "deck",
+                        "path": output_path,
+                        "step": i + 1,
+                        "stepsTotal": total,
+                        "percent": ((i as f64) / (total.max(1) as f64) * 100.0) as u32,
+                        "detail": format!("生成第 {}/{} 页：{}", i + 1, total, st),
+                    }),
+                    session,
+                ));
+            }
             // 版式：首页标题版式(1)，其余标题+内容版式(2)
             let layout = vi32(if i == 0 { 1i32 } else { 2i32 });
             let index = vi32((i as i32) + 1);
@@ -298,9 +313,7 @@ impl ComDriver {
                 .and_then(|t| t.get_dispatch("TextFrame"))
                 .and_then(|tf| tf.get_dispatch("TextRange"))
                 .map_err(com_err)?;
-            title_text
-                .put("Text", &vstr(st))
-                .map_err(com_err)?;
+            title_text.put("Text", &vstr(st)).map_err(com_err)?;
 
             // 要点：用文本框（msoTextOrientationHorizontal=1）写入，避免 Placeholder 索引依赖
             if !bullets.is_empty() {

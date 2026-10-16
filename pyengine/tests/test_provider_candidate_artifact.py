@@ -120,20 +120,38 @@ def test_semantic_tool_problems_are_issues_not_failures() -> None:
 
 def test_deep_or_recursive_arguments_degrade_without_escaping_provider_contract() -> None:
     builder = CandidateArtifactBuilder()
-    builder.observe_call(
-        "deep",
-        name_text="deep",
-        arguments=("[" * 10_000) + ("]" * 10_000),
-    )
+    deep_object: object = []
+    for _ in range(10_000):
+        deep_object = [deep_object]
+    builder.observe_call("deep_object", name_text="deep_object", arguments=deep_object)
     recursive: list[object] = []
     recursive.append(recursive)
     builder.observe_call("recursive", name_text="recursive", arguments=recursive)
+    # A *pre-serialized* deep array is a different path: the builder hands the
+    # text to ``json.loads``, and whether that raises depends on the
+    # interpreter's own scanner depth (CPython has raised its C recursion limit
+    # across releases, so 10k levels overflow on some builds and parse on
+    # others). Pin the invariant instead of one code: a deep array is either
+    # unparseable or valid-but-not-an-object, and both are "arguments unusable"
+    # -- it must never be admitted unflagged.
+    builder.observe_call(
+        "deep_text",
+        name_text="deep_text",
+        arguments=("[" * 10_000) + ("]" * 10_000),
+    )
 
     actions = json.loads(builder.render_text())["actions"]
 
+    # A deep object goes through the builder's own bounded serializer, which is
+    # a Python-level encoder and therefore always hits the recursion limit.
+    assert actions[0]["arguments_text"] == "<unserializable:list>"
     assert actions[0]["issues"] == ["invalid_arguments_json"]
     assert actions[1]["arguments_text"] == "<unserializable:list>"
     assert actions[1]["issues"] == ["invalid_arguments_json"]
+    assert set(actions[2]["issues"]) in (
+        {"invalid_arguments_json"},
+        {"non_object_arguments"},
+    )
 
 
 def test_object_serialization_stops_at_builder_character_limit() -> None:

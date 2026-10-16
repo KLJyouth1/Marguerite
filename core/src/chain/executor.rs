@@ -19,7 +19,7 @@ use crate::agent::subagent::{SubAgentManager, SubAgentStatus};
 use crate::agent::tool_cycle::ToolResult;
 use crate::cli::argv::Args;
 use crate::events::{Envelope, EventBus};
-use crate::guard::gateway::{ApprovalGate, ApprovalOutcome, RiskLevel};
+use crate::guard::gateway::{ApprovalOutcome, RiskLevel};
 use crate::guard::repair::{RepairConfig, RepairLoop};
 use crate::guard::syntax::Language;
 use crate::guard::{GuardGateway, Severity};
@@ -276,7 +276,10 @@ impl ChainExecutor {
             IntentType::Doc => Some("doc"),
             IntentType::Commit => Some("commit"),
             IntentType::Search => Some("search"),
-            IntentType::Question | IntentType::Unknown => None,
+            // 没有 build 专用链模板（`chain::templates::template_names()` 里只有
+            // explain/refactor/fix/test/doc/commit/search）。与 Question/Unknown 一样
+            // 返回 None，由调用方走默认链路，而不是编一个不存在的模板名。
+            IntentType::Build | IntentType::Question | IntentType::Unknown => None,
         }
     }
 
@@ -456,9 +459,85 @@ impl ChainExecutor {
                     return (vec![exec], true);
                 }
                 GateDecision::Confirm { reason } => {
+                    // M2-C5 Trust Calibration：按「工具 × 模式 × 会话」查信任，命中
+                    // （low/medium/high）免确认放行；未授予信任保持 0-确认默认。
+                    let trust_skip = {
+                        let trust = crate::guard::trust::global()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        trust.is_trusted(&step.target, self.mode.current().as_str(), session)
+                    };
+                    if let Some(trust_level) = trust_skip {
+                        self.emit(Envelope::new(
+                            crate::events::envelope::EventType::Approval,
+                            serde_json::json!({
+                                "trust_skip": true,
+                                "tool": step.target,
+                                "mode": self.mode.current().as_str(),
+                                "level": trust_level.as_str(),
+                                "session_key": session,
+                                "key": session,
+                                "reason": format!("信任放行（{}）", trust_level.label()),
+                            }),
+                            session,
+                        ));
+                    } else {
                     let gate = self.mode.approval_gate();
                     let args = serde_json::to_string(&p.params).unwrap_or_default();
-                    let msg = match wait_approval(gate, &step.target, args).await {
+                    // M2-C1 Intent Preview：对即将执行的步骤做结构化意图识别 + 高风险判定。
+                    // high_risk 命中（删除/重置/覆盖/终止/批量破坏/危险命令）→ 提级 High，
+                    // 并随 Approval 事件注入 `intent` 字段供双端确认卡渲染。
+                    let intention = crate::guard::tool_intent::analyze(&step.target, &p.params);
+                    let risk = if intention.high_risk {
+                        RiskLevel::High
+                    } else {
+                        RiskLevel::Medium
+                    };
+                    // v3.3：审批挂起时发布 approval 事件（WebUI ApprovalCard 据此渲染
+                    // 批准/拒绝卡片；此前审批只在链内部轮询，前端永远看不到）。
+                    let pending = gate.request(&step.target, args, risk);
+                    let Some(pending) = pending else {
+                        let exec = StepExec::failed(&step.step_id, "已有挂起审批".to_string(), 0);
+                        self.emit(Envelope::tool_result(
+                            session,
+                            &step.target,
+                            false,
+                            "已有其他审批待处理",
+                        ));
+                        return (vec![exec], true);
+                    };
+                    // M2-C1：把挂起审批注册进全局注册表，GUI/WebUI 裁决桥（approve/deny 命令）
+                    // 通过 approval_id 定位所属 gate 并裁决，无需各自复制门控状态。
+                    crate::guard::approval_registry::global_registry()
+                        .register(gate.clone(), &pending);
+                    self.emit(Envelope::new(
+                        crate::events::envelope::EventType::Approval,
+                        serde_json::json!({
+                            "approval_id": pending.id,
+                            "tool": step.target,
+                            "args_preview": {
+                                "args": pending.args,
+                                "risk": format!("{:?}", pending.risk),
+                            },
+                            // M2-C1：结构化意图预览（操作类型/目标对象/影响范围/副作用/不可逆）
+                            "intent": serde_json::to_value(&intention).unwrap_or_default(),
+                            "reason": reason,
+                            "session_key": session,
+                            "key": session,
+                        }),
+                        session,
+                    ));
+                    let msg = loop {
+                        match gate.outcome(&pending.id) {
+                            crate::guard::gateway::ApprovalOutcome::Pending => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                            }
+                            other => break other,
+                        }
+                    };
+                    // M2-C1：审批已消费（Approved/Denied/Timeout），从全局注册表移除
+                    crate::guard::approval_registry::global_registry().unregister(&pending.id);
+                    let msg = match msg {
                         ApprovalOutcome::Approved => None,
                         ApprovalOutcome::Denied => Some("审批被拒绝".to_string()),
                         ApprovalOutcome::Timeout => Some("审批超时".to_string()),
@@ -469,11 +548,28 @@ impl ChainExecutor {
                         self.emit(Envelope::tool_result(session, &step.target, false, &msg));
                         return (vec![exec], true);
                     }
+                    } // end of trust-skip else
                 }
             }
 
             // 2) 分发执行前发布 tool_call（A4 埋点）
-            self.emit(Envelope::tool_call(session, &step.target, &[]));
+            //
+            // 必须带**真实参数键**：此前恒传 `&[]`，于是行为台账里所有链路工具
+            // 调用都记成 `shell_exec()` 空括号，事后既看不出「这一步传了什么」，
+            // 也无法回放复现。参数**值**仍不进台账（可能含密钥/长正文，由
+            // `memory::behavior` 的 redact + 限长统一兜底），这里只暴露键名。
+            let arg_keys: Vec<&str> = p
+                .params
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            self.emit(Envelope::tool_call(session, &step.target, &arg_keys));
+            // M3-D1：工具调用产品事件（落审计日志）
+            crate::events::product::emit(
+                crate::events::product::TOOL_CALL,
+                session,
+                serde_json::json!({ "tool": &step.target }),
+            );
 
             // 2) 分发执行（超时 + 重试 + 指数退避）
             let mut last_err = String::new();
@@ -695,18 +791,8 @@ fn tool_result_to_string(r: ToolResult) -> Result<String> {
     }
 }
 
-/// 等待审批结果（消费式轮询；非交互路径由 ApprovalGate 内部 fail-closed）
-async fn wait_approval(gate: &ApprovalGate, tool: &str, args: String) -> ApprovalOutcome {
-    let Some(pending) = gate.request(tool, args, RiskLevel::Medium) else {
-        return ApprovalOutcome::Denied;
-    };
-    loop {
-        match gate.outcome(&pending.id) {
-            ApprovalOutcome::Pending => tokio::time::sleep(Duration::from_millis(50)).await,
-            other => return other,
-        }
-    }
-}
+// v3.3：原 wait_approval 已内联到 exec_prepared 的 Confirm 分支——
+// 审批挂起时同步发布 Approval 事件供 WebUI 渲染卡片，再就地轮询结果。
 
 /// 轮询专家结果：完成返回结果；失败/超时快速返回错误
 async fn poll_agent(agents: &SubAgentManager, id: &str, timeout: Duration) -> Result<String> {
@@ -798,6 +884,16 @@ mod tests {
     use crate::mode::ModeKind;
     use crate::model::router::ModelRouter;
     use crate::skills::registry::{Skill, SkillRegistry, SkillSource};
+
+    // ---------- 全局审批注册表串行化 ----------
+    // `global_registry()` 为进程级单例；C1 集成测试并行执行时会互相污染
+    // `pending_ids()` 断言（A 测试 unregister 后，B 测试的挂起审批可能尚未消费，
+    // 导致 A 断言非空）。参照 `automation::long_running::tests::lock_tests()`
+    // 模式，持静态锁将 C1 审批测试串行化。
+    static C1_REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+    fn c1_registry_lock() -> std::sync::MutexGuard<'static, ()> {
+        C1_REGISTRY_LOCK.lock().unwrap()
+    }
 
     // ---------- 测试工具 ----------
 
@@ -1503,5 +1599,231 @@ mod tests {
             "mutated-by-agent"
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // ---------- M2-C1 Intent Preview：高风险动作确认卡集成 ----------
+
+    /// 高风险删除步骤须：提级 Risk::High 挂起 + 注册进全局裁决桥 +
+    /// Approval 事件携带结构化 intent（kind=delete / high_risk / 副作用）。
+    // C1 测试串行化锁需贯穿整个 async 测试体（防 global_registry 并行污染），
+    // 锁仅用于测试隔离、不保护真实业务数据，可安全跨 await。
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn m2_c1_high_risk_approval_emits_intent_and_registers() {
+        let _c1_guard = c1_registry_lock();
+        let state = Arc::new(MockState::default());
+        let del = MockTool::new("delete_file", "ok", &state);
+        let mut fx = build(&state, vec![Box::new(del)], vec![], bloom_mode());
+        let bus = Arc::new(EventBus::default());
+        fx.executor.set_event_bus(Arc::clone(&bus));
+        let since = std::time::Instant::now();
+
+        // 后台：等挂起审批出现 → 校验风险提级 + 全局注册 → 批准
+        let gate = fx.executor.mode.approval_gate().clone();
+        let raised = Arc::new(AtomicUsize::new(0));
+        let reg_seen = Arc::new(AtomicUsize::new(0));
+        let raised2 = Arc::clone(&raised);
+        let reg_seen2 = Arc::clone(&reg_seen);
+        tokio::spawn(async move {
+            loop {
+                if let Some(p) = gate.pending() {
+                    if p.risk == crate::guard::gateway::RiskLevel::High {
+                        raised2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if crate::guard::approval_registry::global_registry()
+                        .gate_for(&p.id)
+                        .is_some()
+                    {
+                        reg_seen2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    gate.approve(&p.id);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let mut step = tool_step(
+            "s1",
+            "delete_file",
+            params_map(&[("path", "/home/user/reports"), ("recursive", "true")]),
+        );
+        step.requires_approval = true;
+        let mut ctx = ChainContext::default();
+        let out = fx
+            .executor
+            .execute(plan(vec![step], vec![]), &mut ctx)
+            .await
+            .unwrap();
+        assert!(out.succeeded(), "批准后应执行成功");
+
+        // 1) 风险提级 + 全局注册确已生效
+        assert_eq!(raised.load(Ordering::SeqCst), 1, "高风险步骤必须提级 Risk::High");
+        assert_eq!(reg_seen.load(Ordering::SeqCst), 1, "挂起审批必须进全局注册表");
+        // 2) 审批消费后注册表不再索引该 ID
+        let ids = crate::guard::approval_registry::global_registry().pending_ids();
+        assert!(
+            ids.is_empty(),
+            "审批消费后全局注册表应清空，实际: {ids:?}"
+        );
+        // 3) Approval 事件结构化 intent 完整（WebUI/GUI 确认卡渲染依据）
+        let history: Vec<Envelope> = bus.history(since);
+        let appr: Vec<&Envelope> = history
+            .iter()
+            .filter(|e| e.r#type == EventType::Approval)
+            .collect();
+        assert_eq!(appr.len(), 1, "应恰好发布一条 Approval 事件");
+        let payload = &appr[0].payload;
+        assert_eq!(payload["intent"]["kind"], "delete", "意图类型应为 delete");
+        assert_eq!(
+            payload["intent"]["high_risk"], true,
+            "应标记 high_risk=true"
+        );
+        assert_eq!(payload["args_preview"]["risk"], "High", "预览风险应为 High");
+        // T1 删除转回收站：delete_file 默认删除=可恢复（移入 .marguerite/trash），
+        // 结构化 intent 的 irreversible 随之变为 false（不可逆的是 delete_file_permanent）。
+        // 风险提级 High 与审批门槛不变——变的是「确认卡告知用户可恢复」这一事实陈述。
+        assert_eq!(
+            payload["intent"]["irreversible"], false,
+            "T1 起 delete_file 默认删除转回收站，应为可逆"
+        );
+        assert!(
+            payload["intent"]["side_effects"]
+                .as_array()
+                .map(|a| a.iter().any(|s| s.as_str().unwrap_or("").contains("可恢复")))
+                .unwrap_or(false),
+            "副作用必须说明删除转回收站、可恢复: {:?}",
+            payload["intent"]["side_effects"]
+        );
+        // 批准通过 → 有 tool_result(true)
+        let ok = history.iter().any(|e| {
+            e.r#type == EventType::ToolResult
+                && e.payload
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        });
+        assert!(ok, "批准后应发布成功的 tool_result");
+    }
+
+    /// **端到端**：控制台的裁决链路真的能放行 Rust 引擎抬升的审批。
+    ///
+    /// 这条覆盖的是一个曾经**整条断掉**的链路：`chat.send` / 链式执行器由 Rust 抬升审批并
+    /// 注册进全局注册表，而 WebUI 的审批卡片只通过 REST 做快照与裁决
+    /// （`useChatApprovals.ts`）；Rust 网关对 `/api/approvals*` 一律回 501 → 点「允许」无效，
+    /// 执行器只能等审批超时按 fail-closed 失败。
+    ///
+    /// 这里不复用「直接 `gate.approve()`」的旁路：后台任务走**真实 HTTP** 拉快照拿到
+    /// approval_id，再 POST `/api/approvals/resolve`，最终断言步骤真的执行成功。
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn approval_survives_console_rest_round_trip() {
+        let _c1_guard = c1_registry_lock();
+        let state = Arc::new(MockState::default());
+        let del = MockTool::new("delete_file", "ok", &state);
+        let fx = build(&state, vec![Box::new(del)], vec![], bloom_mode());
+
+        // 真实网关（回环随机端口），只用到审批 REST 面
+        let gw_state = Arc::new(crate::gateway::server::GatewayState {
+            config: Config::default(),
+            bus: EventBus::default(),
+            token: "approval-e2e-token".to_string(),
+            started_at: std::time::Instant::now(),
+            webui_dir: std::env::temp_dir(),
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = crate::gateway::server::build_router(Arc::clone(&gw_state));
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        tokio::spawn(async move {
+            for _ in 0..600 {
+                let Ok(resp) = client.get(format!("{base}/api/approvals")).send().await else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                };
+                let Ok(body) = resp.json::<serde_json::Value>().await else {
+                    continue;
+                };
+                if let Some(id) = body["pending"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(|item| item["id"].as_str())
+                {
+                    let resolved = client
+                        .post(format!("{base}/api/approvals/resolve"))
+                        .json(&serde_json::json!({ "id": id, "approved": true }))
+                        .send()
+                        .await;
+                    assert!(
+                        matches!(resolved, Ok(ref r) if r.status().is_success()),
+                        "控制台裁决必须成功（此前是 501）"
+                    );
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("审批挂起后在 6s 内未被快照暴露");
+        });
+
+        let mut step = tool_step("s1", "delete_file", params_map(&[("path", "x")]));
+        step.requires_approval = true;
+        let mut ctx = ChainContext::default();
+        let out = fx
+            .executor
+            .execute(plan(vec![step], vec![]), &mut ctx)
+            .await
+            .unwrap();
+        assert!(out.succeeded(), "经控制台批准后步骤应真的执行成功");
+    }
+
+    /// 高风险步骤被拒绝 → 链中止且不执行工具、不留注册表残留。
+    // C1 测试串行化锁需贯穿整个 async 测试体（防 global_registry 并行污染）。
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn m2_c1_high_risk_denied_stops_chain() {
+        let _c1_guard = c1_registry_lock();
+        let state = Arc::new(MockState::default());
+        let del = MockTool::new("delete_file", "ok", &state);
+        let mut fx = build(&state, vec![Box::new(del)], vec![], bloom_mode());
+        let bus = Arc::new(EventBus::default());
+        fx.executor.set_event_bus(Arc::clone(&bus));
+        let since = std::time::Instant::now();
+
+        let gate = fx.executor.mode.approval_gate().clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(p) = gate.pending() {
+                    gate.deny(&p.id);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let mut step = tool_step("s1", "delete_file", params_map(&[("path", "x")]));
+        step.requires_approval = true;
+        let mut ctx = ChainContext::default();
+        let out = fx
+            .executor
+            .execute(plan(vec![step], vec![]), &mut ctx)
+            .await
+            .unwrap();
+        assert!(!out.succeeded(), "拒绝后链应中止");
+        assert_eq!(state.calls(), 0, "拒绝后不得调用工具");
+        let ids = crate::guard::approval_registry::global_registry().pending_ids();
+        assert!(ids.is_empty(), "拒绝后注册表应清空: {ids:?}");
+        let types: Vec<EventType> = bus
+            .history(since)
+            .iter()
+            .map(|e| e.r#type)
+            .collect();
+        assert!(types.contains(&EventType::Approval), "应发布审批事件");
     }
 }

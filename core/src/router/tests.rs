@@ -30,8 +30,42 @@ fn decision(tier: PersonaTier, tm: ThinkingMode, pp: PromptPolicy) -> RouteDecis
         prompt_policy: pp,
         source: DecisionSource::Rule,
         fallback_reason: None,
+        effort_override: None,
         steps: vec![],
     }
+}
+
+/// T3：会话级/请求级 effort 覆盖——thinking_mode 对齐 + 精确档位经 effort_override 落模型层。
+#[test]
+fn effort_override_aligns_mode_and_carries_exact_effort() {
+    use crate::model::thinking::ThinkingEffort;
+    let base = decision(PersonaTier::General, ThinkingMode::T0, PromptPolicy::P0);
+
+    // None：行为与旧版完全一致
+    let d = base.clone().with_effort_override(None);
+    assert_eq!(d.effort_override, None);
+    assert_eq!(d.thinking_effort(), ThinkingEffort::Off);
+
+    // Off/Normal → T0；Deep/Max → T1（前端消费的 thinking_mode 语义不回退）
+    let d = base.clone().with_effort_override(Some(ThinkingEffort::Off));
+    assert_eq!(d.thinking_mode, ThinkingMode::T0);
+    assert_eq!(d.thinking_effort(), ThinkingEffort::Off);
+
+    let d = base.clone().with_effort_override(Some(ThinkingEffort::Normal));
+    assert_eq!(d.thinking_mode, ThinkingMode::T0);
+    assert_eq!(d.thinking_effort(), ThinkingEffort::Normal);
+
+    let d = base.clone().with_effort_override(Some(ThinkingEffort::Deep));
+    assert_eq!(d.thinking_mode, ThinkingMode::T1);
+    assert_eq!(d.thinking_effort(), ThinkingEffort::Deep);
+
+    let d = base.with_effort_override(Some(ThinkingEffort::Max));
+    assert_eq!(d.thinking_mode, ThinkingMode::T1);
+    assert_eq!(d.thinking_effort(), ThinkingEffort::Max);
+
+    // 序列化：无覆盖时不带新键（旧前端 / 旧决策日志零影响）
+    let v = serde_json::to_value(decision(PersonaTier::General, ThinkingMode::T0, PromptPolicy::P0)).unwrap();
+    assert!(v.get("effort_override").is_none(), "None 覆盖不得出现在序列化输出");
 }
 
 // T1：代码提示 → coder 档
@@ -39,7 +73,11 @@ fn decision(tier: PersonaTier, tm: ThinkingMode, pp: PromptPolicy) -> RouteDecis
 fn t1_code_routes_to_coder() {
     let d = classify(&input("请帮我写一个函数 def foo() 并修复 bug"));
     assert_eq!(d.tier, PersonaTier::Coder);
-    assert!(d.confidence >= 0.5, "confidence 应 >= 0.5，实际 {}", d.confidence);
+    assert!(
+        d.confidence >= 0.5,
+        "confidence 应 >= 0.5，实际 {}",
+        d.confidence
+    );
     assert_eq!(d.source, DecisionSource::Rule);
     assert_eq!(d.thinking_mode, ThinkingMode::T1);
     assert_eq!(d.prompt_policy, PromptPolicy::P1);
@@ -70,7 +108,10 @@ fn t4_weak_routing_without_history() {
     assert!(d.confidence < 0.5, "弱路由应 confidence < 0.5");
     assert_eq!(d.source, DecisionSource::History);
     assert_eq!(d.tier, PersonaTier::General);
-    assert_eq!(d.fallback_reason.as_deref(), Some("weak_confidence_stick_default"));
+    assert_eq!(
+        d.fallback_reason.as_deref(),
+        Some("weak_confidence_stick_default")
+    );
 }
 
 // T5：弱路由 + 有 prev 决策 → 采用 prev.tier
@@ -83,7 +124,10 @@ fn t5_weak_routing_with_prev() {
     assert!(d.confidence < 0.5);
     assert_eq!(d.source, DecisionSource::History);
     assert_eq!(d.tier, PersonaTier::Coder);
-    assert_eq!(d.fallback_reason.as_deref(), Some("weak_confidence_stick_prev"));
+    assert_eq!(
+        d.fallback_reason.as_deref(),
+        Some("weak_confidence_stick_prev")
+    );
 }
 
 // T6：runtime 不可用 → RuntimeUnavailable 降级
@@ -132,9 +176,11 @@ fn t10_injection_wiring_without_llm() {
     // 思考预算档位派生
     assert_eq!(d.thinking_effort(), ThinkingEffort::Deep);
     // with_thinking 把档位落到 LLMConfig.thinking（不发起网络请求）
-    let mut cfg = LLMConfig::default();
-    cfg.model = "deepseek-v4-pro".to_string();
-    cfg.provider = LLMProvider::DeepSeek;
+    let cfg = LLMConfig {
+        model: "deepseek-v4-pro".to_string(),
+        provider: LLMProvider::DeepSeek,
+        ..Default::default()
+    };
     let client = LLMClient::new(cfg).with_thinking(d.thinking_effort());
     assert_eq!(client.config.thinking, ThinkingEffort::Deep);
     // P1 策略片段非空（运行时装配点会前置为 system 消息）
@@ -155,8 +201,11 @@ fn t11_decision_log_format_and_hashing() {
     let d1 = classify(&input("用 cargo 重构这段代码"));
     DecisionLog::record_to_dir(&d1, "sess-1", "turn-1", model, &dir).unwrap();
     let mut weak = input("随便聊聊");
-    weak.prev_route_decisions
-        .push(decision(PersonaTier::Reasoner, ThinkingMode::T1, PromptPolicy::P1));
+    weak.prev_route_decisions.push(decision(
+        PersonaTier::Reasoner,
+        ThinkingMode::T1,
+        PromptPolicy::P1,
+    ));
     let d2 = classify(&weak);
     DecisionLog::record_to_dir(&d2, "sess-1", "turn-2", model, &dir).unwrap();
     let mut ru = input("任何消息");
@@ -175,12 +224,17 @@ fn t11_decision_log_format_and_hashing() {
 
     for line in &lines {
         // 每行可独立 serde_json::from_str
-        let v: serde_json::Value =
-            serde_json::from_str(line).expect("每行应可被 serde_json 解析");
+        let v: serde_json::Value = serde_json::from_str(line).expect("每行应可被 serde_json 解析");
         assert_eq!(v["schema_version"], 1, "应含 schema_version=1");
         let model_hash = v["model_hash"].as_str().expect("应含 model_hash");
-        assert_eq!(model_hash, expected_hash, "model_hash 应等于 hash_text 的十六进制");
-        assert!(model_hash.chars().all(|c| c.is_ascii_hexdigit()), "model_hash 应为十六进制");
+        assert_eq!(
+            model_hash, expected_hash,
+            "model_hash 应等于 hash_text 的十六进制"
+        );
+        assert!(
+            model_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "model_hash 应为十六进制"
+        );
         assert_ne!(model_hash, model, "model_hash 不得是明文模型名");
         assert!(!content.contains(model), "日志不得包含明文模型名");
         // 原始 message 不得入日志（此处消息未写入，仅校验字段存在）
@@ -189,6 +243,55 @@ fn t11_decision_log_format_and_hashing() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── P1-4：复杂任务不应被压到 General/T0 ──
+
+#[test]
+fn estimate_complexity_low_for_chat_high_for_multistep() {
+    assert_eq!(
+        estimate_complexity(&input("你好，今天天气怎么样")),
+        TaskComplexity::Low
+    );
+    assert_eq!(estimate_complexity(&input("随便聊聊今天的午饭吃什么")), TaskComplexity::Low);
+    let long = "请设计一个高可用的分布式订单系统，拆解为若干服务，然后说明每个服务的职责，\
+                并且评估一致性、可用性与性能之间的权衡，最后给出分阶段的迁移方案与回滚策略。";
+    assert!(
+        estimate_complexity(&input(long)) >= TaskComplexity::Medium,
+        "长且多步骤的任务应为 Medium 及以上"
+    );
+}
+
+#[test]
+fn p14_complex_generic_task_escalates_out_of_general_t0() {
+    // 无任何强 persona 关键词的复杂设计任务：此前会落 General/T0；现在应提升到更高档 + T1。
+    let msg = "请设计一个高可用的分布式订单系统，拆解为若干服务，然后说明每个服务的职责，\
+               并且评估一致性与性能权衡，最后给出迁移方案。";
+    let d = classify(&input(msg));
+    assert_ne!(d.tier, PersonaTier::General, "复杂任务不应留在 General: {d:?}");
+    assert_eq!(d.thinking_mode, ThinkingMode::T1, "复杂任务应开启思考: {d:?}");
+    assert_eq!(
+        d.fallback_reason.as_deref(),
+        Some("complexity_escalated"),
+        "应以 complexity_escalated 标记提升来源: {d:?}"
+    );
+}
+
+#[test]
+fn p14_complex_code_task_escalates_to_coder_t1() {
+    let msg = "请重构这个模块的架构，修复并发 bug，然后补充测试并优化性能。";
+    let d = classify(&input(msg));
+    assert_eq!(d.tier, PersonaTier::Coder, "{d:?}");
+    assert_eq!(d.thinking_mode, ThinkingMode::T1, "{d:?}");
+}
+
+#[test]
+fn p14_simple_chat_still_general_t0() {
+    // 反向守卫：简单闲聊不得被复杂度提升误伤。
+    let d = classify(&input("你好，今天天气怎么样"));
+    assert_eq!(d.tier, PersonaTier::General);
+    assert_eq!(d.thinking_mode, ThinkingMode::T0);
+    assert_ne!(d.fallback_reason.as_deref(), Some("complexity_escalated"));
 }
 
 // T12：catalog 不变量——非空、tier 唯一、五档全覆盖
@@ -200,7 +303,11 @@ fn t12_catalog_invariants() {
     // tier 唯一
     let mut seen = std::collections::HashSet::new();
     for p in &cat.personas {
-        assert!(seen.insert(p.tier), "tier {:?} 在默认 catalog 中重复", p.tier);
+        assert!(
+            seen.insert(p.tier),
+            "tier {:?} 在默认 catalog 中重复",
+            p.tier
+        );
     }
 
     // 五档全覆盖

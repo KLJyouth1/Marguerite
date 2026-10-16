@@ -10,10 +10,10 @@
 //! - `apply_action` 做合法性校验（轮到谁、下注额是否合法、是否 all-in）；
 //! - 房间状态可整体序列化给前端，但**前端渲染前必须过 `genui::validate`**（防注入）。
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use serde::{Deserialize, Serialize};
 
 // ───────────────────────────── 牌 ─────────────────────────────
 
@@ -171,6 +171,10 @@ impl Deck {
     pub fn len(&self) -> usize {
         self.cards.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.cards.is_empty()
+    }
 }
 
 // ───────────────────────────── 牌型评估 ─────────────────────────────
@@ -230,7 +234,10 @@ pub fn evaluate(cards: &[Card]) -> HandValue {
             }
         }
         if let Some(h) = straight_high(&fc) {
-            return HandValue { category: 8, tie: [h, 0, 0, 0, 0] };
+            return HandValue {
+                category: 8,
+                tie: [h, 0, 0, 0, 0],
+            };
         }
         let mut ranks: Vec<u8> = cards
             .iter()
@@ -245,7 +252,10 @@ pub fn evaluate(cards: &[Card]) -> HandValue {
     }
 
     if let Some(h) = straight_high(&rank_count) {
-        return HandValue { category: 4, tie: [h, 0, 0, 0, 0] };
+        return HandValue {
+            category: 4,
+            tie: [h, 0, 0, 0, 0],
+        };
     }
 
     let mut groups: Vec<(u8, u8)> = rank_count
@@ -269,8 +279,15 @@ pub fn evaluate(cards: &[Card]) -> HandValue {
             }
         }
         (3, 2) | (3, 3) => {
-            let pair = groups.iter().find(|x| x.0 >= 2 && x.1 != g(0)).map(|x| x.1).unwrap_or(0);
-            HandValue { category: 6, tie: [g(0), pair, 0, 0, 0] }
+            let pair = groups
+                .iter()
+                .find(|x| x.0 >= 2 && x.1 != g(0))
+                .map(|x| x.1)
+                .unwrap_or(0);
+            HandValue {
+                category: 6,
+                tie: [g(0), pair, 0, 0, 0],
+            }
         }
         (3, _) => {
             let mut kickers: Vec<u8> = groups.iter().filter(|x| x.0 == 1).map(|x| x.1).collect();
@@ -312,8 +329,8 @@ pub fn evaluate(cards: &[Card]) -> HandValue {
             let mut ranks: Vec<u8> = groups.iter().map(|x| x.1).collect();
             ranks.sort_unstable_by(|a, b| b.cmp(a));
             let mut tie = [0u8; 5];
-            for i in 0..5 {
-                tie[i] = ranks.get(i).copied().unwrap_or(0);
+            for (i, slot) in tie.iter_mut().enumerate() {
+                *slot = ranks.get(i).copied().unwrap_or(0);
             }
             HandValue { category: 0, tie }
         }
@@ -575,7 +592,8 @@ impl PokerRoom {
                 if target <= self.street_high {
                     return Err(format!("加注额须高于当前注 {}", self.street_high));
                 }
-                let pay = (target - self.players[idx].street_committed).min(self.players[idx].tokens);
+                let pay =
+                    (target - self.players[idx].street_committed).min(self.players[idx].tokens);
                 if pay <= 0 {
                     return Err("无效加注".into());
                 }
@@ -706,6 +724,7 @@ impl PokerRoom {
         0
     }
 
+    #[allow(clippy::wrong_self_convention)] // 原地推进状态为动词语义，保留 to_ 前缀
     fn to_showdown(&mut self) {
         self.street = Street::Showdown;
         let alive: Vec<usize> = self
@@ -793,7 +812,12 @@ impl PokerRoom {
 
     fn finish_hand(&mut self) {
         let total: i64 = self.players.iter().map(|p| p.committed).sum();
-        if let Some(ws) = self.players.iter().position(|p| !p.folded).map(|i| i as Seat) {
+        if let Some(ws) = self
+            .players
+            .iter()
+            .position(|p| !p.folded)
+            .map(|i| i as Seat)
+        {
             self.players[ws as usize].tokens += total;
             self.winners = vec![(ws, total)];
             self.last_action = format!("{} 赢得底池", self.players[ws as usize].name);
@@ -978,7 +1002,10 @@ mod tests {
         hub.join_room(&rid, "C".into(), 100, false).unwrap();
         hub.start_room(&rid).unwrap();
         let room = hub.room(&rid).unwrap();
-        assert!(room.players.iter().all(|p| p.hole[0].is_some() && p.hole[1].is_some()));
+        assert!(room
+            .players
+            .iter()
+            .all(|p| p.hole[0].is_some() && p.hole[1].is_some()));
         assert_eq!(room.players[1].committed, 1);
         assert_eq!(room.players[2].committed, 2);
         assert_eq!(room.street_high, 2);

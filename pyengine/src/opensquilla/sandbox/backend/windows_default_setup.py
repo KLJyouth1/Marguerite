@@ -944,6 +944,9 @@ def ensure_offline_sandbox_user(state_root: Path) -> dict[str, str]:
         env=env,
         capture_output=True,
         text=True,
+        # 中文 Windows 的 PowerShell 输出为 GBK；不指定 `errors` 时读取线程
+        # 会抛 UnicodeDecodeError，stderr 详情丢失、错误提示变成空。
+        errors="replace",
         check=False,
     )
     if completed.returncode != 0:
@@ -1025,6 +1028,10 @@ def _current_windows_user_sid() -> str:
         ["whoami", "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
+        # 中文 Windows 上 `whoami` 输出为本机代码页（GBK）字节，默认 UTF-8 解码
+        # 会在读取线程丢 UnicodeDecodeError（实测 `0xd5`）。不崩的前提是显式
+        # `errors="replace"`；此处只解析 ASCII 的 SID，替换不影响结果。
+        errors="replace",
         check=False,
     )
     if completed.returncode != 0:

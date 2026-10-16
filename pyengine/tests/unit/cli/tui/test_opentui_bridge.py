@@ -618,4 +618,4 @@ async def test_start_applies_persisted_theme_to_the_host_env(tmp_path, monkeypat
     await asyncio.wait_for(bridge.start(), timeout=5.0)
     await asyncio.wait_for(bridge.close(), timeout=5.0)
 
-    assert seen_theme.read_text() == "nord"
+    assert seen_theme.read_text(encoding="utf-8") == "nord"

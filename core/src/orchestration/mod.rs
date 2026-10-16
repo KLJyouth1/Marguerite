@@ -13,6 +13,7 @@
 //!   供前端只读展示「agent 将为这条输入选择何种编排」。
 
 pub mod dag;
+pub mod deliverable;
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -32,14 +33,14 @@ use crate::automation::{Automation, AutomationManager, JobKind};
 use crate::domain::AgentMode;
 use crate::events::{EnsembleProgress, Envelope, EventBus, EventType};
 use crate::governance::completion_gate::{
-    CompletionClaim, CompletionGate, CompletionVerdict, RealShellRunner, ShellRunner,
+    CompletionGate, CompletionVerdict, RealShellRunner, ShellRunner,
 };
 use crate::governance::{ActionIntent, GateDecision, PlanGate, ProposedPlan};
 use crate::intent::classifier::{Classifier, IntentType as ClassifierIntent};
 use crate::mcp::registry::ToolRegistry;
-use crate::mode::ModeKind;
 use crate::mode::anchoring::AnchorState;
-use crate::mode::spec::BloomAnchoringSpec;
+use crate::mode::spec::{BloomAnchoringSpec, BloomSpec};
+use crate::mode::ModeKind;
 use crate::model::llm::{LLMClient, LLMConfig, LLMProvider, ToolDef};
 use crate::model::router::{Complexity, IntentType, ModelRouter};
 use crate::model::StreamReceiver;
@@ -63,14 +64,23 @@ use crate::vision::{MockVisionResolver, MockVisionTransport};
 /// Complex 路径 fan-out 默认分片数（「上千 subagent」的可配置起点）。
 /// 每个分片对应一个并行「编码实现」子代理；受 [`SubAgentConfig::max_concurrent`] 并发上限约束。
 const DEFAULT_FANOUT: usize = 6;
-/// Bloom 蜂群子模式：FlashSwarm 蜂群分片上限（bloom:swarm max_swarm_shards）。
-const SWARM_SHARDS: usize = 11;
-/// Bloom 蜂群子模式：ProExpert 专家团队子专家上限（bloom:swarm max_sub_experts）。
-const SWARM_SUB_EXPERTS: usize = 5;
-/// Bloom 自主闭环子模式：最大迭代轮数。
-const AUTO_MAX_ITERATIONS: usize = 20;
-/// Bloom 自主闭环子模式：自动修复上限。
-const AUTO_MAX_FIXES: usize = 3;
+// 蜂群/子专家/自主闭环上限现由 current_bloom_spec() 按运行时模式取内置 YAML 规格，
+// 再叠加用户 swarm_config.json 覆盖（crate::mode::swarm::effective_*）。
+// 自主闭环迭代/修复上限由 current_bloom_spec() 的 max_iterations / max_fixes 提供。
+
+/// 当前运行时模式对应的 BloomSpec：OmniTranscend → omni_transcend.yaml（深想 4/验证 4/蜂群 13/
+/// 子专家 6/预算 160k/24 步/锚定 5 段），其余模式 → bloom.yaml。
+fn current_bloom_spec() -> BloomSpec {
+    let fallback = crate::mode::spec::builtin::bloom()
+        .bloom
+        .unwrap_or_default();
+    match crate::mode::runtime_mode() {
+        ModeKind::OmniTranscend => crate::mode::spec::builtin::omni_transcend()
+            .bloom
+            .unwrap_or(fallback),
+        _ => fallback,
+    }
+}
 /// 反思门禁失败标记：用于区分「DAG 不可用」与「反思自检未通过」，避免降级冒充成功。
 pub(crate) const REFLECT_GATE_MARKER: &str = "[REFLECT_GATE]";
 
@@ -118,6 +128,11 @@ pub struct TaskAnalysis {
     pub strategy: AgentMode,
     /// 分解出的子任务（Solo 时为空）
     pub subtasks: Vec<SubtaskSpec>,
+    /// 复合任务的交付物契约（仅 [`AgentMode::Pipeline`] 时有值）。
+    ///
+    /// 供 `router_decision` 负载向前端投递结构化 `subtasks`（含 id/kind/target_path），
+    /// 以及完成门禁核验契约声明的 `target_path`。
+    pub contract: Option<deliverable::DeliverableContract>,
     /// 决策理由（用于可观测性与前端只读展示）
     pub rationale: String,
 }
@@ -137,6 +152,10 @@ pub struct OrchestrationOutcome {
     pub completion_verdict: CompletionVerdict,
     /// 反思门禁裁决（仅 Reflect 形态有值；go=false 表示产出未被自检通过，不可信）
     pub reflect_verdict: Option<dag::Reflection>,
+    /// 本次编排累计 LLM 调用次数（遥测：判断任务执行质量）
+    pub llm_call_count: u64,
+    /// 本次编排累计耗时（毫秒）
+    pub total_elapsed_ms: u64,
 }
 
 /// 自动化的只读画像（供可观测性与前端只读展示）。
@@ -199,6 +218,18 @@ pub struct Orchestrator {
     /// [`dispatch`] 按此路由：`Bloom` → Captain+Copilot 双模型并行编排；
     /// 其余模式维持既有「分析 → 选形态 → 执行 → 综合」链路，行为不变。
     mode: ModeKind,
+    /// 强制 Solo 编排（忽略 DualLeader/ExpertTeam/Cluster 策略抉择）。
+    ///
+    /// 用途：计划子步骤已由 `run_autonomous` 拆解为原子任务（携带完整目标上下文、
+    /// 要求「不要展开其他子步骤」），不应再被升级为多 Agent 策略——既浪费额度，
+    /// 又在缺少对应工具/网络的环境下失控挂起。计划执行体统一设置此项。
+    force_solo: bool,
+    /// Solo 分支是否启用**工具回路**（真实调用 write_file 等把产物落盘）。
+    ///
+    /// 默认 false：保持既有单轮文本行为（`lead.process_input`），向后兼容既有测试。
+    /// 计划执行体置 true——计划子步骤必须能真实产出交付物，否则产物门禁（Gap1）
+    /// 与步骤级核验（Gap3）永远拿不到真实落盘依据。
+    solo_with_tools: bool,
     /// 锚定规格（声明式 YAML 来源）；None = Bloom 回退内置 bloom.yaml 的 anchoring 段
     anchoring_spec: Option<BloomAnchoringSpec>,
     /// 会话级锚定状态（跨轮持久：网关注入 / [`Orchestrator::take_anchor`] 回收；
@@ -206,10 +237,16 @@ pub struct Orchestrator {
     anchor: Option<AnchorState>,
     /// 本轮消息来源（user / goal / auto-round…；锚定消息源白名单据此过滤）
     message_source: String,
+    /// 是否为**计划子步骤**的执行（计划执行体设置）。
+    ///
+    /// 计划子步骤的编排形态/决策理由已由方案卡**一次性**呈现；子步骤若再逐条复述
+    /// 「自动编排决策 / Bloom 并行编排」叙述，就会在同一轮里 ×N 重复（A3），并与
+    /// 方案卡已声明的交付流水线决策互斥并置（A2）。置 true 时子步骤只执行、不再复述决策。
+    plan_step: bool,
 }
 
 /// 模型名是否具备视觉（多模态）能力（启发式关键词匹配）。
-fn is_vision_model(model: &str) -> bool {
+pub(crate) fn is_vision_model(model: &str) -> bool {
     let m = model.to_lowercase();
     [
         "vision",
@@ -272,7 +309,7 @@ fn vision_from_config(config: &Config) -> Arc<VisionCapability> {
     cap
 }
 
-/// 根据 `config.mcp.servers` 中带 `url` 的条目，建立 HTTP MCP 客户端并预拉取工具目录。
+/// 根据 `config.mcp.servers` 的 `url` 或 `command` 条目，建立 HTTP/stdio MCP 客户端并预拉取工具目录。
 ///
 /// 在独立 OS 线程 + 独立 tokio runtime 中执行，避免污染调用方已有的 runtime / 阻塞事件循环。
 /// 任何失败都 best-effort 跳过（仅打印告警），不影响引擎启动。
@@ -281,11 +318,20 @@ fn connect_configured_mcp_clients(
 ) -> Vec<std::sync::Arc<crate::mcp::client::McpClient>> {
     let mut clients = Vec::new();
     for srv in &config.mcp.servers {
-        let url = match &srv.url {
-            Some(u) if !u.trim().is_empty() => u.trim().to_string(),
-            _ => continue,
-        };
+        let url = srv
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(String::from);
+        let command = srv.command.trim().to_string();
+        if url.is_none() && command.is_empty() {
+            continue;
+        }
         let name = srv.name.clone();
+        let args = srv.args.clone();
+        let env = srv.env.clone();
+        let desc = url.clone().unwrap_or_else(|| format!("command={command}"));
         let handle = std::thread::spawn(move || {
             let rt = match ::tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -298,18 +344,24 @@ fn connect_configured_mcp_clients(
                 }
             };
             rt.block_on(async move {
-                let mut client = crate::mcp::client::McpClient::new(&url);
+                let mut client = match url {
+                    Some(u) => crate::mcp::client::McpClient::new(&u),
+                    None => crate::mcp::client::McpClient::new_stdio(&command, &args, env),
+                };
                 if let Err(e) = client.connect().await {
-                    eprintln!("[mcp] 连接 {name} ({url}) 失败: {e}");
+                    eprintln!("[mcp] 连接 {name} ({desc}) 失败: {e}");
                     return None;
                 }
                 match client.list_tools().await {
-                    Ok(_) => {
-                        eprintln!("[mcp] 已接入 MCP 服务器 {name} ({url})");
+                    Ok(tools) => {
+                        eprintln!(
+                            "[mcp] 已接入 MCP 服务器 {name} ({desc})，{} 个工具",
+                            tools.len()
+                        );
                         Some(std::sync::Arc::new(client))
                     }
                     Err(e) => {
-                        eprintln!("[mcp] 拉取工具目录 {name} ({url}) 失败: {e}");
+                        eprintln!("[mcp] 拉取工具目录 {name} ({desc}) 失败: {e}");
                         None
                     }
                 }
@@ -325,18 +377,35 @@ fn connect_configured_mcp_clients(
 }
 
 /// 默认工作区根目录：优先应用数据目录，其次进程 cwd。
+///
+/// 实现收敛到 [`crate::workspace::Workspace::resolve`]（唯一解析器，P0-1b）：
+/// 此前这里与 `gateway::sandbox_paths::sandbox_path_root()` 各写一半，谁都不完整。
 fn default_workspace() -> std::path::PathBuf {
-    if Config::data_dir().exists() {
-        Config::data_dir()
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    }
+    crate::workspace::Workspace::resolve(None).root
+}
+
+/// 默认工作区根的公开入口（供计划路径 runner 与完成门禁核验共用）。
+///
+/// 计划 runner 各子步骤经 [`Orchestrator::new_with_credentials_and_cache`] 构造，
+/// 其工作区即 [`default_workspace`]；runner 收尾核验产物必须用**同一**根目录，
+/// 否则「文件真实落盘却核验不到」会误判。
+pub fn default_workspace_root() -> std::path::PathBuf {
+    default_workspace()
 }
 
 impl Orchestrator {
     /// 从配置构建编排器（消费 config：lead 运行时独占所有权）。
+    ///
+    /// 未指定工作区 → 走**未绑定**默认根（应用数据目录 / 进程 cwd）。这与
+    /// `new_with_workspace` 是刻意的区别：绑定状态会写进给模型的【工作区】提示
+    /// （P0-1b），把默认根谎称成"用户绑定的项目目录"会让模型连落点都判断错。
     pub fn new(config: Config) -> Self {
-        Self::new_with_workspace(config, default_workspace())
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(None),
+            None,
+            None,
+        )
     }
 
     /// 从配置构建编排器，并经凭证缝解析 API Key（凭证台账优先，config 回退）。
@@ -344,7 +413,12 @@ impl Orchestrator {
         config: Config,
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> Self {
-        Self::new_with_workspace_credentials(config, default_workspace(), credentials)
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(None),
+            credentials,
+            None,
+        )
     }
 
     /// 凭证缝 + 共享前缀缓存联合构造（默认工作区，v9 缓存 100% 接线）。
@@ -353,12 +427,22 @@ impl Orchestrator {
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
         cache: Option<Arc<crate::cache::PrefixCache>>,
     ) -> Self {
-        Self::new_with_workspace_credentials_cache(config, default_workspace(), credentials, cache)
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(None),
+            credentials,
+            cache,
+        )
     }
 
     /// 指定工作区根目录构建编排器（项目模式：工具/终端/文件沙箱根随项目目录切换）。
     pub fn new_with_workspace(config: Config, workspace: std::path::PathBuf) -> Self {
-        Self::new_with_workspace_credentials(config, workspace, None)
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(Some(&workspace)),
+            None,
+            None,
+        )
     }
 
     /// 指定工作区根 + 凭证台账构建编排器（凭证缝接入：模型路由器经
@@ -368,7 +452,12 @@ impl Orchestrator {
         workspace: std::path::PathBuf,
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> Self {
-        Self::new_with_workspace_credentials_cache(config, workspace, credentials, None)
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(Some(&workspace)),
+            credentials,
+            None,
+        )
     }
 
     /// 指定工作区根 + 凭证台账 + **共享前缀缓存**构建编排器（v9 缓存 100% 接线）：
@@ -380,9 +469,33 @@ impl Orchestrator {
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
         cache: Option<Arc<crate::cache::PrefixCache>>,
     ) -> Self {
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::resolve(Some(&workspace)),
+            credentials,
+            cache,
+        )
+    }
+
+    /// 装配编排器（所有公开构造函数唯一汇聚点）。
+    ///
+    /// `ws` 一次性携带「根 + 绑定状态」：工具注册表用 `ws.root`，lead 运行时收
+    /// `ws` 整体（P0-1b 的【工作区】提示段）。两边必须描述**同一个**根——此前
+    /// 模型完全不知道文件该写去哪，只能猜相对路径，1 ms 即失败后死循环重试。
+    fn assemble(
+        config: Config,
+        ws: crate::workspace::Workspace,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+        cache: Option<Arc<crate::cache::PrefixCache>>,
+    ) -> Self {
+        // 工具/自动化/字段一律以解析后的根为准（与 lead 看到的是同一个）。
+        let workspace = ws.root.clone();
         // 先基于 &config 构造模型路由器（借用立即结束），再 move config 进 lead。
-        let model_router =
-            Arc::new(ModelRouter::new_with_credentials_and_cache(&config, credentials, cache));
+        let model_router = Arc::new(ModelRouter::new_with_credentials_and_cache(
+            &config,
+            credentials,
+            cache,
+        ));
         // D 期接入：把 20 个原生工具 + 命令护栏 + SSRF 防护注册进工具注册表，
         // 让自动编排（dispatch）下的 lead / 子 Agent 真正能调用工具（而非空注册）。
         let mut tool_registry = ToolRegistry::new();
@@ -419,6 +532,19 @@ impl Orchestrator {
         // 让 LLM 在工具循环中能发现、调用、创建技能（YAML prompt 模板）。
         let skills_dir = crate::tools::skill_tools::resolve_skills_dir(&config.skills.skills_dir);
         crate::tools::register_skill_tools(&mut tool_registry, skills_dir);
+        // 工具面 patch 层（热启停）：把 `tool_patch.json` 里被禁用的本地工具从本编排器的
+        // 工具集中移除。网关聊天路径**每轮请求都新建 Orchestrator**，所以补丁写盘后
+        // **下一轮即生效**，无需重启守护进程；正在执行的轮次不受影响（不中途夺工具）。
+        // 只覆盖本地工具：MCP 远端工具与技能工具的生命周期在各自的服务器/技能目录里。
+        let (tool_patch, tool_patch_err) = crate::tools::patch::current_with_error();
+        if let Some(err) = &tool_patch_err {
+            // 读失败绝不静默放回被禁工具：沿用进程内最后一次成功读取的补丁，并告警。
+            tracing::warn!(error = %err, "工具补丁读取失败，沿用上一次成功读取的补丁");
+        }
+        let patched_out = crate::tools::patch::apply_to_registry(&mut tool_registry, &tool_patch);
+        if !patched_out.is_empty() {
+            tracing::info!(tools = ?patched_out, "工具补丁生效：已从工具面移除");
+        }
         // 治理接线：把已注册的原生工具名喂给 PlanGate（宪法前置裁决器）。
         // 自动编排身份为 orchestrator（非 user），因此推断出的破坏性动作一律未获批 ——
         // 即自动编排默认不能静默执行破坏性操作，须经治理门人工放行。
@@ -434,7 +560,10 @@ impl Orchestrator {
             tool_registry.clone(),
             model_router.clone(),
         );
-        let lead = AgentRuntime::new(config);
+        let mut lead = AgentRuntime::new(config);
+        // P0-1b：把工具注册表实际使用的根同步给 lead 运行时 ——
+        // 与上面 `workspace` 同源（都是 `ws.root`），指引与工具行为不会打架。
+        lead.set_workspace(ws);
         Self {
             lead,
             subagents,
@@ -451,9 +580,12 @@ impl Orchestrator {
             events: None,
             session: None,
             mode: ModeKind::Agent,
+            force_solo: false,
+            solo_with_tools: false,
             anchoring_spec: None,
             anchor: None,
             message_source: "user".to_string(),
+            plan_step: false,
         }
     }
 
@@ -461,6 +593,9 @@ impl Orchestrator {
     pub fn set_event_bus(&mut self, bus: Arc<EventBus>, session: String) {
         self.lead.set_event_bus(bus.clone(), session.clone());
         self.subagents.set_event_bus(bus.clone());
+        // P5：同一会话键也交给子代理管理器——子代理在独立 task 中运行，
+        // 不传这一份则其产物会被登记到默认会话（右栏「本次会话产物」恒空）。
+        self.subagents.set_session(session.clone());
         self.events = Some(bus);
         self.session = Some(session);
     }
@@ -468,6 +603,29 @@ impl Orchestrator {
     /// 设置当前运行模式（决定 [`dispatch`] 的编排路由）。
     pub fn set_mode(&mut self, mode: ModeKind) {
         self.mode = mode;
+    }
+
+    /// 强制 Solo 编排：忽略 DualLeader/ExpertTeam/Cluster 策略，始终走单 Agent 闭环。
+    ///
+    /// 计划子步骤（原子任务）调用，避免子步骤被二次升级为多 Agent 策略而失控。
+    pub fn set_force_solo(&mut self, on: bool) {
+        self.force_solo = on;
+    }
+
+    /// 开启 Solo 分支的工具回路：Solo 形态下真实调用内置工具（write_file 等）。
+    ///
+    /// 计划执行体置 true，让原子子步骤能真实把交付物落盘；默认 false 保持既有
+    /// 单轮文本行为，向后兼容。
+    pub fn set_solo_with_tools(&mut self, on: bool) {
+        self.solo_with_tools = on;
+    }
+
+    /// 标记本轮是**计划子步骤**执行：只执行、不复述编排决策（决策由方案卡一次性呈现）。
+    ///
+    /// 计划执行体统一置 true，避免同一轮里逐子步骤重复「自动编排决策 / Bloom 并行
+    /// 编排」叙述（A3），也避免与方案卡声明的交付流水线决策互斥并置（A2）。
+    pub fn set_plan_step(&mut self, on: bool) {
+        self.plan_step = on;
     }
 
     /// 当前运行模式。
@@ -497,12 +655,9 @@ impl Orchestrator {
 
     /// 当前生效的锚定规格：显式设置 > 内置 bloom.yaml anchoring 段 > 默认。
     fn bloom_anchoring_spec(&self) -> BloomAnchoringSpec {
-        self.anchoring_spec.clone().unwrap_or_else(|| {
-            crate::mode::spec::builtin::bloom()
-                .bloom
-                .map(|b| b.anchoring)
-                .unwrap_or_default()
-        })
+        self.anchoring_spec
+            .clone()
+            .unwrap_or_else(|| current_bloom_spec().anchoring)
     }
 
     /// 本轮锚定态入口（`dispatch_bloom` 用）：恢复会话锚定态（或按规格新建）
@@ -517,7 +672,39 @@ impl Orchestrator {
         if anchor.source_allowed(&self.message_source) {
             anchor.observe_block(text);
         }
+        self.expand_anchor_to_full_when_needed(&mut anchor, text);
         anchor
+    }
+
+    /// 锚定 → 全工具面的**生产扩展触发**（单调，只加不撤）。
+    ///
+    /// 两条独立理由，任一成立即扩展：
+    /// 1. **阶段越界**：已晋升到 PTC 且越过 `PTC_GRACE_TURNS` 轮 —— `expand_to_full`
+    ///    此前在生产路径没有任何调用点，工具面被永久锁死在 minimal∪{ptc_tool}；
+    /// 2. **能力缺口**：任务文本声明了联网检索，而当前锚定面里没有任何网络工具。
+    ///    携带交付物的检索类任务已被 web 快路拒之门外（必须走工具回路产出真实产物），
+    ///    此时若面里没有网络工具，本步只能退化为「模型自述无法联网」的结构性失败。
+    fn expand_anchor_to_full_when_needed(&mut self, anchor: &mut AnchorState, text: &str) {
+        if anchor.maybe_expand_to_full() {
+            return;
+        }
+        if anchor.is_full() || !Self::is_web_search_intent(text) {
+            return;
+        }
+        const NETWORK_TOOLS: &[&str] = &[
+            "web_search",
+            "web_research",
+            "web_fetch",
+            "http_request",
+            "browser",
+        ];
+        let face = bloom_anchor_tools(anchor, &self.tool_defs());
+        if !face
+            .iter()
+            .any(|d| NETWORK_TOOLS.contains(&d.name.as_str()))
+        {
+            anchor.expand_to_full();
+        }
     }
 
     /// 委托路径锚定态入口（`dispatch_bloom_swarm` / `dispatch_bloom_auto` 用）：
@@ -532,6 +719,7 @@ impl Orchestrator {
                 if a.source_allowed(&self.message_source) {
                     a.observe_block(text);
                 }
+                self.expand_anchor_to_full_when_needed(&mut a, text);
                 a
             }
         }
@@ -547,6 +735,16 @@ impl Orchestrator {
         self.lead.set_mode_section(section);
     }
 
+    /// v3.3.1：把网关 steer 队列 drain 出的插话转发给 lead 运行时。
+    ///
+    /// lead 在下一次模型消息装配（工具循环边界 / 子步骤开始）时并入，
+    /// 使插话真正影响生成本身——而非仅回合末附录。
+    pub fn forward_steers(&mut self, texts: Vec<String>) {
+        for t in texts {
+            self.lead.push_pending_steer(t);
+        }
+    }
+
     /// 注入记忆召回稳定前缀（W-6）：透传到 lead 运行时，作为模型消息序列最前端的
     /// 稳定前缀（先于经验提示），落进 P-7 stable 半区，利于 KV-cache 前缀复用。
     pub fn set_stable_prefix(&mut self, prefix: Message) {
@@ -556,6 +754,17 @@ impl Orchestrator {
     /// 注入 Track A 路由决策（透传到 lead 运行时）。
     pub fn set_route_decision(&mut self, d: crate::router::RouteDecision) {
         self.lead.set_route_decision(d);
+    }
+
+    /// lead 运行时当前的工作区（P0-1b）：None = 未注入（模型看不到工作区指引）。
+    pub fn lead_workspace(&self) -> Option<&crate::workspace::Workspace> {
+        self.lead.workspace()
+    }
+
+    /// 模型实际会看到的【工作区】指引段（P0-1b）：未注入时为 None。
+    /// 供 doctor / `workspace.status` / 单测观测，避免"配了但没接上"这种静默失效。
+    pub fn lead_workspace_guidance(&self) -> Option<String> {
+        self.lead.workspace().map(|w| w.guidance())
     }
 
     /// 注入会话历史消息（重启后上下文恢复）：把之前轮次的 user/assistant 消息
@@ -717,15 +926,42 @@ impl Orchestrator {
 
     /// 离线宪法前置裁决：分析输入 → 推断候选动作 → PlanGate 评估。
     ///
-    /// **不调用 LLM**，可在无 API Key 环境运行。自动 [`dispatch`] 执行前必须先过此门：
-    /// 任何破坏性 / 越权读取密钥等自动操作都会被宪法 C1 / C2 拦下并要求人工放行。
-    /// 返回 [`GateDecision`]（approved / violations / requires_human_gate）。
+    /// **不调用 LLM**，可在无 API Key 环境运行。返回 [`GateDecision`]
+    /// （approved / violations / requires_human_gate）供调用方决定如何处置。
+    /// 注意：自 2026-10-13 起调用方一律走 [`Self::gate_auto_approve`]（自动放行 + 审计），
+    /// 本函数只负责**评估**，不再隐含「必须硬阻断」。
     pub fn evaluate_dispatch(&self, text: &str) -> GateDecision {
         let analysis = self.analyze(text);
         let actions = infer_plan_actions(&analysis, text);
         let mut plan = ProposedPlan::new("dispatch", &analysis.rationale, "orchestrator");
         plan.actions.extend(actions);
         self.plan_gate.evaluate(&plan)
+    }
+
+    /// 治理门「破甲」放行：违规**不再硬阻断**，仅作为审计提示写入思考链后继续执行。
+    ///
+    /// # 为什么
+    /// 旧实现遇到任何 C1/C3 违规即 `return Err(…)` + 「需人工放行」，而
+    /// `infer_plan_actions` 又把蜂群并行、以及「删除 / 覆盖 / 强制」这类日常措辞
+    /// 一律判成破坏性 —— 结果是**正常任务被自己的门禁打死**（真机表现为
+    /// 「治理门裁决未通过（违反：C1），需人工放行」，重试仍失败）。
+    ///
+    /// 现在把治理门从「闸门」降级为「日志」：违规只留痕、不拦截。真正的安全边界
+    /// 交给运行期沙箱 / 工具白名单 / 审批流（它们作用于**真实**动作，而非意图猜测）。
+    fn gate_auto_approve(&self, decision: &GateDecision, scope: &str) {
+        if decision.approved {
+            return;
+        }
+        let ids: Vec<String> = decision
+            .violations
+            .iter()
+            .map(|v| v.rule_id.clone())
+            .collect();
+        self.emit_thinking(&format!(
+            "> 治理门自动放行（破甲）：{scope} 检测到 {} 项宪法提示（{}），已记录审计并继续执行。",
+            decision.violations.len(),
+            ids.join(", ")
+        ));
     }
 
     /// 确保 lead 处于可接收输入的状态（幂等）。
@@ -742,58 +978,63 @@ impl Orchestrator {
     pub fn analyze(&self, text: &str) -> TaskAnalysis {
         let c = self.classifier.classify(text);
         let complexity = map_router_complexity(c.intent.clone(), text);
-        let (strategy, subtasks, rationale) = self.plan(text, c.intent.clone());
+        // 交付物契约检测（纯规则、零 LLM）：命中则策略为交付流水线。检测一次，供 plan 复用。
+        let contract = deliverable::detect(text);
+        let (strategy, subtasks, rationale) = self.plan(text, c.intent.clone(), contract.as_ref());
         TaskAnalysis {
             intent: c.intent.clone(),
             complexity,
             needs_llm: c.needs_llm,
             strategy,
             subtasks,
+            contract,
             rationale,
         }
     }
 
     /// 自动编排入口：分析 → 选形态 → 执行 → 综合。全程零用户介入。
     ///
-    /// 模式路由：`ModeKind::Bloom` 走 [`dispatch_bloom`]（Captain + Copilot 双模型
-    /// `tokio::join!` 真并行，过程经事件总线下发前端）；其余模式行为与既有实现一致。
+    /// 模式路由（MSC-2）：按运行时模式经 [`crate::gateway::mode_route::mode_route`]
+    /// 分流——`DeepParallel` / `OmniSpectrum` 走 [`dispatch_bloom`]（Captain + Copilot
+    /// 双模型 `tokio::join!` 真并行，过程经事件总线下发前端）；其余模式走下方
+    /// 分析驱动的编排，并由模式偏置抬升形态下界（见 `plan`）。
     pub async fn dispatch(&mut self, text: &str) -> Result<OrchestrationOutcome> {
-        // Bloom 模式：转交并行编排入口（其自带同一套治理门与完成门禁，
+        // 模式路由（MSC-2）：按运行时模式分流到编排入口，使模式切换**真实**改变执行路径。
+        // DeepParallel / OmniSpectrum → 并行编排入口（其自带同一套治理门与完成门禁，
         // 因此这里在门禁之前分流，避免重复裁决）。
-        if self.mode == ModeKind::Bloom {
+        let route = crate::gateway::mode_route::mode_route(self.mode);
+        if route.uses_bloom_entry() {
             return self.dispatch_bloom(text).await;
         }
-        // 宪法前置裁决：自动编排不得绕过治理门。未通过则阻断并要求人工放行，
-        // 任何破坏性 / 越权读密钥等动作都不会被静默执行。
+        // 宪法前置裁决（破甲）：自动编排仍做审计，但**不再硬阻断**——违规只留痕，
+        // 执行继续。真正的安全边界由运行期沙箱 / 工具白名单 / 审批流承担。
         let decision = self.evaluate_dispatch(text);
-        if !decision.approved {
-            let ids: Vec<String> = decision
-                .violations
-                .iter()
-                .map(|v| v.rule_id.clone())
-                .collect();
-            self.emit_thinking(&format!(
-                "> 治理门拦截：本次自动编排存在 {} 项宪法违规（{}），需人工放行后方可执行。",
-                decision.violations.len(),
-                ids.join(", ")
-            ));
-            return Err(anyhow!(
-                "治理门裁决未通过（违反：{}），需人工放行。orchestrator 自动编排被宪法拦截，不得静默执行。",
-                ids.join(", ")
-            ));
-        }
+        self.gate_auto_approve(&decision, "自动编排");
         self.ensure_ready();
         let analysis = self.analyze(text);
-        self.emit_thinking(&format!(
-            "> 自动编排决策：{} — {}",
-            analysis.strategy.label(),
-            analysis.rationale
-        ));
+        // A2/A3：计划子步骤的编排决策已由方案卡一次性呈现，子步骤不再逐条复述
+        // （否则同一轮里 ×N 重复，且与方案卡声明的决策互斥并置）。
+        if !self.plan_step {
+            self.emit_thinking(&format!(
+                "> 自动编排决策：{} — {}",
+                analysis.strategy.label(),
+                analysis.rationale
+            ));
+        }
 
-        match analysis.strategy {
+        // 计划子步骤强制 Solo：原子任务不应被升级为多 Agent 策略（浪费额度且易失控）。
+        let strategy = if self.force_solo {
+            AgentMode::Solo
+        } else {
+            analysis.strategy
+        };
+        match strategy {
             AgentMode::Solo => {
                 // 联网检索意图优先直接用内置 web 工具，保证能真正联网完成任务。
-                if Self::is_web_search_intent(text) {
+                // 但**带工具回路**（计划子步骤）时不短路：复合任务的每步都含「搜索」
+                // 等检索词，短路会让每步都退化为检索、永不落盘产物（Gap1 无依据）。
+                // 交给完整工具回路，让模型自行 web_search + write_file。
+                if !self.solo_with_tools && Self::is_web_search_intent(text) {
                     if let Some(reply) = self.try_builtin_web_search(text).await {
                         self.emit_thinking(
                             "> 检测到联网检索意图，已直接用内置 web_search/web_research 工具抓取并综合。",
@@ -808,7 +1049,34 @@ impl Orchestrator {
                         );
                     }
                 }
-                let reply = self.lead.process_input(text).await?.to_string();
+                let reply = if self.solo_with_tools && !self.tool_defs().is_empty() {
+                    if self.plan_step {
+                        // 计划子步骤：保留既有非流式回路（需注入 PLAN_SUBSTEP_OUTPUT_CONTRACT）。
+                        self.run_solo_tool_loop(text).await?
+                    } else {
+                        // 普通 Solo（含桌面 UI 主路径）：带工具执行。
+                        // 这里刻意沿用**非流式**回路：真流式 `run_tool_loop_stream` 对
+                        // 非 SSE（一次性 JSON）响应解析为空文本，会让不支持流式的提供方
+                        // 静默返回空答复（实测 `gateway::chat::tests::
+                        // test_send_runs_turn_and_publishes_enriched_done` 因此变红）。
+                        // 与改动前相比文本行为一致（原本也是非流式 `process_input`），
+                        // 差别仅在「现在真的会调用工具」。
+                        let reply = self.run_solo_tool_loop(text).await?;
+                        // 事件契约：非流式工具回路自身不发事件，须补齐 `Done`，
+                        // 否则 TUI/网关等按 `EventType::Done` 收尾的消费方永远等不到完成。
+                        if let (Some(bus), Some(sess)) = (&self.events, &self.session) {
+                            crate::context::session::clear_partial(sess);
+                            bus.publish(Envelope::new(
+                                EventType::Done,
+                                json!({ "summary": reply.clone() }),
+                                sess.clone(),
+                            ));
+                        }
+                        reply
+                    }
+                } else {
+                    self.lead.process_input(text).await?.to_string()
+                };
                 self.finish_dispatch(text, analysis, AgentMode::Solo, reply, vec![], None)
             }
             AgentMode::DualLeader => {
@@ -846,6 +1114,170 @@ impl Orchestrator {
                 let strategy = analysis.strategy;
                 self.finish_dispatch(text, analysis, strategy, reply, summaries, None)
             }
+            AgentMode::Pipeline => {
+                // 复合任务交付流水线（P0-1）。关键：本分支与 Solo 分支内的
+                // `is_web_search_intent` 短路**并列**——复合句不会落进 Solo 分支被单工具
+                // 短路（这正是用户「4 秒已完成」的成因修复点）。
+                self.dispatch_pipeline(text, analysis).await
+            }
+        }
+    }
+
+    /// Solo 形态的工具回路执行体（计划子步骤带工具，Gap1/Gap3 的产物依据来源）。
+    ///
+    /// 复用 lead 的 [`crate::agent::runtime::AgentRuntime::run_tool_loop`] + 内置工具注册表：
+    /// 让原子子步骤真实调用 `write_file` / `office_automation` 等把产物**落盘**，而非只
+    /// 输出文本。工具执行经 [`crate::agent::tool_cycle`] 的运行时模式裁决：Plan 模式的写类
+    /// 工具被硬拒绝（产物不会落盘 → 完成门禁阻断 → 终态 partial），非 Plan 模式放行
+    /// （产物真实落盘 → 门禁可放行）。
+    async fn run_solo_tool_loop(&mut self, text: &str) -> Result<String> {
+        self.ensure_ready();
+        let tools = self.tool_defs();
+        let mut history = vec![Message::User {
+            content: text.to_string(),
+            timestamp: Utc::now(),
+        }];
+        // P1-2：计划子步骤注入**固定输出结构约束**（system 消息）——固定小节标题 +
+        // 固定表格列名，使同类子步骤产出稳定格式（此前正文由 LLM 自由发挥，格式漂移）。
+        // 仅作用于计划子步骤；其它路径（普通对话 / 专家团队）行为不变。
+        if self.plan_step {
+            history.insert(
+                0,
+                Message::System {
+                    content: crate::plan::runner::PLAN_SUBSTEP_OUTPUT_CONTRACT.to_string(),
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+        self.lead
+            .run_tool_loop(&mut history, self.tool_registry.clone(), &tools)
+            .await
+    }
+
+    /// 交付流水线执行体（P0-1）：按契约 DAG 顺序逐步执行子交付物。
+    ///
+    /// - 每步发 `step_start` / `step_finish` 事件（子 Agent 真实落盘即触发 `artifact.updated`）；
+    /// - 步骤失败 fail-closed 如实上抛，绝不冒充完成；
+    /// - 收尾对契约声明的 `target_path` 做**落盘 + 非空核验**（P1-2：杜绝「4 秒已完成却无产物」）。
+    async fn dispatch_pipeline(
+        &mut self,
+        text: &str,
+        analysis: TaskAnalysis,
+    ) -> Result<OrchestrationOutcome> {
+        let contract = deliverable::detect(text)
+            .ok_or_else(|| anyhow!("交付流水线需要复合任务，但未解析出交付物契约"))?;
+        let specs = deliverable::contract_to_specs(&contract);
+        let total = specs.len();
+        let mut parts: Vec<String> = Vec::new();
+        for (i, spec) in specs.iter().enumerate() {
+            self.emit_step(
+                EventType::StepStart,
+                &contract,
+                i,
+                total,
+                "in_progress",
+                None,
+            );
+            let upstream = parts.join("\n\n");
+            let context = format!(
+                "【交付流水线 第 {}/{} 步｜{}】\n整体目标：{}\n\n前序产出：\n{}\n\n\
+                 请仅完成本步交付物，不要展开其它步骤。",
+                i + 1,
+                total,
+                spec.role,
+                text,
+                upstream
+            );
+            let t0 = std::time::Instant::now();
+            match self.run_single(spec, &context).await {
+                Ok(result) => {
+                    parts.push(format!("[{}] {}", spec.role, result));
+                    self.emit_step(
+                        EventType::StepFinish,
+                        &contract,
+                        i,
+                        total,
+                        "done",
+                        Some(t0.elapsed().as_millis() as u64),
+                    );
+                }
+                Err(e) => {
+                    self.emit_step(
+                        EventType::StepFinish,
+                        &contract,
+                        i,
+                        total,
+                        "failed",
+                        Some(t0.elapsed().as_millis() as u64),
+                    );
+                    // fail-closed：任一步失败即如实上抛，绝不降级冒充成功（P1-2）。
+                    return Err(anyhow!(
+                        "交付流水线第 {}/{} 步（{}）失败：{e}",
+                        i + 1,
+                        total,
+                        spec.role
+                    ));
+                }
+            }
+        }
+        let reply = self.synthesize(text, &parts, &analysis).await?;
+        // 完成门禁：把契约声明的 target_path 作为**必需产物**，核验真实落盘且非空。
+        let targets: Vec<&str> = contract
+            .deliverables
+            .iter()
+            .filter_map(|d| d.target_path.as_deref())
+            .collect();
+        let verdict = self.evaluate_completion(text, &reply, &targets, None);
+        if !verdict.allowed {
+            self.emit_thinking(&format!(
+                "> 完成门禁提示：交付流水线产出存在 {} 项可疑（{}），已标记为部分完成，请人工复核。",
+                verdict.blocked_by.len(),
+                verdict.warnings.join("；")
+            ));
+        }
+        Ok(OrchestrationOutcome {
+            strategy: AgentMode::Pipeline,
+            lead_reply: reply,
+            subagent_summaries: parts,
+            analysis,
+            completion_verdict: verdict,
+            reflect_verdict: None,
+            llm_call_count: total as u64,
+            total_elapsed_ms: 0,
+        })
+    }
+
+    /// 发布一帧交付流水线步骤事件（`step_start` / `step_finish`）。
+    ///
+    /// 负载对齐前端 `TaskStep` 契约：`task_step_id` / `index` / `total` / `title` /
+    /// `role` / `kind` / `target_path` / `status` /（可选）`elapsed_ms`。总线未注入时为空操作。
+    fn emit_step(
+        &self,
+        ty: EventType,
+        contract: &deliverable::DeliverableContract,
+        index: usize,
+        total: usize,
+        status: &str,
+        elapsed_ms: Option<u64>,
+    ) {
+        let Some(spec) = contract.deliverables.get(index) else {
+            return;
+        };
+        let mut payload = json!({
+            "task_step_id": spec.id,
+            "index": index,
+            "total": total,
+            "title": spec.title,
+            "role": spec.role,
+            "kind": spec.kind,
+            "target_path": spec.target_path,
+            "status": status,
+        });
+        if let Some(ms) = elapsed_ms {
+            payload["elapsed_ms"] = json!(ms);
+        }
+        if let (Some(bus), Some(sess)) = (&self.events, &self.session) {
+            bus.publish(Envelope::new(ty, payload, sess.clone()));
         }
     }
 
@@ -856,31 +1288,40 @@ impl Orchestrator {
     /// 设计：Bloom 是推理层优化（并行/多轮），**不**放宽沙箱与工具权限；
     /// 工具调用仍走 AgentRuntime 白名单（见 mode/privileges.rs）。
     pub async fn dispatch_bloom(&mut self, text: &str) -> Result<OrchestrationOutcome> {
+        // 治理门（破甲）：只审计、不阻断（与 `dispatch` 同源）。
         let decision = self.evaluate_dispatch(text);
-        if !decision.approved {
-            let ids: Vec<String> = decision
-                .violations
-                .iter()
-                .map(|v| v.rule_id.clone())
-                .collect();
+        self.gate_auto_approve(&decision, "Bloom 并行编排");
+        self.ensure_ready();
+        // OmniTranscend 思考链（S1→S5 五段渐进，逐段发射到 UI 思考链时间线）
+        if crate::mode::runtime_mode() == ModeKind::OmniTranscend {
+            for stage in [
+                "S1 定轨（锚定 2 最小工具）",
+                "S2 只读探索（Plan 段）",
+                "S3 深想（MAX 4 阶段）",
+                "S4 执行（YOLO×PTC 融合）",
+                "S5 全域（DEEP 双模型 + SWARM 蜂群 + AUTO 闭环）",
+            ] {
+                self.emit_thinking(&format!("> OmniTranscend {stage}"));
+            }
+        }
+        let mut analysis = self.analyze(text);
+        // A2/Q4：在**改写形态之前**留存分析得出的形态与理由。复合交付（Pipeline）的
+        // 判定在此处会被下面强制改成 DualLeader，但 web 检索快路必须知道本输入
+        // 「携带交付物义务」——否则「搜索…整理成 html 再成 ppt」这类复合句的每一步
+        // 都会被 `is_web_search_intent`（匹配 搜索/新闻/今天/最新）短路成一次纯检索，
+        // HTML/PPT 交付步骤永不落盘（用户「4 秒已完成却无产物」的更深根因）。
+        let pipeline_substep = matches!(analysis.strategy, AgentMode::Pipeline);
+        let analyzed_rationale = analysis.rationale.clone();
+        analysis.strategy = AgentMode::DualLeader;
+        // A2/A3：决策叙述必须自洽且不重复。计划子步骤（决策已由方案卡呈现）不再复述；
+        // 其余情形叙述真正的形态，绝不把「交付流水线」叙述成双领队形态。
+        if !self.plan_step {
             self.emit_thinking(&format!(
-                "> 治理门拦截：本次 Bloom 并行编排存在 {} 项宪法违规（{}），需人工放行后方可执行。",
-                decision.violations.len(),
-                ids.join(", ")
-            ));
-            return Err(anyhow!(
-                "治理门裁决未通过（违反：{}），需人工放行。Bloom 并行编排被宪法拦截。",
-                ids.join(", ")
+                "> Bloom 并行编排：Captain + Copilot 双模型并行推理（{} — {}）",
+                AgentMode::DualLeader.label(),
+                analyzed_rationale
             ));
         }
-        self.ensure_ready();
-        let mut analysis = self.analyze(text);
-        analysis.strategy = AgentMode::DualLeader;
-        self.emit_thinking(&format!(
-            "> Bloom 并行编排：Captain + Copilot 双模型并行推理（{} — {}）",
-            analysis.strategy.label(),
-            analysis.rationale
-        ));
 
         // 锚定冷启动（对齐 dsh-forge 首轮锚定 + 工具收窄）：会话锚定态（跨轮持久）
         // 或按规格新建；首块门控命中（含 we 且无 let me）→ 直接晋升 PTC
@@ -908,7 +1349,11 @@ impl Orchestrator {
             } else {
                 "锚定 Minimal 双工具"
             },
-            if ptc_ready { " 就绪" } else { " 未注册→降级" }
+            if ptc_ready {
+                " 就绪"
+            } else {
+                " 未注册→降级"
+            }
         ));
 
         // 统一 Bloom（无 submode 开关）：按任务分析自动选用编排形态，
@@ -929,7 +1374,10 @@ impl Orchestrator {
         // 联网检索快路径：搜索 / 新闻类意图且内置 web 工具可用 → 直接检索 + 综合，
         // 保证「搜索今天的 AI 新闻」这类任务一定用上内置联网工具，不再把简单检索
         // 拆成多个失败子专家，也不依赖模型是否主动选用工具。
-        if Self::is_web_search_intent(text) {
+        //
+        // A2/Q4：**携带交付物义务**（Pipeline / 计划子步骤）时不得短路——那会让
+        // 「生成 HTML 网页 / PPT」这类交付步骤退化为一次纯检索、产物永不落盘。
+        if Self::allows_web_search_fastpath(text, pipeline_substep) {
             self.emit_ensemble(EnsembleProgress::proposer_start(0, "WebSearch"));
             if let Some(reply) = self.try_builtin_web_search(text).await {
                 self.emit_thinking(
@@ -1052,6 +1500,16 @@ impl Orchestrator {
         .any(|k| lower.contains(&k.to_lowercase()))
     }
 
+    /// 是否允许「联网检索快路」接管本次输入。
+    ///
+    /// A2/Q4：命中检索词**且不携带交付物义务**时才允许短路。携带交付物的输入
+    /// （`analyze` 判为 [`AgentMode::Pipeline`] —— 复合任务与计划子步骤都属此类）
+    /// 必须走工具回路产出真实产物，短路会让交付步骤退化为一次纯检索、产物永不落盘。
+    /// 供 [`Orchestrator::dispatch_bloom`] 与回归测试共用（单一事实源，避免两处漂移）。
+    fn allows_web_search_fastpath(text: &str, carries_deliverable: bool) -> bool {
+        !carries_deliverable && Self::is_web_search_intent(text)
+    }
+
     /// 目标型实现任务判定：统一 Bloom 借此自动选用「自主闭环（auto）」编排形态。
     ///
     /// 关键词覆盖中英常见实现/构建/重构意图；命中即走 `dispatch_bloom_auto`
@@ -1092,7 +1550,9 @@ impl Orchestrator {
             return None;
         };
         let mut args = HashMap::new();
-        args.insert("q".to_string(), text.to_string());
+        // P1-1：整句原样当检索词会命中一屏「搜索引擎首页」（用户截图现象）。先蒸馏出
+        // 真正的检索词（剥离「整理成html网页/做成PPT/给我看」等交付指令）再检索。
+        args.insert("q".to_string(), crate::tools::builtin::distill_query(text));
         let res = match self.tool_registry.execute_local_tool(tool, &args).await {
             Ok(r) => r,
             Err(_) => return None,
@@ -1179,7 +1639,11 @@ impl Orchestrator {
     /// 双领队蜂群：FlashSwarm（蜂群分片）+ ProExpert（专家团队）双路成员并行 spawn。
     async fn run_bloom_swarm(&mut self, text: &str) -> Result<(String, Vec<String>)> {
         let mut team = Team::new();
-        for s in cluster_specs(text).into_iter().take(SWARM_SHARDS) {
+        let bloom = current_bloom_spec();
+        for s in cluster_specs(text)
+            .into_iter()
+            .take(crate::mode::swarm::effective_shards(bloom.max_swarm_shards))
+        {
             team = team.member(
                 s.role,
                 &s.system_prompt,
@@ -1188,10 +1652,9 @@ impl Orchestrator {
                 s.complexity.clone(),
             );
         }
-        for s in team_specs(detect_roles(text))
-            .into_iter()
-            .take(SWARM_SUB_EXPERTS)
-        {
+        for s in team_specs(detect_roles(text)).into_iter().take(
+            crate::mode::swarm::effective_sub_experts(bloom.max_sub_experts),
+        ) {
             team = team.member(
                 s.role,
                 &s.system_prompt,
@@ -1216,8 +1679,11 @@ impl Orchestrator {
             content: text.to_string(),
             timestamp: Utc::now(),
         }];
+        let auto_spec = current_bloom_spec();
+        let auto_max_iterations = auto_spec.max_iterations;
+        let auto_max_fixes = auto_spec.max_fixes;
         let mut fixes = 0usize;
-        for round in 0..AUTO_MAX_ITERATIONS {
+        for round in 0..auto_max_iterations {
             let result = if tool_defs.is_empty() {
                 self.run_bloom_text(text).await?
             } else {
@@ -1229,15 +1695,15 @@ impl Orchestrator {
                 self.emit_thinking(&format!("> 自主闭环第 {} 轮：QA 通过，交付。", round + 1));
                 return Ok(result);
             }
-            if fixes >= AUTO_MAX_FIXES {
+            if fixes >= auto_max_fixes {
                 self.emit_thinking(&format!(
-                    "> 自主闭环：修复次数达到上限（{AUTO_MAX_FIXES}），交付当前结果。"
+                    "> 自主闭环：修复次数达到上限（{auto_max_fixes}），交付当前结果。"
                 ));
                 return Ok(result);
             }
             fixes += 1;
             self.emit_thinking(&format!(
-                "> 自主闭环第 {} 轮：QA 未过，自动修复（{fixes}/{AUTO_MAX_FIXES}）。",
+                "> 自主闭环第 {} 轮：QA 未过，自动修复（{fixes}/{auto_max_fixes}）。",
                 round + 1
             ));
             history.push(Message::User {
@@ -1246,7 +1712,7 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
         }
-        anyhow::bail!("自主闭环迭代上限（{AUTO_MAX_ITERATIONS}）耗尽，仍未通过 QA")
+        anyhow::bail!("自主闭环迭代上限（{auto_max_iterations}）耗尽，仍未通过 QA")
     }
 
     /// 单工具回路（Captain 直接带工具，简单任务最省）；失败降级为 Bloom 双模型文本。
@@ -1266,6 +1732,10 @@ impl Orchestrator {
         // 事件转发：AgentEvent → 事件总线 → WebSocket → 前端卡片/动效
         let forward = tokio::spawn(async move {
             let mut partial = String::new();
+            // P2-10：tool_call → tool_result 配对计时，给结果帧补 `elapsed_ms`
+            // （历史工具卡此前完全没有耗时数据）。
+            let mut tool_started_at: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
             while let Some(ev) = rx.recv().await {
                 let (etype, payload) = match ev {
                     AgentEvent::Thinking { text } => (EventType::Thinking, json!({ "text": text })),
@@ -1278,24 +1748,48 @@ impl Orchestrator {
                             json!({ "text": text, "presentation": "answer" }),
                         )
                     }
-                    AgentEvent::ToolCall { name, arguments } => {
+                    AgentEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => {
                         let input: Value =
                             serde_json::from_str(&arguments).unwrap_or(json!(arguments));
+                        let started_at = chrono::Utc::now().timestamp_millis();
+                        let key = id.clone().unwrap_or_else(|| name.clone());
+                        tool_started_at.insert(key, started_at);
                         (
                             EventType::ToolCall,
                             json!({
+                                // 模型给出的调用 id：前端据此精确配对该次调用的结果，
+                                // 不再靠「工具名 + 时钟」猜身份（同毫秒同名会互相吞并）。
+                                "id": id, "tool_use_id": id,
                                 "name": name, "input": input,
-                                "started_at": chrono::Utc::now().timestamp_millis(),
+                                "started_at": started_at,
                             }),
                         )
                     }
-                    AgentEvent::ToolResult { name, output, ok } => (
-                        EventType::ToolResult,
-                        json!({
-                            "name": name, "result": output, "is_error": !ok,
-                            "execution_status": { "status": if ok { "success" } else { "error" } },
-                        }),
-                    ),
+                    AgentEvent::ToolResult {
+                        id,
+                        name,
+                        output,
+                        ok,
+                    } => {
+                        // P2-10：以同名/同 id 的最近一次调用起点算耗时。
+                        let key = id.clone().unwrap_or_else(|| name.clone());
+                        let elapsed_ms = tool_started_at.remove(&key).map(|started| {
+                            (chrono::Utc::now().timestamp_millis() - started).max(0) as u64
+                        });
+                        (
+                            EventType::ToolResult,
+                            json!({
+                                "id": id, "tool_use_id": id,
+                                "name": name, "result": output, "is_error": !ok,
+                                "elapsed_ms": elapsed_ms,
+                                "execution_status": { "status": if ok { "success" } else { "error" } },
+                            }),
+                        )
+                    }
                     AgentEvent::StepStart { round } => {
                         (EventType::StepStart, json!({ "round": round }))
                     }
@@ -1309,8 +1803,17 @@ impl Orchestrator {
                         crate::context::session::clear_partial(&sess);
                         (EventType::Done, json!({ "summary": text }))
                     }
-                    AgentEvent::Error { message } => {
-                        (EventType::Error, json!({ "message": message }))
+                    AgentEvent::Error { message, code } => {
+                        // R65/B1：带上**稳定错误码**（有归类时，如 AUTH_FAILED），
+                        // 前端按码本地化；无码时前端回退到服务端 `message`。
+                        // 真机现象：此前本帧只有 `message`（形如
+                        // `AUTH_FAILED: The model provider rejected the API key…`），
+                        // 前端拿不到码 → 只能原样展示英文正文。现与 plan_runner 同构。
+                        let mut payload = json!({ "message": message });
+                        if let (Some(code), Some(obj)) = (code, payload.as_object_mut()) {
+                            obj.insert("code".to_string(), Value::String(code));
+                        }
+                        (EventType::Error, payload)
                     }
                     AgentEvent::DoomLoop { tool, repeats } => (
                         EventType::Error,
@@ -1466,16 +1969,41 @@ impl Orchestrator {
     /// 保留既有 `BloomOrchestrator` 的并行预取、事件回流与四阶段深度推理；作为
     /// `dispatch_bloom` 在「无可用工具」或「工具回路失败」时的兜底，保证 Bloom 始终可用。
     async fn run_bloom_text(&self, text: &str) -> Result<String> {
-        let client = LLMClient::new(LLMConfig::from_model_config(self.lead.config()));
+        // 模式规格接线（历史缺陷修复）：thinking_depth / verification_passes /
+        // reasoning_effort / temperature 此前全是纯展示字段，执行层零消费——即
+        // 「配置了深度但不生效」。此处把 BloomSpec 真正落到轮数计划与请求体：
+        //   · thinking_depth + verification_passes → DeepPlan（打磨轮数 / 验证遍数）
+        //   · reasoning_effort（"max"）            → ThinkingEffort → 请求体 reasoning_effort
+        //   · temperature（MAX 档 0.1）            → 请求体 temperature（此前恒为默认 0.7）
+        let spec = current_bloom_spec();
+        // T3 会话级思考强度：会话持久档位 > 模式规格声明档位。
+        // 会话档位缺失/读盘失败时回落 spec（向后兼容，行为与旧版一致）。
+        let spec_effort =
+            crate::model::thinking::ThinkingEffort::from_spec_str(&spec.reasoning_effort);
+        let effort = crate::session::thinking_prefs::resolve_effort(
+            self.session.as_deref(),
+            spec_effort,
+        );
+        let deep_plan = crate::model::ensemble_deep::DeepPlan::from_mode_spec(
+            spec.thinking_depth,
+            spec.verification_passes,
+        );
+        let temperature = spec.temperature as f32;
+
+        let client = LLMClient::new(LLMConfig::from_model_config(self.lead.config()))
+            .with_thinking(effort)
+            .with_temperature(temperature);
         let captain_model = self.lead.config().model.model_name.clone();
         let copilot_model = LLMConfig::copilot_from_config(self.lead.config())
             .map(|c| c.model)
             .unwrap_or_else(|| captain_model.clone());
         let orch = match LLMConfig::copilot_from_config(self.lead.config()) {
             Some(cop) => {
-                let copilot = LLMClient::new(cop);
+                let copilot = LLMClient::new(cop)
+                    .with_thinking(effort)
+                    .with_temperature(temperature);
                 crate::model::ensemble::BloomOrchestrator::with_copilot(client, copilot)
-                    .with_deep()
+                    .with_deep_plan(deep_plan)
                     .with_model_names(&captain_model, &copilot_model)
             }
             None => crate::model::ensemble::BloomOrchestrator::with_copilot(client.clone(), client)
@@ -1539,24 +2067,9 @@ impl Orchestrator {
         text: &str,
         kind: dag::DagKind,
     ) -> Result<OrchestrationOutcome> {
-        // 宪法前置裁决（与 dispatch 一致：破坏性 / 越权操作须人工放行）
+        // 治理门（破甲）：只审计、不阻断（与 dispatch 同源）。
         let decision = self.evaluate_dispatch(text);
-        if !decision.approved {
-            let ids: Vec<String> = decision
-                .violations
-                .iter()
-                .map(|v| v.rule_id.clone())
-                .collect();
-            self.emit_thinking(&format!(
-                "> 治理门拦截：DAG 编排存在 {} 项宪法违规（{}），需人工放行。",
-                decision.violations.len(),
-                ids.join(", ")
-            ));
-            return Err(anyhow!(
-                "治理门裁决未通过（违反：{}），需人工放行。",
-                ids.join(", ")
-            ));
-        }
+        self.gate_auto_approve(&decision, "DAG 编排");
         self.ensure_ready();
         let (reply, parts, verdict) = self.run_team_dag(text, kind).await?;
         self.finish_dispatch(
@@ -1635,11 +2148,13 @@ impl Orchestrator {
                     "反思门禁未通过",
                     (Utc::now().timestamp_millis() - t0) as u64,
                 ));
-                return Err(anyhow!(
-                    "{} 反思门禁未通过（失败阶段：{}），未交付。",
-                    REFLECT_GATE_MARKER,
-                    reflection.failed_stages.join("、")
-                ));
+                return Err(anyhow::Error::new(crate::errors::StepError::reflect_gate(
+                    format!(
+                        "{} 反思门禁未通过（失败阶段：{}），未交付。",
+                        REFLECT_GATE_MARKER,
+                        reflection.failed_stages.join("、")
+                    ),
+                )));
             }
             self.emit_thinking("> 反思门禁通过：各阶段产出自洽，进入综合交付。");
             Some(reflection)
@@ -1660,6 +2175,7 @@ impl Orchestrator {
                     needs_llm: false,
                     strategy: AgentMode::ExpertTeam,
                     subtasks: vec![],
+                    contract: None,
                     rationale: "DAG 分层编排：调研/规划/实现/审校依赖链".to_string(),
                 },
             )
@@ -1690,24 +2206,9 @@ impl Orchestrator {
     /// 这是「§6 团队 spawn 落地收尾」的核心：把 [`crate::agent::team::Team`] 这一真实执行体
     /// 暴露为用户可直接触发的表面，区别于 DAG 分层版 `subagent team`（`dispatch_team_dag`）。
     pub async fn dispatch_team(&mut self, goal: &str) -> Result<OrchestrationOutcome> {
-        // 1) 治理门前置裁决（与 dispatch / dispatch_team_dag 一致：破坏性 / 越权须人工放行）
+        // 1) 治理门（破甲）：只审计、不阻断（与 dispatch / dispatch_team_dag 同源）
         let decision = self.evaluate_dispatch(goal);
-        if !decision.approved {
-            let ids: Vec<String> = decision
-                .violations
-                .iter()
-                .map(|v| v.rule_id.clone())
-                .collect();
-            self.emit_thinking(&format!(
-                "> 治理门拦截：专家团队存在 {} 项宪法违规（{}），需人工放行。",
-                decision.violations.len(),
-                ids.join(", ")
-            ));
-            return Err(anyhow!(
-                "治理门裁决未通过（违反：{}），需人工放行。专家团队编排被宪法拦截，不得静默执行。",
-                ids.join(", ")
-            ));
-        }
+        self.gate_auto_approve(&decision, "专家团队");
         self.ensure_ready();
 
         // 2) 复用自动角色检测（与 dispatch ExpertTeam 分支同源），强制团队形态
@@ -1787,24 +2288,16 @@ impl Orchestrator {
         artifacts: &[&str],
         duration: Option<f64>,
     ) -> CompletionVerdict {
-        let criteria = self.completion_gate.extract_claimed_artifacts(reply);
-        let verification = if criteria.is_empty() {
-            None
-        } else {
-            Some(self.completion_gate.verify_criteria(
-                &criteria,
-                &self.workspace,
-                &self.completion_shell,
-            ))
-        };
-        self.completion_gate.check_completion(CompletionClaim {
-            task_description: text,
-            execution_result: reply,
+        // 单一事实源：委托给 CompletionGate::evaluate（计划路径 runner 亦复用同一实现，
+        // 杜绝「网关路径验产物、计划路径不验」的两套逻辑漂移）。
+        self.completion_gate.evaluate(
+            text,
+            reply,
             artifacts,
-            verification,
-            verification_attempted: !criteria.is_empty(),
-            execution_duration: duration,
-        })
+            &self.workspace,
+            &self.completion_shell,
+            duration,
+        )
     }
 
     /// 收尾：跑完成门禁，若拦截则 emit 提示，并返回最终编排结果。
@@ -1832,6 +2325,8 @@ impl Orchestrator {
             analysis,
             completion_verdict: verdict,
             reflect_verdict,
+            llm_call_count: 0,
+            total_elapsed_ms: 0,
         })
     }
 
@@ -1862,17 +2357,33 @@ impl Orchestrator {
     // ===== 自动决策核心 =====
 
     /// 规则引擎：根据意图 + 关键词信号，得出编排形态与子任务分解。
+    ///
+    /// `contract` 为预先检测出的交付物契约（`analyze` 传入，避免重复扫描）：
+    /// **命中即优先返回交付流水线**（置于既有 strategy 判定之前，否则复合句会被判为
+    /// `Solo`/`subtasks=[]` 而无法分解）。
     fn plan(
         &self,
         text: &str,
         clf_intent: ClassifierIntent,
+        contract: Option<&deliverable::DeliverableContract>,
     ) -> (AgentMode, Vec<SubtaskSpec>, String) {
+        if let Some(c) = contract {
+            let specs = deliverable::contract_to_specs(c);
+            let rationale = format!(
+                "检测到 {} 个交付物，采用交付流水线：{}",
+                c.deliverables.len(),
+                c.rationale
+            );
+            // 契约已自带依赖 DAG，**不**再走 assign_dependencies（后者按角色关键词重算，
+            // 会把「检索→HTML→PPT」的依赖边抹掉）。
+            return (AgentMode::Pipeline, specs, rationale);
+        }
         let roles = detect_roles(text);
         let role_count = roles.len();
         let adversarial = adversarial_signal(&text.to_lowercase());
         let fanout = fanout_signal(text);
 
-        let strategy = if fanout {
+        let analyzed = if fanout {
             AgentMode::Cluster
         } else if role_count >= 2 {
             AgentMode::ExpertTeam
@@ -1881,12 +2392,17 @@ impl Orchestrator {
         } else {
             AgentMode::Solo
         };
+        // 模式路由偏置（MSC-2）：运行时模式抬升形态下界，使模式切换真实改变编排形态。
+        // Agent（Direct）档保持分析结果不变，向后兼容既有行为与测试。
+        let strategy = crate::gateway::mode_route::mode_route(self.mode).bias_strategy(analyzed);
 
         let mut subtasks = match strategy {
             AgentMode::Solo => vec![],
             AgentMode::DualLeader => dual_leader_specs(),
             AgentMode::ExpertTeam => team_specs(roles.clone()),
             AgentMode::Cluster => cluster_specs(text),
+            // Pipeline 已在函数开头 return，此分支不可达；仅为 match 穷尽性保留。
+            AgentMode::Pipeline => vec![],
         };
 
         let rationale = match strategy {
@@ -1894,6 +2410,7 @@ impl Orchestrator {
             AgentMode::DualLeader => "检测到「规划/执行」或「设计/评审」双侧张力，采用 MAX 双带队：规划者先行、执行者据计划落地".to_string(),
             AgentMode::ExpertTeam => format!("检测到 {} 个专精角色需求，采用专家团队并行：{}", role_count, role_labels(&roles)),
             AgentMode::Cluster => "检测到批量 / 枚举型 fan-out 任务，采用集群并行分发".to_string(),
+            AgentMode::Pipeline => "检测到复合交付物，采用交付流水线".to_string(),
         };
 
         // 离线、确定性地检测角色间依赖，填充各 subtask 的 deps（无依赖时自动并行）。
@@ -2393,28 +2910,44 @@ fn role_labels(roles: &[RoleKey]) -> String {
 /// 目的是在自动执行前拦住破坏性 / 越权动作，符合宪法 C1（破坏性须批准）/
 /// C2（密钥仅限用户侧）/ C3（工具须登记）。
 ///
+/// ⚠️ 2026-10-13 修正（「降低门槛」）：
+/// - **词表收窄**：旧表含「删除 / delete / 覆盖 / overwrite / force / 强制 /
+///   truncate / drop / format」等宽泛词，正常开发需求（「删除旧实现」「覆盖写入
+///   配置文件」「强制刷新」）会被整体判为破坏性 → 每次都撞 C1。现只保留**真正
+///   不可逆**的形态（`rm -rf`、`del /s`、`format c:`、`git reset --hard`、
+///   `drop table`、`shutdown`、`mkfs` 等）。
+/// - **Cluster 不再默认破坏性**：旧实现把「蜂群 / 批量并行」无条件标为破坏性
+///   `shell_exec`，导致「极致·执行」**永远**被治理门拦下、根本跑不起来。并行
+///   本身不是破坏性操作 —— 是否破坏由真实工具调用时的沙箱与护栏判定。
+///
 /// 自动编排身份为 `orchestrator`（非 `user`），因此推断出的破坏性动作一律
-/// `approved=false` —— 即自动编排默认**不能**静默执行破坏性操作。
+/// `approved=false`；但调用方（`dispatch*`）已改为**自动放行 + 审计**，
+/// 见 [`Orchestrator::gate_auto_approve`]。
 fn infer_plan_actions(analysis: &TaskAnalysis, text: &str) -> Vec<ActionIntent> {
     let lower = text.to_lowercase();
+    // 仅「不可逆」形态才判破坏性（收窄后不再误伤普通开发措辞）。
     let destructive_sig = [
         "rm -rf",
+        "rm -r ",
         "rm /",
-        "del /",
-        "删除",
-        "delete",
-        "覆盖",
-        "overwrite",
-        "force",
-        "强制",
-        "reset --hard",
-        "drop ",
-        "truncate",
-        "格式化",
-        "format",
+        "del /s",
+        "del /f",
+        "rd /s",
+        "format c:",
+        "format /",
+        "mkfs",
+        "diskpart",
+        "reg delete",
+        "drop table",
+        "drop database",
+        "truncate table",
+        "git reset --hard",
+        "git clean -fd",
         "shutdown",
-        "重启",
         "reboot",
+        "清空磁盘",
+        "格式化磁盘",
+        "彻底删除",
     ];
     let secret_sig = [
         "api key",
@@ -2425,7 +2958,6 @@ fn infer_plan_actions(analysis: &TaskAnalysis, text: &str) -> Vec<ActionIntent> 
         "password",
         "凭据",
         "credential",
-        "环境变量",
     ];
     let destructive = destructive_sig.iter().any(|s| lower.contains(s));
     let secret = secret_sig.iter().any(|s| lower.contains(s));
@@ -2452,9 +2984,10 @@ fn infer_plan_actions(analysis: &TaskAnalysis, text: &str) -> Vec<ActionIntent> 
         actions.push(a);
     }
 
-    // 集群 / fan-out 隐含批量处理（默认破坏性，需人工放行）
+    // 集群 / fan-out：并行处理**本身不是破坏性操作**（旧实现误标为破坏性，
+    // 使「极致·执行」恒被治理门拦下）。真实破坏性由运行期沙箱 / 工具护栏判定。
     if matches!(analysis.strategy, AgentMode::Cluster) {
-        actions.push(ActionIntent::new("shell_exec", "批量并行处理").destructive());
+        actions.push(ActionIntent::new("shell_exec", "批量并行处理"));
     }
     // Solo 默认读/处理（破坏性信号下同样标记为破坏性）
     if matches!(analysis.strategy, AgentMode::Solo) {
@@ -2480,6 +3013,7 @@ fn map_router_intent(clf: ClassifierIntent) -> IntentType {
         ClassifierIntent::Explain
         | ClassifierIntent::Refactor
         | ClassifierIntent::Fix
+        | ClassifierIntent::Build
         | ClassifierIntent::Test => IntentType::Code,
         ClassifierIntent::Doc | ClassifierIntent::Commit => IntentType::Summarization,
         ClassifierIntent::Search | ClassifierIntent::Question => IntentType::Chat,
@@ -2489,9 +3023,11 @@ fn map_router_intent(clf: ClassifierIntent) -> IntentType {
 
 fn map_router_complexity(clf: ClassifierIntent, text: &str) -> Complexity {
     let base = match clf {
-        ClassifierIntent::Refactor | ClassifierIntent::Fix | ClassifierIntent::Test => {
-            Complexity::Medium
-        }
+        // 与 agent::runtime::map_complexity 保持一致：创建型意图按 Medium 起算。
+        ClassifierIntent::Refactor
+        | ClassifierIntent::Fix
+        | ClassifierIntent::Build
+        | ClassifierIntent::Test => Complexity::Medium,
         _ => Complexity::Simple,
     };
     // 长输入或含多角色关键词 → 升一档
@@ -2559,6 +3095,24 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     #[test]
+    fn test_current_bloom_spec_is_mode_aware() {
+        let _g = crate::mode::test_runtime_mode_guard();
+        let prev = crate::mode::runtime_mode();
+        crate::mode::set_runtime_mode(ModeKind::OmniTranscend);
+        let omni = current_bloom_spec();
+        assert_eq!(omni.max_swarm_shards, 13, "OmniTranscend 蜂群上限 13");
+        assert_eq!(omni.max_sub_experts, 6);
+        assert_eq!(omni.thinking_depth, 4, "S3 深想 4 阶段");
+        assert_eq!(omni.verification_passes, 4, "4 遍验证");
+        assert!(omni.anchoring.promote_after_first_response);
+        assert_eq!(omni.anchoring.minimal_tools.len(), 2);
+        crate::mode::set_runtime_mode(ModeKind::Bloom);
+        let bloom = current_bloom_spec();
+        assert_eq!(bloom.max_swarm_shards, 11, "Bloom 蜂群上限 11");
+        crate::mode::set_runtime_mode(prev);
+    }
+
+    #[test]
     fn vision_model_keyword_heuristics() {
         assert!(is_vision_model("gpt-4o"));
         assert!(is_vision_model("Qwen-VL-Max"));
@@ -2590,6 +3144,46 @@ mod tests {
         let cap = vision_from_config(&cfg);
         // transport 已注入：resolver 声明 capable；网络失败 → locate 返回 None（不 panic）
         assert!(cap.locate(&png(), "按钮").await.is_none());
+    }
+
+    /// C1 可观测性回归：`OrchestrationOutcome` 新增遥测字段（`llm_call_count` /
+    /// `total_elapsed_ms`）。`finish_dispatch` 是唯一集中构造点，须默认填充 0，
+    /// 且结构体仍可 Debug/Clone，无破坏既有构造（chat.rs 用 `..outcome` 更新语法）。
+    #[test]
+    fn orchestration_outcome_exposes_telemetry_fields_and_defaults_zero() {
+        let config = Config::default();
+        let orch = Orchestrator::new(config);
+        let analysis = orch.analyze("帮我做一个完善的FPS第一人称射击游戏");
+        // 走 finish_dispatch 构造：这是集中入口，必须默认遥测字段为 0。
+        let finished = orch
+            .finish_dispatch(
+                "任务描述",
+                analysis.clone(),
+                analysis.strategy,
+                "结论".to_string(),
+                vec![],
+                None,
+            )
+            .expect("finish_dispatch 应成功");
+        assert_eq!(finished.llm_call_count, 0, "默认 llm_call_count 应为 0");
+        assert_eq!(finished.total_elapsed_ms, 0, "默认 total_elapsed_ms 应为 0");
+        // Debug/Clone 契约保持（auto-derive 兼容，不破坏既有调用方）。
+        let cloned = finished.clone();
+        let _dbg = format!("{cloned:?}");
+        assert_eq!(cloned.llm_call_count, 0);
+        // 手工构造携带真实值：字段用于聚合回传（run_autonomous 收尾处填真实数）。
+        let outcome = OrchestrationOutcome {
+            strategy: analysis.strategy,
+            lead_reply: "回复".to_string(),
+            subagent_summaries: vec![],
+            analysis,
+            completion_verdict: crate::governance::completion_gate::CompletionVerdict::allowed(),
+            reflect_verdict: None,
+            llm_call_count: 7,
+            total_elapsed_ms: 12345,
+        };
+        assert_eq!(outcome.llm_call_count, 7);
+        assert_eq!(outcome.total_elapsed_ms, 12345);
     }
 
     fn png() -> Vec<u8> {
@@ -2643,6 +3237,44 @@ mod tests {
 
     fn cfg() -> Config {
         Config::default()
+    }
+
+    /// 缺陷回归（P0-1b）：编排器必须把**工具注册表实际使用的根**同步给 lead 运行时。
+    ///
+    /// 否则模型根本不知道文件该写去哪，只能猜相对路径 → 1ms 失败 → 死循环重试。
+    /// `set_workspace_for_test` 只改编排器自己的字段，不影响 lead——所以这里显式
+    /// 断言两条路径：`new_with_workspace` 构造时的注入，与 `Orchestrator::new` 的
+    /// 默认根注入（后者同样必须可达，网关未绑定时走它）。
+    #[test]
+    fn test_lead_workspace_is_wired_from_the_tool_root() {
+        let dir = std::env::temp_dir().join(format!("mar_lead_ws_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let o = Orchestrator::new_with_workspace(cfg(), dir.clone());
+        let ws = o
+            .lead_workspace()
+            .expect("With_workspace 构造必须注入工作区到 lead");
+        assert_eq!(ws.root, dir, "lead 的根必须与工具注册表的根一致");
+        assert!(ws.is_bound(), "目录存在时必须视为已绑定");
+        let g = o.lead_workspace_guidance().unwrap_or_default();
+        assert!(
+            g.contains(&dir.display().to_string()),
+            "模型必须看到根目录：{g}"
+        );
+        assert!(g.contains("已绑定"), "必须说明绑定状态：{g}");
+
+        // 未绑定路径（网关 project_path = null 走这里）：同样必须可达、且不谎称绑定。
+        let o2 = Orchestrator::new(cfg());
+        let ws2 = o2
+            .lead_workspace()
+            .expect("默认工作区也必须注入到 lead（未绑定是常态，不是异常）");
+        assert!(!ws2.is_bound(), "未绑定不得谎称已绑定");
+        assert!(
+            ws2.root.is_dir(),
+            "默认根必须真实存在，否则工具全部 1ms 失败"
+        );
+        let g2 = o2.lead_workspace_guidance().unwrap_or_default();
+        assert!(g2.contains("不要猜测"), "未绑定时必须给出可执行动作：{g2}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2717,6 +3349,39 @@ mod tests {
     }
 
     #[test]
+    fn test_analyze_compound_task_routes_to_pipeline() {
+        // P0-1 验收①：基准句 → 交付流水线，≥3 步，且 d2→d1、d3→d2 依赖链成立。
+        let o = Orchestrator::new(cfg());
+        let a = o.analyze("搜索今天的AI新闻，并整理成html网页再成PPT给我看");
+        assert_eq!(
+            a.strategy,
+            AgentMode::Pipeline,
+            "复合句应走交付流水线（Delivery Pipeline）"
+        );
+        assert!(
+            a.subtasks.len() >= 3,
+            "复合句至少 3 个交付物，实际 {}",
+            a.subtasks.len()
+        );
+        let c = a.contract.as_ref().expect("Pipeline 应携带交付物契约");
+        assert_eq!(c.deliverables.len(), 3);
+        assert_eq!(c.deliverables[1].depends_on, vec!["d1".to_string()]);
+        assert_eq!(c.deliverables[2].depends_on, vec!["d2".to_string()]);
+    }
+
+    #[test]
+    fn test_analyze_single_intent_stays_solo_guard() {
+        // P0-1 验收②（反向护栏）：单产物/纯检索不得被过度分解为流水线。
+        let o = Orchestrator::new(cfg());
+        for text in ["搜索这个文件", "写一个网页"] {
+            let a = o.analyze(text);
+            assert_eq!(a.strategy, AgentMode::Solo, "{text} 应保持 Solo");
+            assert!(a.subtasks.is_empty(), "{text} 不应分解出子任务");
+            assert!(a.contract.is_none(), "{text} 不应携带交付物契约");
+        }
+    }
+
+    #[test]
     fn test_analyze_offline_safe_no_llm() {
         // analyze 不得触发任何网络/LLM 调用：纯规则，离线必过。
         let o = Orchestrator::new(cfg());
@@ -2729,6 +3394,43 @@ mod tests {
         for inp in inputs {
             let a = o.analyze(inp);
             assert!(!a.rationale.is_empty(), "自动决策应携带非空理由");
+        }
+    }
+
+    #[test]
+    fn test_mode_route_changes_analyzed_strategy() {
+        // MSC-2 验收③：**同一基准输入**下，五档模式的编排形态不能全部相同（≥4 档不同）。
+        // 这是「切换与不切换模式路由没什么区别」的核心回归护栏。
+        let baseline = "分析这个项目的架构并提出改进建议";
+        let mut labels = std::collections::BTreeSet::new();
+        for kind in crate::mode::ModeKind::ALL {
+            let mut o = Orchestrator::new(cfg());
+            o.set_mode(*kind);
+            let a = o.analyze(baseline);
+            labels.insert(a.strategy.label());
+        }
+        assert!(
+            labels.len() >= 4,
+            "五档模式应产生 ≥4 种不同编排形态，实际 {} 种：{:?}",
+            labels.len(),
+            labels
+        );
+    }
+
+    #[test]
+    fn test_mode_route_plan_first_and_direct_differ_from_pipeline_guard() {
+        // 模式偏置不得吞掉交付流水线：复合任务在任何模式下都应保持 Pipeline。
+        let compound = "搜索今天的AI新闻，并整理成html网页再成PPT给我看";
+        for kind in crate::mode::ModeKind::ALL {
+            let mut o = Orchestrator::new(cfg());
+            o.set_mode(*kind);
+            let a = o.analyze(compound);
+            assert_eq!(
+                a.strategy,
+                AgentMode::Pipeline,
+                "模式 {:?} 下复合任务仍应走交付流水线",
+                kind
+            );
         }
     }
 
@@ -3048,12 +3750,21 @@ mod tests {
 
     #[test]
     fn test_evaluate_dispatch_destructive_blocked() {
-        // 自动编排的破坏性操作必须被宪法 C1 拦截并要求人工放行
+        // 真正不可逆的破坏性操作仍会被宪法 C1 标为违规（`approved=false`）。
+        // 注意：这只是**评估**结论；调用方已改为自动放行 + 审计（见 gate_auto_approve）。
         let o = Orchestrator::new(cfg());
-        let d = o.evaluate_dispatch("删除 /tmp 下所有文件并重建项目");
-        assert!(!d.approved, "自动编排的破坏性操作须被宪法 C1 拦截");
-        assert!(d.requires_human_gate, "破坏性违规需人工放行");
+        let d = o.evaluate_dispatch("执行 rm -rf /tmp/project 然后重建");
+        assert!(!d.approved, "不可逆破坏性操作须被宪法 C1 标记");
+        assert!(d.requires_human_gate, "破坏性违规标记为需人工门");
         assert!(d.violations.iter().any(|v| v.rule_id == "C1"));
+    }
+
+    #[test]
+    fn test_evaluate_dispatch_benign_delete_wording_passes() {
+        // 收窄后：日常开发措辞（「删除旧实现」「覆盖写入」）不再被误判为破坏性。
+        let o = Orchestrator::new(cfg());
+        let d = o.evaluate_dispatch("删除旧实现并覆盖写入新的配置文件");
+        assert!(d.approved, "日常删除/覆盖措辞不应被判为破坏性");
     }
 
     #[test]
@@ -3138,6 +3849,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn test_pipeline_required_artifact_gate() {
+        // P1-2 验收③：契约声明的必需产物落盘且非空 → 放行；删除产物 → 必须 not allowed。
+        let mut o = Orchestrator::new(cfg());
+        let dir = std::env::temp_dir().join(format!("bloom_req_art_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        o.set_workspace_for_test(dir.clone());
+        let artifact = "output.html";
+        let path = dir.join(artifact);
+        std::fs::write(&path, "<html>ok</html>").unwrap();
+
+        let reply = "已生成交付物，详见 output.html 与 presentation.pptx。";
+        let ok = o.evaluate_completion("检索并生成网页", reply, &[artifact], None);
+        assert!(
+            ok.allowed,
+            "产物已落盘且非空应放行，实际 warnings: {:?}",
+            ok.warnings
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        let bad = o.evaluate_completion("检索并生成网页", reply, &[artifact], None);
+        assert!(
+            !bad.allowed,
+            "删除产物后必须 not allowed（终态 partial/fail）"
+        );
+        assert!(
+            bad.blocked_by
+                .contains(&crate::governance::completion_gate::BlockReason::MissingArtifact),
+            "应以 MissingArtifact 阻断，实际 {:?}",
+            bad.blocked_by
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ===== Bloom 模式路由：dispatch 必须走 BloomOrchestrator 并行路径 =====
 
     /// 离线配置：指向本地保留端口（连接立即被拒），保证测试不触网。
@@ -3150,6 +3896,7 @@ mod tests {
                 api_key: "offline-test".to_string(),
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
+                timeout_secs: 0,
             },
             ..Default::default()
         }
@@ -3306,52 +4053,184 @@ mod tests {
 
     #[test]
     fn test_bloom_anchor_tools_narrows_and_falls_back() {
-        use crate::model::llm::ToolDef;
         use crate::mode::anchoring::AnchorState;
+        use crate::model::llm::ToolDef;
         use serde_json::Value;
 
         let tools = vec![
-            ToolDef { name: "code".into(), description: "".into(), parameters: Value::Null },
-            ToolDef { name: "web_search".into(), description: "".into(), parameters: Value::Null },
-            ToolDef { name: "bash_persistent".into(), description: "".into(), parameters: Value::Null },
-            ToolDef { name: "str_replace_editor".into(), description: "".into(), parameters: Value::Null },
+            ToolDef {
+                name: "code_exec".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
+            ToolDef {
+                name: "web_search".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
+            ToolDef {
+                name: "shell_exec".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
+            ToolDef {
+                name: "str_replace_editor".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
         ];
 
-        // Anchored（默认）：仅暴露 Minimal 双工具 bash_persistent / str_replace_editor
+        // Anchored（默认）：仅暴露 Minimal 双工具 shell_exec / str_replace_editor
         let mut a = AnchorState::new();
         let anchored = super::bloom_anchor_tools(&a, &tools);
         let names: Vec<&str> = anchored.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["bash_persistent", "str_replace_editor"]);
+        assert_eq!(names, vec!["shell_exec", "str_replace_editor"]);
 
-        // PTC：仅暴露 PTC（单调包含 Minimal ∪ {ptc_tool} = 3 件，ptc_tool 为 code）
+        // PTC：单调包含 Minimal ∪ {ptc_tool} = 3 件（ptc_tool 为 code_exec）
         let _ = a.note_no_tool_round(); // Anchored → Ptc 晋升（单调，Minimal 保留 + PTC 追加）
         let promoted = super::bloom_anchor_tools(&a, &tools);
         assert_eq!(promoted.len(), 3);
-        assert!(promoted.iter().any(|t| t.name == "code"));
-        assert!(promoted
-            .iter()
-            .any(|t| t.name == "bash_persistent"));
-        assert!(promoted
-            .iter()
-            .any(|t| t.name == "str_replace_editor"));
+        assert!(promoted.iter().any(|t| t.name == "code_exec"));
+        assert!(promoted.iter().any(|t| t.name == "shell_exec"));
+        assert!(promoted.iter().any(|t| t.name == "str_replace_editor"));
 
-        // Full：直接 force promote 到 Full（仍走 active_tools：Minimal ∪ PTC）
+        // Full：原样返回全工具面（收窄只服务于锚定冷启动；此前误留在 PTC 超集）
         a.promote();
         let full = super::bloom_anchor_tools(&a, &tools);
-        assert_eq!(full.len(), 3, "Full 阶段在此仍保持 PTC 超集，完整面由调用方追加");
+        assert_eq!(
+            full.len(),
+            tools.len(),
+            "Full 阶段必须是**全工具面**，实际 {full:?}"
+        );
 
         // 锚定态但 Minimal 工具未注册：安全回退到完整工具集，绝不致空
         let no_minimal = vec![
-            ToolDef { name: "code".into(), description: "".into(), parameters: Value::Null },
-            ToolDef { name: "web_search".into(), description: "".into(), parameters: Value::Null },
+            ToolDef {
+                name: "code_exec".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
+            ToolDef {
+                name: "web_search".into(),
+                description: "".into(),
+                parameters: Value::Null,
+            },
         ];
         let b = AnchorState::new();
         let fallback = super::bloom_anchor_tools(&b, &no_minimal);
-        assert_eq!(fallback.len(), no_minimal.len(), "无 Minimal 工具时应回退到全部");
+        assert_eq!(
+            fallback.len(),
+            no_minimal.len(),
+            "无 Minimal 工具时应回退到全部"
+        );
 
         // 空输入：回退仍为空（无可回退）
         let empty: Vec<ToolDef> = vec![];
         assert!(super::bloom_anchor_tools(&a, &empty).is_empty());
+    }
+
+    /// **别名必须指向真实注册名**（用注册表驱动，不接受伪造 ToolDef）。
+    ///
+    /// 锚定收窄以真实注册表为数据源：别名写错时会静默塌成「只剩 1 件工具」，
+    /// 而用伪造名（`bash_persistent` / `code`）的单测永远发现不了。
+    /// 历史缺陷：两个别名都不存在（真名是 `shell_exec` / `code_exec`），
+    /// 整轮会话模型手上只有 `str_replace_editor` —— 联网检索与目录探索全部不可达，
+    /// 这正是「联网检索这一步没能真正执行」的根因。
+    #[test]
+    fn test_default_tool_schema_surface_stays_under_quarter_context_budget() {
+        let orchestrator = Orchestrator::new(offline_cfg());
+        let all_tools = orchestrator.tool_defs();
+        let disclosure = crate::agent::tool_schema::ToolDisclosure::new(
+            &all_tools,
+            "解释一下这个项目的用途",
+            ModeKind::Agent,
+        );
+        let active = disclosure.active_tools();
+        let metrics = disclosure.metrics();
+        assert!(all_tools.len() > 12, "该验收需覆盖真实宽工具目录");
+        assert!(
+            active.len() < all_tools.len(),
+            "首轮应按需暴露 schema：{} / {}",
+            active.len(),
+            all_tools.len()
+        );
+        assert!(
+            metrics.initial_estimated_tokens <= metrics.budget_tokens,
+            "初始 schema {} tokens 超过工具上下文四分之一预算 {}",
+            metrics.initial_estimated_tokens,
+            metrics.budget_tokens
+        );
+        assert!(
+            metrics.initial_estimated_tokens < metrics.full_estimated_tokens,
+            "schema 估算必须低于全量面：{} vs {}",
+            metrics.initial_estimated_tokens,
+            metrics.full_estimated_tokens
+        );
+    }
+
+    #[test]
+    fn test_bloom_anchor_face_uses_real_registry_names() {
+        use crate::mode::anchoring::AnchorState;
+
+        let o = Orchestrator::new(offline_cfg());
+        let tools = o.tool_defs();
+        for required in [
+            "shell_exec",
+            "code_exec",
+            "str_replace_editor",
+            "web_search",
+        ] {
+            assert!(
+                tools.iter().any(|t| t.name == required),
+                "注册表应含真实工具 {required}"
+            );
+        }
+
+        // 锚定期：真实双工具（且不得是幽灵名）
+        let a = AnchorState::new();
+        let mut names: Vec<String> = super::bloom_anchor_tools(&a, &tools)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["shell_exec", "str_replace_editor"],
+            "锚定期必须收窄为真实存在的 2 件最小工具（当前 {names:?}）"
+        );
+
+        // PTC：追加真实 PTC 工具
+        let mut b = AnchorState::new();
+        let _ = b.note_no_tool_round();
+        let pnames: Vec<String> = super::bloom_anchor_tools(&b, &tools)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert!(
+            pnames.contains(&"code_exec".to_string()),
+            "PTC 晋升必须追加真实 code_exec（当前 {pnames:?}）"
+        );
+    }
+
+    /// 能力缺口触发的扩展：检索类任务在锚定面缺网络工具时**必须**扩展到全工具面，
+    /// 否则本步只能退化为「模型自述无法联网」。
+    #[test]
+    fn test_anchor_expands_to_full_when_task_needs_network() {
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_mode(ModeKind::Bloom);
+        // 中文检索任务：前缀门控（"we"）不命中 → 若没有能力缺口触发，将一直是 Anchored
+        let anchor = o.anchor_for_turn("搜索今天的 AI 新闻，并整理成 html 网页");
+        assert!(
+            anchor.is_full(),
+            "检索类任务必须立即拿到全工具面，实际阶段 {:?}",
+            anchor.stage()
+        );
+        // 全工具面确实含网络工具
+        let face = super::bloom_anchor_tools(&anchor, &o.tool_defs());
+        assert!(
+            face.iter().any(|t| t.name == "web_search"),
+            "扩展后必须能看见 web_search"
+        );
     }
 
     #[test]
@@ -3380,10 +4259,13 @@ mod tests {
         let mut a = AnchorState::new();
         a.observe_block("we proceed");
         assert!(a.is_promoted());
+        let before = a.stage();
         o.set_anchor(Some(a));
         let t = o.anchor_for_turn("whatever");
         assert!(t.is_promoted(), "会话锚定态应保持晋升（跨轮不重锚）");
-        assert!(!t.is_full());
+        // 新契约：晋升越过 PTC 宽容轮数（grace=1）后单调扩展到 Full
+        assert!(t.is_full(), "越过 PTC 宽容轮数应扩展到全工具面");
+        assert!(t.stage() >= before, "阶段只增不减（单调扩展红线）");
     }
 
     #[test]
@@ -3595,6 +4477,7 @@ mod tests {
                 api_key: "offline".to_string(),
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
+                timeout_secs: 0,
             },
             ..Default::default()
         };
@@ -3680,6 +4563,192 @@ mod tests {
         );
         let parts = dag::aggregate(&nodes, &outputs);
         assert_eq!(parts.len(), nodes.len(), "aggregate 应按节点数产出 parts");
+    }
+
+    /// A2/Q4 回归护栏：携带交付物义务的步骤（复合任务 / 计划子步骤）不得被
+    /// 「联网检索快路」短路，否则「生成 HTML 网页 / PPT」这类步骤会退化为一次纯检索、
+    /// 产物永不落盘（用户「4 秒已完成却无产物」的更深根因）。
+    #[test]
+    fn pipeline_substep_never_takes_web_search_fastpath() {
+        const BASELINE: &str = "搜索今天的AI新闻，并整理成html网页再成PPT给我看";
+        let o = Orchestrator::new(cfg());
+        // 复刻计划子步骤文本：标题 + 嵌入的原始复合目标（与 `plan::runner` 同构）。
+        let step_task = format!(
+            "【计划子步骤 step-2｜[网页] 生成 HTML 网页（output.html）。】\n\
+             整体目标：{BASELINE}\n\n请完成上述子步骤。"
+        );
+        let a = o.analyze(&step_task);
+        assert_eq!(
+            a.strategy,
+            AgentMode::Pipeline,
+            "交付步骤应判为交付流水线（携带交付物义务）"
+        );
+        assert!(
+            Orchestrator::is_web_search_intent(&step_task),
+            "该步骤文本确实命中检索意图（搜索/新闻/今天）"
+        );
+        assert!(
+            !Orchestrator::allows_web_search_fastpath(
+                &step_task,
+                matches!(a.strategy, AgentMode::Pipeline)
+            ),
+            "携带交付物义务的步骤不得被联网检索快路短路"
+        );
+        // 反向护栏：纯检索（无交付物）仍可走快路，既有能力不被削弱。
+        let pure = "搜索今天的AI新闻";
+        assert!(
+            Orchestrator::allows_web_search_fastpath(
+                pure,
+                matches!(o.analyze(pure).strategy, AgentMode::Pipeline)
+            ),
+            "无交付物的纯检索应保留快路"
+        );
+    }
+
+    // ===== A2/Q4 **调用点**护栏（#1）的测试替身 ==============
+
+    /// 命中即计数的 fake 检索工具。
+    ///
+    /// 注入「只含本工具」的注册表后，内置检索快路**若被采用必然成功且可观测**
+    /// （`hits += 1` 且工具返回非空），从而使「调用点是否被回退」成为可判定命题。
+    struct CountingWebSearch {
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::mcp::registry::ToolExecutor for CountingWebSearch {
+        fn name(&self) -> &str {
+            "web_search"
+        }
+
+        fn description(&self) -> &str {
+            "counting web_search (A2/Q4 test double)"
+        }
+
+        async fn execute(&self, _args: &HashMap<String, String>) -> Result<ToolResult> {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolResult::Success {
+                data: "1. 《示例》AI 新闻标题\n2. 摘要：示例正文".to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({ "type": "object", "properties": { "q": { "type": "string" } } })
+        }
+    }
+
+    /// A2/Q4 **调用点**回归护栏（#1）：驱动真实 `dispatch` → `dispatch_bloom` 快路。
+    ///
+    /// 只单测 helper [`Orchestrator::allows_web_search_fastpath`]（见上一条）挡不住
+    /// 「把 `dispatch_bloom` 里那行判定改回无条件 `Self::is_web_search_intent(text)`」的回退——
+    /// 那正是「4 秒已完成却无产物」的更深根因。本用例**注入 fake 检索工具并真正 dispatch 一条
+    /// 携带交付物义务的计划子步骤**，断言快路未被采用：任何把调用点改回旧行为的改动都会变红。
+    #[tokio::test]
+    async fn dispatch_bloom_deliverable_step_never_shortcircuits_to_web_search() {
+        const BASELINE: &str = "搜索今天的AI新闻，并整理成html网页再成PPT给我看";
+        let step_task = format!(
+            "【计划子步骤 step-3｜[演示文稿] 生成 PPT（presentation.pptx）。】\n\
+             整体目标：{BASELINE}\n\n请完成上述子步骤。"
+        );
+
+        // 前置：该步骤确实命中检索词，且携带交付物义务（Pipeline）——否则护栏无意义。
+        let probe = Orchestrator::new(cfg());
+        assert!(
+            Orchestrator::is_web_search_intent(&step_task),
+            "交付步骤文本确实命中检索意图（搜索/新闻/今天）"
+        );
+        assert_eq!(
+            probe.analyze(&step_task).strategy,
+            AgentMode::Pipeline,
+            "交付步骤应携带交付物义务（Pipeline）"
+        );
+
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bus = Arc::new(EventBus::default());
+        let mut rx = bus.subscribe("**");
+        let mut o = Orchestrator::new(offline_cfg());
+        // 注入只含 fake web_search 的注册表：快路若被采用必然成功 → 可判定。
+        let mut reg = ToolRegistry::new();
+        reg.register_local(Box::new(CountingWebSearch { hits: hits.clone() }));
+        o.tool_registry = Arc::new(reg);
+        o.set_event_bus(bus.clone(), "ws.bloom".to_string());
+        // 用 Bloom（DeepParallel → DualLeader）驱动。注：自 2026-10-13 起治理门已改为
+        // 自动放行（不再硬阻断），OmniTranscend（OmniSpectrum → Cluster）同样可穿过；
+        // 此处保留 Bloom 仅为与既有断言（Bloom 锚定冷启动）一致。
+        o.set_mode(ModeKind::Bloom);
+        o.set_solo_with_tools(true);
+
+        // 驱动真实入口：交付步骤不得被快路吞掉（模型离线 → 常规回路返回 Err/超时均可接受）。
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), o.dispatch(&step_task)).await;
+
+        let thinking = thinking_texts(&drain_bus(&mut rx));
+        // 正控（防空转）：请求必须真的穿过治理门、抵达快路判定点之前的那条叙述——
+        // 否则「未短路」可能只是因为请求被治理门拦下，断言将失去意义。
+        assert!(
+            !thinking.iter().any(|t| t.contains("治理门拦截")),
+            "本用例路径不应被治理门拦下（否则空转）；thinking={thinking:?}"
+        );
+        assert!(
+            thinking
+                .iter()
+                .any(|t| t.contains("Bloom 锚定冷启动") || t.contains("Bloom 并行编排")),
+            "请求应真正进入 dispatch_bloom 主体（抵达快路判定点），否则护栏空转；thinking={thinking:?}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "携带交付物义务的步骤不得触发内置检索快路（fake web_search 被调用 = 调用点回退到旧行为）；thinking={thinking:?}"
+        );
+        assert!(
+            !thinking
+                .iter()
+                .any(|t| t.contains("已直接用内置 web_search/web_research 工具抓取并综合")),
+            "交付步骤不得发射快路短路文案；thinking={thinking:?}"
+        );
+    }
+
+    /// A2/Q4 调用点护栏（#2，反向）：纯检索（无交付物）**仍**走快路，既有能力不被削弱。
+    ///
+    /// 与上一条配对：既防「交付步骤被短路」，也防「为堵回退而把快路整个关掉」。
+    #[tokio::test]
+    async fn dispatch_bloom_pure_search_still_uses_web_search_fastpath() {
+        let pure = "搜索今天的AI新闻";
+        assert_ne!(
+            Orchestrator::new(cfg()).analyze(pure).strategy,
+            AgentMode::Pipeline,
+            "纯检索不应被判为交付流水线（否则快路本就不该走）"
+        );
+
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bus = Arc::new(EventBus::default());
+        let mut rx = bus.subscribe("**");
+        let mut o = Orchestrator::new(offline_cfg());
+        let mut reg = ToolRegistry::new();
+        reg.register_local(Box::new(CountingWebSearch { hits: hits.clone() }));
+        o.tool_registry = Arc::new(reg);
+        o.set_event_bus(bus.clone(), "ws.bloom".to_string());
+        o.set_mode(ModeKind::Bloom);
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), o.dispatch(pure)).await;
+
+        let thinking = thinking_texts(&drain_bus(&mut rx));
+        assert!(
+            !thinking.iter().any(|t| t.contains("治理门拦截")),
+            "纯检索不应被治理门拦下；thinking={thinking:?}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "纯检索应触发内置检索快路恰好一次；thinking={thinking:?}"
+        );
+        assert!(
+            thinking
+                .iter()
+                .any(|t| t.contains("已直接用内置 web_search/web_research 工具抓取并综合")),
+            "纯检索应发射快路短路文案；thinking={thinking:?}"
+        );
     }
 }
 
@@ -3819,15 +4888,32 @@ mod live_llm_tests {
 /// Bloom 锚定冷启动工具收窄（纯函数，离线可测；对齐 dsh-forge 首轮锚定 + 工具收窄）。
 ///
 /// 将完整工具集按锚定态收窄为首轮应暴露的工具：
-/// - `Anchored`  → Minimal 精确双工具（bash_persistent / str_replace_editor）
-/// - `Promoted`  → PTC 单一 run_code（注册名为 `code`）
+/// - `Anchored`  → Minimal 精确双工具（shell_exec / str_replace_editor）
+/// - `Promoted`  → PTC 单一 run_code（注册名为 `code_exec`）
+/// - `Full`      → **原样返回全工具面**（不再收窄）
 ///
 /// 锚定模块的逻辑名与注册名通过 `ALIASES` 映射；若收窄后为空（工具未注册等异常），
 /// 安全回退到完整工具集，绝不致工具全空导致 Bloom 不可用。
+///
+/// **历史缺陷（v0.2.10 修复）**：别名表曾把 `bash_persistent` 与 `run_code` 分别映射到
+/// `bash_persistent` / `code` —— 两个名字在注册表里**都不存在**（真名是 `shell_exec` /
+/// `code_exec`）。收窄后锚定期只剩 `str_replace_editor` 一件工具，模型自述「只有文件编辑器、
+/// 联网检索无法执行」即由此而来；PTC 晋升后同理追加失败，工具面被永久锁死在 1 件。
 pub(crate) fn bloom_anchor_tools(anchor: &AnchorState, tools: &[ToolDef]) -> Vec<ToolDef> {
+    // Full = **全工具面**：收窄只服务于锚定冷启动。
+    //
+    // 历史缺陷：此处曾注释「完整面由调用方追加」，而**没有任何调用方追加**
+    // （dispatch_bloom / dispatch_bloom_auto / swarm 三处都只是直接赋值）
+    // → 即使阶段升到 Full，模型也永远只见 minimal∪{ptc_tool} 的 3 件工具。
+    if anchor.is_full() {
+        return tools.to_vec();
+    }
     const ALIASES: &[(&str, &str)] = &[
-        ("run_code", "code"),
-        ("bash_persistent", "bash_persistent"),
+        // 逻辑名 → 注册名（注册表来源：tools::builtin::register_builtin_tools）
+        ("run_code", "code_exec"),
+        ("code", "code_exec"),
+        ("bash_persistent", "shell_exec"),
+        ("shell_exec", "shell_exec"),
         ("str_replace_editor", "str_replace_editor"),
     ];
     let allowed: Vec<String> = anchor
@@ -3843,7 +4929,7 @@ pub(crate) fn bloom_anchor_tools(anchor: &AnchorState, tools: &[ToolDef]) -> Vec
         .collect();
     let narrowed: Vec<ToolDef> = tools
         .iter()
-        .filter(|d| allowed.iter().any(|a| d.name == *a))
+        .filter(|d| allowed.contains(&d.name))
         .cloned()
         .collect();
     if narrowed.is_empty() {

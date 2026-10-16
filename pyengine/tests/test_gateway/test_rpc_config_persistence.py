@@ -291,8 +291,34 @@ async def test_safe_patch_persists_the_gateway_channel_notice_locale(cfg_path) -
     assert data["control_ui"]["default_locale"] == "zh-Hans"
 
 
-# --- set-heartbeats (third _persist_config caller) -----------------------------
+async def test_concurrent_safe_patches_keep_both_updates(cfg_path) -> None:
+    """两条并行 ``config.patch.safe`` 必须都生效（配置写入不得静默丢更新）。
 
+    用户可见故障形态：两个开关同时保存都提示成功，刷新后只剩一个（另一个回弹）。
+    当前实现靠「读改写窗口内无 ``await``」天然满足该契约（asyncio 只在 await 点
+    调度），本用例把契约钉住 —— 谁在持久化前插入 await 而没有补串行锁，就会在这里
+    或线上以「保存成功却丢更新」的形式暴露。
+    """
+    import asyncio
+
+    _write_small_config(cfg_path)
+    cfg = GatewayConfig.load(str(cfg_path))
+
+    await asyncio.gather(
+        _handle_config_patch_safe({"patches": {"naming.enabled": True}}, _ctx(cfg)),
+        _handle_config_patch_safe(
+            {"patches": {"privacy.disable_network_observability": True}}, _ctx(cfg)
+        ),
+    )
+
+    data = tomllib.loads(cfg_path.read_text())
+    assert data.get("naming", {}).get("enabled") is True
+    assert data.get("privacy", {}).get("disable_network_observability") is True
+    assert cfg.naming.enabled is True
+    assert cfg.privacy.disable_network_observability is True
+
+
+# --- set-heartbeats (third _persist_config caller) -----------------------------
 
 async def test_set_heartbeats_persists_sparsely_and_atomically(cfg_path) -> None:
     import opensquilla.gateway.rpc_system as rpc_system

@@ -7,9 +7,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 BENCH_SCRIPT = PROJECT_ROOT / "scripts" / "bench_tui_replay.py"
 FIXTURE_MODULE = Path(__file__).with_name("replay_fixtures.py")
+
+# The replay benchmark harness is an upstream developer tool that was never
+# migrated into this repository (`pyengine/scripts/` does not exist here), so the
+# two tests that drive a real replay cannot run in a source checkout. Skipping
+# with the concrete missing path is deliberate: the alternative — deleting the
+# tests — would silently drop the coverage intent, and a bare failure would look
+# like a product regression when it is a missing dev tool.
+BENCH_HARNESS_MISSING_REASON = (
+    f"requires the upstream replay benchmark harness at {BENCH_SCRIPT}, which is "
+    "not part of this repository (pyengine/scripts/ is absent). Restore the script "
+    "from upstream to re-enable."
+)
+requires_bench_harness = pytest.mark.skipif(
+    not BENCH_SCRIPT.is_file(), reason=BENCH_HARNESS_MISSING_REASON
+)
 
 
 def _load_module(name: str, path: Path) -> Any:
@@ -74,6 +91,7 @@ def test_dense_history_fixture_matches_baseline_shape() -> None:
     assert text_chars >= 24 * 80 * 30
 
 
+@requires_bench_harness
 def test_opentui_replay_summary_can_be_written(tmp_path) -> None:
     bench = _load_module("bench_tui_replay", BENCH_SCRIPT)
     summary = asyncio.run(bench.run_replay("opentui", "long-stream", repeat=1))
@@ -81,7 +99,7 @@ def test_opentui_replay_summary_can_be_written(tmp_path) -> None:
 
     bench.write_summary(summary, summary_path)
 
-    data = json.loads(summary_path.read_text())
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
     assert data["renderer"] == "opentui"
     assert data["fixture"] == "long-stream"
     assert data["event_count"] == 4011
@@ -102,6 +120,7 @@ def test_opentui_replay_summary_can_be_written(tmp_path) -> None:
     assert data["errors"] == []
 
 
+@requires_bench_harness
 def test_dense_history_replay_uses_bounded_transcript_projection() -> None:
     bench = _load_module("bench_tui_replay", BENCH_SCRIPT)
     summary = asyncio.run(bench.run_replay("opentui", "dense-history", repeat=1))

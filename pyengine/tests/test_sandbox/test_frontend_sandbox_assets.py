@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-WEBUI_SOURCE = ROOT / "opensquilla-webui" / "src"
+PYENGINE_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = PYENGINE_ROOT.parent
+# The upstream console directory ``opensquilla-webui/`` was never migrated into
+# this repository; its console is ``<repo>/webui/``. Every literal asserted below
+# resolves inside that tree, so the contract is intact and only the path was
+# stale (same repair as ``tests/test_gateway/spa_source.py``).
+WEBUI_SOURCE = REPO_ROOT / "webui" / "src"
 WEBUI_LOCALES = WEBUI_SOURCE / "locales"
 SHARED_ROUTES = WEBUI_SOURCE / "router" / "sharedRoutes.ts"
 CHAT_VIEW = WEBUI_SOURCE / "views" / "ChatView.vue"
@@ -73,5 +78,5 @@ def test_removed_trusted_sandbox_term_is_absent_from_all_webui_sources() -> None
     assert source_files
     for path in source_files:
         source = _read(path)
-        assert "Trusted-Sandbox" not in source, path.relative_to(ROOT)
-        assert "可信沙箱" not in source, path.relative_to(ROOT)
+        assert "Trusted-Sandbox" not in source, path.relative_to(REPO_ROOT)
+        assert "可信沙箱" not in source, path.relative_to(REPO_ROOT)

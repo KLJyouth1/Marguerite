@@ -59,6 +59,8 @@ pub struct UsageAccumulated {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
     pub at_ms: u64,
     /// 写入 ledger 是否成功（失败时事件仍发布，用于告警）。
     pub persisted: bool,
@@ -119,17 +121,7 @@ impl UsageQueryService {
         // 内实现一个等价构造：
 
         // 先确保 schema 已创建（幂等）
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session TEXT NOT NULL DEFAULT '',
-                model TEXT NOT NULL,
-                prompt_tokens INTEGER NOT NULL DEFAULT 0,
-                completion_tokens INTEGER NOT NULL DEFAULT 0,
-                total_tokens INTEGER NOT NULL DEFAULT 0,
-                created_ms INTEGER NOT NULL
-            );",
-        )?;
+        super::init_schema(&conn)?;
         // 构造一个假的（但等价的）UsageLedger 不可能——字段私有。
         // 最后策略：我们用一个"内部 ConnectionHolder"枚举，并让 by_day 读取时
         // 二选一。这与要求的"持有 Arc<UsageLedger>"冲突，但测试里需要
@@ -211,12 +203,12 @@ impl UsageQueryService {
             e.tokens_in = e.tokens_in.saturating_add(r.prompt_tokens);
             e.tokens_out = e.tokens_out.saturating_add(r.completion_tokens);
             e.turns = e.turns.saturating_add(1);
-            *e.model_distribution.entry(r.model).or_insert(0) =
-                e.model_distribution
-                    .get(&r.model)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(r.total_tokens);
+            *e.model_distribution.entry(r.model).or_insert(0) = e
+                .model_distribution
+                .get(&r.model)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(r.total_tokens);
             // sessions 后面统一 DISTINCT 重算
             let _ = r.session;
         }
@@ -358,6 +350,7 @@ impl UsageQueryService {
             prompt_tokens: usage.prompt_tokens as u64,
             completion_tokens: usage.completion_tokens as u64,
             total_tokens: usage.total_tokens as u64,
+            cache_read_tokens: usage.cache_read_input_tokens as u64,
             at_ms: now_ms,
             persisted,
         }
@@ -517,11 +510,7 @@ mod tests {
     fn schema_create_ok() {
         let svc = mem_svc();
         let cnt: i64 = with_conn(&svc, |conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM usage_events",
-                [],
-                |r| r.get(0),
-            )
+            conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
         })
         .unwrap();
         assert_eq!(cnt, 0);
@@ -651,7 +640,7 @@ mod tests {
         let today = Utc::now().date_naive();
         insert_on(&svc, today, "s", "m", 10, 5, 1); // total 15
         assert!(!svc.check_today_budget(1000)); // 15 < 1000 → false
-        // 空台账
+                                                // 空台账
         let empty = mem_svc();
         assert!(!empty.check_today_budget(1));
     }
@@ -683,7 +672,7 @@ mod tests {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for i in 0..10_000i64 {
-                let day_offset = (i % 30) as i64;
+                let day_offset = i % 30;
                 let d = start + Duration::days(day_offset);
                 let ms = naive_date_to_ms(d) + (i as u64 % 86_400_000);
                 stmt.execute(rusqlite::params![

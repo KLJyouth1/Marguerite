@@ -50,6 +50,13 @@ pub struct AnchorState {
 /// 四步兜底阈值（默认值；实际运行时优先读 spec.fallback_steps）
 pub const FALLBACK_STEPS: u32 = 4;
 
+/// PTC 阶段宽容轮数：晋升到 PTC 后经过此轮数仍未扩展，即单调扩展到 Full 工具面。
+///
+/// **为什么需要**：`expand_to_full` 此前只有测试调用点，生产路径**没有任何触发**
+/// → 会话永远停在 `minimal_tools ∪ {ptc_tool}`，`web_search` / `read_file` / `list_dir`
+/// 等能力永不可达，「联网检索」类任务结构性不可完成。
+pub const PTC_GRACE_TURNS: u32 = 1;
+
 impl Default for AnchorState {
     fn default() -> Self {
         Self::new()
@@ -238,6 +245,20 @@ impl AnchorState {
         true
     }
 
+    /// 单调扩展的**生产触发点**：已晋升到 PTC 且越过 [`PTC_GRACE_TURNS`] 轮后，
+    /// 扩展到 Bloom 全工具面；返回本次是否发生扩展。
+    ///
+    /// 仍锚定（未晋升）或已 Full 时不动（后者返回 false，表示本次无状态变化）。
+    pub fn maybe_expand_to_full(&mut self) -> bool {
+        if self.stage != AnchorStage::Ptc {
+            return false;
+        }
+        match self.promoted_at_turn {
+            Some(t) if self.turns.saturating_sub(t) >= PTC_GRACE_TURNS => self.expand_to_full(),
+            _ => false,
+        }
+    }
+
     /// 强制晋升（直接进入 Full；保留给测试 / 紧急旁路）。
     /// 注意：正常路径应走 `observe_block` / `note_no_tool_round` / `expand_to_full`。
     pub fn promote(&mut self) {
@@ -287,8 +308,7 @@ fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
     for i in 0..=(h.len() - n.len()) {
         if &h[i..i + n.len()] == n {
             let left_ok = i == 0 || !h[i - 1].is_ascii_alphanumeric();
-            let right_ok = i + n.len() == h.len()
-                || !h[i + n.len()].is_ascii_alphanumeric();
+            let right_ok = i + n.len() == h.len() || !h[i + n.len()].is_ascii_alphanumeric();
             if left_ok && right_ok {
                 return true;
             }
@@ -300,7 +320,6 @@ fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
 fn contains_sequence(haystack: &str, needle: &str) -> bool {
     haystack.contains(needle)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -423,6 +442,38 @@ mod tests {
         assert!(contains(&tools_full, "run_code"));
     }
 
+    /// 生产触发点回归：`maybe_expand_to_full` 必须真的把 PTC 推到 Full，
+    /// 否则 `expand_to_full` 又会退回「只有测试调用点」的死状态（工具面永久锁死）。
+    #[test]
+    fn maybe_expand_to_full_requires_promotion_then_grace() {
+        let mut a = AnchorState::new();
+        a.note_turn();
+        assert!(
+            !a.maybe_expand_to_full(),
+            "仍锚定（未晋升）时不得跳到 Full"
+        );
+        assert_eq!(a.stage(), AnchorStage::Anchored);
+
+        // 晋升发生在轮 1
+        assert!(a.observe_block("we proceed"));
+        assert_eq!(a.stage(), AnchorStage::Ptc);
+        assert!(
+            !a.maybe_expand_to_full(),
+            "晋升当轮仍留在 PTC，宽容 {PTC_GRACE_TURNS} 轮"
+        );
+        assert_eq!(a.stage(), AnchorStage::Ptc);
+
+        a.note_turn(); // 轮 2
+        assert!(a.maybe_expand_to_full(), "越过宽容轮数应扩展到 Full");
+        assert!(a.is_full());
+        assert!(!a.maybe_expand_to_full(), "已是 Full：不再有状态变化");
+        // 单调性：Full 面仍包含 Minimal 与 PTC 工具
+        let full = a.active_tools();
+        assert!(contains(&full, "bash_persistent"));
+        assert!(contains(&full, "str_replace_editor"));
+        assert!(contains(&full, "run_code"));
+    }
+
     #[test]
     fn promoted_is_idempotent() {
         let mut a = AnchorState::new();
@@ -467,16 +518,11 @@ mod tests {
         assert!(spec.message_sources.iter().any(|s| s == "goal"));
         assert_eq!(spec.bootstrap_max_tokens, None);
         assert_eq!(spec.deferred_grace_steps, 1);
-        assert!(
-            spec.deferred_sources
-                .iter()
-                .any(|s| s == "agent-instructions")
-        );
-        assert!(
-            spec.deferred_sources
-                .iter()
-                .any(|s| s == "skill-catalog")
-        );
+        assert!(spec
+            .deferred_sources
+            .iter()
+            .any(|s| s == "agent-instructions"));
+        assert!(spec.deferred_sources.iter().any(|s| s == "skill-catalog"));
         assert!(spec.promote_after_first_response);
     }
 
@@ -490,10 +536,7 @@ mod tests {
             "非白名单自动轮在锚定期应被过滤"
         );
         a.observe_block("we proceed");
-        assert!(
-            a.source_allowed("auto-round"),
-            "晋升后所有来源放行"
-        );
+        assert!(a.source_allowed("auto-round"), "晋升后所有来源放行");
     }
 
     #[test]

@@ -19,6 +19,10 @@ use crate::memory::long_term::LongTermMemory;
 use crate::memory::sensory::SensoryMemory;
 use crate::types::Message;
 
+/// 经验台账总条数上限：超出后按「最旧 + 未验证优先」裁剪，防 DB 无界增长
+/// （每轮会话的每条 ≥20 字符消息都会沉淀为 Pattern）。
+const MAX_EXPERIENCE_ROWS: usize = 1000;
+
 /// 经验类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperienceKind {
@@ -174,8 +178,13 @@ impl ExperienceLedger {
             rusqlite::params![kind.as_str(), title, body, tags_str, signature, vector, now],
         )?;
         let id = db.last_insert_rowid();
-        // 索引已加载时增量追加（复用刚算出的向量）
-        if let Ok(mut idx) = self.index.try_borrow_mut() {
+        // 有界：超出总条数上限则裁剪最旧 / 最不有价值的条目（防 DB 无界增长）。
+        let pruned = self.prune_over_cap()?;
+        if pruned > 0 {
+            // DB 行已删除：进程内索引与库不一致 → 作废，下次 search 全量重建。
+            *self.index.borrow_mut() = None;
+        } else if let Ok(mut idx) = self.index.try_borrow_mut() {
+            // 索引已加载时增量追加（复用刚算出的向量）
             if let Some((_, rows)) = idx.as_mut() {
                 rows.push(ExpIndexRow {
                     id,
@@ -191,6 +200,40 @@ impl ExperienceLedger {
             }
         }
         Ok(id)
+    }
+
+    /// 超出总条数上限时裁剪：优先删除最旧的**未验证**条目，仍超则删最旧条目。
+    ///
+    /// 返回删除条数（0 表示未超限）。已 `mark_validated` 的高价值经验在容量足够时
+    /// 不会被优先删除。调用后由调用方负责作废进程内索引。
+    fn prune_over_cap(&self) -> Result<usize> {
+        let db = self.db()?;
+        let total: i64 = db.query_row("SELECT COUNT(*) FROM experience_ledger", [], |r| r.get(0))?;
+        let total = total.max(0) as usize;
+        if total <= MAX_EXPERIENCE_ROWS {
+            return Ok(0);
+        }
+        let mut excess = total - MAX_EXPERIENCE_ROWS;
+        let mut removed = 0usize;
+        // 第一轮：最旧的未验证条目（least-valuable）。
+        removed += db.execute(
+            "DELETE FROM experience_ledger WHERE id IN (
+                SELECT id FROM experience_ledger WHERE validated = 0
+                ORDER BY created_at ASC, id ASC LIMIT ?1
+             )",
+            rusqlite::params![excess as i64],
+        )?;
+        excess = excess.saturating_sub(removed);
+        if excess > 0 {
+            // 第二轮：仍超限则删最旧条目（含已验证）。
+            removed += db.execute(
+                "DELETE FROM experience_ledger WHERE id IN (
+                    SELECT id FROM experience_ledger ORDER BY created_at ASC, id ASC LIMIT ?1
+                 )",
+                rusqlite::params![excess as i64],
+            )?;
+        }
+        Ok(removed)
     }
 
     /// 语义检索（低于阈值视为无相关）
@@ -614,5 +657,71 @@ mod tests {
         );
         assert!(hits.iter().all(|e| !e.body.contains("旧内容")));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_ledger_bounded_by_cap() {
+        // B3 回归：每轮会话把每条 ≥20 字符消息沉淀为 Pattern，旧实现无上限 → DB 无界增长。
+        let (mut l, p) = temp_ledger("cap");
+        let n = MAX_EXPERIENCE_ROWS + 50;
+        for i in 0..n {
+            l.record(
+                ExperienceKind::Pattern,
+                &format!("p{i}"),
+                &format!("内容 {i} 用于验证台账有界裁剪"),
+                &[],
+                &format!("sig-{i}"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            l.count().unwrap(),
+            MAX_EXPERIENCE_ROWS,
+            "台账条数应被上限约束"
+        );
+        let recent = l.list_recent(5).unwrap();
+        assert!(
+            recent.iter().any(|e| e.title == format!("p{}", n - 1)),
+            "最新条目不得被裁剪"
+        );
+        let all = l.list_recent(MAX_EXPERIENCE_ROWS + 100).unwrap();
+        assert!(
+            all.iter().all(|e| e.title != "p0"),
+            "最旧条目应被裁剪"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_ledger_prune_keeps_validated() {
+        // 裁剪应「最旧 + 未验证优先」：已验证的高价值经验在容量充足时不被删除。
+        let (mut l, p) = temp_ledger("capvalid");
+        let keep = l
+            .record(
+                ExperienceKind::Pitfall,
+                "重要踩坑",
+                "已验证的根因与修法",
+                &[],
+                "sig-keep",
+            )
+            .unwrap();
+        l.mark_validated(keep).unwrap();
+        for i in 0..(MAX_EXPERIENCE_ROWS + 50) {
+            l.record(
+                ExperienceKind::Pattern,
+                &format!("p{i}"),
+                &format!("填充内容 {i}"),
+                &[],
+                &format!("s{i}"),
+            )
+            .unwrap();
+        }
+        let all = l.list_recent(MAX_EXPERIENCE_ROWS + 100).unwrap();
+        assert!(
+            all.iter().any(|e| e.id == keep),
+            "已验证条目不应被裁剪: {} 条",
+            all.len()
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }

@@ -185,7 +185,9 @@ fn render_form(form: &Form, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(form.fields.len());
     for field in &form.fields {
         let line = match field {
-            FormField::Text { label, placeholder, .. } => {
+            FormField::Text {
+                label, placeholder, ..
+            } => {
                 // 格式：> label: [____placeholder__]
                 let ph = if placeholder.is_empty() {
                     "________________".to_string()
@@ -307,7 +309,10 @@ mod tests {
     // -- 4) ProgressBar 0% --
     #[test]
     fn progress_bar_zero_percent() {
-        let w = Widget::ProgressBar(ProgressBar { id: "p".into(), percent: 0.0 });
+        let w = Widget::ProgressBar(ProgressBar {
+            id: "p".into(),
+            percent: 0.0,
+        });
         let buf = render_buf(40, 3, |frame| {
             render_widget(&w, frame, Rect::new(0, 0, 40, 3));
         });
@@ -317,7 +322,10 @@ mod tests {
     // -- 5) ProgressBar 50% --
     #[test]
     fn progress_bar_half_percent() {
-        let w = Widget::ProgressBar(ProgressBar { id: "p".into(), percent: 0.52 });
+        let w = Widget::ProgressBar(ProgressBar {
+            id: "p".into(),
+            percent: 0.52,
+        });
         let buf = render_buf(40, 3, |frame| {
             render_widget(&w, frame, Rect::new(0, 0, 40, 3));
         });
@@ -327,11 +335,17 @@ mod tests {
     // -- 6) ProgressBar 100%（夹紧 1.5）--
     #[test]
     fn progress_bar_100_percent_clamped() {
-        let w = Widget::ProgressBar(ProgressBar { id: "p".into(), percent: 1.5 });
+        let w = Widget::ProgressBar(ProgressBar {
+            id: "p".into(),
+            percent: 1.5,
+        });
         let buf = render_buf(40, 3, |frame| {
             render_widget(&w, frame, Rect::new(0, 0, 40, 3));
         });
-        assert!(buf.contains("100%"), "percent>=1 应夹紧为 100%，实际：{buf}");
+        assert!(
+            buf.contains("100%"),
+            "percent>=1 应夹紧为 100%，实际：{buf}"
+        );
     }
 
     // -- 7) Form field render --
@@ -358,7 +372,10 @@ mod tests {
         assert!(buf.contains("Form: profile"), "应渲染表单标题：{buf}");
         // 中文 placeholder 在 ratatui buffer 中按逐格 symbol 拼接后，每个汉字会与下一格空字符之间
         // 出现自然分隔（全角宽占 2 cell），所以这里拆成三段独立断言避免空格误判。
-        assert!(buf.contains("> Name:"), "文本字段前缀应为 '> Name:'，实际：{buf}");
+        assert!(
+            buf.contains("> Name:"),
+            "文本字段前缀应为 '> Name:'，实际：{buf}"
+        );
         assert!(buf.contains("请"), "placeholder 中的'请' 需出现");
         assert!(buf.contains("姓"), "placeholder 中的'姓' 需出现");
         assert!(buf.contains("City:"), "下拉字段前缀应为 'City:'");

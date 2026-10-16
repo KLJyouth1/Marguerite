@@ -22,7 +22,7 @@ REMOVED_TERMINAL_BRIDGE = "terminal" + "_bridge"
 
 
 def _imports_name_from_module(path: Path, module: str, name: str) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -32,7 +32,7 @@ def _imports_name_from_module(path: Path, module: str, name: str) -> bool:
 
 
 def _imports_from_module(path: Path, module: str) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == module:
             return True
@@ -42,7 +42,7 @@ def _imports_from_module(path: Path, module: str) -> bool:
 
 
 def _imports_module(path: Path, module: str) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(alias.name == module for alias in node.names):
             return True
@@ -52,7 +52,7 @@ def _imports_module(path: Path, module: str) -> bool:
 
 
 def _imports_module_from_package(path: Path, package: str, module_name: str) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.module == package and any(alias.name == module_name for alias in node.names):
@@ -66,7 +66,7 @@ def _imports_module_from_package(path: Path, package: str, module_name: str) -> 
 
 
 def _defined_function_names(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     return {
         node.name
         for node in tree.body
@@ -75,7 +75,7 @@ def _defined_function_names(path: Path) -> set[str]:
 
 
 def _module_aliases(path: Path, module_alias: str) -> dict[str, str]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     aliases: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign):
@@ -166,7 +166,7 @@ def test_chat_cmd_does_not_import_backend_helper_bridges() -> None:
 
 
 def test_chat_cmd_private_compat_surface_is_dynamic_legacy_exports() -> None:
-    tree = ast.parse(CHAT_CMD.read_text())
+    tree = ast.parse(CHAT_CMD.read_text(encoding="utf-8"))
     assigned_names = {
         target.id
         for node in tree.body
@@ -192,7 +192,7 @@ def test_chat_cmd_private_compat_surface_is_dynamic_legacy_exports() -> None:
 
 
 def test_chat_cmd_uses_typed_launch_request_instead_of_private_runner_names() -> None:
-    source = CHAT_CMD.read_text()
+    source = CHAT_CMD.read_text(encoding="utf-8")
 
     assert "_ChatCommandRequest" in source
     assert "_ChatCommandLaunchOverrides" in source

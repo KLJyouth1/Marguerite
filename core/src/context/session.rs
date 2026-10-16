@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::events::{Envelope, EventBus, EventType};
+use crate::context::cache::SummaryCache;
 use crate::model::llm::{LLMClient, LLMConfig, LLMProvider};
 use crate::persistence::config::Config;
 use crate::types::Message;
@@ -31,6 +32,12 @@ pub const COMPACT_RATIO: f64 = 0.85;
 pub const WARN_RATIO: f64 = 0.80;
 /// 压缩后保留的最近轮次（原文 verbatim）
 pub const KEEP_RECENT_TURNS: usize = 8;
+/// 压缩跳过低水位：仅当条目数不多**且**用量占比低于此值时，才判定「无多少可回收」并跳过。
+///
+/// 旧实现只看条目数（`entries.len() <= KEEP_RECENT_TURNS * 2`）→ 少数几条巨大工具输出
+/// （单条几十万 token）也永远不压缩，直到撞上 provider 上下文窗口。改为结合**真实 token
+/// 压力**判断：低占比才是真正的「短/轻」；高占比即使条目很少也必须压缩。
+pub const COMPACT_SKIP_RATIO: f64 = 0.5;
 /// 折叠保留头部字符数
 const SNIP_HEAD: usize = 400;
 /// 折叠保留尾部字符数
@@ -67,6 +74,14 @@ pub struct SessionContext {
     /// 供前端切走再切回时恢复正在生成的消息占位，不丢流式文本）。
     #[serde(default)]
     pub partial_text: Option<String>,
+    /// 非对话文本的 token 开销：工具输出 / 工具 schema / 系统提示等。
+    ///
+    /// 此前 `used_tokens()` 只统计 user/assistant 聊天文本，工具密集的长任务会被
+    /// 严重低估 → `ratio()` 偏低 → 压缩触发过晚 → 撞上 provider 上下文窗口（HTTP 400）。
+    /// 这里**只累计 token 数、不保存原文**，保证落盘有界；`#[serde(default)]` 兼容
+    /// 既有磁盘 JSON（缺该字段时反序列化为 0）。
+    #[serde(default)]
+    pub overhead_tokens: u64,
 }
 
 impl SessionContext {
@@ -83,6 +98,7 @@ impl SessionContext {
             snapshot_count: 0,
             project_path: None,
             partial_text: None,
+            overhead_tokens: 0,
         }
     }
 
@@ -93,9 +109,9 @@ impl SessionContext {
         }
     }
 
-    /// 当前 token 用量
+    /// 当前 token 用量（对话条目 + 非对话开销）
     pub fn used_tokens(&self) -> u64 {
-        self.entries.iter().map(|e| e.tokens).sum()
+        self.entries.iter().map(|e| e.tokens).sum::<u64>() + self.overhead_tokens
     }
 
     /// 用量占比（0-1）
@@ -187,9 +203,48 @@ impl ContextLedger {
         ratio
     }
 
+    /// 累计非对话文本的 token 开销（工具输出 / schema / 系统提示），返回更新后的用量占比。
+    ///
+    /// 只保存 token 数（不保存原文），因此落盘与内存都有界；饱和加法防止溢出。
+    fn record_overhead(&mut self, session: &str, tokens: u64) -> f64 {
+        let mut ctx = self.load(session);
+        ctx.overhead_tokens = ctx.overhead_tokens.saturating_add(tokens);
+        let ratio = ctx.ratio();
+        self.persist(&ctx);
+        self.sessions.insert(session.to_string(), ctx);
+        ratio
+    }
+
     /// 读取会话状态
     fn status(&mut self, session: &str) -> SessionContext {
         self.load(session)
+    }
+
+    /// 列出目录下的快照文件，按**修改时间**升序（最旧在前）。
+    ///
+    /// ⚠️ 不能按文件名排序：快照名是 `cmp-<uuid>`，字典序与时间无关 —— 历史缺陷
+    /// 让「清理最旧」与「回滚最新」都作用在**随机**一份上（`/compact undo` 可能
+    /// 恢复到更早或更晚的状态）。按 mtime 排序才是真正的时间序。
+    fn snapshot_files_by_mtime(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+            std::fs::read_dir(dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| {
+                            e.path().extension().map(|x| x == "json").unwrap_or(false)
+                        })
+                        .map(|e| {
+                            let t = e
+                                .metadata()
+                                .and_then(|m| m.modified())
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            (t, e.path())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        files.sort_by_key(|a| a.0);
+        files.into_iter().map(|(_, p)| p).collect()
     }
 
     /// 保存预压缩快照（供 `/compact undo` 回滚；超过 5 份清理最旧）
@@ -201,16 +256,12 @@ impl ContextLedger {
         if let Ok(raw) = serde_json::to_string(&snap) {
             let _ = std::fs::write(dir.join(format!("{compaction_id}.json")), raw);
         }
-        // 清理：只保留最近 5 份
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .map(|rd| rd.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        files.sort();
-        while files.len() > 5 {
-            if let Some(oldest) = files.first() {
+        // 清理：只保留最近 5 份（按 mtime 判新旧，见 snapshot_files_by_mtime）
+        let files = Self::snapshot_files_by_mtime(&dir);
+        if files.len() > 5 {
+            for oldest in files.iter().take(files.len() - 5) {
                 let _ = std::fs::remove_file(oldest);
             }
-            files.remove(0);
         }
     }
 
@@ -218,12 +269,8 @@ impl ContextLedger {
     fn rollback(&mut self, session: &str) -> bool {
         let mut ctx = self.load(session);
         let dir = self.snapshots_dir(session);
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .map(|rd| rd.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        files.sort();
-        let latest = files.last();
-        let Some(latest) = latest else {
+        let files = Self::snapshot_files_by_mtime(&dir);
+        let Some(latest) = files.last() else {
             return false;
         };
         let Ok(raw) = std::fs::read_to_string(latest) else {
@@ -233,12 +280,12 @@ impl ContextLedger {
             return false;
         };
         let _ = std::fs::remove_file(latest); // 回滚一次即消费一份快照
-        let restored_count = ctx.snapshot_count.saturating_sub(1);
         ctx.entries = restored.entries;
         ctx.summary = None; // 摘要回到压缩前状态
         ctx.last_mode = None;
         ctx.compression_ratio = None;
-        ctx.snapshot_count = restored_count;
+        // 让计数与**磁盘上真实剩余**的快照数一致，避免 status 报告不存在的快照。
+        ctx.snapshot_count = Self::snapshot_files_by_mtime(&dir).len() as u32;
         self.persist(&ctx);
         self.sessions.insert(session.to_string(), ctx);
         true
@@ -254,8 +301,10 @@ impl ContextLedger {
         llm_summary: Option<String>,
     ) -> Option<CompactReport> {
         let mut ctx = self.load(session);
-        if ctx.entries.len() <= KEEP_RECENT_TURNS * 2 {
-            return None; // 太短，跳过
+        // 跳过条件必须基于**真实 token 压力**，而非仅条目数：条目少但 token 压力高
+        // （少数几条巨大工具输出）同样必须压缩，否则会撞上 provider 上下文窗口。
+        if ctx.entries.len() <= KEEP_RECENT_TURNS * 2 && ctx.ratio() < COMPACT_SKIP_RATIO {
+            return None; // 条目少且压力低 → 无多少可回收，跳过
         }
         // 第 4 层：保存预压缩快照（回滚目标）
         self.save_snapshot(&ctx, compaction_id);
@@ -271,10 +320,11 @@ impl ContextLedger {
                 at_ms: e.at_ms,
             })
             .collect();
-        // 第 2 层：语义摘要（LLM 优先，确定性回退）
-        let (summary, mode) = match llm_summary {
-            Some(s) if !s.trim().is_empty() => (s, "llm"),
-            _ => (build_summary(&folded), "deterministic"),
+        // 第 2 层：语义摘要（LLM 优先，确定性回退）——经内容 hash 缓存复用，
+        // 相同内容第二次压缩不再重复计算（`SummaryCache` 生产接线）。
+        let (summary, mode) = {
+            let mut cache = summary_cache().lock().unwrap_or_else(|e| e.into_inner());
+            select_summary(&mut cache, &ctx.entries, &folded, llm_summary)
         };
         // 第 3 层：保留最近 N 轮原文，其余替换为摘要（摘要前置）
         let keep = ctx.entries.len().saturating_sub(KEEP_RECENT_TURNS);
@@ -562,6 +612,80 @@ fn extract_files(text: &str, out: &mut Vec<String>) {
     }
 }
 
+/// 摘要缓存上限（条目数）与 TTL（秒）。
+const SUMMARY_CACHE_MAX: usize = 256;
+const SUMMARY_CACHE_TTL_SECS: u64 = 3600;
+
+/// 进程级摘要缓存单例（内容 hash → 摘要）。
+///
+/// 压缩时按内容复用摘要，避免对同一内容重复调用 LLM 或重复跑确定性抽取。
+fn summary_cache() -> &'static Mutex<SummaryCache> {
+    static CACHE: OnceLock<Mutex<SummaryCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SummaryCache::new(SUMMARY_CACHE_MAX, SUMMARY_CACHE_TTL_SECS)))
+}
+
+/// 摘要内容键：`mode`（llm / deterministic）+ 每条 (role, `snip_long(text)`) 的规范串 hash。
+///
+/// 键必须在**原始条目**上取（函数内部对文本做 `snip_long`）：[`compact`] 传入的 `folded`
+/// 已是折叠结果，而 [`build_summary_llm`] 也以原始条目为输入（内部折叠）——对原始条目
+/// 折叠后的规范串，两处天然一致，缓存方能真正命中。
+fn summary_key(mode: &str, entries: &[ContextEntry]) -> u64 {
+    let mut s = String::new();
+    s.push_str(mode);
+    s.push('\u{1f}');
+    for e in entries {
+        s.push_str(&e.role);
+        s.push('\u{1e}');
+        s.push_str(&snip_long(&e.text));
+        s.push('\u{1d}');
+    }
+    SummaryCache::content_hash(&s)
+}
+
+/// 选择摘要（LLM 优先、确定性回退），经给定缓存按内容复用。返回 `(summary, mode)`。
+///
+/// `raw` 用于取内容键（见 [`summary_key`]），`folded` 供确定性摘要使用。
+fn select_summary(
+    cache: &mut SummaryCache,
+    raw: &[ContextEntry],
+    folded: &[ContextEntry],
+    llm_summary: Option<String>,
+) -> (String, &'static str) {
+    let llm = llm_summary.filter(|s| !s.trim().is_empty());
+    let mode: &'static str = if llm.is_some() { "llm" } else { "deterministic" };
+    let key = summary_key(mode, raw);
+    if let Some(hit) = cache.get(key) {
+        return (hit, mode);
+    }
+    let summary = match llm {
+        Some(s) => s,
+        None => build_summary(folded),
+    };
+    cache.put(key, summary.clone());
+    (summary, mode)
+}
+
+/// 带缓存的 LLM 摘要生成：先按内容 hash 查缓存，未命中才调用 LLM 并回填。
+///
+/// LLM 摘要在 [`compact`] 之外生成（异步调用点），故缓存查询必须放在这里才能真正跳过
+/// 重复的 LLM 调用；[`compact`] 内部再用同一内容键复用（双保险，键一致）。
+async fn cached_llm_summary(entries: &[ContextEntry]) -> Option<String> {
+    let key = summary_key("llm", entries);
+    let cached = {
+        let mut c = summary_cache().lock().unwrap_or_else(|e| e.into_inner());
+        c.get(key)
+    };
+    if let Some(hit) = cached {
+        return Some(hit);
+    }
+    let summary = build_summary_llm(entries).await;
+    if let Some(s) = &summary {
+        let mut c = summary_cache().lock().unwrap_or_else(|e| e.into_inner());
+        c.put(key, s.clone());
+    }
+    summary
+}
+
 fn ledger() -> &'static Mutex<ContextLedger> {
     static LEDGER: OnceLock<Mutex<ContextLedger>> = OnceLock::new();
     LEDGER.get_or_init(|| Mutex::new(ContextLedger::new(&Config::data_dir())))
@@ -573,6 +697,33 @@ pub fn record_turn(session: &str, role: &str, text: &str) -> f64 {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .record(session, role, text)
+}
+
+/// `context.record_overhead`：计入非对话文本（工具输出 / schema / 系统提示）的 token 开销。
+///
+/// 返回更新后的用量占比；只累计 token 数，不保存原文。
+pub fn record_overhead(session: &str, tokens: u64) -> f64 {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_overhead(session, tokens)
+}
+
+/// `context.record_tool_output`：把一次工具输出估算为 token 并计入 overhead。
+///
+/// 复用 [`estimate_tokens`]；**只累加 token 数、不保存原文**，故对超长输出天然有界。
+/// 空/纯空白输出不计（返回当前占比）。
+pub fn record_tool_output(session: &str, tool: &str, output: &str) -> f64 {
+    if output.trim().is_empty() {
+        return ledger()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status(session)
+            .ratio();
+    }
+    let tokens = estimate_tokens(output);
+    tracing::debug!(session = %session, tool = %tool, tokens, "记录工具输出 token 开销");
+    record_overhead(session, tokens)
 }
 
 /// 增量持久化流式「部分文本」（F1）：turn 进行中调用，切走再切回可恢复。
@@ -691,7 +842,7 @@ pub fn context_sessions() -> Vec<ContextSessionSummary> {
             project_path: ctx.project_path,
         });
     }
-    out.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    out.sort_by_key(|cs| std::cmp::Reverse(cs.updated_ms));
     out
 }
 
@@ -705,6 +856,7 @@ pub fn context_status(session: &str) -> Value {
     json!({
         "session": ctx.session,
         "used_tokens": ctx.used_tokens(),
+        "overhead_tokens": ctx.overhead_tokens,
         "budget": ctx.budget,
         "ratio": ratio,
         "alert": if ratio >= COMPACT_RATIO { "compact_required" }
@@ -758,14 +910,15 @@ pub async fn context_compact_async(session: &str, bus: Option<&EventBus>) -> Val
             session,
         ));
     }
-    // 第 2 层：LLM 语义摘要（失败/无 key → None → 确定性回退）
+    // 第 2 层：LLM 语义摘要（失败/无 key → None → 确定性回退）。
+    // 先按内容 hash 查缓存，命中则直接复用、跳过 LLM 调用。
     let llm_summary = {
         let entries = ledger()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .status(session)
             .entries;
-        build_summary_llm(&entries).await
+        cached_llm_summary(&entries).await
     };
     compact_and_publish(session, bus, &compaction_id, llm_summary)
 }
@@ -891,6 +1044,61 @@ mod tests {
         assert_eq!(l.status("s2").compaction_count, 0);
     }
 
+    /// 缺陷回归（HIGH）：条目数少但 token 压力极高（几条巨大工具输出）**必须**压缩。
+    ///
+    /// 旧实现只看 `entries.len() <= KEEP_RECENT_TURNS * 2`，少数巨型条目被永久跳过，
+    /// 直到撞上 provider 上下文窗口。此处把「按真实 token 压力判定」钉死。
+    #[test]
+    fn test_compact_few_entries_high_ratio_compacts() {
+        let (mut l, _d) = tmp_ledger("fewhuge");
+        let mut ctx = l.status("fh1");
+        ctx.budget = 1000; // 小预算使 ratio 越过 COMPACT_SKIP_RATIO
+        ctx.entries = (0..4)
+            .map(|i| ContextEntry {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                text: format!("巨大工具输出 {i} {}", "x".repeat(200)),
+                tokens: 400,
+                at_ms: i as u64,
+            })
+            .collect();
+        l.sessions.insert("fh1".into(), ctx);
+        assert!(
+            l.status("fh1").ratio() >= COMPACT_SKIP_RATIO,
+            "构造的少数大条目应处于高 token 压力"
+        );
+        let report = l.compact("fh1", "cmp-fh", None);
+        assert!(
+            report.is_some(),
+            "条目少但高 token 压力必须触发压缩（缺陷回归）"
+        );
+        assert!(l.status("fh1").compaction_count >= 1);
+    }
+
+    /// 反向守卫：条目不多且 token 压力低（小消息、低 ratio）→ 仍应跳过，不做无谓工作。
+    #[test]
+    fn test_compact_many_tiny_entries_low_ratio_skips() {
+        let (mut l, _d) = tmp_ledger("manytiny");
+        let mut ctx = l.status("mt1");
+        ctx.budget = DEFAULT_BUDGET; // 128k，条目虽多但 token 极小
+        ctx.entries = (0..KEEP_RECENT_TURNS * 2)
+            .map(|i| ContextEntry {
+                role: "user".into(),
+                text: format!("hi {i}"),
+                tokens: 2,
+                at_ms: i as u64,
+            })
+            .collect();
+        l.sessions.insert("mt1".into(), ctx);
+        assert!(
+            l.status("mt1").ratio() < COMPACT_SKIP_RATIO,
+            "小消息应处于低 token 压力"
+        );
+        assert!(
+            l.compact("mt1", "cmp-mt", None).is_none(),
+            "低压力下不应压缩（无谓工作）"
+        );
+    }
+
     #[test]
     fn test_compact_keeps_tail_and_summary() {
         let (mut l, _d) = tmp_ledger("tail");
@@ -960,6 +1168,7 @@ mod tests {
             snapshot_count: 0,
             project_path: None,
             partial_text: None,
+            overhead_tokens: 0,
         };
         let write = std::fs::write(&path, serde_json::to_string(&ctx).unwrap());
         assert!(write.is_ok(), "临时台账写入失败");
@@ -1014,6 +1223,43 @@ mod tests {
         assert_eq!(estimate_tokens(""), 1);
         assert_eq!(estimate_tokens("abc"), 1);
         assert!(estimate_tokens("abcdefghij") >= 3);
+    }
+
+    /// 缺陷回归（MEDIUM）：相同内容的第二次压缩必须复用 `SummaryCache` 缓存的摘要，
+    /// 不再重复跑确定性/LLM 摘要计算（内容 hash 键）。
+    #[test]
+    fn test_summary_cache_reuses_second_compaction() {
+        let raw = vec![
+            ContextEntry {
+                role: "user".into(),
+                text: "帮我重构登录模块并写测试".into(),
+                tokens: 10,
+                at_ms: 1,
+            },
+            ContextEntry {
+                role: "assistant".into(),
+                text: "决定采用 tokens.rs 方案".into(),
+                tokens: 10,
+                at_ms: 2,
+            },
+        ];
+        let folded: Vec<ContextEntry> = raw
+            .iter()
+            .map(|e| ContextEntry {
+                role: e.role.clone(),
+                text: snip_long(&e.text),
+                tokens: e.tokens,
+                at_ms: e.at_ms,
+            })
+            .collect();
+        let mut cache = SummaryCache::new(16, 60);
+        let (s1, m1) = select_summary(&mut cache, &raw, &folded, None);
+        assert_eq!(m1, "deterministic");
+        assert_eq!(cache.stats.misses, 1, "首次应未命中并写入");
+        let (s2, m2) = select_summary(&mut cache, &raw, &folded, None);
+        assert_eq!(m2, "deterministic");
+        assert_eq!(s2, s1, "相同内容的第二次压缩必须复用缓存摘要");
+        assert_eq!(cache.stats.hits, 1, "第二次必须命中缓存");
     }
 
     #[test]
@@ -1095,5 +1341,105 @@ mod tests {
         assert_eq!(ctx.entries.len(), 1);
         assert_eq!(ctx.entries[0].text, "持久化测试");
         let _ = Config::data_dir();
+    }
+
+    /// 删除全局台账中的临时会话文件，避免污染真实 data_dir（in-memory 条目无碍）。
+    fn cleanup_ledger_file(session: &str) {
+        let path = Config::data_dir()
+            .join("context")
+            .join(format!("{session}.json"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_overhead_raises_used_and_ratio() {
+        let (mut l, _d) = tmp_ledger("overhead");
+        l.record("ov1", "user", "hello world");
+        let before = l.status("ov1");
+        let used_before = before.used_tokens();
+        let ratio_before = before.ratio();
+        let r = l.record_overhead("ov1", 500);
+        let after = l.status("ov1");
+        assert_eq!(after.overhead_tokens, 500, "overhead 应被累计");
+        assert!(
+            after.used_tokens() > used_before,
+            "overhead 应抬升 used_tokens：{used_before} -> {}",
+            after.used_tokens()
+        );
+        assert!(
+            after.ratio() > ratio_before,
+            "overhead 应抬升 ratio：{ratio_before} -> {}",
+            after.ratio()
+        );
+        assert!(
+            (r - after.ratio()).abs() < 1e-12,
+            "record_overhead 返回值应等于最新 ratio"
+        );
+        // 饱和累加：再次叠加应继续增长
+        l.record_overhead("ov1", 1000);
+        assert_eq!(l.status("ov1").overhead_tokens, 1500);
+    }
+
+    #[test]
+    fn test_record_tool_output_accounts_large_output() {
+        // 走全局台账：record_tool_output 是唯一对外的写入入口，context_status 读取同一单例。
+        let session = format!("mgt-ctx-tool-{}", uuid::Uuid::new_v4());
+        let big = "x".repeat(40_000); // 拉丁字符 ≈ 10k token，远超普通对话
+        let expected = estimate_tokens(&big);
+        assert!(expected > 5_000, "大工具输出应估算出大量 token：{expected}");
+        let ratio = record_tool_output(&session, "shell", &big);
+        let status = context_status(&session);
+        assert_eq!(
+            status["overhead_tokens"].as_u64(),
+            Some(expected),
+            "大工具输出应完整计入 overhead"
+        );
+        assert_eq!(status["used_tokens"].as_u64(), Some(expected));
+        assert!(ratio > 0.0);
+        // 空/纯空白输出不计（返回当前占比，overhead 不变）
+        let r0 = record_tool_output(&session, "shell", "   ");
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "空输出不应改变 overhead"
+        );
+        assert!((r0 - ratio).abs() < 1e-12);
+        cleanup_ledger_file(&session);
+    }
+
+    #[test]
+    fn test_context_status_surfaces_overhead() {
+        let session = format!("mgt-ctx-status-{}", uuid::Uuid::new_v4());
+        record_overhead(&session, 1234);
+        let v = context_status(&session);
+        assert!(
+            v.get("overhead_tokens").is_some(),
+            "context_status 必须暴露 overhead_tokens（使此前的漏记可观测）"
+        );
+        assert_eq!(v["overhead_tokens"].as_u64(), Some(1234));
+        assert_eq!(v["used_tokens"].as_u64(), Some(1234));
+        cleanup_ledger_file(&session);
+    }
+
+    #[test]
+    fn test_legacy_json_without_overhead_deserializes() {
+        // 旧版磁盘 JSON 无 overhead_tokens / partial_text 字段 → serde(default) 回退为 0/None
+        let legacy = r#"{
+            "session": "legacy1",
+            "entries": [],
+            "budget": 128000,
+            "compaction_count": 0,
+            "last_compact_ms": null,
+            "summary": null,
+            "last_mode": null,
+            "compression_ratio": null,
+            "snapshot_count": 0,
+            "project_path": null
+        }"#;
+        let ctx: SessionContext =
+            serde_json::from_str(legacy).expect("旧 JSON 必须仍可反序列化");
+        assert_eq!(ctx.overhead_tokens, 0, "缺失字段应回退为 0");
+        assert_eq!(ctx.partial_text, None);
+        assert_eq!(ctx.used_tokens(), 0);
     }
 }

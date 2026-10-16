@@ -19,15 +19,39 @@ use std::time::Duration;
 /// 一个高层 computer-use 动作（轻量、可序列化；映射到 `computer_use::dispatch` 的 action）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
-    Click { x: i64, y: i64 },
-    DoubleClick { x: i64, y: i64 },
-    RightClick { x: i64, y: i64 },
-    TypeText { text: String },
-    Key { key: String },
-    Scroll { x: i64, y: i64, dx: i64, dy: i64 },
-    Move { x: i64, y: i64 },
+    Click {
+        x: i64,
+        y: i64,
+    },
+    DoubleClick {
+        x: i64,
+        y: i64,
+    },
+    RightClick {
+        x: i64,
+        y: i64,
+    },
+    TypeText {
+        text: String,
+    },
+    Key {
+        key: String,
+    },
+    Scroll {
+        x: i64,
+        y: i64,
+        dx: i64,
+        dy: i64,
+    },
+    Move {
+        x: i64,
+        y: i64,
+    },
     /// 定位（对应 C1 `locate`：截图 → 视觉模型坐标 → click，可选自动点击）
-    Locate { description: String, auto_click: bool },
+    Locate {
+        description: String,
+        auto_click: bool,
+    },
 }
 
 /// 人类化时序配置。
@@ -101,7 +125,10 @@ pub struct RecordingDelayer {
 }
 impl Delayer for RecordingDelayer {
     fn delay(&self, ms: u64) {
-        self.delays.lock().unwrap_or_else(|e| e.into_inner()).push(ms);
+        self.delays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ms);
     }
 }
 
@@ -179,8 +206,8 @@ impl<'a> VisualLoop<'a> {
 
     /// 第 `retry_index`（从 0 计）次重试的退避等待。
     fn backoff(&self, retry_index: u32) -> u64 {
-        (self.policy.backoff_base_ms as f64
-            * self.policy.backoff_factor.powi(retry_index as i32)) as u64
+        (self.policy.backoff_base_ms as f64 * self.policy.backoff_factor.powi(retry_index as i32))
+            as u64
     }
 
     /// 执行一个动作计划（按序），返回报告。每个动作独立重试；任一动作耗尽重试仍失败则
@@ -342,9 +369,7 @@ mod tests {
     impl LoopBackend for ScriptedBackend {
         fn observe(&self) -> ObserveSnapshot {
             *self.observe_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-            ObserveSnapshot {
-                raw: "obs".into(),
-            }
+            ObserveSnapshot { raw: "obs".into() }
         }
         fn act(&self, _a: &UiAction) -> ActOutcome {
             let n = {
@@ -392,11 +417,7 @@ mod tests {
     #[test]
     fn loop_succeeds_on_first_try() {
         let delayer = RecordingDelayer::default();
-        let loop_ = VisualLoop::new(
-            HumanizedTiming::default(),
-            LoopPolicy::default(),
-            &delayer,
-        );
+        let loop_ = VisualLoop::new(HumanizedTiming::default(), LoopPolicy::default(), &delayer);
         let backend = ScriptedBackend {
             act_fails_first: 0,
             verify_fails_first: 0,
@@ -404,20 +425,14 @@ mod tests {
             act_calls: Mutex::new(0),
             verify_calls: Mutex::new(0),
         };
-        let report = loop_.run(
-            &[UiAction::Click { x: 10, y: 20 }],
-            &backend,
-        );
+        let report = loop_.run(&[UiAction::Click { x: 10, y: 20 }], &backend);
         assert!(report.all_success);
         assert_eq!(report.steps.len(), 1);
         assert_eq!(report.steps[0].retries, 0, "首次应成功，重试 0");
         assert!(report.steps[0].success);
         // 延迟应包含 思考 + 动作后等待
         let delays = delayer.delays.lock().unwrap();
-        assert!(
-            delays.iter().any(|d| *d == 200),
-            "应包含 think_ms=200 停顿"
-        );
+        assert!(delays.contains(&200), "应包含 think_ms=200 停顿");
     }
 
     #[test]
@@ -503,7 +518,11 @@ mod tests {
         let report = loop_.run(&[UiAction::Click { x: 1, y: 1 }], &backend);
         assert!(report.all_success, "校验重试后应成功");
         assert_eq!(report.steps[0].retries, 1, "校验失败应触发 1 次重试");
-        assert_eq!(*backend.observe_count.lock().unwrap(), 2, "应再观察 2 次（含重试）");
+        assert_eq!(
+            *backend.observe_count.lock().unwrap(),
+            2,
+            "应再观察 2 次（含重试）"
+        );
     }
 
     #[test]
@@ -513,9 +532,7 @@ mod tests {
         assert_eq!(click.get("x").map(String::as_str), Some("5"));
         assert_eq!(click.get("y").map(String::as_str), Some("6"));
 
-        let typed = ui_action_to_dispatch_args(&UiAction::TypeText {
-            text: "hi".into(),
-        });
+        let typed = ui_action_to_dispatch_args(&UiAction::TypeText { text: "hi".into() });
         assert_eq!(typed.get("action").map(String::as_str), Some("type"));
         assert_eq!(typed.get("text").map(String::as_str), Some("hi"));
 

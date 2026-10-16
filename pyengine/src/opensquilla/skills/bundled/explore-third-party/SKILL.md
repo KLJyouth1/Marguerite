@@ -23,8 +23,13 @@ provenance:
   maintained_by: Marguerite
 metadata:
   opensquilla:
+    # ``bash`` is a *binary* requirement; see audit-third-party for why listing it
+    # under ``requires_tools`` silently hid this skill from every prompt.
+    requires:
+      bins:
+        - bash
     requires_tools:
-      - bash
+      - exec_command
 ---
 
 # Explore Third-Party Skill（统一勘探 · 产出能力清单）

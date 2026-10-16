@@ -35,6 +35,7 @@ from opensquilla.gateway.origin_guard import (
     request_origin_allowed,
 )
 from opensquilla.gateway.scopes import is_loopback_address
+from opensquilla.gateway.session_key import request_session_key
 from opensquilla.paths import media_root_from_config, native_io_path
 
 log = structlog.get_logger(__name__)
@@ -740,11 +741,7 @@ async def _request_session(
     *,
     session_manager: Any,
 ) -> tuple[str | None, str | None]:
-    session_key = (
-        request.headers.get("x-opensquilla-session-key")
-        or request.query_params.get("sessionKey")
-        or request.query_params.get("session_key")
-    )
+    session_key = request_session_key(request) or None
     if not session_key:
         return None, None
     if session_manager is None:

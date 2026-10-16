@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -14,6 +15,18 @@ use tokio::sync::oneshot;
 
 use super::client::McpTool;
 use super::registry::ToolRegistry;
+
+/// 请求体上限（字节）。
+///
+/// `Content-Length` 完全由客户端控制；修复前直接 `vec![0u8; content_length]`，
+/// 一个 `Content-Length: 2000000000` 就会让进程分配 2 GB（OOM/DoS）。
+/// 8 MiB 对 JSON-RPC 工具调用足够宽裕。**必须在分配前判上限**。
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// 单次请求头 / 请求体读取的超时（慢速攻击防护）。
+///
+/// 修复前读写无超时，slowloris 客户端逐字节滴流即可永久占住连接处理任务。
+pub const MCP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// MCP 服务器
 ///
@@ -132,15 +145,35 @@ async fn run_server(
     }
 }
 
-/// 处理 HTTP 连接
-async fn handle_connection(mut stream: tokio::net::TcpStream, registry: Arc<ToolRegistry>) {
+/// 写一条仅含状态行 + `Content-Length: 0` 的响应。
+async fn write_simple_status<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, status: &str) {
+    let response = format!("HTTP/1.1 {}\r\nContent-Length: 0\r\n\r\n", status);
+    let _ = writer.write_all(response.as_bytes()).await;
+}
+
+/// 处理 HTTP 连接（生产入口：使用 [`MCP_READ_TIMEOUT`]）。
+async fn handle_connection(stream: tokio::net::TcpStream, registry: Arc<ToolRegistry>) {
+    handle_connection_with_timeout(stream, registry, MCP_READ_TIMEOUT).await;
+}
+
+/// 处理 HTTP 连接（可注入读取超时，便于测试慢速攻击路径）。
+async fn handle_connection_with_timeout(
+    mut stream: tokio::net::TcpStream,
+    registry: Arc<ToolRegistry>,
+    read_timeout: Duration,
+) {
     let (reader, mut writer) = stream.split();
     let mut buf_reader = BufReader::new(reader);
     let mut request_line = String::new();
 
-    // 读取请求行
-    if buf_reader.read_line(&mut request_line).await.is_err() {
-        return;
+    // 读取请求行（带超时）
+    match tokio::time::timeout(read_timeout, buf_reader.read_line(&mut request_line)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => return,
+        Err(_) => {
+            let _ = write_simple_status(&mut writer, "408 Request Timeout").await;
+            return;
+        }
     }
 
     let request_line = request_line.trim();
@@ -150,17 +183,21 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, registry: Arc<Tool
 
     // 只处理 POST 请求
     if !request_line.starts_with("POST") {
-        let response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
-        let _ = writer.write_all(response.as_bytes()).await;
+        let _ = write_simple_status(&mut writer, "405 Method Not Allowed").await;
         return;
     }
 
-    // 读取请求头
+    // 读取请求头（带超时）
     let mut content_length: usize = 0;
     loop {
         let mut line = String::new();
-        if buf_reader.read_line(&mut line).await.is_err() {
-            return;
+        match tokio::time::timeout(read_timeout, buf_reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return,
+            Err(_) => {
+                let _ = write_simple_status(&mut writer, "408 Request Timeout").await;
+                return;
+            }
         }
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -173,16 +210,32 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, registry: Arc<Tool
         }
     }
 
-    // 读取请求体
+    // ⚠️ 先判上限、再分配：`content_length` 是客户端可控值，直接
+    // `vec![0u8; content_length]` 会让超大 `Content-Length` 触发巨额分配（DoS）。
+    if content_length > MAX_BODY_BYTES {
+        tracing::warn!(
+            content_length,
+            max = MAX_BODY_BYTES,
+            "MCP 请求体超过上限，拒绝（413）"
+        );
+        let _ = write_simple_status(&mut writer, "413 Payload Too Large").await;
+        return;
+    }
+
+    // 读取请求体（带超时）
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        if let Err(e) = buf_reader.read_exact(&mut body).await {
-            tracing::error!("Failed to read request body: {}", e);
-            let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-            if let Err(e) = writer.write_all(response.as_bytes()).await {
-                tracing::warn!(error = %e, "MCP 响应写入客户端失败");
+        match tokio::time::timeout(read_timeout, buf_reader.read_exact(&mut body)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::error!("Failed to read request body: {}", e);
+                let _ = write_simple_status(&mut writer, "400 Bad Request").await;
+                return;
             }
-            return;
+            Err(_) => {
+                let _ = write_simple_status(&mut writer, "408 Request Timeout").await;
+                return;
+            }
         }
     }
 
@@ -654,5 +707,85 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(!json["result"]["isError"].as_bool().unwrap());
         assert_eq!(json["result"]["content"][0]["text"], "echo: ");
+    }
+
+    /// 后台接受一个连接并用给定读取超时处理它，返回监听地址（用于慢速攻击测试）。
+    async fn spawn_handler_with_timeout(read_timeout: Duration) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = setup_registry();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                handle_connection_with_timeout(stream, registry, read_timeout).await;
+            }
+        });
+        addr
+    }
+
+    /// D1：超大 `Content-Length` 必须在分配前被拒绝（413），不得尝试分配 2GB。
+    #[tokio::test]
+    async fn test_oversized_content_length_rejected_413() {
+        let port = free_port().await;
+        let mut server = McpServer::new("127.0.0.1", port, setup_registry());
+        server.start().await.unwrap();
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        // 声明 2GB 的 Content-Length，但不发送任何 body。修复前会走到
+        // `vec![0u8; 2_000_000_000]`；修复后必须在此之前返回 413。
+        let req = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000000\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .expect("服务器应立即拒绝，而不是尝试分配 2GB")
+            .unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.contains("413"), "expected 413, got: {resp}");
+
+        server.stop();
+    }
+
+    /// D1：客户端声明 body 长度但永不发送 → 读 body 必须超时（408），不得永久挂起。
+    #[tokio::test]
+    async fn test_slow_body_times_out_408() {
+        let addr = spawn_handler_with_timeout(Duration::from_millis(150)).await;
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .expect("慢速 body 必须超时返回，而不是永久阻塞")
+            .unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.contains("408"), "expected 408, got: {resp}");
+    }
+
+    /// D1：客户端只发一半请求头后停住 → 读头必须超时（408）。
+    #[tokio::test]
+    async fn test_slow_header_times_out_408() {
+        let addr = spawn_handler_with_timeout(Duration::from_millis(150)).await;
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST / HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .expect("慢速请求头必须超时返回，而不是永久阻塞")
+            .unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.contains("408"), "expected 408, got: {resp}");
     }
 }

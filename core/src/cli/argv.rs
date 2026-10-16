@@ -54,6 +54,9 @@ pub struct Args {
     pub tools: bool,
     /// `--agent <id>`：以指定智能体的人设执行单指令链（供 `marguerite -p "..." --agent <id>` 消费）
     pub agent: Option<String>,
+    /// `--probe` / `--deep`：显式联网深度探测（供 `doctor --probe` 消费）。
+    /// 默认关闭：doctor 的默认路径必须保持离线、快速。
+    pub probe: bool,
 }
 
 impl Default for Args {
@@ -76,6 +79,7 @@ impl Default for Args {
             continue_last: false,
             tools: false,
             agent: None,
+            probe: false,
         }
     }
 }
@@ -100,20 +104,70 @@ pub const SUBCOMMANDS: &[&str] = &[
     "capabilities",
     "cache",
     "dispatch",
+    "games",
+    "export-diagnostics",
 ];
+
+/// 子命令后置旗标（带值）：这些旗标由各 handler 从 sub_args 自行消费，
+/// 解析器只透传（不触发“未知选项”），值以相邻裸词原样收集。
+const SUBCOMMAND_FLAGS_WITH_VALUE: &[&str] = &[
+    "--target",
+    "--bin",
+    "--service",
+    "--health-url",
+    "--user",
+    "--identity",
+    "--dir",
+    "--site",
+    "--endpoint",
+    "--api-key",
+    "--id",
+    "--base-url",
+    "--model",
+    "--provider",
+    "--label",
+    "--kind",
+    "--out",
+    "--timeout",
+    "--parallel",
+    "--targets",
+    "--env",
+    "--output",
+];
+
+/// 子命令后置旗标（布尔）：无值，仅透传给 handler。
+const SUBCOMMAND_BOOL_FLAGS: &[&str] = &[
+    "--dry-run",
+    "--dryrun",
+    "--no-systemd",
+    "--no-ssl",
+    "--add-panel",
+    "--reflect",
+    "--trellis",
+];
+
+fn subcommand_flag_with_value(flag: &str) -> bool {
+    SUBCOMMAND_FLAGS_WITH_VALUE.contains(&flag)
+}
+
+fn subcommand_flag_passthrough(flag: &str) -> bool {
+    SUBCOMMAND_FLAGS_WITH_VALUE.contains(&flag) || SUBCOMMAND_BOOL_FLAGS.contains(&flag)
+}
 
 /// 解析命令行参数
 ///
 /// 支持的参数格式：
 /// - `-p "指令"` 或 `--prompt "指令"` — 单指令模式
 /// - `-f <文件>` 或 `--file <文件>` — 指定输入文件
-/// - `--pipe` — 管道模式，从 stdin 读取
+/// - `--pipe` — 管道模式，从 stdin 读取（等价于「单指令模式 + 指令来自 stdin」，
+///   故单独出现时 mode 提升为 [`CliMode::Direct`]；后跟子命令时子命令优先）
 /// - `--help` / `-h` / `--version` / `-V` — 顶层发现（打印后退出 0）
 /// - `--json` / `--output-format json` — 机器可读输出（AC-03）
 /// - 子命令: `doctor`, `model`, `mcp`, `skills`, `session`, `exec`, `deploy`, `serve`,
 ///   `sandbox`, `subagent`, `team`, `browser`, `chat`, `gateway`, `capabilities`
 /// - 子命令级帮助: `marguerite doctor --help`（AC-01 子命令级，退出 0）
 /// - `chat` 子命令旗标: `--resume <id>` / `--continue`(`-c`) / `--tools`(`-t`) / `--json`
+/// - `--probe` / `--deep` — 显式联网深度探测（仅 `doctor` 消费；默认路径保持离线）
 /// - 无参数 — 交互模式
 pub fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().collect();
@@ -135,6 +189,13 @@ fn parse_args_from(raw: &[String]) -> Args {
             }
             "--json" => {
                 args.json = true;
+            }
+            "--safe" => {
+                // Safe Mode（S10）顶层旗标。**语义已在 `main()` 首行消费完毕**
+                // （注入 MARGUERITE_{CONFIG,DATA,SIDECAR_LOG}_DIR 指向一次性目录），
+                // 这里只登记为已知旗标，避免被判成未知选项而中止启动。
+                // 刻意不放进 Args 结构：它不是「运行参数」，而是「启动前环境」，
+                // 存进 Args 会诱使下游以为可以在运行期切换 —— 那已经太晚了。
             }
             "--output-format" => {
                 i += 1;
@@ -158,7 +219,22 @@ fn parse_args_from(raw: &[String]) -> Args {
                 }
             }
             "--pipe" => {
+                // 根因修复（P0-F `--pipe` 永不返回）：`--pipe` 此前只置位 `args.pipe`，
+                // 却把 `mode` 留在默认的 `CliMode::Interactive` → `Program::run()` 走
+                // 「交互模式 - 进入三栏工作台 TUI」分支，`handle_direct()`（stdin 读取）
+                // 根本没被调用；TUI 在非 TTY stdin 上无人驱动事件流，于是永久挂起。
+                // 语义上 `--pipe` 是「单指令模式，指令来自 stdin」，必须显式路由到 Direct。
+                //
+                // 子命令优先：`marguerite session list --pipe` 由下面的 sub 分支决定 mode，
+                // 此处仅在尚未解析出子命令时把 Interactive 提升为 Direct（顺序无关）。
                 args.pipe = true;
+                if args.mode == CliMode::Interactive {
+                    args.mode = CliMode::Direct;
+                }
+            }
+            "--probe" | "--deep" => {
+                // 显式深度探测（`doctor --probe`）：默认路径绝不联网，故必须显式指定。
+                args.probe = true;
             }
             "--agent" => {
                 // 指定执行人设来源智能体（direct 模式）：`marguerite -p "..." --agent <id>`
@@ -240,6 +316,28 @@ fn parse_args_from(raw: &[String]) -> Args {
                                 j += 1;
                                 continue;
                             }
+                            if raw[j] == "--probe" || raw[j] == "--deep" {
+                                // 深度探测旗标：被 doctor 消费，不进入 sub_args
+                                args.probe = true;
+                                j += 1;
+                                continue;
+                            }
+                            if subcommand_flag_passthrough(&raw[j]) {
+                                // 已知子命令旗标（deploy/model add/browser/dispatch/subagent 等）：
+                                // 透传到 sub_args 交由对应 handler 消费，避免被误判为“未知选项”。
+                                args.sub_args.push(raw[j].clone());
+                                if subcommand_flag_with_value(&raw[j]) {
+                                    if let Some(v) = raw.get(j + 1) {
+                                        if !v.starts_with('-') {
+                                            args.sub_args.push(v.clone());
+                                            j += 2;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                j += 1;
+                                continue;
+                            }
                             if raw[j].starts_with('-') {
                                 // 其它未知选项：停止收集（交由顶层 unknown_flags 处理）
                                 break;
@@ -304,6 +402,42 @@ mod tests {
     fn test_parse_pipe() {
         let args = parse_args_with(&["marguerite", "--pipe"]);
         assert!(args.pipe);
+    }
+
+    #[test]
+    fn test_parse_pipe_routes_to_direct_mode() {
+        // 回归（P0-F `--pipe` 永不返回）：`--pipe` 必须路由到 `CliMode::Direct`。
+        // 仅置位 `args.pipe` 而 mode 留在 Interactive 时，`Program::run()` 会走 TUI 分支，
+        // `handle_direct()`（stdin 读取）根本不被调用 —— 实测 `--pipe < in.txt` 渲染 TUI
+        // 并永久挂起。故此断言不是「锦上添花」，而是挂起缺陷的直接守卫。
+        let args = parse_args_with(&["marguerite", "--pipe"]);
+        assert_eq!(
+            args.mode,
+            CliMode::Direct,
+            "--pipe 单独出现时必须进入单指令模式（否则落到 TUI 分支挂起）"
+        );
+        assert!(args.pipe);
+    }
+
+    #[test]
+    fn test_parse_pipe_after_prompt_keeps_prompt() {
+        // `--pipe` 与 `-p` 组合：仍为 Direct，prompt 保留（pipe 优先从 stdin 取指令）。
+        let args = parse_args_with(&["marguerite", "--pipe", "-p", "explain"]);
+        assert_eq!(args.mode, CliMode::Direct);
+        assert!(args.pipe);
+        assert_eq!(args.prompt, Some("explain".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pipe_does_not_override_subcommand() {
+        // 子命令优先（顺序无关）：`--pipe session list` 与 `session list --pipe`
+        // 都必须是子命令模式，不得被 `--pipe` 抢成 Direct。
+        let before = parse_args_with(&["marguerite", "--pipe", "session", "list"]);
+        assert_eq!(before.mode, CliMode::Subcommand("session".to_string()));
+        assert!(before.pipe);
+        let after = parse_args_with(&["marguerite", "session", "list", "--pipe"]);
+        assert_eq!(after.mode, CliMode::Subcommand("session".to_string()));
+        assert!(after.pipe);
     }
 
     #[test]
@@ -384,6 +518,67 @@ mod tests {
         assert_eq!(args.mode, CliMode::Subcommand("session".to_string()));
         assert_eq!(args.sub_args, vec!["list".to_string()]);
         assert!(args.pipe);
+    }
+
+    #[test]
+    fn test_parse_subcommand_flags_passthrough() {
+        // model add：带值旗标原样进入 sub_args（handler 自行解析），不再报未知选项
+        let m = parse_args_with(&[
+            "marguerite",
+            "model",
+            "add",
+            "--id",
+            "x",
+            "--base-url",
+            "http://x",
+            "--model",
+            "m",
+        ]);
+        assert_eq!(m.mode, CliMode::Subcommand("model".to_string()));
+        assert_eq!(
+            m.sub_args,
+            vec!["add", "--id", "x", "--base-url", "http://x", "--model", "m"]
+        );
+        // dispatch run：--timeout --env 透传
+        let d = parse_args_with(&[
+            "marguerite",
+            "dispatch",
+            "run",
+            "deepseek",
+            "task",
+            "--timeout",
+            "60",
+            "--env",
+            "K=V",
+        ]);
+        assert_eq!(
+            d.sub_args,
+            vec!["run", "deepseek", "task", "--timeout", "60", "--env", "K=V"]
+        );
+        // browser：--out 透传
+        let b = parse_args_with(&[
+            "marguerite",
+            "browser",
+            "open",
+            "http://x",
+            "--out",
+            "shot.png",
+        ]);
+        assert_eq!(b.sub_args, vec!["open", "http://x", "--out", "shot.png"]);
+        // subagent：布尔旗标 --reflect --trellis 透传
+        let s = parse_args_with(&[
+            "marguerite",
+            "subagent",
+            "team",
+            "goal",
+            "--reflect",
+            "--trellis",
+        ]);
+        assert_eq!(s.sub_args, vec!["team", "goal", "--reflect", "--trellis"]);
+        // deploy：带值 + 布尔旗标透传（DeployCli 自身按 raw args 再解析）
+        let dep = parse_args_with(&["marguerite", "deploy", "--target", "ssh://h", "--dry-run"]);
+        assert_eq!(dep.sub_args, vec!["--target", "ssh://h", "--dry-run"]);
+        assert!(dep.unknown_flags.is_empty());
     }
 
     #[test]
@@ -476,6 +671,28 @@ mod tests {
         assert!(args.json);
         assert_eq!(args.sub_args, vec!["hi".to_string()]);
         assert!(!args.health);
+    }
+
+    #[test]
+    fn test_parse_doctor_probe_flag_and_alias() {
+        // P0-D 缺陷 3：`doctor --probe` / `--deep` 显式联网探测旗标。
+        // 未加旗标时必须为 false（doctor 默认离线、快速）。
+        for flag in ["--probe", "--deep"] {
+            let args = parse_args_with(&["marguerite", "doctor", flag]);
+            assert_eq!(args.mode, CliMode::Subcommand("doctor".to_string()));
+            assert!(args.probe, "flag {flag} 未被识别");
+            assert!(args.sub_args.is_empty(), "flag {flag} 不应进入 sub_args");
+            assert!(
+                args.unknown_flags.is_empty(),
+                "flag {flag} 不应被当作未知选项"
+            );
+        }
+        let plain = parse_args_with(&["marguerite", "doctor"]);
+        assert!(!plain.probe, "默认必须关闭联网探测");
+        // 顶层位置也能识别（`marguerite --probe doctor`）
+        let top = parse_args_with(&["marguerite", "--probe", "doctor"]);
+        assert!(top.probe);
+        assert_eq!(top.mode, CliMode::Subcommand("doctor".to_string()));
     }
 
     #[test]

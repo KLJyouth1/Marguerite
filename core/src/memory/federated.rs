@@ -25,8 +25,8 @@ use crate::memory::compact::{as_stable_prefix, Observation};
 use crate::memory::cross_project;
 use crate::memory::experience::{Experience, SelfEvolution};
 use crate::memory::long_term::MemoryItem;
-use crate::memory::short_term::{SessionSummary, ShortTermMemory};
 use crate::memory::sensory::SensoryMemory;
+use crate::memory::short_term::{SessionSummary, ShortTermMemory};
 use crate::types::Message;
 
 /// 联邦记忆层标识
@@ -552,7 +552,10 @@ mod tests {
         // 后端 A（高层）与 B（低层）返回重叠内容，去重保留最高分
         let a = FakeBackend {
             tier: MemoryTier::Experience,
-            hits: vec![hit(MemoryTier::Experience, "X", 0.5), hit(MemoryTier::Experience, "Y", 0.9)],
+            hits: vec![
+                hit(MemoryTier::Experience, "X", 0.5),
+                hit(MemoryTier::Experience, "Y", 0.9),
+            ],
             consolidate_log: Arc::new(Mutex::new(Vec::new())),
         };
         let b = FakeBackend {
@@ -581,7 +584,10 @@ mod tests {
     fn escalate_stops_at_quota_when_top_satisfied() {
         let a = FakeBackend {
             tier: MemoryTier::Experience,
-            hits: vec![hit(MemoryTier::Experience, "A1", 1.0), hit(MemoryTier::Experience, "A2", 0.8)],
+            hits: vec![
+                hit(MemoryTier::Experience, "A1", 1.0),
+                hit(MemoryTier::Experience, "A2", 0.8),
+            ],
             consolidate_log: Arc::new(Mutex::new(Vec::new())),
         };
         let b = FakeBackend {
@@ -695,6 +701,7 @@ mod tests {
             input: "1+1".to_string(),
             output: "2".to_string(),
             timestamp: now,
+            elapsed_ms: None,
         };
         assert_eq!(message_text(&m), "2");
     }

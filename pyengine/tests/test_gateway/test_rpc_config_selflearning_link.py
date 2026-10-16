@@ -214,6 +214,10 @@ async def test_patch_safe_allows_memory_learning_toggles(tmp_path) -> None:
     assert "squilla_router.self_learning.enabled" in _SAFE_WRITE_PATCH_PATHS
     assert "memory.dream.enabled" in _SAFE_WRITE_PATCH_PATHS
     assert "memory.dream.auto_schedule" in _SAFE_WRITE_PATCH_PATHS
+    # Settings > Privacy 的记忆自动捕获开关（boolean opt-in，与 Rust 侧白名单对齐）。
+    # 回归背景：Python 白名单曾漏此路径 → 前端脏栏保存被拒（“Path is not safe for
+    # operator.write: memory.auto_capture_enabled”），而纯 Rust 路径却能保存。
+    assert "memory.auto_capture_enabled" in _SAFE_WRITE_PATCH_PATHS
     # Thresholds/schedules stay admin-only.
     assert "squilla_router.self_learning.train_min_samples" not in _SAFE_WRITE_PATCH_PATHS
 

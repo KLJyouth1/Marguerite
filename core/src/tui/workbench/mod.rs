@@ -8,13 +8,13 @@ pub mod dsh_slots;
 pub mod history;
 pub mod input;
 pub mod layout;
+pub mod palette_audit;
 pub mod region;
 pub mod registry;
 pub mod shortcut;
 pub mod slot;
 pub mod state;
 pub mod theme;
-pub mod palette_audit;
 pub mod workspace_watcher;
 
 use std::collections::hash_map::DefaultHasher;
@@ -50,6 +50,7 @@ use crate::model::llm::{LLMClient, LLMConfig, LLMProvider};
 use crate::model::selector::ModelSelector;
 use crate::orchestration::Orchestrator;
 use crate::persistence::config::Config;
+use crate::router::RouteDecision;
 use crate::sandbox::Sandbox;
 use crate::tui::workbench::layout::{split, WorkbenchLayout};
 use crate::tui::workbench::registry::register_builtins;
@@ -60,7 +61,6 @@ use crate::tui::workbench::state::{
 };
 use crate::tui::workbench::theme::Theme;
 use crate::types::Message;
-use crate::router::RouteDecision;
 
 /// 引擎运行门面（屏蔽 ChainExecutor / AgentRuntime 借用差异；后端实现真实适配器）
 pub trait EngineRunner: Send + Sync {
@@ -142,6 +142,9 @@ pub struct RealEngine {
     /// 共享前缀缓存（可选，v9 缓存 100% 接线）：Some = 编排器模型路由器复用
     /// 该缓存实例（跨轮/跨重启可重复请求命中）；None = 每轮自建。
     cache: Option<Arc<crate::cache::PrefixCache>>,
+    /// v3.3.1 steer 提供者（可选）：网关注入；每轮 dispatch 前 drain 运行中插话
+    /// 并转发给 lead 运行时，使插话在工具循环边界并入模型消息、影响生成本身。
+    steer_provider: Option<Arc<dyn Fn() -> Vec<String> + Send + Sync>>,
 }
 
 impl RealEngine {
@@ -157,7 +160,17 @@ impl RealEngine {
             mode_section: None,
             credentials: None,
             cache: None,
+            steer_provider: None,
         }
+    }
+
+    /// v3.3.1 注入 steer 提供者：每轮 dispatch 前 drain 运行中插话。
+    pub fn with_steer_provider(
+        mut self,
+        provider: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    ) -> Self {
+        self.steer_provider = Some(provider);
+        self
     }
 
     /// 接入自进化经验台账（GUI 调用；TUI 保持默认 None）
@@ -266,11 +279,20 @@ impl RealEngine {
         // 关键：把进程级运行时模式（前端 mode.switch 切换的 Plan/Agent/Bloom）
         // 应用到本次编排，否则模式切换形同虚设。
         orch.set_mode(crate::mode::runtime_mode());
+        // 工具回路（P1 修复）：`solo_with_tools` 默认为 false，于是 UI 默认（Solo）路径
+        // 走 `lead.process_input` ——**没有任何工具**：模型只能"声称"已创建文件，
+        // 产物永不落盘，而完成门禁仍判 completed（实测：说"已创建 ui_probe.txt"但磁盘无此文件）。
+        // 计划执行器早已置 true（`plan/runner.rs`），这里把同一开关接到 UI 主路径；
+        // 仅 Plan（只读探索，写操作须先审批）保持关闭，以免绕过"先计划后执行"的语义。
+        orch.set_solo_with_tools(crate::mode::runtime_mode() != crate::mode::ModeKind::Plan);
         // 模式提示段（DSH 融合 v2 §4 接线收尾）：Plan 模式注入 plan.yaml 的规则段；
         // 显式注入（with_mode_section）优先，否则按当前模式规格取 prompt_section。
         let mode_section = self.mode_section.clone().or_else(|| {
             let kind = crate::mode::runtime_mode();
-            crate::mode::ModeManager::new().spec(kind).prompt_section.clone()
+            crate::mode::ModeManager::new()
+                .spec(kind)
+                .prompt_section
+                .clone()
         });
         orch.set_mode_section(mode_section);
         orch.set_event_bus(bus.clone(), session.clone());
@@ -289,10 +311,25 @@ impl RealEngine {
         orch.load_history(crate::gateway::chat::session_history_messages(
             &session, &text,
         ));
+        // v3.3.1：dispatch 前 drain 运行中插话 → lead 缓冲；工具循环边界并入
+        // 模型消息，插话真正影响生成本身（而非仅回合末附录）。
+        if let Some(provider) = &self.steer_provider {
+            let steers = provider();
+            if !steers.is_empty() {
+                tracing::info!(session = %session, count = steers.len(), "运行中插话注入 lead");
+                orch.forward_steers(steers);
+            }
+        }
         let outcome = orch.dispatch(&text).await?; // Orchestrator 已在失败时发布 Error 事件
-                                                   // 自进化：本轮完成后由 LLM 自主抽取踩坑/决策写入台账（best-effort）
+        // 自进化：本轮完成后由 LLM 自主抽取踩坑/决策写入台账（best-effort）。
+        // 必须**脱离回合的关键路径**：它是一次额外的 LLM 调用，若在这里 await，
+        // 网关要等它返回才发布 Done / sessions.changed(idle)，前端就表现为
+        // 「任务已经做完，界面还一直显示思考中」，并且答完之后仍持续有网络动作。
         if let Some(evo) = evolution {
-            extract_experiences(evo, extract_cfg, text, outcome.lead_reply.clone()).await;
+            let reply = outcome.lead_reply.clone();
+            tokio::spawn(async move {
+                extract_experiences(evo, extract_cfg, text, reply).await;
+            });
         }
         Ok(outcome)
     }
@@ -311,6 +348,7 @@ impl EngineRunner for RealEngine {
         let mode_section = self.mode_section.clone();
         let credentials = self.credentials.clone();
         let cache = self.cache.clone();
+        let steer_provider = self.steer_provider.clone();
         Box::pin(async move {
             Self {
                 config,
@@ -322,6 +360,7 @@ impl EngineRunner for RealEngine {
                 mode_section,
                 credentials,
                 cache,
+                steer_provider,
             }
             .execute_turn(text, session, bus)
             .await
@@ -340,6 +379,7 @@ fn llm_config_for_extraction(config: &Config) -> LLMConfig {
     let provider = match config.model.provider.as_str() {
         "openai" => LLMProvider::OpenAI,
         "deepseek" => LLMProvider::DeepSeek,
+        "anthropic" => LLMProvider::Anthropic,
         _ => LLMProvider::Custom {
             base_url: config.model.base_url.clone(),
         },
@@ -655,7 +695,11 @@ impl WorkbenchApp {
     }
 
     /// 渲染：布局 → 五区域渲染（折叠区域按需跳过）
-    fn render(&self, frame: &mut ratatui::Frame) {
+    ///
+    /// `pub` 是为了让 `core/examples/tui_frame.rs` 能把**真实一帧**导成 ANSI
+    /// 用于生成文档里的终端截图 —— 那条路径走的是 `TestBackend`，不需要 pty，
+    /// 所以换台机器/CI 也能复现。
+    pub fn render(&self, frame: &mut ratatui::Frame) {
         let collapse = self.state.collapse;
         let lay: WorkbenchLayout = split(frame.area(), &collapse);
         crate::tui::workbench::region::activity::render_activity(frame, lay.activity, &self.state);
@@ -1331,31 +1375,6 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect()
         };
-        // 转储：非 ASCII 可打印字符标注为 U+XXXX，便于核对全角占位
-        let dump_esc = |term: &Terminal<TestBackend>, path: &str| {
-            let buf = term.backend().buffer();
-            let w = buf.area.width as usize;
-            let h = buf.area.height as usize;
-            let content = buf.content();
-            let mut out = String::new();
-            for y in 0..h {
-                let mut row = String::new();
-                for x in 0..w {
-                    let s = content[y * w + x].symbol();
-                    for ch in s.chars() {
-                        if ch == ' ' {
-                            row.push(' ');
-                        } else if ch.is_ascii_graphic() {
-                            row.push(ch);
-                        } else {
-                            row.push_str(&format!("<U+{:04X}>", ch as u32));
-                        }
-                    }
-                }
-                out.push_str(&format!("{:2} |{}\n", y, row));
-            }
-            let _ = std::fs::write(path, out);
-        };
 
         let mut app = WorkbenchApp::from_config(&Config::default()).unwrap();
 
@@ -1370,10 +1389,6 @@ mod tests {
         t_dep
             .draw(|f| render_rail(f, f.area(), &app.state))
             .unwrap();
-        dump_esc(
-            &t_dep,
-            "D:/Downloads/Marguerite/mgt_tmp/render_deploy_dump.txt",
-        );
         let d = collect(&t_dep);
         assert!(
             norm(&d).contains("部署面板"),
@@ -1401,10 +1416,6 @@ mod tests {
         t_col
             .draw(|f| render_rail(f, f.area(), &app.state))
             .unwrap();
-        dump_esc(
-            &t_col,
-            "D:/Downloads/Marguerite/mgt_tmp/render_collab_dump.txt",
-        );
         let c = collect(&t_col);
         assert!(
             norm(&c).contains("协作事件流"),
@@ -1511,24 +1522,6 @@ mod tests {
         let app = WorkbenchApp::from_config(&Config::default()).unwrap();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
-
-        // 转储全帧供五源对齐人工核对（mgt_tmp 为 I4 已建临时目录）
-        {
-            let buf = term.backend().buffer();
-            let w = buf.area.width as usize;
-            let h = buf.area.height as usize;
-            let content = buf.content();
-            let mut out = String::new();
-            for y in 0..h {
-                let mut row = String::new();
-                for x in 0..w {
-                    let s = content[y * w + x].symbol();
-                    row.push_str(if s == " " { " " } else { s });
-                }
-                out.push_str(&format!("{:2} |{}\n", y, row));
-            }
-            let _ = std::fs::write("D:/Downloads/Marguerite/mgt_tmp/j5_fullframe_dump.txt", out);
-        }
 
         let d = j5_collect(&term);
         let norm = d.replace(' ', "");

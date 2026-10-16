@@ -21,6 +21,7 @@ from opensquilla.recovery.atomic import (
     PathIdentity,
     _chmod_open_file,
     _native_io_path,
+    can_harden_posix_mode,
     is_path_redirecting_stat,
     native_move_no_replace,
 )
@@ -132,14 +133,14 @@ def _restrict_existing_credential_to_owner(path: Path) -> None:
     snapshot = ConfigSnapshot.capture(path)
     if snapshot.identity is None:
         return
-    can_harden_posix_mode = callable(getattr(os, "fchmod", None))
+    can_harden = can_harden_posix_mode()
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(_native_io_path(path), flags)
     try:
         if PathIdentity.from_stat(os.fstat(fd)) != snapshot.identity:
             raise AtomicStateUnknownError("Desktop credential changed before backup hardening")
-        if can_harden_posix_mode:
+        if can_harden:
             _chmod_open_file(fd, 0o600)
             os.fsync(fd)
     finally:
@@ -148,7 +149,7 @@ def _restrict_existing_credential_to_owner(path: Path) -> None:
     if (
         after.identity is None
         or after.data != snapshot.data
-        or (can_harden_posix_mode and after.identity.mode & 0o777 != 0o600)
+        or (can_harden and after.identity.mode & 0o777 != 0o600)
     ):
         raise AtomicStateUnknownError("Desktop credential backup is not owner-only")
 

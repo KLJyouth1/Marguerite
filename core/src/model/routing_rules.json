@@ -1,0 +1,52 @@
+{
+  "rules": [
+    { "intent": "Code", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "Reasoning", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "Reasoning", "complexity": "Medium", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "LongContext", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "LongContext", "complexity": "Medium", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "Vision", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "Vision", "complexity": "Medium", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "WebSearch", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+    { "intent": "Chat", "complexity": "Complex", "model": "deepseek-v4-pro", "priority": 100 },
+
+    { "intent": "Code", "complexity": "Medium", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "Code", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "Reasoning", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "LongContext", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "Vision", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "WebSearch", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "WebSearch", "complexity": "Medium", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "Chat", "complexity": "Simple", "model": "deepseek-v4-flash", "priority": 80 },
+    { "intent": "Chat", "complexity": "Medium", "model": "deepseek-v4-flash", "priority": 80 },
+
+    { "intent": "Translation", "complexity": null, "model": "deepseek-v4-flash", "priority": 70 },
+    { "intent": "Summarization", "complexity": null, "model": "deepseek-v4-flash", "priority": 70 },
+
+    { "intent": null, "complexity": null, "model": "deepseek-v4-pro", "priority": 50 }
+  ],
+  "failover": {
+    "siblings": {
+      "deepseek-v4-pro": "deepseek-v4-flash",
+      "deepseek-v4-flash": "deepseek-v4-pro",
+      "deepseek-chat": "deepseek-v4-pro",
+      "deepseek-reasoner": "deepseek-v4-pro",
+      "gpt-4o": "gpt-4o-mini",
+      "gpt-4o-mini": "gpt-4o",
+      "claude-sonnet-4": "claude-haiku-4",
+      "claude-opus-4": "claude-haiku-4",
+      "claude-haiku-4": "claude-sonnet-4"
+    },
+    "tiers": {
+      "deepseek-v4-pro": ["deepseek-v4-pro", "deepseek-v4-flash"],
+      "deepseek-v4-flash": ["deepseek-v4-pro", "deepseek-v4-flash"],
+      "deepseek-chat": ["deepseek-v4-pro", "deepseek-v4-flash"],
+      "deepseek-reasoner": ["deepseek-v4-pro", "deepseek-v4-flash"],
+      "gpt-4o": ["gpt-4o", "gpt-4o-mini"],
+      "gpt-4o-mini": ["gpt-4o", "gpt-4o-mini"],
+      "claude-opus-4": ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"],
+      "claude-sonnet-4": ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"],
+      "claude-haiku-4": ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"]
+    }
+  }
+}

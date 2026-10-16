@@ -15,4 +15,7 @@ pub mod client;
 pub mod event_bridge;
 pub mod sidecar;
 
-pub use sidecar::{PyEngineSidecar, PyEngineStatus, SidecarConfig};
+pub use sidecar::{
+    detect_python, free_loopback_port, parse_python_version, PyEngineSidecar, PyEngineStatus,
+    SidecarConfig,
+};

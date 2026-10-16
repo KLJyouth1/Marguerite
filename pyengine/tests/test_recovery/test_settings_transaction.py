@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from opensquilla.recovery import inspect_profile
-from opensquilla.recovery.atomic import _native_io_path
+from opensquilla.recovery.atomic import _native_io_path, can_harden_posix_mode
 from opensquilla.recovery.errors import AtomicStateUnknownError, RecoveryError
 from opensquilla.recovery.settings_transaction import (
     apply_desktop_settings,
@@ -152,7 +152,7 @@ def test_imported_settings_retain_exact_owner_only_credential_backup(tmp_path: P
     assert report.outcome == "ready"
     assert credential_path.read_text(encoding="utf-8") == new_credential
     assert backup.read_text(encoding="utf-8") == old_credential
-    if callable(getattr(os, "fchmod", None)):
+    if can_harden_posix_mode():
         assert backup.stat().st_mode & 0o777 == 0o600
     assert not settings_transaction_journal(home).exists()
 
@@ -184,7 +184,7 @@ def test_imported_settings_backup_survives_failpoint_recovery(tmp_path: Path) ->
     assert recovered.outcome == "ready"
     assert credential_path.read_text(encoding="utf-8") == new_credential
     assert backup.read_text(encoding="utf-8") == old_credential
-    if callable(getattr(os, "fchmod", None)):
+    if can_harden_posix_mode():
         assert backup.stat().st_mode & 0o777 == 0o600
     assert not settings_transaction_journal(home).exists()
 

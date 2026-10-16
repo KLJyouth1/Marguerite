@@ -44,6 +44,48 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=(haystack.len() - needle.len())).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
+/// keep-alive 安全的请求读取：从 `buf`（跨请求持久）中解析出「一条完整 HTTP/1.x 请求」，
+/// 返回 `(该请求字节, 剩余未消费字节)`。剩余字节会被下一次调用继续消费，避免多请求共用
+/// 一个连接时「多读出的下一条请求字节被丢弃 → 连接错位卡死」。
+///
+/// `buf` 必须由调用方在多次调用间保持并持续追加（`socket.read` 的数据）。本函数只在
+/// 确实凑齐一条请求时才返回 `Some`，否则继续从 socket 读，直到对端关闭（`None`）。
+pub(crate) async fn read_request_keepalive(
+    socket: &mut tokio::net::TcpStream,
+    buf: &mut Vec<u8>,
+) -> Option<Vec<u8>> {
+    let mut tmp = [0u8; 4096];
+    loop {
+        // 头结束
+        let header_end = match find_subsequence(buf, b"\r\n\r\n") {
+            Some(pos) => pos + 4,
+            None => {
+                match socket.read(&mut tmp).await {
+                    Ok(0) | Err(_) => return None,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+                continue;
+            }
+        };
+        // 体长度
+        let content_len = content_length(&buf[..header_end]).unwrap_or(0);
+        if buf.len() < header_end + content_len {
+            match socket.read(&mut tmp).await {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+            continue;
+        }
+        // 恰好一条完整请求：切出，剩余留在 buf 供下一请求
+        let req_end = header_end + content_len;
+        let req: Vec<u8> = buf[..req_end].to_vec();
+        let rest: Vec<u8> = buf[req_end..].to_vec();
+        buf.clear();
+        buf.extend_from_slice(&rest);
+        return Some(req);
+    }
+}
+
 /// 大小写不敏感地解析 Content-Length 头（无则 None）。
 fn content_length(headers: &[u8]) -> Option<usize> {
     let text = String::from_utf8_lossy(headers).to_ascii_lowercase();

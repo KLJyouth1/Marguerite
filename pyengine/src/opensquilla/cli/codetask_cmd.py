@@ -46,6 +46,159 @@ def _codetask_main() -> None:
     # (keeps ``opensquilla code-task solve ...`` as an explicit subcommand).
 
 
+worktree_app = typer.Typer(
+    help="Parallel task isolation via git worktrees (task = worktree).",
+    no_args_is_help=True,
+)
+codetask_app.add_typer(worktree_app, name="worktree")
+
+
+def _wt_module():
+    """Lazy import so ``--help`` stays cheap and opensquilla import paths
+    never pull the worktree module in."""
+    from opensquilla.contrib.codetask import worktree as wt
+
+    return wt
+
+
+def _emit_wt_error(exc: Exception) -> None:
+    typer.secho(f"worktree error: {exc}", err=True, fg=typer.colors.RED)
+    raise typer.Exit(1) from exc
+
+
+@worktree_app.command("create")
+def worktree_create(
+    repo: str = typer.Option(..., "--repo", help="Source git repository (main worktree)."),
+    base: str = typer.Option(None, "--base", help="Base ref (default: HEAD)."),
+    slug: str = typer.Option("task", "--slug", help="Slug for the auto-generated task id."),
+    task_id: str = typer.Option(
+        "", "--task-id", help="Explicit task id (default: <slug>-<uuid8>)."
+    ),
+) -> None:
+    """Create an isolated git worktree + branch for one parallel task."""
+    wt = _wt_module()
+    try:
+        record = wt.create_task_worktree(repo, task_id=task_id or None, base_ref=base, slug=slug)
+    except wt.WorktreeError as exc:
+        _emit_wt_error(exc)
+    typer.echo(
+        json.dumps(
+            {
+                "task_id": record.task_id,
+                "repo": record.repo,
+                "path": record.path,
+                "branch": record.branch,
+                "base_ref": record.base_ref,
+                "base_commit": record.base_commit,
+                "main_branch": record.main_branch,
+                "created_at": record.created_at,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@worktree_app.command("list")
+def worktree_list(
+    repo: str = typer.Option(..., "--repo", help="Source git repository."),
+) -> None:
+    """List registered task worktrees and their live status."""
+    wt = _wt_module()
+    try:
+        tasks = wt.list_task_worktrees(repo)
+    except wt.WorktreeError as exc:
+        _emit_wt_error(exc)
+    typer.echo(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2))
+
+
+@worktree_app.command("diff")
+def worktree_diff(
+    repo: str = typer.Option(..., "--repo", help="Source git repository."),
+    task_id: str = typer.Option(..., "--task-id", help="Task id to collect."),
+    out: str = typer.Option(None, "--out", help="Write the patch here (default: stdout)."),
+) -> None:
+    """Collect the task's diff (live worktree, or rescue from its branch)."""
+    wt = _wt_module()
+    try:
+        files_changed, diffstat, patch = wt.collect_task_diff(repo, task_id)
+    except wt.WorktreeError as exc:
+        _emit_wt_error(exc)
+    if out:
+        Path(out).write_text(patch, encoding="utf-8")
+        typer.echo(
+            json.dumps(
+                {"task_id": task_id, "files_changed": files_changed, "patch_path": out},
+                ensure_ascii=False,
+            )
+        )
+    else:
+        if patch.strip():
+            typer.echo(patch, nl=False)
+        else:
+            typer.secho(
+                f"(no changes for task {task_id!r}; diffstat: {diffstat or 'empty'})",
+                err=True,
+            )
+
+
+@worktree_app.command("finish")
+def worktree_finish(
+    repo: str = typer.Option(..., "--repo", help="Source git repository."),
+    task_id: str = typer.Option(..., "--task-id", help="Task id to finish."),
+    action: str = typer.Option(
+        "merge",
+        "--action",
+        help=(
+            "merge (guarded --no-ff into the create-time branch) or abandon "
+            "(keep diff, delete worktree+branch)."
+        ),
+    ),
+    cleanup: bool = typer.Option(
+        True, "--cleanup/--no-cleanup", help="Remove the worktree+branch after a merge."
+    ),
+) -> None:
+    """Merge or abandon a task worktree (merge is guarded; conflicts preserve the scene)."""
+    wt = _wt_module()
+    if action not in ("merge", "abandon"):
+        typer.secho(
+            f"Unknown --action {action!r}; expected one of: merge, abandon.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+    try:
+        result = wt.finish_task_worktree(repo, task_id, action=action, cleanup=cleanup)
+    except wt.WorktreeError as exc:
+        _emit_wt_error(exc)
+    typer.echo(
+        json.dumps(
+            {
+                "task_id": result.task_id,
+                "action": result.action,
+                "ok": result.ok,
+                "detail": result.detail,
+                "patch_path": result.patch_path,
+                "merge_commit": result.merge_commit,
+                "cleaned": result.cleaned,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@worktree_app.command("prune")
+def worktree_prune(
+    repo: str = typer.Option(..., "--repo", help="Source git repository."),
+) -> None:
+    """Reclaim crash residue (git worktree prune + registry rows with no dir)."""
+    wt = _wt_module()
+    try:
+        summary = wt.prune_task_worktrees(repo)
+    except wt.WorktreeError as exc:
+        _emit_wt_error(exc)
+    typer.echo(json.dumps(summary, ensure_ascii=False))
+
+
 def _shell_quote_path(path: str) -> str:
     if os.name == "nt":
         return '"' + path.replace('"', '\\"') + '"'
@@ -247,9 +400,7 @@ def solve(
     # at "[y/N]"). Fail-fast with a clear exit 2 instead.
     if not yes:
         if json_output or not _stdin_is_tty():
-            reason = (
-                "(stdout is JSON)" if json_output else "(stdin is not a terminal)"
-            )
+            reason = "(stdout is JSON)" if json_output else "(stdin is not a terminal)"
             typer.secho(
                 f"Refusing to run without --yes on a non-interactive surface "
                 f"{reason}. code-task runs an agent on the host (not a sandbox); "

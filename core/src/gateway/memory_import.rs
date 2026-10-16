@@ -1,5 +1,21 @@
 //! 画像导入（Memory Profile Import）：8 个 RPC 的完整闭环
 //!
+//! # ⚠️ 定位：**离线降级实现**（与 Python 侧车不同源，见下）
+//!
+//! `memory.import.*` 命中 `PY_ENGINE_PREFIXES`，因此**侧车在线时由 Python 的
+//! `gateway/rpc_memory_import.py` 应答**（自述为 *model-assisted profile imports*，
+//! 自带解析/事务/receipts/undo 服务）；本模块**只在侧车不可用时**接管。
+//!
+//! 两套实现的**语义与写入目标不同**（2026-10-09 审计确认）：
+//! - 本模块：**不做 LLM 真实分析**，基于**关键词分类**把文本路由到三类文件
+//!   （下表给出目标布局），产出 unified diff 与 `.bak.undo` 快照；
+//! - Python：**模型辅助分析**，写入路径不同。
+//!
+//! ⇒ 同一句「导入我的画像」在侧车在线/离线时会**改到不同文件、产生不同 receipts/undo**。
+//! 这是**已知且有意保留的降级差异**（产品决策：以 Python 为准，本模块为离线兜底）。
+//! **改动此处前请先确认：不要让它与 Python 侧的语义悄悄靠拢或分叉** ——
+//! 任何"对齐"都应作为显式决策，而不是顺手修改。
+//!
 //! 目标文件布局（三类 target）：
 //! - USER   → `~/.trae-cn/memory/user_profile.md`（用户画像，跨项目共享）
 //! - MEMORY → `Config::data_dir()/memory/` 下结构化画像（本地记忆、约定等）

@@ -299,7 +299,10 @@ mod tests {
     #[test]
     fn rejects_uppercase_and_spaced_variants() {
         // 大小写混写 + 属性名与 '=' 间留空白，均不得绕过
-        assert!(scan_text("<ScRiPt>x</ScRiPt>").is_some(), "大小写混写不得绕过");
+        assert!(
+            scan_text("<ScRiPt>x</ScRiPt>").is_some(),
+            "大小写混写不得绕过"
+        );
         assert!(
             scan_text("<div onmouseover = \"x()\">").is_some(),
             "= 前留空白不得绕过"

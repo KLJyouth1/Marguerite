@@ -172,17 +172,16 @@ impl PetV2 {
                 self.transition(PetStateV2::Sleeping, now_ms);
             }
             // Eating 超过 2s → Idle
-            PetStateV2::Eating if elapsed_secs >= 2 => {
+            PetStateV2::Eating
+                if elapsed_secs >= 2
                 // 如果能量已很低，前面 (b) 已经改成 Sleeping，所以这里仅覆盖非低能场景
-                if self.state == PetStateV2::Eating {
-                    self.transition(PetStateV2::Idle, now_ms);
-                }
+                && self.state == PetStateV2::Eating =>
+            {
+                self.transition(PetStateV2::Idle, now_ms);
             }
             // Petted 超过 3s → Idle
-            PetStateV2::Petted if elapsed_secs >= 3 => {
-                if self.state == PetStateV2::Petted {
-                    self.transition(PetStateV2::Idle, now_ms);
-                }
+            PetStateV2::Petted if elapsed_secs >= 3 && self.state == PetStateV2::Petted => {
+                self.transition(PetStateV2::Idle, now_ms);
             }
             _ => { /* 保持当前 */ }
         }

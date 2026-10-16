@@ -624,6 +624,12 @@ _SAFE_WRITE_PATCH_PATHS = frozenset(
         "llm_ensemble.orchestration_mode",
         "naming.enabled",
         "privacy.disable_network_observability",
+        # Settings > Privacy 的「记忆自动捕获」开关（webui `memory.auto_capture_enabled`）。
+        # 与 Rust 侧 `gateway/config.rs` 的 patch 白名单**必须一致**：缺了这条，同一开关
+        # 经 Python 侧车的 config.patch.safe 会被拒（实测报 “Path is not safe for
+        # operator.write: memory.auto_capture_enabled”，前端脏栏保存永久失败），而纯 Rust
+        # 路径却能保存 —— 两实现行为分叉。
+        "memory.auto_capture_enabled",
         "control_ui.default_locale",
         "prompt_cache.mode",
         "squilla_router.enabled",
@@ -861,6 +867,13 @@ async def _handle_config_set(params: dict | None, ctx: RpcContext) -> dict[str, 
     return response
 
 
+# ⚠️ 不变量：本 handle 的读改写序列（读 `ctx.config` → 构建候选 → `_persist_config` →
+# 写回 `ctx.config`）**中间不得出现 `await`**。asyncio 只在 await 点调度其它任务，
+# 没有 await 就没有交错，并发 `config.patch` 因此天然不会互相覆盖（实测：`gather`
+# 两条并行 `config.patch.safe` 双写都落盘）。**若将来必须在持久化前插入 await**
+# （例如异步校验），就必须先补一把 `asyncio.Lock` 串行化，否则会退化成静默丢更新 ——
+# 那正是 Rust 侧（多线程 runtime，无法靠「无 await」保证）必须用 `CONFIG_WRITE_LOCK`
+# 的原因，见 `core/src/gateway/config.rs`。
 @_d.method("config.patch", scope="operator.admin")
 async def _handle_config_patch(
     params: dict | None,

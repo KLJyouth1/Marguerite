@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 
-use super::llm::{LLMClient, LLMConfig, LLMResponse, StreamReceiver, ToolDef};
+use super::error_taxonomy::ProviderErrorClass;
+use super::llm::{
+    default_timeout_secs, LLMClient, LLMConfig, LLMResponse, StreamReceiver, ToolDef,
+};
 use crate::cache::PrefixCache;
 use crate::persistence::config::Config;
 use crate::types::Message;
@@ -79,12 +82,54 @@ pub struct ModelRouter {
     template_config: LLMConfig,
     /// 跨所有候选客户端共享的客户端缓存（精确前缀命中 + 服务端前缀复用观测 + 预热）
     cache: Arc<PrefixCache>,
+    /// 档位治理状态（M3）。`None` = 未启用，行为与历史完全一致（零回归）。
+    tier_governance: Option<TierGovernance>,
+}
+
+/// 档位治理状态（M3）：把档位准入真正接到**实际调用链**上所需的最小状态。
+///
+/// 为什么做成 `Option` 而非必填：既有的 265 项测试与全部历史调用路径都不传档位。
+/// 若设为必填，就必须一次性改掉所有构造点与调用点，回归面过大且难以逐项验证。
+/// 设为 `None` 时 [`ModelRouter::chain_for_call`] 精确退化为原 `candidate_chain`，
+/// 从而**默认零行为变更**——档位治理只在使用方显式开启后才生效。
+#[derive(Clone)]
+pub struct TierGovernance {
+    /// 本次会话生效的目标档位（由上层据模式 / TaskKind / 预算决定）
+    pub tier: crate::model::tier::ModelTier,
+    /// 档案表：既是准入判定的输入，也是候选接入配置的唯一来源
+    pub registry: Arc<crate::model::registry::ModelRegistry>,
+}
+
+/// M3：把档位准入结果组装为候选客户端（**不含首选**，由调用方置于链首）。
+///
+/// 为什么抽成自由函数而不是 Router 方法：构造完整 `ModelRouter` 需要 `Config`
+/// 与 vault 主口令（见同模块凭证缝测试），对一个"候选过滤"语义而言过重。
+/// 抽出来后可只依赖档案表与缓存独立单测，从而精确验证
+/// 「被准入线拒绝的模型绝不进入候选链」这一关键行为——这是 M3 的核心不变量。
+pub(crate) fn tier_clients(
+    registry: &crate::model::registry::ModelRegistry,
+    tier: crate::model::tier::ModelTier,
+    cache: &Arc<PrefixCache>,
+) -> (Vec<Arc<LLMClient>>, crate::model::tier::TierChain) {
+    let chain = registry.tier_chain(tier);
+    let mut out = Vec::new();
+    for id in &chain.candidates {
+        // `candidates` 已由 filter_chain 保证命中档案表；这里再取一次以拿到接入配置。
+        if let Some(p) = registry.profiles.get(id) {
+            out.push(Arc::new(LLMClient::new(p.to_llm_config()).with_cache(cache.clone())));
+        }
+    }
+    (out, chain)
 }
 
 impl ModelRouter {
-    /// 从配置创建模型路由器
+    /// 从配置创建模型路由器。
+    ///
+    /// M2 降耗修复：默认缓存改为 [`crate::cache::default_prefix_cache`]——进程内若已
+    /// 安装语义层（网关路径），则复用其 Tier 0 共享实例，使 `AgentRuntime` 等经此路径
+    /// 构造的组件与网关共享同一份缓存，跨轮重复请求才能命中；否则退化为独立实例。
     pub fn new(config: &Config) -> Self {
-        Self::new_with_cache(config, Arc::new(PrefixCache::new(2048)))
+        Self::new_with_cache(config, crate::cache::default_prefix_cache())
     }
 
     /// 从配置 + **共享前缀缓存**创建模型路由器（v9 缓存 100% 接线）：
@@ -107,6 +152,7 @@ impl ModelRouter {
             clients: Mutex::new(HashMap::new()),
             template_config,
             cache,
+            tier_governance: None,
         }
     }
 
@@ -156,8 +202,9 @@ impl ModelRouter {
 
     /// 设置回退客户端
     pub fn with_fallback(mut self, config: LLMConfig) -> Self {
-        self.fallback_client =
-            Some(Arc::new(LLMClient::new(config).with_cache(self.cache.clone())));
+        self.fallback_client = Some(Arc::new(
+            LLMClient::new(config).with_cache(self.cache.clone()),
+        ));
         self
     }
 
@@ -185,6 +232,7 @@ impl ModelRouter {
             provider: match config.model.provider.as_str() {
                 "openai" => super::llm::LLMProvider::OpenAI,
                 "deepseek" => super::llm::LLMProvider::DeepSeek,
+                "anthropic" => super::llm::LLMProvider::Anthropic,
                 _ => super::llm::LLMProvider::Custom {
                     base_url: config.model.base_url.clone(),
                 },
@@ -192,26 +240,56 @@ impl ModelRouter {
             model: config.model.model_name.clone(),
             api_key: config.model.api_key.clone(),
             base_url: config.model.base_url.clone(),
+            timeout_secs: if config.model.timeout_secs > 0 {
+                config.model.timeout_secs
+            } else {
+                default_timeout_secs()
+            },
             ..Default::default()
         }
     }
 
-    /// 默认故障转移链：据主模型派生「同提供商备用模型」作为候选。
+    /// 默认故障转移链：为已知 provider 派生「同提供商全档位备用模型」作为有序候选。
     ///
     /// 蒸馏 外部参考 provider-plane 有序候选语义，但来源诚实——仅复用用户已配置的
-    /// provider / base_url / api_key，不编造任何凭据或新端点。已知主模型映射到其
-    /// 同提供商 sibling（如 deepseek-chat ↔ deepseek-reasoner）；未知/自定义模型
-    /// 无可靠 sibling，返回空（不伪造备用后端）。返回 `Vec<Arc<LLMClient>>`，
-    /// 与主字段类型一致（仿 `with_fallback_chain` 把 config 包成 client）。
+    /// provider / base_url / api_key，不编造任何凭据或新端点。
+    ///
+    /// **跨档冗余修正（W-4 后续 / PRD G1 可靠性）**：旧实现仅派生「单一 sibling」，
+    /// 当路由主模型恰好等于该 sibling 时，`candidate_chain` 去重后只剩一个候选，
+    /// 导致**高价值复杂任务（主模型=deepseek-v4-pro）的故障转移实际失效**——
+    /// 例如线上 `config.yaml` 主模型=deepseek-chat 时 sibling=deepseek-v4-pro，
+    /// 与路由选中的主模型重合，回退链塌缩成单候选。新实现把 provider 的**全部已知
+    /// 档位**都纳入候选链（sibling 优先、其余档位随后）；`candidate_chain` 按
+    /// (base_url, model) 去重，选中的主模型自然被折叠，始终留下一个**跨档**备用
+    /// 后端，确保 fallback 真正生效（PRD G1 要求 fallback < 15%）。
+    ///
+    /// 未知 / 自定义模型无可靠档位映射，返回空（不伪造备用后端）。
     fn default_failover_chain(config: &Config, cache: &Arc<PrefixCache>) -> Vec<Arc<LLMClient>> {
-        match provider_sibling_model(&config.model.model_name) {
-            Some(sibling) if sibling != config.model.model_name.as_str() => {
-                let mut cfg = Self::build_template_config(config);
-                cfg.model = sibling.to_string();
-                vec![Arc::new(LLMClient::new(cfg).with_cache(cache.clone()))]
-            }
-            _ => Vec::new(),
+        let primary = config.model.model_name.as_str();
+        let tiers = provider_tiers(primary);
+        if tiers.is_empty() {
+            return Vec::new();
         }
+        // 顺序：sibling 优先（最可能的备用档），随后补其余档位。
+        // 包含 primary 自身无害——candidate_chain 会按 (base_url, model) 去重，
+        // 并在「选中主模型 ≠ primary」时充当真实回退。
+        let mut ordered: Vec<String> = Vec::new();
+        if let Some(sib) = provider_sibling_model(primary) {
+            ordered.push(sib);
+        }
+        for t in tiers {
+            if !ordered.contains(&t) {
+                ordered.push(t);
+            }
+        }
+        ordered
+            .into_iter()
+            .map(|m| {
+                let mut cfg = Self::build_template_config(config);
+                cfg.model = m.to_string();
+                Arc::new(LLMClient::new(cfg).with_cache(cache.clone()))
+            })
+            .collect()
     }
 
     /// 组装一次调用的有序候选链：`[primary, fallback_client?, ...failover_chain]`，
@@ -228,6 +306,78 @@ impl ModelRouter {
         out.into_iter()
             .filter(|c| seen.insert((c.config.base_url.clone(), c.config.model.clone())))
             .collect()
+    }
+
+    /// 按**档位**组装候选链（M3：把 M2 的档位准入真正接到路由的候选链上）。
+    ///
+    /// 与 [`Self::candidate_chain`] 的区别：后者只按 provider 静态档位表派生候选，
+    /// 而本方法从**注册表**取该档的准入结果 —— 声明能力达不到该档准入线的档案
+    /// （见 `tier.rs::filter_chain`）**不会进入候选链**。这正是"准入校验生效"的地方：
+    /// 若只算不接，`accepts()` 就只是一段无人调用的装饰代码。
+    ///
+    /// 保持既有"主模型优先"语义：`primary` 置顶，档内准入候选作为其后备，
+    /// 并沿用 `candidate_chain` 的 `(base_url, model)` 去重口径。
+    ///
+    /// 返回值第二项是完整的准入明细（含 `rejected`/`unverified`/`missing`），
+    /// 供控制中心回显"为何没选它"（对齐设计稿 §3.1 的 `RouteDecision.why`）。
+    pub fn tier_candidate_chain(
+        &self,
+        primary: Arc<LLMClient>,
+        tier: crate::model::tier::ModelTier,
+        registry: &crate::model::registry::ModelRegistry,
+    ) -> (Vec<Arc<LLMClient>>, crate::model::tier::TierChain) {
+        let (backends, chain) = tier_clients(registry, tier, &self.cache);
+        let mut out = Vec::with_capacity(backends.len() + 1);
+        out.push(primary);
+        out.extend(backends);
+        let mut seen = std::collections::HashSet::new();
+        let deduped = out
+            .into_iter()
+            .filter(|c| seen.insert((c.config.base_url.clone(), c.config.model.clone())))
+            .collect();
+        (deduped, chain)
+    }
+
+    /// 开启档位治理（M3）：此后 `chat_complete*` 的候选链由该档的**准入结果**决定。
+    ///
+    /// 传入的档位即"本次会话的生效档"（由上层据模式 / TaskKind / 预算决定）；
+    /// 不调用本方法则 [`ModelRouter::chain_for_call`] 精确退化为历史行为。
+    pub fn with_tier_governance(
+        mut self,
+        tier: crate::model::tier::ModelTier,
+        registry: Arc<crate::model::registry::ModelRegistry>,
+    ) -> Self {
+        self.tier_governance = Some(TierGovernance { tier, registry });
+        self
+    }
+
+    /// 由请求画像**自动判定**生效档，并据此开启档位治理（M3 闭环入口）。
+    ///
+    /// 这是"生效档自动判定"的落地入口：调用方只需给出模式 / 任务类型 / 延迟 / 预算，
+    /// **无需自己知道该选哪一档**。判定结果与理由链一并返回，供控制中心 / TUI 回显
+    /// "为何选这一档"（设计稿 §3.1 ⑥）。
+    ///
+    /// 返回 `(router, decision)`：`router` 已带好治理状态，可直接用于后续 `chat_complete*`。
+    pub fn with_auto_tier(
+        self,
+        req: &crate::model::tier::TierRequest,
+        registry: Arc<crate::model::registry::ModelRegistry>,
+    ) -> (Self, crate::model::tier::TierDecision) {
+        let decision = crate::model::tier::resolve_tier(req);
+        (self.with_tier_governance(decision.tier, registry), decision)
+    }
+
+    /// 一次调用**实际**使用的候选链：开了档位治理走档位准入，否则走历史链。
+    ///
+    /// 这是 M3 的接线点：所有 `chat_complete*` 都经它取链，因此"准入校验生效"是
+    /// **一处改动、全局受益**，而不是散落在各方法里的条件分支（后者极易漏改，
+    /// 且漏改的那条路径会静默绕过准入校验）。
+    fn chain_for_call(&self, primary: Arc<LLMClient>) -> Vec<Arc<LLMClient>> {
+        match &self.tier_governance {
+            // 未开启 → 与历史逐字节等价（默认零行为变更）
+            None => self.candidate_chain(primary),
+            Some(g) => self.tier_candidate_chain(primary, g.tier, &g.registry).0,
+        }
     }
 
     /// 添加路由规则
@@ -336,7 +486,7 @@ impl ModelRouter {
         messages: &[Message],
     ) -> Result<LLMResponse> {
         let primary = self.select_model(intent, complexity);
-        let chain = self.candidate_chain(primary);
+        let chain = self.chain_for_call(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
 
@@ -351,7 +501,7 @@ impl ModelRouter {
         max_tokens: Option<u32>,
     ) -> Result<LLMResponse> {
         let primary = self.primary_with_cap(intent, complexity, max_tokens);
-        let chain = self.candidate_chain(primary);
+        let chain = self.chain_for_call(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
 
@@ -359,7 +509,7 @@ impl ModelRouter {
     ///
     /// 默认客户端失败后，按故障转移链（`candidate_chain`）逐级切下一级。
     pub async fn chat(&self, messages: &[Message]) -> Result<LLMResponse> {
-        let chain = self.candidate_chain(self.default_client.clone());
+        let chain = self.chain_for_call(self.default_client.clone());
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
 
@@ -380,7 +530,9 @@ impl ModelRouter {
             .as_ref()
             .clone()
             .with_adaptive_profile(kind);
-        client.chat_complete_with_tools_cached(messages, tools).await
+        client
+            .chat_complete_with_tools_cached(messages, tools)
+            .await
     }
 
     /// 带输出预算上限的工具聊天（锚定 bootstrap 通道）：`max_tokens` 为 Some 时
@@ -402,14 +554,16 @@ impl ModelRouter {
             Some(cap) => base.with_max_tokens(cap),
             None => base,
         };
-        client.chat_complete_with_tools_cached(messages, tools).await
+        client
+            .chat_complete_with_tools_cached(messages, tools)
+            .await
     }
 
     /// 流式聊天
     ///
     /// 默认客户端失败后，按故障转移链（`candidate_chain`）逐级切下一级。
     pub async fn chat_stream(&self, messages: &[Message]) -> Result<StreamReceiver> {
-        let chain = self.candidate_chain(self.default_client.clone());
+        let chain = self.chain_for_call(self.default_client.clone());
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_stream(messages))).await
     }
 
@@ -426,7 +580,7 @@ impl ModelRouter {
     ) -> Result<LLMResponse> {
         let effort = decision.thinking_effort();
         let primary = self.primary_with_thinking(intent, complexity, effort);
-        let chain = self.candidate_chain(primary);
+        let chain = self.chain_for_call(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_cached(messages))).await
     }
 
@@ -440,7 +594,7 @@ impl ModelRouter {
     ) -> Result<StreamReceiver> {
         let effort = decision.thinking_effort();
         let primary = self.primary_with_thinking(intent, complexity, effort);
-        let chain = self.candidate_chain(primary);
+        let chain = self.chain_for_call(primary);
         try_failover_chain(&chain, |c| Box::pin(c.chat_complete_stream(messages))).await
     }
 
@@ -455,7 +609,7 @@ impl ModelRouter {
     ) -> Result<LLMResponse> {
         let effort = decision.thinking_effort();
         let primary = self.primary_with_thinking(intent, complexity, effort);
-        let chain = self.candidate_chain(primary);
+        let chain = self.chain_for_call(primary);
         try_failover_chain(&chain, |c| {
             Box::pin(c.chat_complete_with_tools_cached(messages, tools))
         })
@@ -492,6 +646,7 @@ impl ModelRouter {
 impl Clone for ModelRouter {
     fn clone(&self) -> Self {
         Self {
+            tier_governance: self.tier_governance.clone(),
             default_client: self.default_client.clone(),
             fallback_client: self.fallback_client.clone(),
             failover_chain: self.failover_chain.clone(),
@@ -549,23 +704,68 @@ pub(crate) async fn try_failover_chain<'cand, T>(
     if candidates.is_empty() {
         return Err(anyhow!("failover chain is empty (no candidate client)"));
     }
-    let mut attempts: Vec<(String, String)> = Vec::with_capacity(candidates.len());
+    // 记录每级失败：模型名 + 已归类错误的安全文案 + 归类（用于「全候选同类失败」判定）。
+    let mut attempts: Vec<(String, String, Option<ProviderErrorClass>)> =
+        Vec::with_capacity(candidates.len());
     for c in candidates {
         match runner(c).await {
             Ok(response) => return Ok(response),
-            Err(e) => attempts.push((c.config.model.clone(), e.to_string())),
+            Err(e) => {
+                let class = crate::model::error_taxonomy::provider_error_of(&e).map(|p| p.class());
+                // `e.to_string()`：对 ProviderError 只含 `code: safe_message`（**不含**上游正文），
+                // 故即便走下方通用兜底分支也不会把 provider 原始正文回显给用户。
+                attempt_errors_capture(&mut attempts, c.config.model.clone(), e.to_string(), class);
+            }
         }
     }
     let detail = attempts
         .iter()
-        .map(|(model, err)| format!("{model}: {err}"))
+        .map(|(model, err, _)| format!("{model}: {err}"))
         .collect::<Vec<_>>()
         .join(" | ");
+
+    // P0-1：若**全部候选**因同一类别失败（如全部 401/403 鉴权失败、全部 429 限流），
+    // 返回该稳定错误码，而非把它降级成一坨泛化文案——前端据此给出可操作的本地化引导。
+    if let Some(class) = common_failure_class(&attempts) {
+        tracing::warn!(
+            class = class.code(),
+            candidates = attempts.len(),
+            detail = %detail,
+            "all failover candidates failed with the same class"
+        );
+        return Err(anyhow::Error::new(
+            crate::model::error_taxonomy::ProviderError::new(class, detail),
+        ));
+    }
+
     Err(anyhow!(
         "all failover candidates failed ({}/{}): {detail}",
         attempts.len(),
         candidates.len()
     ))
+}
+
+/// 追加一级失败明细（把 push 收敛为函数：便于判定「全候选同类失败」）。
+fn attempt_errors_capture(
+    attempts: &mut Vec<(String, String, Option<ProviderErrorClass>)>,
+    model: String,
+    err: String,
+    class: Option<ProviderErrorClass>,
+) {
+    attempts.push((model, err, class));
+}
+
+/// 全体候选失败的归类：仅当**至少一个**候选、且每个候选都带归类、且归类完全一致时返回。
+///
+/// 任一候选无归类（如非 provider 类错误）或归类不一致 → 返回 `None`（保持泛化文案）。
+fn common_failure_class(
+    attempts: &[(String, String, Option<ProviderErrorClass>)],
+) -> Option<ProviderErrorClass> {
+    let first = attempts.first()?.2?;
+    attempts
+        .iter()
+        .all(|(_, _, c)| *c == Some(first))
+        .then_some(first)
 }
 
 /// 获取默认路由规则（供 CLI 展示）
@@ -575,26 +775,72 @@ pub fn default_rules_public() -> Vec<ModelRoutingRule> {
 
 /// 已知主模型 → 同提供商备用模型（故障转移默认候选）。
 ///
+/// 数据驱动：从 `routing_rules.json` 的 `failover.siblings` 读取，与路由规则表同源，
+/// 新增/调整档位只改数据文件、不碰路由代码（对齐「禁硬编码旧版」纪律）。
 /// 仅含本仓明确支持、且与主模型不同的模型；其余返回 `None`（不编造备用后端）。
-/// 这是 W-4 默认故障转移链的唯一来源，确保派生候选复用用户真实凭据。
-fn provider_sibling_model(primary: &str) -> Option<&'static str> {
-    match primary {
-        "deepseek-v4-pro" => Some("deepseek-v4-flash"),
-        "deepseek-v4-flash" => Some("deepseek-v4-pro"),
-        "deepseek-chat" => Some("deepseek-v4-pro"),
-        "deepseek-reasoner" => Some("deepseek-v4-pro"),
-        "gpt-4o" => Some("gpt-4o-mini"),
-        "gpt-4o-mini" => Some("gpt-4o"),
-        "claude-sonnet-4" => Some("claude-haiku-4"),
-        "claude-opus-4" => Some("claude-haiku-4"),
-        "claude-haiku-4" => Some("claude-sonnet-4"),
-        _ => None,
-    }
+fn provider_sibling_model(primary: &str) -> Option<String> {
+    routing_config().failover.siblings.get(primary).cloned()
+}
+
+/// 已知模型所属 provider 的全部档位（含跨档），用于构造「全档位故障转移链」。
+///
+/// 数据驱动：从 `routing_rules.json` 的 `failover.tiers` 读取。仅覆盖本仓明确支持、
+/// 复用用户真实凭据的 provider；其余返回空（不伪造备用后端）。返回的档位作为
+/// `default_failover_chain` 的候选池，`candidate_chain` 按 (base_url, model) 去重。
+fn provider_tiers(model: &str) -> Vec<String> {
+    routing_config()
+        .failover
+        .tiers
+        .get(model)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 路由规则数据文件（编译期内嵌）。新增/调整路由表与故障转移拓扑只改这里，
+/// 不碰路由/调用代码（对齐「禁硬编码旧版」纪律；与 `seed_models.json` 同源思路）。
+const ROUTING_RULES_JSON: &str = include_str!("routing_rules.json");
+
+/// 路由规则 DTO（从 JSON 解析；intent/complexity 缺省为 None = 通配）。
+#[derive(Debug, serde::Deserialize)]
+struct RoutingRuleDto {
+    #[serde(default)]
+    intent: Option<IntentType>,
+    #[serde(default)]
+    complexity: Option<Complexity>,
+    model: String,
+    priority: u8,
+}
+
+/// 故障转移拓扑 DTO（sibling + 全档位 tiers）。
+#[derive(Debug, serde::Deserialize, Default)]
+struct FailoverDto {
+    #[serde(default)]
+    siblings: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    tiers: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// 路由配置根（rules + failover）。
+#[derive(Debug, serde::Deserialize)]
+struct RoutingConfigFile {
+    rules: Vec<RoutingRuleDto>,
+    #[serde(default)]
+    failover: FailoverDto,
+}
+
+/// 解析并缓存路由配置（parse 一次，全进程复用）。
+fn routing_config() -> &'static RoutingConfigFile {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<RoutingConfigFile> = OnceLock::new();
+    CFG.get_or_init(|| {
+        serde_json::from_str(ROUTING_RULES_JSON)
+            .expect("routing_rules.json 解析失败（数据驱动路由表损坏）")
+    })
 }
 
 /// 默认路由规则
 ///
-/// 档位分层（沿用既有 priority 风格）：
+/// 档位分层（沿用既有 priority 风格，定义见 `routing_rules.json`）：
 /// - **强档**（priority 100）：代码 / 推理 / 长上下文 / 视觉 / 复杂问答的中高复杂度
 ///   → 强推理模型 `deepseek-v4-pro`；
 /// - **中轻档**（priority 80）：各意图的简单任务、以及代码 / 对话 / 检索的中等复杂度
@@ -602,139 +848,16 @@ fn provider_sibling_model(primary: &str) -> Option<&'static str> {
 /// - **恒定轻档**（priority 70）：翻译 / 总结无论复杂度都用轻量模型；
 /// - **兜底**（priority 50）：通用 / 未知意图 → 默认强模型 `deepseek-v4-pro`。
 fn default_routing_rules() -> Vec<ModelRoutingRule> {
-    vec![
-        // ---- 强档：中高复杂度 → 强推理模型 ----
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Code),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Reasoning),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        // 推理中档仍需强模型（证明 / 数学校验非轻任务）
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Reasoning),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::LongContext),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::LongContext),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Vision),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Vision),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::WebSearch),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Chat),
-            complexity: Some(Complexity::Complex),
-            model: "deepseek-v4-pro".to_string(),
-            priority: 100,
-        },
-        // ---- 中轻档：简单任务 / 轻量意图的中等复杂度 → 轻量模型 ----
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Code),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Code),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Reasoning),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::LongContext),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Vision),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::WebSearch),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::WebSearch),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Chat),
-            complexity: Some(Complexity::Simple),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Chat),
-            complexity: Some(Complexity::Medium),
-            model: "deepseek-v4-flash".to_string(),
-            priority: 80,
-        },
-        // ---- 恒定轻档：翻译 / 总结 无论复杂度都用轻量模型 ----
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Translation),
-            complexity: None,
-            model: "deepseek-v4-flash".to_string(),
-            priority: 70,
-        },
-        ModelRoutingRule {
-            intent_pattern: Some(IntentType::Summarization),
-            complexity: None,
-            model: "deepseek-v4-flash".to_string(),
-            priority: 70,
-        },
-        // ---- 兜底：通用 / 未知意图 → 默认强模型 ----
-        ModelRoutingRule {
-            intent_pattern: None,
-            complexity: None,
-            model: "deepseek-v4-pro".to_string(),
-            priority: 50,
-        },
-    ]
+    routing_config()
+        .rules
+        .iter()
+        .map(|r| ModelRoutingRule {
+            intent_pattern: r.intent.clone(),
+            complexity: r.complexity.clone(),
+            model: r.model.clone(),
+            priority: r.priority,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -785,6 +908,10 @@ mod tests {
         // 凭证缝（DSH 融合 v5）：台账中的 provider 路由键优先于 config 直读值
         let dir = std::env::temp_dir().join(format!("mgt_router_cred_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        // 测试隔离：config_dir 指向本用例临时目录 + 初始化 vault，
+        // 避免写真实 `~/.marguerite/`，且满足 byok 加解密所需主口令派生密钥。
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+        crate::vault::set_master_passphrase("test-vault-pass").unwrap();
         let store = Arc::new(crate::credentials::CredentialsStore::load(
             &dir.join("credentials.json"),
         ));
@@ -1000,8 +1127,11 @@ mod tests {
     fn test_primary_with_thinking_preserves_max_tokens() {
         let config = Config::default();
         let router = ModelRouter::new(&config);
-        let client =
-            router.primary_with_thinking(&IntentType::Code, Complexity::Complex, ThinkingEffort::Deep);
+        let client = router.primary_with_thinking(
+            &IntentType::Code,
+            Complexity::Complex,
+            ThinkingEffort::Deep,
+        );
         assert_eq!(client.config.model, PRO);
         assert_eq!(client.config.thinking, ThinkingEffort::Deep);
         // with_thinking 仅覆盖思考档，不得改动 max_tokens（保持模板默认值）。
@@ -1191,6 +1321,71 @@ mod tests {
         assert!(msg.contains("b down"), "摘要应含 b 的失败原因");
     }
 
+    // P0-1：全部候选均因鉴权失败（401/403）→ 返回稳定错误码 AUTH_FAILED，
+    // 且用户可见文案不得回显上游原始正文（如 DeepSeek 回的 `****gEni`）。
+    #[tokio::test]
+    async fn test_try_failover_chain_all_auth_failed_yields_stable_code() {
+        let a = Arc::new(LLMClient::new(LLMConfig {
+            model: "a".to_string(),
+            ..Default::default()
+        }));
+        let b = Arc::new(LLMClient::new(LLMConfig {
+            model: "b".to_string(),
+            ..Default::default()
+        }));
+        let upstream_body = "Your api key: ****gEni is invalid";
+        let out: Result<LLMResponse> = try_failover_chain(&[a, b], |_c| {
+            let body = upstream_body.to_string();
+            Box::pin(async move {
+                Err(anyhow::Error::new(
+                    crate::model::error_taxonomy::ProviderError::from_status(401, body),
+                ))
+            })
+        })
+        .await;
+        assert!(out.is_err(), "全候选鉴权失败应报错");
+        let err = out.unwrap_err();
+        assert_eq!(
+            crate::model::error_taxonomy::code_of(&err),
+            Some("AUTH_FAILED"),
+            "全候选鉴权失败应归类为 AUTH_FAILED"
+        );
+        let visible = err.to_string();
+        assert!(
+            !visible.contains("****gEni"),
+            "用户可见文案不得回显上游正文片段: {visible}"
+        );
+    }
+
+    // P0-1 反向：失败类别不一致时**不**强行归类，保持泛化文案（可诊断明细仍在）。
+    #[tokio::test]
+    async fn test_try_failover_chain_mixed_classes_stay_generic() {
+        let a = Arc::new(LLMClient::new(LLMConfig {
+            model: "a".to_string(),
+            ..Default::default()
+        }));
+        let b = Arc::new(LLMClient::new(LLMConfig {
+            model: "b".to_string(),
+            ..Default::default()
+        }));
+        let out: Result<LLMResponse> = try_failover_chain(&[a, b], |c| {
+            let m = c.config.model.clone();
+            Box::pin(async move {
+                let status = if m == "a" { 401 } else { 503 };
+                Err(anyhow::Error::new(
+                    crate::model::error_taxonomy::ProviderError::from_status(status, "x"),
+                ))
+            })
+        })
+        .await;
+        let err = out.unwrap_err();
+        assert_eq!(
+            crate::model::error_taxonomy::code_of(&err),
+            None,
+            "类别不一致不应归类为单一稳定码"
+        );
+    }
+
     // ---- W-4 生产接线：ModelRouter::new 默认构造故障转移链 ----
 
     #[test]
@@ -1222,6 +1417,129 @@ mod tests {
             models,
             vec!["deepseek-v4-pro", "deepseek-v4-flash"],
             "默认 candidate_chain 应含主模型与其派生备用模型"
+        );
+    }
+
+    // ---- W-4 后续：跨档故障转移链不再塌缩（PRD G1 fallback < 15%） ----
+
+    #[test]
+    fn test_default_failover_chain_includes_all_tiers() {
+        // deepseek provider 应把两个档位都纳入默认故障转移链，
+        // 确保无论路由选中 pro 还是 flash，都有跨档备用后端。
+        let config = Config::default(); // model = deepseek-v4-pro
+        let router = ModelRouter::new(&config);
+        let models: Vec<&str> = router
+            .failover_chain()
+            .iter()
+            .map(|c| c.model.as_str())
+            .collect();
+        assert!(
+            models.contains(&"deepseek-v4-pro"),
+            "链应含 pro 档（跨档回退），得 {models:?}"
+        );
+        assert!(
+            models.contains(&"deepseek-v4-flash"),
+            "链应含 flash 档（首选 sibling），得 {models:?}"
+        );
+    }
+
+    #[test]
+    fn test_routed_complex_task_has_cross_tier_fallback() {
+        // 复杂任务路由到 deepseek-v4-pro 时，candidate_chain 必须仍有一个 flash 备用，
+        // 否则 PRD G1 的 fallback<15% 无法达成（旧实现会塌缩成单候选）。
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        let primary = router.select_model(&IntentType::Code, Complexity::Complex);
+        let chain = router.candidate_chain(primary);
+        let models: Vec<&str> = chain.iter().map(|c| c.config.model.as_str()).collect();
+        assert!(
+            models.contains(&"deepseek-v4-flash"),
+            "pro 主模型须有 flash 跨档回退，得 {models:?}"
+        );
+    }
+
+    #[test]
+    fn test_routed_simple_task_has_cross_tier_fallback() {
+        // 对称守护：简单任务路由到 flash 时，candidate_chain 须有 pro 备用。
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        let primary = router.select_model(&IntentType::Code, Complexity::Simple);
+        let chain = router.candidate_chain(primary);
+        let models: Vec<&str> = chain.iter().map(|c| c.config.model.as_str()).collect();
+        assert!(
+            models.contains(&"deepseek-v4-pro"),
+            "flash 主模型须有 pro 跨档回退，得 {models:?}"
+        );
+    }
+
+    // ── A 延伸：路由规则数据化（禁硬编码旧版）──
+
+    #[test]
+    fn test_routing_rules_load_from_json() {
+        // 路由表已外置为数据文件；条目数须与 routing_rules.json 严格对齐，
+        // 防止「改了 Rust 代码却忘了同步 JSON」之类的漂移。
+        let rules = default_routing_rules();
+        assert_eq!(rules.len(), 21, "路由表条目数须与 routing_rules.json 对齐");
+        // 兜底规则（intent/complexity 均空）存在且 priority 50
+        let catch = rules
+            .iter()
+            .find(|r| r.intent_pattern.is_none() && r.complexity.is_none());
+        assert!(catch.is_some(), "须有兜底规则（intent/complexity 均空）");
+        assert_eq!(catch.unwrap().priority, 50);
+        // 强档：Code×Complex → deepseek-v4-pro @ priority 100
+        assert!(rules.iter().any(|r| {
+            r.intent_pattern == Some(IntentType::Code)
+                && r.complexity == Some(Complexity::Complex)
+                && r.model == "deepseek-v4-pro"
+                && r.priority == 100
+        }));
+        // 全矩阵仍与数据文件一致（重定向到既有全矩阵守护）
+        let config = Config::default();
+        let router = ModelRouter::new(&config);
+        for intent in all_intents() {
+            for complexity in all_complexities() {
+                assert_eq!(
+                    router.resolve_model(&intent, &complexity),
+                    expected_model(&intent, &complexity),
+                    "{intent:?}×{complexity:?} 矩阵须与 routing_rules.json 对齐"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_failover_topology_loads_from_json() {
+        // 故障转移拓扑（sibling/档位）已数据驱动；须与 routing_rules.json 的 failover 一致。
+        assert_eq!(
+            provider_sibling_model("deepseek-v4-pro").as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            provider_sibling_model("gpt-4o-mini").as_deref(),
+            Some("gpt-4o")
+        );
+        let tiers = provider_tiers("deepseek-v4-pro");
+        assert!(tiers.contains(&"deepseek-v4-pro".to_string()));
+        assert!(tiers.contains(&"deepseek-v4-flash".to_string()));
+        // 未知模型无档位映射（不伪造备用后端）
+        assert!(provider_tiers("some-unknown-model").is_empty());
+        assert_eq!(provider_sibling_model("some-unknown-model"), None);
+    }
+
+    #[test]
+    fn tier_clients_never_fabricate_backends_for_missing_profiles() {
+        // M3 数据漂移守卫：tier_rules.json 里列了 id、但档案表里并不存在时，
+        // 必须把它记入 missing 且**不构造任何客户端** —— 若照链序硬造一个指向
+        // 不存在档案的客户端，故障会推迟到真正发请求时才炸，且现场信息丢失。
+        let reg = crate::model::registry::ModelRegistry::default();
+        let cache = crate::cache::default_prefix_cache();
+        let (clients, chain) =
+            tier_clients(&reg, crate::model::tier::ModelTier::Flagship, &cache);
+        assert!(clients.is_empty(), "空档案表不得产出任何候选客户端");
+        assert!(chain.candidates.is_empty());
+        assert!(
+            !chain.missing.is_empty(),
+            "链中所有 id 都应被记为 missing（数据漂移必须可见）"
         );
     }
 }

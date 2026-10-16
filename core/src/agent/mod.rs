@@ -17,7 +17,9 @@ pub mod team;
 pub mod tool_cache;
 pub mod tool_compress;
 pub mod tool_cycle;
+pub mod tool_schema;
 pub mod trellis;
+pub mod worktree;
 
 pub use bloom_cache::{
     embedding_similarity, BloomDecisionCache, BloomParallelPrefix, CacheQuery, SemanticHit,
@@ -31,10 +33,12 @@ pub use prefix_scope::{stable_prefix_key, SharedPrefixCache};
 pub use profile::{apply_auto_profile, auto_profile, Persona};
 pub use runtime::{AgentRuntime, AgentState, Message, SessionContext};
 pub use stream_loop::{
-    detect_doom_loop, run_tool_loop_streaming, AgentEvent, StreamAggregator, DOOM_LOOP_THRESHOLD,
+    detect_doom_loop, run_tool_loop_streaming, AgentEvent, StreamAggregator, DOOM_LOOP_ABORT,
+    DOOM_LOOP_THRESHOLD,
 };
 pub use subagent::{SubAgent, SubAgentConfig, SubAgentManager, SubAgentStatus};
 pub use team::{Team, TeamMember, TeamOutcome};
 pub use tool_cache::{default_is_idempotent, ToolCache, ToolCacheStats};
 pub use tool_cycle::{ToolCall, ToolCycle, ToolResult};
 pub use trellis::{trellis_wait_all, trellis_wait_any, TrellisDone};
+pub use worktree::{WorktreeHandle, WorktreeInfo, WorktreeManager};

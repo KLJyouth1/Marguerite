@@ -151,7 +151,10 @@ mod tests {
         let b: Button = serde_json::from_str(json).unwrap();
         assert_eq!(b.id, "a");
         assert_eq!(b.label, "B");
-        assert!(!b.enabled, "JSON 缺失 enabled 时 #[serde(default)] 应走 false");
+        assert!(
+            !b.enabled,
+            "JSON 缺失 enabled 时 #[serde(default)] 应走 false"
+        );
         // 而构造器默认 true
         let c = Button::new("x", "Y");
         assert!(c.enabled, "Button::new 默认应为 enabled=true");
@@ -162,9 +165,15 @@ mod tests {
 
     #[test]
     fn progress_bar_clamps() {
-        let p = ProgressBar { id: "p".into(), percent: 1.5 };
+        let p = ProgressBar {
+            id: "p".into(),
+            percent: 1.5,
+        };
         assert!((p.clamped_percent() - 1.0).abs() < f32::EPSILON);
-        let n = ProgressBar { id: "p".into(), percent: -0.5 };
+        let n = ProgressBar {
+            id: "p".into(),
+            percent: -0.5,
+        };
         assert!((n.clamped_percent() - 0.0).abs() < f32::EPSILON);
     }
 
@@ -173,7 +182,11 @@ mod tests {
         let json = r#"{"kind":"text","id":"f1","label":"Name"}"#;
         let f: FormField = serde_json::from_str(json).unwrap();
         match f {
-            FormField::Text { id, label, placeholder } => {
+            FormField::Text {
+                id,
+                label,
+                placeholder,
+            } => {
                 assert_eq!(id, "f1");
                 assert_eq!(label, "Name");
                 assert_eq!(placeholder, "");

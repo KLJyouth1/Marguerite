@@ -27,7 +27,12 @@ pub const CONTEXT_WINDOW_1M: u32 = 1_000_000;
 pub const CONTEXT_WINDOW_DEFAULT: u32 = 64 * 1024;
 
 /// 思考深度档位
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// `PartialOrd`/`Ord` 由**声明顺序**给出，且声明顺序即语义强度顺序：
+/// `Off < Normal < Deep < Max`。档位准入校验（`tier.rs::TierCaps::accepts`）依赖
+/// 该顺序比较「档案支持的推理强度是否达到档位准入线」，因此**禁止重排变体**——
+/// `thinking_effort_ordering_is_semantic` 测试会在此被破坏时立即失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum ThinkingEffort {
     /// 关闭思考（纯对话）
     #[default]
@@ -54,6 +59,28 @@ impl ThinkingEffort {
     /// 是否在此档位注入思考系统提示（引导模型先推理再作答）
     pub fn wants_reasoning_prompt(self) -> bool {
         matches!(self, ThinkingEffort::Deep | ThinkingEffort::Max)
+    }
+
+    /// 从模式规格字符串解析档位（`mode/spec.rs` 的 `BloomSpec::reasoning_effort`）。
+    ///
+    /// 历史缺陷：`BloomSpec.reasoning_effort`（bloom.yaml = `max`，omni_transcend.yaml = `max`）
+    /// 是纯展示字段，从无解析入口，导致模式声明的思考强度到不了请求体。此处补上解析，
+    /// 让 `mode/spec.rs` 的字符串与 `ThinkingEffort` 枚举真正贯通。
+    ///
+    /// 映射（大小写与首尾空白无关）：
+    /// - `max` / `high` → [`ThinkingEffort::Max`]（请求体 `reasoning_effort: high`）
+    /// - `medium` / `deep` → [`ThinkingEffort::Deep`]
+    /// - `low` / `normal` → [`ThinkingEffort::Normal`]
+    /// - `off` / `none` / 空串 → [`ThinkingEffort::Off`]
+    /// - 未知值 → [`ThinkingEffort::Deep`]（保守：宁可多想，不静默降级为不思考）
+    pub fn from_spec_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "max" | "high" => ThinkingEffort::Max,
+            "medium" | "deep" => ThinkingEffort::Deep,
+            "low" | "normal" => ThinkingEffort::Normal,
+            "off" | "none" | "" => ThinkingEffort::Off,
+            _ => ThinkingEffort::Deep,
+        }
     }
 }
 
@@ -296,5 +323,51 @@ mod tests {
         assert!(supports_reasoning_effort("deepseek-v4-pro-0813"));
         assert!(supports_reasoning_effort("deepseek-reasoner"));
         assert!(!supports_reasoning_effort("gpt-4o"));
+    }
+
+    #[test]
+    fn from_spec_str_parses_mode_yaml_values() {
+        // 内置模式 YAML 实际写的值必须能解析成最高档，否则「reasoning_effort: max」等于白写
+        assert_eq!(ThinkingEffort::from_spec_str("max"), ThinkingEffort::Max);
+        assert_eq!(ThinkingEffort::from_spec_str("high"), ThinkingEffort::Max);
+        assert_eq!(
+            ThinkingEffort::from_spec_str("medium"),
+            ThinkingEffort::Deep
+        );
+        assert_eq!(ThinkingEffort::from_spec_str("deep"), ThinkingEffort::Deep);
+        assert_eq!(ThinkingEffort::from_spec_str("low"), ThinkingEffort::Normal);
+        assert_eq!(ThinkingEffort::from_spec_str("off"), ThinkingEffort::Off);
+        assert_eq!(ThinkingEffort::from_spec_str(""), ThinkingEffort::Off);
+        // 大小写与空白不敏感
+        assert_eq!(ThinkingEffort::from_spec_str("  MAX "), ThinkingEffort::Max);
+        // 未知值保守取 Deep（不静默降级成不思考）
+        assert_eq!(
+            ThinkingEffort::from_spec_str("ultra-turbo"),
+            ThinkingEffort::Deep
+        );
+    }
+
+    #[test]
+    fn builtin_mode_specs_declare_parsable_effort() {
+        // 端到端守卫：内置 Bloom / OmniTranscend 规格声明的 reasoning_effort
+        // 必须真能解析出「会注入请求体」的档位（非 Off），否则深度声明形同虚设。
+        for kind in crate::mode::ModeKind::ALL {
+            let spec = crate::mode::spec::builtin::for_kind(*kind);
+            if let Some(b) = spec.bloom.as_ref() {
+                let e = ThinkingEffort::from_spec_str(&b.reasoning_effort);
+                assert_ne!(
+                    e,
+                    ThinkingEffort::Off,
+                    "模式 {} 的 reasoning_effort='{}' 解析为 Off，等于不思考",
+                    kind.as_str(),
+                    b.reasoning_effort
+                );
+                assert!(
+                    e.reasoning_effort().is_some(),
+                    "模式 {} 的思考档位必须能落到请求体",
+                    kind.as_str()
+                );
+            }
+        }
     }
 }

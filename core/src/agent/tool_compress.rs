@@ -246,11 +246,15 @@ impl ToolCompressor {
     fn json_shrink(&self, v: &Value) -> Value {
         match v {
             Value::String(s) => {
-                if s.len() > self.max_string_len {
+                // ⚠️ 必须按**字符**截断，不能按字节切片：`&s[..max]` 在 `max` 落到
+                // 多字节字符中间时 panic（中文/emoji 的 office、企业场景必踩）。
+                let total_chars = s.chars().count();
+                if total_chars > self.max_string_len {
+                    let kept: String = s.chars().take(self.max_string_len).collect();
                     Value::String(format!(
                         "{}…[+{} chars]",
-                        &s[..self.max_string_len],
-                        s.len() - self.max_string_len
+                        kept,
+                        total_chars - self.max_string_len
                     ))
                 } else {
                     v.clone()
@@ -343,7 +347,7 @@ fn render(v: &Value, out: &mut String) {
 fn dedupe_consecutive(lines: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     for l in lines {
-        if out.last().map_or(true, |p| p != l) {
+        if out.last().is_none_or(|p| p != l) {
             out.push((*l).to_string());
         }
     }
@@ -408,7 +412,10 @@ mod tests {
         let arr = format!("[{}]", arr.join(","));
         let r = c.compress("list", &success(&arr));
         let out = r.data().expect("应有输出");
-        assert!(out.contains("__truncated_remaining__"), "应带截断计数: {out}");
+        assert!(
+            out.contains("__truncated_remaining__"),
+            "应带截断计数: {out}"
+        );
         assert!(out.contains("1"), "应保留前 5 项之首");
         assert!(out.contains("5"), "应保留前 5 项之尾");
         assert!(out.len() < arr.len(), "压缩后必须更短");
@@ -507,10 +514,7 @@ mod tests {
         let p1 = a.data().unwrap_or("");
         let p2 = b.data().unwrap_or("");
         assert!(c.observe_stable_prefix(p1), "首次登记应返回 true");
-        assert!(
-            c.observe_stable_prefix(p2),
-            "确定性压缩不应造成前缀漂移"
-        );
+        assert!(c.observe_stable_prefix(p2), "确定性压缩不应造成前缀漂移");
     }
 
     #[test]
@@ -524,5 +528,23 @@ mod tests {
         assert_eq!(s.compressed, 1);
         assert!(s.bytes_in >= big.len() as u64);
         assert!(s.ratio() < 1.0, "压缩后比例应小于 1");
+    }
+
+    /// 回归守卫：超长**多字节**字符串的截断必须按字符边界，不能按字节切片。
+    ///
+    /// 旧实现 `&s[..self.max_string_len]` 在 `max_string_len` 落到中文/emoji 字符
+    /// 中间时 panic（office、企业场景的中文 JSON 必踩）。
+    #[test]
+    fn json_shrink_is_utf8_safe_on_multibyte_strings() {
+        let c = ToolCompressor::with_budget(64, 4, 8, 4, 16, 4); // max_string_len = 8
+        let v = serde_json::json!("中文中文中文中文中文中文"); // 12 个字符 / 36 字节
+        let out = c.json_shrink(&v);
+        let s = out.as_str().expect("仍应是字符串");
+        let want_head: String = "中文中文中文中文中文中文".chars().take(8).collect();
+        assert!(
+            s.starts_with(&want_head),
+            "应按字符截断保留前 8 个字符：{s}"
+        );
+        assert!(s.contains("[+4 chars]"), "应报告被截断的字符数：{s}");
     }
 }

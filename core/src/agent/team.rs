@@ -486,6 +486,7 @@ mod tests {
                 api_key: "offline".to_string(),
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
+                timeout_secs: 0,
             },
             ..Default::default()
         };

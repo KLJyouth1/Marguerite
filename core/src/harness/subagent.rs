@@ -25,8 +25,10 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use uuid::Uuid;
 
 use crate::agent::subagent::{SubAgentManager, SubAgentStatus};
+use crate::agent::worktree::{WorktreeHandle, WorktreeManager};
 use crate::context::budget::{BudgetAlert, TokenBudget, TokenBudgetError};
 use crate::context::paging::{PagingEngine, PagingOptions};
 use crate::context::session::estimate_tokens;
@@ -345,6 +347,14 @@ pub struct IsolatedSubagents {
     budget_per_agent: u64,
     budgets: Mutex<HashMap<String, SubagentBudget>>,
     events: Option<Arc<EventBus>>,
+    /// 是否为每个子代理分配独立 git worktree（默认 false，向后兼容）。
+    ///
+    /// 开启后每次 `run` 先 [`WorktreeManager::alloc`] 一棵隔离工作树，把其路径
+    /// 注入子代理上下文（作为 cwd 语义），运行结束随 [`WorktreeHandle`] 的 Drop
+    /// 自动清理。多代理并行改代码时互不踩工作区。
+    use_worktree: bool,
+    /// worktree 管理器（`use_worktree=true` 时才创建；绑定主仓库根）
+    worktrees: Option<WorktreeManager>,
 }
 
 impl IsolatedSubagents {
@@ -365,7 +375,34 @@ impl IsolatedSubagents {
             budget_per_agent,
             budgets: Mutex::new(HashMap::new()),
             events: None,
+            use_worktree: false,
+            worktrees: None,
         }
+    }
+
+    /// 开启 git worktree 隔离（为每个子代理分配独立工作树）
+    ///
+    /// `repo` 为主仓库根（须为 git 工作区，否则返回错误）；`session_id` 用作
+    /// 分支命名空间（`marguerite/<session_id>/<name>`）。开启后 `run` 会在
+    /// 启动子代理前 alloc 工作树、结束后自动清理。
+    ///
+    /// 默认关闭（向后兼容）：不调用本方法时行为与既有完全一致。
+    pub fn with_worktree(mut self, repo: impl Into<PathBuf>, session_id: &str) -> Result<Self> {
+        let mgr = WorktreeManager::new(repo.into(), session_id)
+            .context("worktree 隔离初始化失败（仓库须为 git 工作区）")?;
+        self.worktrees = Some(mgr);
+        self.use_worktree = true;
+        Ok(self)
+    }
+
+    /// 是否启用了 worktree 隔离
+    pub fn use_worktree(&self) -> bool {
+        self.use_worktree
+    }
+
+    /// worktree 管理器（未启用时为 None）
+    pub fn worktree_manager(&self) -> Option<&WorktreeManager> {
+        self.worktrees.as_ref()
     }
 
     /// 注册事件总线
@@ -447,23 +484,53 @@ impl IsolatedSubagents {
 
     /// 执行一次隔离运行
     ///
-    /// 时序：预算核算（必要时压缩）→ 取并发许可 → `subagent_start` →
-    /// 转录入参 → 委托 manager 执行并等待终态 → 记账输出 → 转录输出 →
-    /// `subagent_end` → 释放许可。
+    /// 时序：预算核算（必要时压缩）→ 取并发许可 → **（可选）alloc worktree** →
+    /// `subagent_start` → 转录入参 → 委托 manager 执行并等待终态 → 记账输出 →
+    /// 转录输出 → `subagent_end` → 释放许可。
     ///
     /// 许可在**整个运行期间**持有（而非仅 spawn 瞬间），因此闸门真正限制的是
     /// 同时在跑的子代理数。
     pub async fn run(&self, spec: IsolatedSpec) -> Result<IsolatedOutcome> {
         let mut budget = SubagentBudget::new(self.budget_per_agent);
 
-        // 1) 预算核算：入参过大先压缩上下文
+        // 1) 可选：为本子代理分配独立 git worktree（隔离工作区）
+        //
+        // alloc 是阻塞 git 调用，卸载到 spawn_blocking；句柄随 run 结束 Drop
+        // 自动清理（失败路径同样自动收尾，见 WorktreeManager::alloc）。
+        let worktree: Option<WorktreeHandle> = if self.use_worktree {
+            let mgr = self
+                .worktrees
+                .as_ref()
+                .ok_or_else(|| anyhow!("worktree 已启用但管理器缺失（内部不一致）"))?;
+            let name = format!("task-{}", Uuid::new_v4().simple());
+            let mgr2 = mgr.clone();
+            Some(
+                tokio::task::spawn_blocking(move || mgr2.alloc(&name))
+                    .await
+                    .map_err(|e| anyhow!("worktree 分配任务异常：{e}"))??,
+            )
+        } else {
+            None
+        };
+
+        // 2) 预算核算：入参过大先压缩上下文（worktree 路径并入 context）
+        let raw_context = if let Some(wt) = &worktree {
+            format!(
+                "{}\n\n[worktree] 你的独立工作树（cwd）：{}\n分支：{}",
+                spec.context,
+                wt.path.display(),
+                wt.branch
+            )
+        } else {
+            spec.context.clone()
+        };
         let prompt_probe = format!("{}{}", spec.role_prompt, spec.task);
         let probe_tokens = SubagentBudget::estimate(&prompt_probe);
         let (context, compacted) =
-            if budget.would_exceed(probe_tokens + SubagentBudget::estimate(&spec.context)) {
-                Self::compact_context(&spec.context, self.budget_per_agent)
+            if budget.would_exceed(probe_tokens + SubagentBudget::estimate(&raw_context)) {
+                Self::compact_context(&raw_context, self.budget_per_agent)
             } else {
-                (spec.context.clone(), false)
+                (raw_context, false)
             };
 
         let prompt = format!("{}\n{}\n{}", spec.role_prompt, spec.task, context);
@@ -476,10 +543,10 @@ impl IsolatedSubagents {
             ));
         }
 
-        // 2) 并发闸门：无许可则在此背压等待
+        // 3) 并发闸门：无许可则在此背压等待
         let _permit = self.gate.acquire().await;
 
-        // 3) 委托既有 manager 执行（角色 + 意图 + 复杂度路由）
+        // 4) 委托既有 manager 执行（角色 + 意图 + 复杂度路由）
         let subagent_id = self
             .manager
             .spawn_spec_with_timeout(
@@ -575,7 +642,6 @@ mod tests {
     use crate::mcp::registry::ToolRegistry;
     use crate::model::router::ModelRouter;
     use crate::persistence::config::Config;
-    use uuid::Uuid;
 
     fn temp_data_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("marguerite_harness_{tag}_{}", Uuid::new_v4()));

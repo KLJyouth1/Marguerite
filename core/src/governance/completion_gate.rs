@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::proc::SilentCommand;
 use crate::security::command_guard::CommandGuard;
 use crate::tools::fs_path::safe_resolve;
 
@@ -82,6 +83,7 @@ impl ShellRunner for RealShellRunner {
             ("sh", "-c")
         };
         match std::process::Command::new(shell)
+            .silent()
             .arg(flag)
             .arg(cmd)
             .output()
@@ -120,6 +122,30 @@ pub enum BlockReason {
     TimePressure,
     PlacationDetected,
     EmptyResult,
+    /// 契约声明的必需产物未落盘或为空（P1-2：杜绝「声称完成却无产物」）。
+    MissingArtifact,
+}
+
+/// 必需产物核验报告（P1-2）：把「契约声明的交付物」逐一核验是否真实落盘且非空。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredArtifactsReport {
+    /// 声明为必需的产物路径（原样）。
+    pub required: Vec<String>,
+    /// 已落盘且非空的产物。
+    pub present: Vec<String>,
+    /// 缺失（不存在 / 非文件 / 路径解析失败）的产物。
+    pub missing: Vec<String>,
+    /// 存在但为空的产物。
+    pub empty: Vec<String>,
+    /// 存在且非空、但容器格式非法（如纯文本伪装的 .pptx）的产物。
+    pub invalid: Vec<String>,
+}
+
+impl RequiredArtifactsReport {
+    /// 全部必需产物均已落盘、非空且容器格式合法。
+    pub fn all_ok(&self) -> bool {
+        self.missing.is_empty() && self.empty.is_empty() && self.invalid.is_empty()
+    }
 }
 
 /// 完成门禁裁决结果。
@@ -633,6 +659,112 @@ impl CompletionGate {
         }
         out
     }
+
+    /// 综合完成门禁（P1-2 单一事实源）：把「提取自报产物 → 客观核验 → 四道检查 →
+    /// 必需产物强约束」串成一步，供 [`crate::orchestration::Orchestrator`] 与计划
+    /// 路径 runner 共用，杜绝两处逻辑漂移。
+    ///
+    /// - `extract_claimed_artifacts`：从回复里提取 agent 自报创建/修改的文件，逐一核验
+    ///   是否真实落盘（反幻觉）；
+    /// - `check_completion`：非空 / 时间压力 / 敷衍四检查；
+    /// - `verify_required_artifacts`：调用方**显式声明**的必需产物路径逐一核验真实落盘
+    ///   且非空，任一缺失/为空 → 强制 `allowed=false` + [`BlockReason::MissingArtifact`]。
+    ///
+    /// 这正是「计划路径绝不因回复够长就放行」的核心：必需产物由契约/步骤标题决定，
+    /// 与 agent 口头声称无关。
+    pub fn evaluate(
+        &self,
+        task_description: &str,
+        execution_result: &str,
+        required_artifacts: &[&str],
+        workspace: &Path,
+        shell: &Arc<dyn ShellRunner>,
+        duration: Option<f64>,
+    ) -> CompletionVerdict {
+        let criteria = self.extract_claimed_artifacts(execution_result);
+        let verification = if criteria.is_empty() {
+            None
+        } else {
+            Some(self.verify_criteria(&criteria, workspace, shell))
+        };
+        let mut verdict = self.check_completion(CompletionClaim {
+            task_description,
+            execution_result,
+            artifacts: required_artifacts,
+            verification,
+            verification_attempted: !criteria.is_empty(),
+            execution_duration: duration,
+        });
+        if !required_artifacts.is_empty() {
+            let report = self.verify_required_artifacts(required_artifacts, workspace);
+            if !report.all_ok() {
+                verdict.allowed = false;
+                if !verdict.blocked_by.contains(&BlockReason::MissingArtifact) {
+                    verdict.blocked_by.push(BlockReason::MissingArtifact);
+                }
+                let mut details = Vec::new();
+                if !report.missing.is_empty() {
+                    details.push(format!("缺失: {}", report.missing.join(", ")));
+                }
+                if !report.empty.is_empty() {
+                    details.push(format!("空文件: {}", report.empty.join(", ")));
+                }
+                if !report.invalid.is_empty() {
+                    details.push(format!("格式非法: {}", report.invalid.join(", ")));
+                }
+                verdict.warnings.push(format!(
+                    "必需产物未落盘、为空或格式非法（{}），不得标记为完成",
+                    details.join("；")
+                ));
+                verdict
+                    .evidence
+                    .insert("required_artifacts_total".into(), report.required.len().to_string());
+                verdict.evidence.insert(
+                    "required_artifacts_present".into(),
+                    report.present.len().to_string(),
+                );
+                verdict.evidence.insert(
+                    "required_artifacts_invalid".into(),
+                    report.invalid.len().to_string(),
+                );
+            }
+        }
+        verdict
+    }
+
+    /// 核验**必需产物**是否真实落盘且非空（P1-2）。
+    ///
+    /// 与「从回复里猜测产物」的 [`Self::extract_claimed_artifacts`] 互补：这里的路径由
+    /// 调用方（交付契约）显式声明，属于**强约束**。路径经 `safe_resolve` 防逃逸；
+    /// 仅接受**非空常规文件**（目录 / 缺失 / 解析失败均计入缺失，空文件单列）。
+    pub fn verify_required_artifacts(
+        &self,
+        required: &[&str],
+        workspace: &Path,
+    ) -> RequiredArtifactsReport {
+        let mut report = RequiredArtifactsReport::default();
+        for raw in required {
+            let name = (*raw).to_string();
+            report.required.push(name.clone());
+            match safe_resolve(workspace, raw) {
+                Ok(path) => match std::fs::metadata(&path) {
+                    Ok(md) if md.is_file() && md.len() > 0 => {
+                        // 非空只是必要条件：办公交付物还必须是**合法容器**
+                        // （.pptx/.docx/.xlsx 为 OOXML ZIP，.pdf 带 %PDF- 头），
+                        // 否则纯文本伪装的「假交付物」会被误判为真实落盘。
+                        match crate::tools::ooxml::validate_office_container(&path) {
+                            Ok(()) => report.present.push(name),
+                            Err(_) => report.invalid.push(name),
+                        }
+                    }
+                    Ok(md) if md.is_file() => report.empty.push(name),
+                    _ => report.missing.push(name),
+                },
+                Err(_) => report.missing.push(name),
+            }
+        }
+        report
+    }
 }
 
 #[cfg(test)]
@@ -908,5 +1040,157 @@ mod tests {
         let d = gate.check_completion(claim);
         assert!(!d.allowed);
         assert!(d.blocked_by.contains(&BlockReason::VerificationFailed));
+    }
+
+    #[test]
+    fn verify_required_artifacts_detects_missing_empty_and_present() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        std::fs::write(ws.join("ok.html"), "<html>hi</html>").unwrap();
+        std::fs::write(ws.join("blank.html"), "").unwrap();
+        let report = gate.verify_required_artifacts(
+            &["ok.html", "blank.html", "gone.pptx"],
+            &ws,
+        );
+        assert_eq!(report.required.len(), 3);
+        assert_eq!(report.present, vec!["ok.html".to_string()]);
+        assert_eq!(report.empty, vec!["blank.html".to_string()]);
+        assert_eq!(report.missing, vec!["gone.pptx".to_string()]);
+        assert!(!report.all_ok(), "存在缺失/空文件时不得 all_ok");
+    }
+
+    #[test]
+    fn verify_required_artifacts_all_ok_when_present() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        std::fs::write(ws.join("a.txt"), "a").unwrap();
+        std::fs::write(ws.join("b.txt"), "b").unwrap();
+        let report = gate.verify_required_artifacts(&["a.txt", "b.txt"], &ws);
+        assert!(report.all_ok(), "全部落盘且非空应 all_ok");
+        assert!(gate.verify_required_artifacts(&[], &ws).all_ok(), "无要求恒 ok");
+    }
+
+    /// 构造一个未压缩（stored）的最小 ZIP：仅中央目录 + EOCD（无需真实压缩）。
+    fn build_minimal_zip(names: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut offsets = Vec::new();
+        for name in names {
+            offsets.push(out.len() as u32);
+            out.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        let cd_start = out.len() as u32;
+        for (i, name) in names.iter().enumerate() {
+            out.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]);
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&offsets[i].to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        let cd_size = out.len() as u32 - cd_start;
+        out.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(names.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(names.len() as u16).to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// 缺陷 E1 回归：纯文本伪装的 .pptx 必须进 `invalid`，不得算 present。
+    #[test]
+    fn verify_required_artifacts_flags_fake_pptx_as_invalid() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        std::fs::write(ws.join("deck.pptx"), "plain text, not a real pptx").unwrap();
+        let report = gate.verify_required_artifacts(&["deck.pptx"], &ws);
+        assert_eq!(report.invalid, vec!["deck.pptx".to_string()]);
+        assert!(report.present.is_empty(), "假交付物不得计入 present");
+        assert!(!report.all_ok(), "invalid 必须使 all_ok=false");
+    }
+
+    /// 缺陷 E1 回归：含必需条目的真 ZIP（.pptx）应被接受。
+    #[test]
+    fn verify_required_artifacts_accepts_genuine_pptx_container() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        let zip = build_minimal_zip(&["[Content_Types].xml", "ppt/presentation.xml"]);
+        std::fs::write(ws.join("deck.pptx"), &zip).unwrap();
+        let report = gate.verify_required_artifacts(&["deck.pptx"], &ws);
+        assert_eq!(report.present, vec!["deck.pptx".to_string()]);
+        assert!(report.invalid.is_empty());
+        assert!(report.all_ok());
+    }
+
+    /// 缺陷 E1 回归：非办公扩展名（.txt）不受容器校验影响。
+    #[test]
+    fn verify_required_artifacts_leaves_txt_unaffected() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        std::fs::write(ws.join("notes.txt"), "just text").unwrap();
+        let report = gate.verify_required_artifacts(&["notes.txt"], &ws);
+        assert_eq!(report.present, vec!["notes.txt".to_string()]);
+        assert!(report.invalid.is_empty());
+    }
+
+    /// 缺陷 E1 回归：`evaluate` 对 invalid 产物告警并阻断（计入不满足）。
+    #[test]
+    fn evaluate_warns_and_blocks_on_invalid_artifact() {
+        let (_g, ws) = tmp_workspace();
+        let gate = CompletionGate::new();
+        std::fs::write(ws.join("deck.pptx"), "plain text, not a real pptx").unwrap();
+        let shell: Arc<dyn ShellRunner> = Arc::new(MockShellRunner {
+            ok: true,
+            out: String::new(),
+        });
+        let v = gate.evaluate(
+            "生成一份演示文稿",
+            "已完成，产物为 deck.pptx。",
+            &["deck.pptx"],
+            &ws,
+            &shell,
+            None,
+        );
+        assert!(!v.allowed, "假交付物不得放行");
+        assert!(v.blocked_by.contains(&BlockReason::MissingArtifact));
+        assert!(
+            v.warnings.iter().any(|w| w.contains("格式非法")),
+            "告警须点名格式非法，实际: {:?}",
+            v.warnings
+        );
+        assert_eq!(
+            v.evidence.get("required_artifacts_present").map(String::as_str),
+            Some("0"),
+            "invalid 不得计入 present"
+        );
+        assert_eq!(
+            v.evidence.get("required_artifacts_invalid").map(String::as_str),
+            Some("1")
+        );
     }
 }

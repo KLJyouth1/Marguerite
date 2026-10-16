@@ -30,20 +30,15 @@ pub mod ranks {
 }
 
 /// 技能来源
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum SkillSource {
     /// 内置技能
+    #[default]
     Builtin,
     /// 本地文件
     Local { path: std::path::PathBuf },
     /// 远程安装
     Remote { url: String },
-}
-
-impl Default for SkillSource {
-    fn default() -> Self {
-        Self::Builtin
-    }
 }
 
 /// 技能定义
@@ -123,12 +118,7 @@ impl SkillRegistry {
                 bail!("技能 '{}' 已注册", s.name);
             }
             if let Some(&j) = seen.get(&s.name) {
-                bail!(
-                    "批内技能名重复：'{}' 位于索引 {} 与 {}",
-                    s.name,
-                    j,
-                    i
-                );
+                bail!("批内技能名重复：'{}' 位于索引 {} 与 {}", s.name, j, i);
             }
             seen.insert(s.name.clone(), i);
         }
@@ -214,11 +204,7 @@ impl SkillRegistry {
                             }
                         } else {
                             rollback(self, &committed);
-                            bail!(
-                                "技能 '{}' 依赖未找到：'{}'",
-                                batch[gi].name,
-                                dep
-                            );
+                            bail!("技能 '{}' 依赖未找到：'{}'", batch[gi].name, dep);
                         }
                     }
                 }
@@ -327,7 +313,11 @@ impl SkillRegistry {
         out.sort_by(|a, b| {
             a.rank
                 .cmp(&b.rank)
-                .then_with(|| b.rating.partial_cmp(&a.rating).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| {
+                    b.rating
+                        .partial_cmp(&a.rating)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| b.uses.cmp(&a.uses))
         });
         out
@@ -652,14 +642,12 @@ mod tests {
     #[test]
     fn rank_histogram_tracks_groups() {
         let mut reg = SkillRegistry::new();
-        reg.register(skill_with("s", ranks::SYSTEM, vec![])).unwrap();
+        reg.register(skill_with("s", ranks::SYSTEM, vec![]))
+            .unwrap();
         reg.register(skill_with("p", ranks::PROJECT, vec![]))
             .unwrap();
         reg.register(skill_with("u", ranks::USER, vec![])).unwrap();
-        assert_eq!(
-            reg.rank_histogram(),
-            vec![(100, 1), (250, 1), (450, 1)]
-        );
+        assert_eq!(reg.rank_histogram(), vec![(100, 1), (250, 1), (450, 1)]);
     }
 
     #[test]

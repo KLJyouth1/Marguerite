@@ -86,7 +86,7 @@ impl TerminalSession {
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("终端启动失败（{}）: {}", shell, e))?;
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("无法获取终端 stdin"))?;
@@ -102,6 +102,13 @@ impl TerminalSession {
         let (tx, rx) = mpsc::channel::<String>(TERMINAL_OUTPUT_BUFFER);
         tokio::spawn(pipe_reader(stdout, tx.clone()));
         tokio::spawn(pipe_reader(stderr, tx));
+
+        // Windows: 启动后立即切换到 UTF-8 代码页，避免中文路径/输出乱码
+        #[cfg(windows)]
+        {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(b"chcp 65001 >nul\r\n").await;
+        }
 
         let id = format!(
             "term_{}_{}",

@@ -40,6 +40,7 @@ resolved versions are recorded by `opensquilla-webui/package.json` and
 | marked (`marked`) | npm dependency used by `opensquilla-webui/src/composables/chat/useChatTextRendering.ts`; generated JavaScript under `src/opensquilla/gateway/static/dist/assets/` | MIT. Copyright (c) 2018+, MarkedJS and Copyright (c) 2011-2018, Christopher Jeffrey. The bundled Markdown-derived portion carries the John Gruber notice reproduced below. |
 | DOMPurify (`dompurify`) | npm dependency used by `opensquilla-webui/src/composables/chat/useChatTextRendering.ts`; generated JavaScript under `src/opensquilla/gateway/static/dist/assets/` | MPL-2.0 OR Apache-2.0. OpenSquilla distributes this component under the Apache-2.0 option. Copyright belongs to Cure53 and other contributors. |
 | highlight.js (`highlight.js`) | npm dependency used by `opensquilla-webui/src/composables/chat/useChatTextRendering.ts`; generated JavaScript under `src/opensquilla/gateway/static/dist/assets/` | BSD-3-Clause. Copyright (c) 2006, Ivan Sagalaev. |
+| three.js (`three`) | npm dependency used by the Web UI 3D views (desktop pet, island, glow); generated JavaScript under `src/opensquilla/gateway/static/dist/assets/` | MIT. Copyright (c) 2010-2025 three.js authors. |
 | IBM Plex Sans and IBM Plex Mono | `opensquilla-webui/src/assets/fonts/ibm-plex-*.woff2` and generated Web UI font assets | SIL Open Font License 1.1. Copyright 2017 IBM Corp. with Reserved Font Name "Plex". |
 | Space Grotesk | `opensquilla-webui/src/assets/fonts/space-grotesk-*.woff2` and generated Web UI font assets | SIL Open Font License 1.1. Copyright 2020 The Space Grotesk Project Authors. |
 | Fraunces | `opensquilla-webui/src/themes/out-of-register/fonts/fraunces-*.woff2` and generated Web UI font assets | SIL Open Font License 1.1. Copyright 2020 The Fraunces Project Authors (https://github.com/undercasetype/Fraunces). |
@@ -442,6 +443,16 @@ are released under OpenSquilla's repository license (Apache-2.0; see `LICENSE`):
 - `voice-clone-lab`
 - `voice-conversion-studio`
 - `voiceover-studio`
+
+## Marguerite-derived bundled skills
+
+These bundled skill descriptors are authored for this workbench, adapted from the
+upstream harness at https://github.com/deepseek-ai/deepseek-harness. They are
+released under the MIT license and maintained as part of Marguerite:
+
+- `audit-third-party`
+- `clone-third-party`
+- `explore-third-party`
 
 ## tokenjuice adapted reduction rules
 

@@ -10,6 +10,7 @@ pub mod cron;
 pub mod host_board;
 pub mod ledger;
 pub mod long_running;
+pub mod task_queue;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

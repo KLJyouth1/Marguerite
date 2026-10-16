@@ -29,6 +29,12 @@ pub trait Embedding: Send + Sync {
     fn cosine(&self, a: &[f64], b: &[f64]) -> f64 {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
     }
+
+    /// 后端名（诚实上报用：`cache.status` 据此说明语义缓存**当前到底用的哪个嵌入后端**）。
+    /// 默认 `custom`，避免每个自定义后端都被迫实现。
+    fn name(&self) -> &'static str {
+        "custom"
+    }
 }
 
 /// 默认零依赖后端：特征哈希词袋（包装既有 `LocalEmbedding`，维度 256）
@@ -43,6 +49,10 @@ impl Embedding for LocalEmbeddingBackend {
 
     fn dim(&self) -> usize {
         LocalEmbedding::dim()
+    }
+
+    fn name(&self) -> &'static str {
+        "local-hash"
     }
 }
 

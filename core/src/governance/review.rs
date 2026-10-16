@@ -12,6 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::model::llm::LLMClient;
+use crate::proc::SilentCommand;
 use crate::types::Message;
 
 /// 评审问题严重度
@@ -144,6 +145,89 @@ pub(crate) fn extract_json_object(s: &str) -> Option<String> {
     None
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 完成判定的**可选**自动评审（opt-in，默认关闭）
+//
+// 背景：`AutoReview` 此前**零生产调用者**。它是**只读**的（输入变更 → 输出裁决），
+// 与 `Verifier` 同属「要花一次 LLM 调用」的层，故同样做成显式开关、默认关闭。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 环境变量开关：`MARGUERITE_COMPLETION_REVIEW=1` 启用完成判定的自动评审。
+pub const COMPLETION_REVIEW_ENV: &str = "MARGUERITE_COMPLETION_REVIEW";
+
+/// 评审输入（变更证据）最大字符数：避免把整份 diff 灌进上下文。
+const MAX_REVIEW_DIFF_CHARS: usize = 12_000;
+
+/// 解析开关真值（与 `verifier` 的开关同语义：`1`/`true`/`yes`/`on`）。
+fn parse_completion_review(v: Option<&str>) -> bool {
+    matches!(
+        v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// 是否启用完成判定的自动评审（opt-in，默认关闭）。
+pub fn completion_review_enabled() -> bool {
+    parse_completion_review(std::env::var(COMPLETION_REVIEW_ENV).ok().as_deref())
+}
+
+/// 采集**变更证据**：优先 `git diff`（工作区真实改动），失败/无改动时回退到给定摘要。
+///
+/// 只读且有界：`git` 缺失 / 非 git 仓库 / 无改动时静默回退，绝不阻塞完成判定。
+fn collect_change_evidence(workspace: &std::path::Path, fallback: &str) -> String {
+    let out = std::process::Command::new("git")
+        .silent()
+        .args(["diff", "--no-color", "-p"])
+        .current_dir(workspace)
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let diff = String::from_utf8_lossy(&o.stdout);
+            let trimmed = diff.trim();
+            if !trimmed.is_empty() {
+                return trimmed.chars().take(MAX_REVIEW_DIFF_CHARS).collect();
+            }
+        }
+    }
+    fallback.chars().take(MAX_REVIEW_DIFF_CHARS).collect()
+}
+
+/// 完成判定的可选自动评审：仅当开关开启且配置了 API key 时执行。
+///
+/// **fail-open**：未启用 / 无 key / 网络失败 / 解析失败一律返回 `None` ——
+/// 确定性门禁已先行裁决，本层只是可选增强。
+pub async fn review_completion_if_enabled(
+    task: &str,
+    fallback_evidence: &str,
+    workspace: &std::path::Path,
+) -> Option<ReviewVerdict> {
+    if !completion_review_enabled() {
+        return None;
+    }
+    let cfg = crate::persistence::config::Config::load().ok()?;
+    let client = crate::governance::verifier::llm_config_from(&cfg)?;
+    let evidence = collect_change_evidence(workspace, fallback_evidence);
+    if evidence.trim().is_empty() {
+        return None;
+    }
+    // 带上任务目标，让评审知道「这些改动是为了做什么」。
+    let input: String = format!("任务目标：{task}\n\n变更：\n{evidence}")
+        .chars()
+        .take(MAX_REVIEW_DIFF_CHARS + 512)
+        .collect();
+    let reviewer = AutoReview::new(client);
+    match reviewer.review(&input).await {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "完成判定的自动评审调用失败（fail-open：不影响确定性门禁裁决）"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +322,34 @@ mod tests {
             .unwrap();
         assert!(!v.pass);
         assert_eq!(v.blocking_count(), 1);
+    }
+
+    /// opt-in 开关解析：仅 1/true/yes/on 视为开启。
+    #[test]
+    fn completion_review_flag_parsing() {
+        assert!(!parse_completion_review(None));
+        assert!(!parse_completion_review(Some("0")));
+        assert!(!parse_completion_review(Some("off")));
+        assert!(parse_completion_review(Some("1")));
+        assert!(parse_completion_review(Some(" YES ")));
+        assert!(parse_completion_review(Some("On")));
+    }
+
+    /// 变更证据采集：非 git 目录回退到给定摘要，并按**字符**截断（UTF-8 安全）。
+    #[test]
+    fn collect_change_evidence_falls_back_and_truncates() {
+        let dir = std::env::temp_dir().join(format!("marg_review_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let got = collect_change_evidence(&dir, "回退摘要");
+        assert_eq!(got, "回退摘要", "非 git 目录应回退到摘要");
+        // 超长回退串被截断且不 panic（多字节字符）
+        let long: String = "变".repeat(MAX_REVIEW_DIFF_CHARS + 100);
+        let got = collect_change_evidence(&dir, &long);
+        assert!(
+            got.chars().count() <= MAX_REVIEW_DIFF_CHARS,
+            "应截断到上限，实际 {}",
+            got.chars().count()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -43,18 +43,47 @@ enum ClientCmd {
     Cancel { id: String },
 }
 
+/// WS 半部的具体类型（`connect_async` 的产物，与 `browser/mod.rs` 同形）。
+type WsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+type WsWriter = futures_util::stream::SplitSink<WsStream, Message>;
+type WsReader = futures_util::stream::SplitStream<WsStream>;
+
 impl PyGatewayClient {
-    /// 建立 WS 连接并完成 challenge→connect 握手
+    /// 建立 WS 连接并完成 challenge→connect 握手。
+    ///
+    /// 返回的句柄是**跨代稳定**的：内部有监督任务负责断开后重连，
+    /// 因此 `PY_CLIENT_REG` 这个 `OnceLock` 单例不会因为
+    /// 「Python 侧车被守护任务进程内重启」而变成死连接（S7）。
     pub async fn connect(base_url: &str, _token: &str) -> Result<Self> {
         let ws_url = build_ws_url(base_url);
-        let req = ws_url
-            .as_str()
-            .into_client_request()
-            .with_context(|| format!("构造 WS 请求失败: {ws_url}"))?;
-        let (ws, _resp) = connect_async(req)
-            .await
-            .with_context(|| format!("连接 Python 网关 WS 失败: {ws_url}"))?;
-        let (mut writer, mut reader) = ws.split();
+
+        // 事件扇出与命令入口在**重连之间保持不变**：重连只换 WS 半部，
+        // 不换消费者，否则 event_bridge 会订阅到一个再也不产出的信道。
+        let (event_tx, event_rx) = mpsc::channel::<Value>(256);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(32);
+        let cmd_tx_arc = Arc::new(Mutex::new(cmd_tx));
+
+        let (writer, reader) = Self::open_session(&ws_url).await?;
+        tokio::spawn(async move {
+            Self::supervise_ws(ws_url, writer, reader, event_tx, cmd_rx).await;
+        });
+        // event_rx 暴露到全局静态注册表：通过 EVENTS_BUS 转发在 event_bridge.rs
+        set_event_sink(event_rx);
+
+        Ok(Self { tx: cmd_tx_arc })
+    }
+
+    /// 建连 + 完成 challenge→connect 握手，返回拆分的读写半部。
+    async fn open_session(ws_url: &str) -> Result<(WsWriter, WsReader)> {
+    let req = ws_url
+        .into_client_request()
+        .with_context(|| format!("构造 WS 请求失败: {ws_url}"))?;
+    let (ws, _resp) = connect_async(req)
+        .await
+        .with_context(|| format!("连接 Python 网关 WS 失败: {ws_url}"))?;
+    let (mut writer, mut reader) = ws.split();
 
         // 1) 等待 challenge
         let challenge_msg: String = timeout(Duration::from_secs(10), async {
@@ -131,25 +160,102 @@ impl PyGatewayClient {
             .unwrap_or_default() as u32;
         debug!(proto, "Python 网关握手完成");
 
-        // 事件扇出：event_rx 由 event_bridge 订阅
-        let (event_tx, event_rx) = mpsc::channel::<Value>(256);
-        // 命令入口
-        let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(32);
-        let cmd_tx_arc = Arc::new(Mutex::new(cmd_tx));
-
-        // 驱动任务：串行处理 cmd_rx + reader.next() + 心跳
-        tokio::spawn(async move {
-            drive_ws_loop(writer, reader, event_tx, cmd_rx).await;
-        });
-        // event_rx 暴露到全局静态注册表：通过 EVENTS_BUS 转发在 event_bridge.rs
-        set_event_sink(event_rx);
-
         // 保存协议版本（debug 用）
         let _ = proto; // 避免未使用；可按需提升字段
         let _ = PROTOCOL_VERSION;
 
-        Ok(Self { tx: cmd_tx_arc })
+        Ok((writer, reader))
+}
+
+    /// 连接监督：断开后按退避重连，直到命令信道关闭。
+    ///
+    /// # 为什么必须重连
+    ///
+    /// Python 侧车子进程会被守护任务在**进程内**重启（`sidecar.rs` 的退避重启）。
+    /// 若客户端在 WS 断开时永久退出，`py_client()` 这个 `OnceLock` 单例就会永远
+    /// 指向**上一代侧车**的死连接 —— 此后所有经 Python 代理的方法
+    /// （`logs.tail` / `pyengine.*` / 侧车网关方法…）全部失败且无从自愈。
+    /// 这正是 S7「禁跨代缓存句柄」要消灭的缺陷类型：与其让句柄带上代际标记，
+    /// 不如让客户端自己重连 —— 句柄于是与「第几代」无关。
+    ///
+    /// # 断连窗口内的调用
+    ///
+    /// fail-fast：重连期间到达的调用立即回一个明确错误，而不是让调用方
+    /// 白等自己的 60s 超时。
+    async fn supervise_ws(
+        ws_url: String,
+        mut writer: WsWriter,
+        mut reader: WsReader,
+        event_tx: mpsc::Sender<Value>,
+        mut cmd_rx: mpsc::Receiver<ClientCmd>,
+    ) {
+    const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        drive_ws_loop(writer, reader, event_tx.clone(), &mut cmd_rx).await;
+
+        // 断连 → 重连，直到成功。期间保持对 cmd_rx 的服务（fail-fast）。
+        loop {
+            tokio::select! {
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        // 断连窗口内到达的调用：立即回错，别让调用方等满超时
+                        Some(ClientCmd::Call { reply, .. }) => {
+                            let _ = reply.send(Err(RpcError::internal(
+                                "Python 侧车连接已断开，正在重连；请稍后重试",
+                            )));
+                        }
+                        Some(ClientCmd::Cancel { .. }) => {}
+                        // 所有发送端已释放 → 外层句柄被丢弃，监督结束
+                        None => return,
+                    }
+                }
+                res = Self::open_session(&ws_url) => {
+                    match res {
+                        Ok((w, r)) => {
+                            writer = w;
+                            reader = r;
+                            backoff = INITIAL_BACKOFF;
+                            // info 而非 debug：重连成功是**生命周期事件**，
+                            // 默认 `warn` 过滤下若不可见，运维就无法区分
+                            // 「已自愈」与「一直没连上」。
+                            tracing::info!("Python WS 已重连，侧车方法代理恢复");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                err = %e,
+                                backoff_ms = backoff.as_millis(),
+                                "Python WS 重连失败，退避后重试"
+                            );
+                            // 退避期间仍然 fail-fast 服务 cmd_rx
+                            let deadline = Instant::now() + backoff;
+                            loop {
+                                tokio::select! {
+                                    _ = tokio::time::sleep_until(deadline) => break,
+                                    cmd = cmd_rx.recv() => {
+                                        match cmd {
+                                            Some(ClientCmd::Call { reply, .. }) => {
+                                                let _ = reply.send(Err(RpcError::internal(
+                                                    "Python 侧车未就绪（重连中）；请稍后重试",
+                                                )));
+                                            }
+                                            Some(ClientCmd::Cancel { .. }) => {}
+                                            None => return,
+                                        }
+                                    }
+                                }
+                            }
+                            backoff = (backoff * 2).min(MAX_BACKOFF);
+                        }
+                    }
+                }
+            }
+        }
     }
+}
 
     /// 同步调用：发送 req{id,method,params}，等待对应 res。
     /// 调用方等待包在超时内（默认 60s，可由 `MARGUERITE_PYENGINE_CALL_TIMEOUT_MS` 覆盖）：
@@ -213,7 +319,7 @@ async fn drive_ws_loop<S, R>(
     mut writer: futures_util::stream::SplitSink<S, Message>,
     mut reader: futures_util::stream::SplitStream<R>,
     event_tx: mpsc::Sender<Value>,
-    mut cmd_rx: mpsc::Receiver<ClientCmd>,
+    cmd_rx: &mut mpsc::Receiver<ClientCmd>,
 ) where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     R: futures_util::Stream<

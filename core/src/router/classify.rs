@@ -17,7 +17,11 @@ pub fn classify(input: &ClassifyInput) -> RouteDecision {
 pub fn classify_with(input: &ClassifyInput, catalog: &PersonaCatalog) -> RouteDecision {
     // —— 步骤 1：runtime 可用性闸门（opensquilla v4_unavailable 语义）——
     let mut decision = if !input.runtime_available {
-        default_decision(catalog, DecisionSource::RuntimeUnavailable, "v4_unavailable")
+        default_decision(
+            catalog,
+            DecisionSource::RuntimeUnavailable,
+            "v4_unavailable",
+        )
     } else if catalog.personas.iter().filter(|p| p.enabled).count() == 0 {
         // 启用中的 persona 为空 → 降级（classify 异常保护，不 panic）
         default_decision(catalog, DecisionSource::Default, "classify_error")
@@ -66,6 +70,7 @@ pub fn classify_with(input: &ClassifyInput, catalog: &PersonaCatalog) -> RouteDe
                 prompt_policy: p.default_prompt_policy,
                 source: DecisionSource::Rule,
                 fallback_reason: None,
+                effort_override: None,
                 steps: vec![PipelineStepRecord {
                     step_name: "classify".to_string(),
                     applied: true,
@@ -75,6 +80,30 @@ pub fn classify_with(input: &ClassifyInput, catalog: &PersonaCatalog) -> RouteDe
             }
         }
     };
+
+    // —— P1-4：复杂度提升（复杂任务不再被压到 General/T0）——
+    // 规则路由此前对「无 persona 命中」或「只命中弱关键词」的输入一律落 General/T0
+    // （实测决策日志 2140 条中 2138 条为 General、2115 条为 T0）。这里用可测的复杂度
+    // 信号把**复杂任务**提升到更高档 + T1；简单闲聊保持 General/T0（阈值与依据见下方常量）。
+    if decision.tier == PersonaTier::General
+        && decision.thinking_mode == ThinkingMode::T0
+        && estimate_complexity(input) >= TaskComplexity::Medium
+    {
+        let tier = complexity_tier(input);
+        if let Some(p) = catalog.lookup(tier) {
+            decision.tier = tier;
+            decision.thinking_mode = p.default_thinking_mode;
+            decision.prompt_policy = p.default_prompt_policy;
+            decision.source = DecisionSource::Rule;
+            decision.fallback_reason = Some("complexity_escalated".to_string());
+            decision.steps.push(PipelineStepRecord {
+                step_name: "complexity_escalate".to_string(),
+                applied: true,
+                routing_source: "rule".to_string(),
+                fallback_reason: Some("complexity_escalated".to_string()),
+            });
+        }
+    }
 
     // —— Track B 切片 1：视觉取证门（additive，不改非图片轮的路由）——
     // 仅当本轮带图（has_image）时，追加一条 vision_gate 可观测步骤。决策逻辑留在
@@ -132,12 +161,126 @@ fn default_decision(
         prompt_policy: pp,
         source,
         fallback_reason: Some(reason.to_string()),
+        effort_override: None,
         steps: vec![PipelineStepRecord {
             step_name: "classify".to_string(),
             applied: false,
             routing_source: source.as_str().to_string(),
             fallback_reason: Some(reason.to_string()),
         }],
+    }
+}
+
+/// 任务复杂度档（P1-4）。仅用于「弱信号 / General 结果」是否应被提升的判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskComplexity {
+    Low,
+    Medium,
+    High,
+}
+
+/// 复杂度阈值（可测、有依据）：
+/// - 字符数：`>= COMPLEXITY_LONG_CHARS` → +2；`>= COMPLEXITY_MEDIUM_CHARS` → +1；
+/// - 结构化/多步骤标记命中数：`>= 2` → +2；`== 1` → +1；
+/// - 复杂度关键词命中 → +1；
+/// - 上下文 token 估算 `>= COMPLEXITY_CONTEXT_TOKENS` → +1。
+///
+/// 总分 `0..=1` → Low；`2..=3` → Medium；`>= 4` → High。
+///
+/// 阈值取「一句话闲聊 / 单问单答必然为 Low」为准：闲聊消息通常 < 80 字、无多步骤标记、
+/// 无复杂度关键词 → 0 分 → Low，因而维持 General/T0（不误伤简单交互）。
+const COMPLEXITY_LONG_CHARS: usize = 200;
+const COMPLEXITY_MEDIUM_CHARS: usize = 80;
+const COMPLEXITY_CONTEXT_TOKENS: usize = 16_000;
+
+/// 复杂度关键词（跨中英；命中即 +1）。
+const COMPLEXITY_KEYWORDS: &[&str] = &[
+    "重构",
+    "架构",
+    "设计",
+    "实现",
+    "优化",
+    "分布式",
+    "并发",
+    "性能",
+    "系统",
+    "算法",
+    "迁移",
+    "方案",
+    "algorithm",
+    "refactor",
+    "architecture",
+    "design",
+    "optimize",
+    "implement",
+    "migrate",
+    "concurrent",
+    "system",
+];
+
+/// 多步骤 / 结构化标记（命中数 >= 2 → +2）。
+const MULTI_STEP_MARKERS: &[&str] = &[
+    "然后", "接着", "首先", "其次", "最后", "并且", "同时", "1.", "2.", "3.", "\n-", "\n*",
+    "and then", "finally",
+];
+
+/// 估算任务复杂度（纯函数、零 LLM 开销、可单测）。
+pub fn estimate_complexity(input: &ClassifyInput) -> TaskComplexity {
+    let text = &input.message;
+    let chars = text.chars().count();
+    let lower = text.to_ascii_lowercase();
+
+    let mut score: u32 = 0;
+    if chars >= COMPLEXITY_LONG_CHARS {
+        score += 2;
+    } else if chars >= COMPLEXITY_MEDIUM_CHARS {
+        score += 1;
+    }
+    let markers = MULTI_STEP_MARKERS
+        .iter()
+        .filter(|k| lower.contains(&k.to_ascii_lowercase()))
+        .count();
+    if markers >= 2 {
+        score += 2;
+    } else if markers == 1 {
+        score += 1;
+    }
+    if COMPLEXITY_KEYWORDS
+        .iter()
+        .any(|k| lower.contains(&k.to_ascii_lowercase()))
+    {
+        score += 1;
+    }
+    if input.context_tokens_est >= COMPLEXITY_CONTEXT_TOKENS {
+        score += 1;
+    }
+
+    match score {
+        0..=1 => TaskComplexity::Low,
+        2..=3 => TaskComplexity::Medium,
+        _ => TaskComplexity::High,
+    }
+}
+
+/// 复杂任务的目标档（按领域信号择档；未知领域归 Reasoner——深度推理）。
+fn complexity_tier(input: &ClassifyInput) -> PersonaTier {
+    let lower = input.message.to_ascii_lowercase();
+    let has = |kws: &[&str]| kws.iter().any(|k| lower.contains(&k.to_ascii_lowercase()));
+
+    if has(&[
+        "代码", "函数", "重构", "bug", "修复", "cargo", "rust", "python", "impl ", "fn ",
+        "code", "refactor", "api", "数据库", "sql",
+    ]) {
+        PersonaTier::Coder
+    } else if has(&[
+        "工具", "终端", "shell", "浏览器", "桌面", "脚本", "部署", "运维", "deploy", "terminal",
+        "browser", "自动化",
+    ]) {
+        PersonaTier::Tooler
+    } else if input.context_tokens_est >= COMPLEXITY_CONTEXT_TOKENS {
+        PersonaTier::Explorer
+    } else {
+        PersonaTier::Reasoner
     }
 }
 
@@ -160,6 +303,7 @@ fn decision_for(
         prompt_policy: pp,
         source,
         fallback_reason: Some(reason.to_string()),
+        effort_override: None,
         steps: vec![PipelineStepRecord {
             step_name: "classify".to_string(),
             applied: false,

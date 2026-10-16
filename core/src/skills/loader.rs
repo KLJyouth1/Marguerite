@@ -576,10 +576,7 @@ prompt_template: "模板: {{text}}"
         );
 
         // 关键不变量：拒绝后工作区不得出现该文件（绝不写盘）
-        assert!(
-            !dir.join("evil.yaml").exists(),
-            "被拦截的技能绝不应落盘"
-        );
+        assert!(!dir.join("evil.yaml").exists(), "被拦截的技能绝不应落盘");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

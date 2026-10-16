@@ -1,12 +1,13 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-SOURCES_ROW = ROOT / "opensquilla-webui/src/components/chat/SourcesRow.vue"
-CHAT_TYPES = ROOT / "opensquilla-webui/src/types/chat.ts"
-PART_TYPES = ROOT / "opensquilla-webui/src/types/parts.ts"
-RENDERED_MESSAGES = ROOT / "opensquilla-webui/src/composables/chat/useChatRenderedMessages.ts"
-TEXT_PART = ROOT / "opensquilla-webui/src/components/chat/parts/TextPart.vue"
-CITATIONS = ROOT / "opensquilla-webui/src/utils/chat/citations.ts"
+from spa_source import spa
+
+SOURCES_ROW = spa("src/components/chat/SourcesRow.vue")
+CHAT_TYPES = spa("src/types/chat.ts")
+PART_TYPES = spa("src/types/parts.ts")
+RENDERED_MESSAGES = spa("src/composables/chat/useChatRenderedMessages.ts")
+TEXT_PART = spa("src/components/chat/parts/TextPart.vue")
+CITATIONS = spa("src/utils/chat/citations.ts")
 
 
 def _read(path: Path) -> str:

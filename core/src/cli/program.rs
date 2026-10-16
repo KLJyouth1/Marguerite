@@ -32,7 +32,7 @@ use crate::mcp::registry::ToolRegistry;
 use crate::memory::recall::KbBackedMemory;
 use crate::model::llm::ToolDef;
 use crate::model::selector::{models_path, profile_from_flags, ModelSelector};
-use crate::orchestration::{EngineInvoker, Orchestrator};
+use crate::orchestration::{EngineInvoker, Orchestrator, TaskAnalysis};
 use crate::persistence::config::Config;
 use crate::persistence::session::SessionManager;
 use crate::serve::acp::listener::start_listener;
@@ -82,6 +82,16 @@ impl Program {
             "dispatch",
             dispatch_handler,
             "无头分发任务到 11 个外部 agent CLI（meta-agent 调度一体内置）",
+        );
+        route_table.register(
+            "games",
+            games_handler,
+            "内置小游戏（list / play <id> <动作>）",
+        );
+        route_table.register(
+            "export-diagnostics",
+            export_diagnostics_handler,
+            "导出脱敏诊断包（tar；所有文本过 scrub_text）",
         );
 
         Self {
@@ -185,11 +195,41 @@ impl Program {
     ///
     /// 构建完整提示（含 `-f` 文件内容 / `--pipe` 标准输入），
     /// 优先走调用链（意图有模板时），否则通过 AgentRuntime 执行。
+    ///
+    /// 三段式降级（P0-B 离线首启体验）：
+    /// 1. **调用链**（本地模板 / 技能，无需密钥）；
+    /// 2. **离线回显**：未配置模型密钥时不再报错退出，而是用 [`Orchestrator::analyze`]
+    ///    给出纯规则编排判定 + 原始输入回显（**不调用任何 LLM、不伪造模型回答**），退出码 0；
+    /// 3. **真实模型**：配置了密钥才走 `AgentRuntime`。
     fn handle_direct(&self, args: &Args) -> Result<()> {
         let raw_prompt = if args.pipe {
-            let mut input = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
-            input.trim().to_string()
+            // 有界读取：读到 EOF 立即返回；EOF 不来时由空闲超时 + 总时长兜底收敛，
+            // 绝不无界阻塞在 stdin（详见 crate::cli::pipe_input 的根因说明）。
+            let got = crate::cli::pipe_input::read_stdin_pipe()?;
+            if got.is_empty_timeout() {
+                bail!(
+                    "读取标准输入超时（{} 秒内未收到任何数据，也未读到 EOF）：--pipe 需要管道输入，\
+                     例如 `echo \"指令\" | marguerite --pipe`；亦可直接用 -p \"指令\"",
+                    crate::cli::pipe_input::idle_timeout().as_secs()
+                );
+            }
+            if got.text.trim().is_empty() {
+                // 空输入（`--pipe < NUL` / `echo -n "" | marguerite --pipe`）：
+                // 无论 EOF 是否到达，都必须是**明确错误 + 非零退出**，绝不静默成功。
+                // EOF 路径此前会落到下面那句「未提供指令」——语义含糊；这里给出可操作的提示。
+                bail!(
+                    "--pipe 未从标准输入读到任何内容：请通过管道传入指令，\
+                     例如 `echo \"指令\" | marguerite --pipe`；亦可直接用 -p \"指令\""
+                );
+            }
+            if got.timed_out {
+                eprintln!(
+                    "警告：标准输入在 {} 秒内未结束（未见 EOF），已按已读取的 {} 字节继续。",
+                    crate::cli::pipe_input::idle_timeout().as_secs(),
+                    got.text.len()
+                );
+            }
+            got.text.trim().to_string()
         } else {
             args.prompt.clone().unwrap_or_default()
         };
@@ -209,41 +249,52 @@ impl Program {
             }
         }
 
-        // 创建 tokio runtime 执行：优先调用链，回退 Agent
-        let config = Config::load()?;
+        // 配置优先复用 `run()` 已加载的实例（已叠加 env / .env 覆盖，避免二次读盘），
+        // 未注入时（单测直接调用 handle_direct）回退到 Config::load()。
+        let config = match &self.config {
+            Some(c) => c.clone(),
+            None => Config::load()?,
+        };
         let rt = tokio::runtime::Runtime::new()?;
+
+        // 1) 调用链优先（本地模板 / 技能路径，无密钥也可离线完成）
+        if let Some(chain_output) = rt.block_on(crate::chain::cli::run_direct_chain(
+            &config,
+            &raw_prompt,
+            args.file.as_deref(),
+            args.agent.as_deref(),
+        )) {
+            print_direct_response(args, &chain_output);
+            return Ok(());
+        }
+
+        // 2) 无模型密钥 → 离线回显（纯规则，不联网；退出码 0：这是正常降级路径，不是错误）
+        if needs_offline_echo(&config) {
+            return print_offline_echo(args, &config, &raw_prompt);
+        }
+
+        // 3) 配置了密钥 → 真实模型执行
         let result = rt.block_on(async {
-            if let Some(chain_output) = crate::chain::cli::run_direct_chain(
-                &config,
-                &raw_prompt,
-                args.file.as_deref(),
-                args.agent.as_deref(),
-            )
-            .await
-            {
-                return Ok::<String, anyhow::Error>(chain_output);
-            }
-            if config.model.api_key.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "未配置 API Key，请在 {} 中设置 model.api_key",
-                    Config::config_path().display()
-                ));
-            }
-            let mut runtime = AgentRuntime::new(config);
+            // 克隆：`config` 之后仍需在鉴权失败降级路径（print_offline_echo_with_hint）复用。
+            let mut runtime = AgentRuntime::new(config.clone());
             runtime.init()?;
             let resp = runtime.process_input(&prompt).await?;
             Ok::<String, anyhow::Error>(resp.to_string())
         });
 
         match result {
-            Ok(resp) => {
-                if args.json {
-                    print_json_ok(serde_json::json!({ "response": resp }));
-                } else {
-                    println!("{resp}");
-                }
-            }
+            Ok(resp) => print_direct_response(args, &resp),
             Err(e) => {
+                // P0-1d：密钥存在但被上游拒绝（401/403 → AUTH_FAILED）时，把离线降级的触发条件
+                // 从「没有 Key」扩展到「鉴权失败」——与无密钥同属「本次无法得到真实模型回答」，
+                // 应走正常的离线降级路径（退出码 0）而非裸报错；同时以「鉴权失败」专用提示行
+                // 如实说明密钥被拒（不谎称「未配置」）。
+                // 分支条件收敛在 [`auth_failure_echo_hint`]（表驱动护栏锁死，见
+                // `test_auth_failure_offline_echo_branch_condition`），防止判定被人
+                // 无声改坏而门禁全绿（QA 变异 M6 的教训）。
+                if let Some(hint) = auth_failure_echo_hint(&e) {
+                    return print_offline_echo_with_hint(args, &config, &raw_prompt, hint);
+                }
                 if args.json {
                     print_json_err(
                         ExitCode::Temporary,
@@ -281,6 +332,177 @@ impl Program {
     }
 }
 
+/// 判断是否应走离线回显：模型密钥缺失或仅剩空白即视为「未配置」。
+///
+/// 单指令模式只经 `AgentRuntime::new(config)` 取密钥（不查凭证台账），因此这里的判据
+/// 与真实执行路径一致：空白密钥进真实调用必然失败，只应降级而非报错退出。
+fn needs_offline_echo(config: &Config) -> bool {
+    config.model.api_key.trim().is_empty()
+}
+
+/// P0-1d 分支判定（纯函数）：该稳定错误码是否应触发「鉴权失败 → 离线降级」。
+///
+/// 这是 [`auth_failure_echo_hint`]（`handle_direct` Err 分支的判定入口）引用的
+/// **唯一条件出处**；`test_auth_failure_offline_echo_branch_condition` 表驱动锁死——
+/// 把这里的判定改掉（例如换成永不相等的字面量）护栏测试必然变红。
+fn should_offline_echo_on_auth_failure(code: Option<&str>) -> bool {
+    code == Some("AUTH_FAILED")
+}
+
+/// 单指令模式真实执行失败后的降级决策：仅当错误归类为 `AUTH_FAILED` 时返回
+/// 鉴权失败专用提示行（走离线回显），否则 `None`（按普通失败处理）。
+///
+/// 收敛为函数的原因（QA 变异 M6）：此前分支条件内联在 `handle_direct` 里，
+/// 把 `== Some("AUTH_FAILED")` 改掉后全部既有测试仍然通过——只测渲染函数
+/// 保护不了调用点。现调用点只允许经由本函数分流，由行为护栏测试直接驱动。
+fn auth_failure_echo_hint(e: &anyhow::Error) -> Option<&'static str> {
+    should_offline_echo_on_auth_failure(crate::model::error_taxonomy::code_of(e))
+        .then_some(OFFLINE_ECHO_AUTH_HINT)
+}
+
+/// 单指令模式的统一成功输出（文本 / `--json` 契约共用）。
+fn print_direct_response(args: &Args, resp: &str) {
+    if args.json {
+        print_json_ok(serde_json::json!({ "response": resp }));
+    } else {
+        println!("{resp}");
+    }
+}
+
+/// 离线回显的固定提示行（文本与 JSON 共用同一常量，避免两处文案漂移）。
+pub const OFFLINE_ECHO_HINT: &str =
+    "未配置模型密钥，已离线回显；配置方法：`marguerite model add ...` 或设置 `MARGUERITE_API_KEY`。";
+
+/// 鉴权失败的离线回显提示行（P0-1d：把离线降级触发条件从「没有 Key」扩展到「鉴权失败」）。
+///
+/// 与「未配置密钥」区分：这里密钥**存在但被上游拒绝**（401/403），文案必须如实说明，
+/// 不得谎称「未配置」（诚实性边界）。
+pub const OFFLINE_ECHO_AUTH_HINT: &str =
+    "模型密钥被上游拒绝（鉴权失败 401/403），已离线回显；请检查密钥是否有效：`marguerite model add ...` 或设置 `MARGUERITE_API_KEY`。";
+
+/// 渲染离线回显块（纯函数，便于单测）——使用默认「未配置密钥」提示行。
+fn render_offline_echo(prompt: &str, analysis: &TaskAnalysis, config_path: &Path) -> String {
+    render_offline_echo_with_hint(prompt, analysis, config_path, OFFLINE_ECHO_HINT)
+}
+
+/// 渲染离线回显块（可变提示行；P0-1d 的鉴权失败降级复用同一渲染逻辑，只换首行文案）。
+///
+/// 语义边界（不可越界）：本块**只**包含原始输入 + 本地规则编排判定 + 配置指引，
+/// 不包含任何模型生成的回答，也不假装调用过模型。
+fn render_offline_echo_with_hint(
+    prompt: &str,
+    analysis: &TaskAnalysis,
+    config_path: &Path,
+    hint: &str,
+) -> String {
+    let indented: String = prompt
+        .lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[OFFLINE] {hint}\n\
+         （本块由本地规则引擎生成，未调用任何模型：不包含也不伪造模型回答。）\n\
+         \n\
+         输入:\n{indented}\n\
+         \n\
+         自动编排判定（纯本地规则，不联网）:\n\
+         \x20   形态: {} ({:?})\n\
+         \x20   意图: {} ({:?})\n\
+         \x20   复杂度: {:?}\n\
+         \x20   需 LLM 消歧: {}\n\
+         \x20   子任务: {} 个\n\
+         \x20   判定依据: {}\n\
+         \n\
+         配置文件: {}\n\
+         配置完成后重跑同一指令即可获得真实模型回答。",
+        analysis.strategy.label(),
+        analysis.strategy,
+        analysis.intent.task_label(),
+        analysis.intent,
+        analysis.complexity,
+        analysis.needs_llm,
+        analysis.subtasks.len(),
+        analysis.rationale,
+        config_path.display()
+    )
+}
+
+/// 离线回显的结构化载荷（`--json` 下由 [`print_json_ok`] 包成 `{ok,data,meta}`）。
+fn offline_echo_payload(
+    prompt: &str,
+    analysis: &TaskAnalysis,
+    config_path: &Path,
+) -> serde_json::Value {
+    serde_json::json!({
+        "offline": true,
+        "response": render_offline_echo(prompt, analysis, config_path),
+        "prompt": prompt,
+        "analysis": {
+            "strategy": analysis.strategy,
+            "strategy_label": analysis.strategy.label(),
+            "intent": analysis.intent,
+            "intent_label": analysis.intent.task_label(),
+            "complexity": analysis.complexity,
+            "needs_llm": analysis.needs_llm,
+            "subtask_count": analysis.subtasks.len(),
+            "rationale": analysis.rationale,
+        },
+        "config_path": config_path.display().to_string(),
+        "hint": OFFLINE_ECHO_HINT,
+    })
+}
+
+/// 打印离线回显并**正常返回**（退出码 0：这是正常的降级路径，不是错误）。
+///
+/// 编排判定走 [`Orchestrator::analyze`]（纯规则、零 LLM，可在无密钥 / 无网络环境运行），
+/// 与交互式工作台的离线语义一致：形态只由引擎自动得出，不提供人工选择入口。
+fn print_offline_echo(args: &Args, config: &Config, raw_prompt: &str) -> Result<()> {
+    print_offline_echo_with_hint(args, config, raw_prompt, OFFLINE_ECHO_HINT)
+}
+
+/// 打印离线回显（可指定首行提示）：P0-1d 的「鉴权失败」降级复用同一渲染路径，
+/// 只把首行换成 [`OFFLINE_ECHO_AUTH_HINT`]，其余（编排判定 / 配置指引 / 未调用模型声明）不变。
+fn print_offline_echo_with_hint(
+    args: &Args,
+    config: &Config,
+    raw_prompt: &str,
+    hint: &str,
+) -> Result<()> {
+    let analysis = Orchestrator::new(config.clone()).analyze(raw_prompt);
+    let config_path = Config::config_path();
+    if args.json {
+        print_json_ok(offline_echo_payload_with_hint(
+            raw_prompt,
+            &analysis,
+            &config_path,
+            hint,
+        ));
+    } else {
+        println!(
+            "{}",
+            render_offline_echo_with_hint(raw_prompt, &analysis, &config_path, hint)
+        );
+    }
+    Ok(())
+}
+
+/// 离线回显 JSON 载荷（可指定提示行；与 [`print_offline_echo_with_hint`] 共用，
+/// 抽出纯函数便于护栏测试直接断言 `--json` 契约，无需真实打印）。
+fn offline_echo_payload_with_hint(
+    prompt: &str,
+    analysis: &TaskAnalysis,
+    config_path: &Path,
+    hint: &str,
+) -> serde_json::Value {
+    let mut payload = offline_echo_payload(prompt, analysis, config_path);
+    // 提示行随降级原因变化：JSON 契约里的 response/hint 都同步（避免两处文案漂移）。
+    payload["hint"] = serde_json::json!(hint);
+    payload["response"] =
+        serde_json::json!(render_offline_echo_with_hint(prompt, analysis, config_path, hint));
+    payload
+}
+
 impl Default for Program {
     fn default() -> Self {
         Self::new()
@@ -297,41 +519,111 @@ pub const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 列出全部资源（子命令）的一句话说明与可直接运行的示例，
 /// 不依赖任何运行期状态（无 emoji、无 ANSI 色，便于被 agent 抓取）。
 pub fn print_top_help() {
-    println!("Marguerite — 终端智能体工作台 (v{CLI_VERSION})");
-    println!();
-    println!("用法:");
-    println!("  marguerite                        启动交互式工作台（默认）");
-    println!("  marguerite -p \"<指令>\"           单指令模式，执行后退出");
-    println!("  marguerite --pipe                从标准输入读取指令并执行后退出");
-    println!("  marguerite <资源> <动作>          运行子命令");
-    println!("  marguerite --help | -h           显示本帮助");
-    println!("  marguerite --version | -V        显示版本");
-    println!();
-    println!("资源（子命令）:");
-    println!("  doctor    系统诊断与环境自检");
-    println!("  model     模型档案管理（list/current/use/copilot/add/remove/path）");
-    println!("  mcp       MCP 服务器管理（list）");
-    println!("  skills    技能管理（list/install）");
-    println!("  session   会话管理（list/delete）");
-    println!("  exec      沙箱命令执行（exec -- <命令>）");
-    println!("  deploy    一键部署（SSH / 宝塔，--target ...）");
-    println!("  serve     ACP 回环服务（serve --health | serve [--port N]）");
-    println!("  chat      对话（chat 进流式 REPL；chat \"问题\" 单发流式）");
-    println!("  gateway   统一网关（gateway --health | gateway [--port N]，回环 Web 控制台）");
-    println!("  cache     KV 缓存命中率与可缓存比（cache stats / cache ratio）");
-    println!("  goal      目标循环（goal create/get/update：自治续轮与 blocked 门控）");
-    println!("  dispatch  无头分发任务到 11 个外部 agent CLI（meta-agent 一体内置，list / run / many）");
-    println!();
-    println!("示例:");
-    println!("  marguerite -p \"解释当前目录的 main.rs\"");
-    println!("  marguerite model list");
-    println!("  marguerite session list");
-    println!("  marguerite deploy --target ssh://user@host --dry-run");
-    println!();
-    println!("说明:");
-    println!("  - 工作台由编排内核自动决定 Solo / MAX / 团队 / 集群 形态，无需手动选择。");
-    println!("  - 未配置 API Key 时自动降级为离线回显。");
-    println!("  - 设置 MARGUERITE_LEGACY_UI=1 可回退到旧版单栏界面（仅排障）。");
+    print!("{}", render_top_help());
+}
+
+/// 渲染顶层帮助索引为字符串（纯函数，供 [`print_top_help`] 与单测共用）。
+///
+/// **不变量**：「资源（子命令）」区块必须与 [`SUBCOMMANDS`]（即路由注册表）
+/// 逐项、按序一致；由 `test_top_help_lists_every_subcommand` 机械守卫，
+/// 防止帮助清单再次漂移（曾漏列 sandbox / subagent / team / browser / capabilities）。
+fn render_top_help() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "Marguerite — 终端智能体工作台 (v{CLI_VERSION})");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "用法:");
+    let _ = writeln!(out, "  marguerite                        启动交互式工作台（默认）");
+    let _ = writeln!(out, "  marguerite -p \"<指令>\"           单指令模式，执行后退出");
+    let _ = writeln!(out, "  marguerite --pipe                从标准输入读取指令并执行后退出");
+    let _ = writeln!(out, "  marguerite <资源> <动作>          运行子命令");
+    let _ = writeln!(out, "  marguerite --help | -h           显示本帮助");
+    let _ = writeln!(out, "  marguerite --version | -V        显示版本");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "资源（子命令）:");
+    let _ = writeln!(out, "  doctor    系统诊断与环境自检");
+    let _ = writeln!(out, "  model     模型档案管理（list/current/use/copilot/add/remove/path）");
+    let _ = writeln!(out, "  mcp       MCP 服务器管理（list）");
+    let _ = writeln!(out, "  skills    技能管理（list/install）");
+    let _ = writeln!(out, "  session   会话管理（list/delete）");
+    let _ = writeln!(out, "  exec      沙箱命令执行（exec -- <命令>）");
+    let _ = writeln!(out, "  deploy    一键部署（SSH / 宝塔，--target ...）");
+    let _ = writeln!(out, "  serve     ACP 回环服务（serve --health | serve [--port N]）");
+    let _ = writeln!(
+        out,
+        "  sandbox   沙箱执行与状态（sandbox exec -- <命令> / sandbox workspace）"
+    );
+    let _ = writeln!(
+        out,
+        "  subagent  子代理团队 DAG 编排（subagent team \"<目标>\" [--reflect] [--trellis]）"
+    );
+    let _ = writeln!(out, "  team      专家团队并行 spawn（team <目标描述>）");
+    let _ = writeln!(
+        out,
+        "  browser   真实浏览器 CDP 操控（browser open <url> [--out <file.png>]）"
+    );
+    let _ = writeln!(out, "  chat      对话（chat 进流式 REPL；chat \"问题\" 单发流式）");
+    let _ = writeln!(
+        out,
+        "  gateway   统一网关（gateway --health | gateway [--port N]，回环 Web 控制台）"
+    );
+    let _ = writeln!(out, "  goal      目标循环（goal create/get/update：自治续轮与 blocked 门控）");
+    let _ = writeln!(
+        out,
+        "  capabilities 能力自检（真实落地状态；capabilities [组名] [--json]）"
+    );
+    let _ = writeln!(out, "  cache     KV 缓存命中率与可缓存比（cache stats / cache ratio）");
+    let _ = writeln!(
+        out,
+        "  dispatch  无头分发任务到 11 个外部 agent CLI（meta-agent 一体内置，list / run / many）"
+    );
+    let _ = writeln!(out, "  games     内置小游戏（games list / games play <id> <动作...>）");
+    let _ = writeln!(
+        out,
+        "  export-diagnostics  导出脱敏诊断包（tar；export-diagnostics [--output <路径>] [--json]）"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "示例:");
+    let _ = writeln!(out, "  marguerite -p \"解释当前目录的 main.rs\"");
+    let _ = writeln!(out, "  marguerite model list");
+    let _ = writeln!(out, "  marguerite session list");
+    let _ = writeln!(out, "  marguerite deploy --target ssh://user@host --dry-run");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "说明:");
+    let _ = writeln!(
+        out,
+        "  - 工作台由编排内核自动决定 Solo / MAX / 团队 / 集群 形态，无需手动选择。"
+    );
+    let _ = writeln!(out, "  - 未配置模型密钥时不再报错：自动降级为离线回显（本地规则编排判定 + 输入回显，不调用模型，退出码 0）。");
+    let _ = writeln!(out, "  - 设置 MARGUERITE_LEGACY_UI=1 可回退到旧版单栏界面（仅排障）。");
+    out
+}
+
+/// 从顶层帮助文本中解析「资源（子命令）」区块列出的子命令名（按出现顺序）。
+///
+/// 供 `test_top_help_lists_every_subcommand` 做机械对账：区块以
+/// `资源（子命令）:` 起始，逐行 `  <名字>  <说明>`，遇空行结束。
+#[cfg(test)]
+fn parse_help_subcommand_names(help: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_section = false;
+    for line in help.lines() {
+        if !in_section {
+            if line.starts_with("资源（子命令）") {
+                in_section = true;
+            }
+            continue;
+        }
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("  ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// 打印单个子命令的帮助（AC-01 子命令级）
@@ -346,12 +638,19 @@ pub fn print_subcommand_help(name: &str) {
 Marguerite doctor — 系统诊断与环境自检
 
 用法:
-  marguerite doctor           运行诊断，输出环境摘要（文本）
-  marguerite doctor --json    以 JSON 输出（便于脚本 / agent 接入）
+  marguerite doctor           运行诊断，输出环境摘要（文本；默认离线、不发起联网鉴权）
+  marguerite doctor --probe   追加联网鉴权探测：GET <base_url>/models 判定密钥真伪
+  marguerite doctor --json    输出可复制的 JSON 报告（版本号 + 7 项 OK/MISSING/DEGRADED + 修复动作）
+
+说明:
+  api_key 项只判断「是否配置」（存在性），不判断有效性；真伪判定由 --probe 的
+  auth 项负责（2xx=有效 / 401,403=被拒 / 未加 --probe 时该项为 [SKIP]）。
+  --probe 仅作用于文本模式；--json 报告的鉴权结论以 doctor 模块为准。
 
 示例:
   marguerite doctor
-  marguerite doctor --json | jq .api_key_configured
+  marguerite doctor --probe   # 联网校验密钥是否真的可用（会拒绝 401 的假 OK）
+  marguerite doctor --json    # 完整版含版本号，离线可传给支持方
 "
         }
         "model" => {
@@ -380,9 +679,11 @@ Marguerite mcp — MCP 工具服务器管理
 
 用法:
   marguerite mcp list     列出 config.yaml 中已配置的 MCP 服务器
+  marguerite mcp tools    实时连接带 url 的 HTTP MCP 服务器并拉取工具目录
 
 示例:
   marguerite mcp list
+  marguerite mcp tools
   marguerite mcp list | cat   # 在脚本中读取服务器清单
 "
         }
@@ -474,6 +775,47 @@ Marguerite cache — KV 缓存命中率与可缓存比
   marguerite cache stats
   marguerite cache ratio
   marguerite cache ratio <session-id>
+"
+        }
+        "games" => {
+            "\
+Marguerite games — 内置小游戏（Rust 引擎，离线可玩）
+
+用法:
+  marguerite games list                  列出已实装小游戏
+  marguerite games play <id> <动作...>   按动作驱动游戏引擎并渲染棋盘/结果
+  marguerite games list --json           以 JSON 输出（便于脚本 / agent 接入）
+
+示例:
+  marguerite games list
+  marguerite games play tictactoe 0 3 1 4 2
+  marguerite games play 2048 left up left
+  marguerite games play snake up left down
+"
+        }
+        "export-diagnostics" => {
+            "\
+Marguerite export-diagnostics — 导出脱敏诊断包（可附到 bug 报告）
+
+用法:
+  marguerite export-diagnostics                      导出到 <数据目录>/diagnostics/*.tar
+  marguerite export-diagnostics --output <路径>      指定输出路径（.tar 结尾按文件处理，否则按目录）
+  marguerite export-diagnostics --json               以 JSON 输出清单（便于脚本 / agent 接入）
+
+说明:
+  收集：版本与环境摘要、config.yaml、侧车 sidecar.json（含上次退出证据）、
+        侧车 stdout/stderr 日志（含轮转历史代）。
+  所有文本必经统一脱敏 scrub_text（Bearer / key=value 赋值 / 裸令牌 /
+  URL 内嵌凭据 / 家目录），占位符为 [redacted] 与 [USER]。
+  硬排除：~/.marguerite/.env、desktop-credential.json、*-raw.jsonl、
+         security-audit/skill_block.jsonl（后者存的是用户输入原文片段）。
+  单个条目收集失败只记入清单的 collection_errors，不影响其余条目导出。
+  纯只读、离线：不修改配置、不联网上报。
+
+示例:
+  marguerite export-diagnostics
+  marguerite export-diagnostics --output D:/tmp/diag.tar
+  marguerite export-diagnostics --json
 "
         }
         "goal" => {
@@ -639,16 +981,35 @@ Marguerite team — 专家团队并行 spawn（Team::run 真实执行体）
 /// 验收（Phase 5 / AC）：When 运行 `marguerite doctor`，系统**必须**校验 config schema / key /
 /// 网络并报告；If `--json`，系统**必须**输出 `{ok, data:{checks, summary, status}, meta}`。
 fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
+    // M5 doctor：`--json` 直接委托 doctor 模块（版本号 + 7 项 OK/MISSING/DEGRADED + 修复动作）。
+    // 前置短路上探针：避免构建 legacy checks 触发日志噪音，保证 JSON 可干净复制（离线传给支持方）。
+    // 注意：`--probe` 的联网鉴权探测只作用于文本路径（JSON 路径由 doctor 模块负责），
+    // 显式告知用户而非静默忽略。
+    if args.json {
+        if args.probe {
+            eprintln!(
+                "提示: --probe 仅作用于文本模式；--json 报告的鉴权结论以 doctor 模块为准（本次未做联网鉴权探测）。"
+            );
+        }
+        let report = crate::doctor::run_doctor_with_config(config);
+        println!("{report}");
+        return Ok(());
+    }
+
     let config_dir = Config::config_dir();
 
-    // 结构化自检项：每项含 名称 / 是否通过 / 详情 / 修复建议
+    // 结构化自检项：每项含 名称 / 结果状态 / 详情 / 修复建议
     let mut checks: Vec<DoctorCheck> = Vec::new();
 
     // 1. 配置目录
     let dir_ok = config_dir.exists();
     checks.push(DoctorCheck {
         name: "config_dir",
-        ok: dir_ok,
+        state: if dir_ok {
+            CheckState::Ok
+        } else {
+            CheckState::Fail
+        },
         detail: config_dir.display().to_string(),
         hint: if dir_ok {
             String::new()
@@ -659,38 +1020,17 @@ fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
 
     // 2. 配置 schema
     let schema = validate_config_schema(config);
-    checks.push(DoctorCheck {
-        name: "config_schema",
-        ok: schema.ok,
-        detail: schema.detail,
-        hint: schema.hint,
-    });
+    checks.push(schema);
 
-    // 3. API Key
-    let key_ok = !config.model.api_key.is_empty();
-    checks.push(DoctorCheck {
-        name: "api_key",
-        ok: key_ok,
-        detail: if key_ok {
-            "已配置".to_string()
-        } else {
-            "未配置".to_string()
-        },
-        hint: if key_ok {
-            String::new()
-        } else {
-            "设置环境变量 MARGUERITE_API_KEY 或在 config.yaml 的 model.api_key 中填写".to_string()
-        },
-    });
+    // 3. API Key（仅存在性：**不**校验有效性，避免「有 key 即 OK」的假阳性）
+    checks.push(api_key_check(config));
+
+    // 3b. 密钥有效性（**仅**在显式 --probe/--deep 时联网；默认路径离线跳过）
+    checks.push(auth_probe_check(config, args.probe));
 
     // 4. 网络可达性（base_url 探测，短超时，离线安全）
     let net = probe_model_endpoint(config);
-    checks.push(DoctorCheck {
-        name: "network",
-        ok: net.ok,
-        detail: net.detail,
-        hint: net.hint,
-    });
+    checks.push(net);
 
     // 5. 沙箱（平台支持性，信息项，恒 ok）
     let sandbox_detail = match std::env::consts::OS {
@@ -700,7 +1040,7 @@ fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
     };
     checks.push(DoctorCheck {
         name: "sandbox",
-        ok: true,
+        state: CheckState::Ok,
         detail: sandbox_detail.to_string(),
         hint: String::new(),
     });
@@ -710,7 +1050,11 @@ fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
     let engine_ok = engine.tool_count() > 0;
     checks.push(DoctorCheck {
         name: "engine",
-        ok: engine_ok,
+        state: if engine_ok {
+            CheckState::Ok
+        } else {
+            CheckState::Fail
+        },
         detail: format!(
             "tools={} research_docs={} automations={}",
             engine.tool_count(),
@@ -724,29 +1068,80 @@ fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
         },
     });
 
-    let total = checks.len();
-    let passed = checks.iter().filter(|c| c.ok).count();
-    let failed = total - passed;
-    let status = if failed == 0 { "ok" } else { "degraded" };
+    // 7. 技能子系统：可加载即健康；数量作为信息并给出落地提示（非致命）。
+    //    解析统一走 resolve_skills_dir，使打包/多 cwd 场景下技能可被发现。
+    let skills_dir = crate::tools::skill_tools::resolve_skills_dir(&config.skills.skills_dir);
+    let skills_load = crate::skills::loader::SkillLoader::new(&skills_dir).load_all();
+    let skills_count = skills_load.as_ref().map_or(0, Vec::len);
+    let skills_ok = skills_load.is_ok();
+    checks.push(DoctorCheck {
+        name: "skills",
+        state: if skills_ok {
+            CheckState::Ok
+        } else {
+            CheckState::Fail
+        },
+        detail: format!("dir={} skills={}", skills_dir.display(), skills_count),
+        hint: if skills_count == 0 {
+            format!(
+                "技能目录为空，可运行 'marguerite skills install <yaml-url>' 或将 YAML 放入 {}",
+                skills_dir.display()
+            )
+        } else {
+            String::new()
+        },
+    });
 
-    if args.json {
-        let data = serde_json::json!({
-            "rust_arch": std::env::consts::ARCH,
-            "os": std::env::consts::OS,
-            "config_dir": config_dir.display().to_string(),
-            "model": { "name": config.model.model_name, "provider": config.model.provider },
-            "api_key_configured": key_ok,
-            "mcp_servers": config.mcp.servers.len(),
-            "skills_dir": config.skills.skills_dir,
-            "checks": checks.iter().map(|c| serde_json::json!({
-                "name": c.name, "ok": c.ok, "detail": c.detail, "hint": c.hint
-            })).collect::<Vec<_>>(),
-            "summary": { "total": total, "passed": passed, "failed": failed },
-            "status": status
+    // 8. 能力清单健康度（已实装 / 纯叙事 / 总规模）
+    let cap_stats = crate::domain::capabilities::stats();
+    checks.push(DoctorCheck {
+        name: "capabilities",
+        state: CheckState::Ok,
+        detail: format!(
+            "real={} partial={} implemented={} narrative={} total={}",
+            cap_stats.real,
+            cap_stats.partial,
+            cap_stats.implemented,
+            cap_stats.narrative,
+            cap_stats.total
+        ),
+        hint: String::new(),
+    });
+
+    // 9. 重型运行时（ASR / 本地量化模型）：诚实占位 —— 未预下载，给下载源 + 选型指引。
+    let heavy_runtimes = crate::runtime::heavy_runtime_status();
+    for rt in &heavy_runtimes {
+        checks.push(DoctorCheck {
+            name: match rt.kind {
+                "asr" => "audio_runtime",
+                "local_llm" => "local_model_runtime",
+                other => other,
+            },
+            state: CheckState::Ok,
+            detail: format!("{}={} engine={}", rt.kind, rt.status, rt.engine),
+            hint: format!(
+                "下载源：{}
+  选型：{}",
+                rt.download, rt.guidance
+            ),
         });
-        print_json_ok(data);
-        return Ok(());
     }
+
+    let total = checks.len();
+    let passed = checks
+        .iter()
+        .filter(|c| c.state == CheckState::Ok)
+        .count();
+    let failed = checks
+        .iter()
+        .filter(|c| c.state == CheckState::Fail)
+        .count();
+    let skipped = checks
+        .iter()
+        .filter(|c| c.state == CheckState::Skip)
+        .count();
+    let status = if failed == 0 { "ok" } else { "degraded" };
+    let judged = total - skipped;
 
     // 文本输出（ASCII 状态标记，利 NO_COLOR / 非 TTY）
     println!("Marguerite 系统诊断");
@@ -764,23 +1159,55 @@ fn doctor_handler(args: &Args, config: &Config) -> Result<()> {
     println!();
     println!("自检项:");
     for c in &checks {
-        let tag = if c.ok { "[OK]" } else { "[FAIL]" };
-        println!("  {tag} {:<14} {}", c.name, c.detail);
-        if !c.ok && !c.hint.is_empty() {
-            println!("        修复: {}", c.hint);
+        println!("  {} {:<14} {}", c.state.tag(), c.name, c.detail);
+        if !c.hint.is_empty() {
+            if c.state == CheckState::Fail {
+                println!("        修复: {}", c.hint);
+            } else {
+                println!("        提示: {}", c.hint);
+            }
         }
     }
     println!();
-    println!("结果: {passed}/{total} 通过 -> {status}");
+    if skipped == 0 {
+        println!("结果: {passed}/{total} 通过 -> {status}");
+    } else {
+        println!("结果: {passed}/{judged} 通过（{skipped} 项未探测）-> {status}");
+    }
     Ok(())
+}
+
+/// 单条诊断检查的结果状态
+///
+/// `Skip` 用于「本次未探测」的项（如未加 `--probe` 时的鉴权探测）：
+/// 既不计通过、也不计失败，避免把「没查」粉饰成 `[OK]`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CheckState {
+    /// 通过
+    Ok,
+    /// 明确失败
+    Fail,
+    /// 未探测（默认离线路径）
+    Skip,
+}
+
+impl CheckState {
+    /// ASCII 状态标记（遵循 CLI 输出契约：无 emoji、尊重 NO_COLOR）
+    fn tag(self) -> &'static str {
+        match self {
+            CheckState::Ok => "[OK]",
+            CheckState::Fail => "[FAIL]",
+            CheckState::Skip => "[SKIP]",
+        }
+    }
 }
 
 /// 单条诊断检查的结果
 struct DoctorCheck {
     /// 检查项名称
     name: &'static str,
-    /// 是否通过
-    ok: bool,
+    /// 结果状态
+    state: CheckState,
     /// 详情
     detail: String,
     /// 未通过时的修复建议（为空表示无需修复）
@@ -804,14 +1231,14 @@ fn validate_config_schema(config: &Config) -> DoctorCheck {
     if problems.is_empty() {
         DoctorCheck {
             name: "config_schema",
-            ok: true,
+            state: CheckState::Ok,
             detail: "schema 合法".to_string(),
             hint: String::new(),
         }
     } else {
         DoctorCheck {
             name: "config_schema",
-            ok: false,
+            state: CheckState::Fail,
             detail: problems.join("; "),
             hint: "请检查 config.yaml 的对应字段".to_string(),
         }
@@ -824,7 +1251,7 @@ fn probe_model_endpoint(config: &Config) -> DoctorCheck {
     if base.is_empty() {
         return DoctorCheck {
             name: "network",
-            ok: true,
+            state: CheckState::Ok,
             detail: "未配置 base_url，跳过网络探测".to_string(),
             hint: String::new(),
         };
@@ -834,7 +1261,7 @@ fn probe_model_endpoint(config: &Config) -> DoctorCheck {
         None => {
             return DoctorCheck {
                 name: "network",
-                ok: false,
+                state: CheckState::Fail,
                 detail: format!("无法解析 base_url: {base}"),
                 hint: "请检查 config.yaml 的 model.base_url".to_string(),
             }
@@ -845,7 +1272,7 @@ fn probe_model_endpoint(config: &Config) -> DoctorCheck {
         Err(e) => {
             return DoctorCheck {
                 name: "network",
-                ok: false,
+                state: CheckState::Fail,
                 detail: format!("无法创建运行时: {e}"),
                 hint: String::new(),
             }
@@ -861,21 +1288,106 @@ fn probe_model_endpoint(config: &Config) -> DoctorCheck {
     match result {
         Ok(Ok(_)) => DoctorCheck {
             name: "network",
-            ok: true,
-            detail: format!("TCP 可达 {host}:{port}"),
+            state: CheckState::Ok,
+            detail: format!("TCP 可达 {host}:{port}（仅端口连通，不代表鉴权有效）"),
             hint: String::new(),
         },
         Ok(Err(e)) => DoctorCheck {
             name: "network",
-            ok: false,
+            state: CheckState::Fail,
             detail: format!("TCP 不可达 {host}:{port}: {e}"),
             hint: "检查网络 / 代理 / base_url 端口".to_string(),
         },
         Err(_) => DoctorCheck {
             name: "network",
-            ok: false,
+            state: CheckState::Fail,
             detail: format!("探测超时 {host}:{port} (3s)"),
             hint: "检查网络 / 代理 / 防火墙".to_string(),
+        },
+    }
+}
+
+/// `api_key` 检查项：**只**判定「存在性」。
+///
+/// 存在 ≠ 有效：实测同一台机器 doctor 报「已配置」后立刻 `-p` 得到 401。
+/// 因此本项详情里明确写出「未校验有效性」，并把真伪判定交给
+/// [`auth_probe_check`]（联网、需显式 `--probe`）。
+fn api_key_check(config: &Config) -> DoctorCheck {
+    // 纯空白视为未配置：与离线回显闸门 `needs_offline_echo` 同一判据。
+    let key_ok = !config.model.api_key.trim().is_empty();
+    DoctorCheck {
+        name: "api_key",
+        state: if key_ok {
+            CheckState::Ok
+        } else {
+            CheckState::Fail
+        },
+        detail: if key_ok {
+            "已配置（仅存在性检查，未校验有效性）".to_string()
+        } else {
+            "未配置".to_string()
+        },
+        hint: if key_ok {
+            "本项不校验密钥真伪：运行 'marguerite doctor --probe' 联网校验（默认离线不联网）"
+                .to_string()
+        } else {
+            "设置环境变量 MARGUERITE_API_KEY 或在 config.yaml 的 model.api_key 中填写".to_string()
+        },
+    }
+}
+
+/// 密钥**有效性**探测（`doctor --probe` / `--deep`）。
+///
+/// 设计取舍（P0-D 缺陷 3）：`api_key` 项只能证明「存在」，证明不了「有效」——
+/// 实测同一台机器 `[OK] api_key 已配置` 后立刻 `-p` 得到 401。真正的真伪判定
+/// 必须发起一次带鉴权的只读请求，而 doctor 的默认契约是**离线 + 快速**，
+/// 因此这里把它做成显式开关：
+/// - 未加 `--probe`：`[SKIP]`（既不计通过也不计失败，并打印如何开启）；
+/// - 加 `--probe`：`GET {base_url}/models`（OpenAI 兼容只读端点），
+///   2xx = 密钥有效，401/403 = 密钥被拒，其它状态/网络失败 = 无法判定（FAIL）。
+///   任何分支都不打印密钥明文。
+fn auth_probe_check(config: &Config, probe: bool) -> DoctorCheck {
+    use crate::doctor::auth_probe::{probe_auth, AuthProbeOutcome};
+
+    if !probe {
+        return DoctorCheck {
+            name: "auth",
+            state: CheckState::Skip,
+            detail: "未探测（默认离线，不发起联网鉴权请求）".to_string(),
+            hint: "运行 'marguerite doctor --probe' 联网校验密钥有效性".to_string(),
+        };
+    }
+
+    let base = config.model.base_url.trim();
+    let url = format!("{}/models", base.trim_end_matches('/'));
+    // 与 RPC `doctor.status{probe:true}` 同源：唯一的探测实现在 doctor::auth_probe。
+    match probe_auth(config, std::time::Duration::from_secs(8)) {
+        AuthProbeOutcome::Valid => DoctorCheck {
+            name: "auth",
+            state: CheckState::Ok,
+            detail: format!("密钥有效（GET {url} → HTTP 2xx）"),
+            hint: String::new(),
+        },
+        AuthProbeOutcome::Rejected { status } => DoctorCheck {
+            name: "auth",
+            state: CheckState::Fail,
+            detail: format!("密钥被拒绝（GET {url} → HTTP {status}，401/403 鉴权失败）"),
+            hint: "密钥无效或已过期：运行 'marguerite model add ...' 重新配置，或检查 MARGUERITE_API_KEY"
+                .to_string(),
+        },
+        AuthProbeOutcome::Indeterminate { reason } => DoctorCheck {
+            name: "auth",
+            state: CheckState::Fail,
+            detail: format!("无法判定（GET {url} → {reason}）"),
+            hint: "确认 base_url 是否为 OpenAI 兼容端点（应支持 GET /models）；检查网络 / 代理"
+                .to_string(),
+        },
+        AuthProbeOutcome::Skipped { reason } => DoctorCheck {
+            name: "auth",
+            state: CheckState::Skip,
+            detail: format!("{reason}，跳过鉴权探测"),
+            hint: "先配置密钥：设置环境变量 MARGUERITE_API_KEY 或在 config.yaml 的 model.api_key 中填写"
+                .to_string(),
         },
     }
 }
@@ -1061,6 +1573,7 @@ fn build_acp_tool_registry() -> ToolRegistry {
 /// - `add --id --base-url --model [--provider --label --api-key --kind]`
 ///   新增自定义接入点（kind: cloud/local/custom）
 /// - `remove <id>`             删除档案（至少保留一个）
+/// - `reload-seeds`            热更新内置种子（读 models.json 同目录的 models.seed.json 覆盖层，不覆盖自定义档案）
 /// - `path`                    显示 models.json 路径
 fn model_handler(args: &Args, _config: &Config) -> Result<()> {
     let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
@@ -1136,6 +1649,63 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
         "path" => {
             println!("{}", models_path().display());
         }
+        "reload-seeds" => {
+            let n = sel.reload_seeds()?;
+            if n == 0 {
+                println!("未发现 models.seed.json 覆盖层，或未补充任何新档案（无操作）");
+            } else {
+                println!("已热更新 {n} 个新模型档案（来自 models.seed.json 覆盖层，未覆盖你的自定义档案）");
+            }
+        }
+        // 三档模型分层（5c）：marguerite model tier [flagship|balanced|turbo|auto] [--effort off|normal|deep|max]
+        "tier" => {
+            use crate::model::thinking::ThinkingEffort;
+            use crate::model::tier::{ModelTier, SessionState};
+            let mut state = SessionState::load();
+            // --effort <x>
+            if let Some(pos) = args.sub_args.iter().position(|a| a == "--effort") {
+                let e = args.sub_args.get(pos + 1).map(String::as_str).unwrap_or("normal");
+                state.thinking_effort = ThinkingEffort::from_spec_str(e);
+            }
+            // 位置参数 = 锁定档位
+            if let Some(t) = args.sub_args.get(1).map(String::as_str) {
+                state.locked_tier = match t {
+                    "auto" | "none" | "" => None,
+                    other => Some(ModelTier::parse(other)),
+                };
+            }
+            let _ = state.save();
+            println!(
+                "档位: locked={:?}  effort={:?}  effective={}  预算状态={} (剩余 {:.0}%)",
+                state.locked_tier.map(|t| t.as_str()),
+                state.thinking_effort.reasoning_effort(),
+                state.effective_tier().as_str(),
+                state.budget.state().as_str(),
+                state.budget.remaining_ratio() * 100.0
+            );
+        }
+        // 会话预算：marguerite model budget [--tokens <n>] [--usd <d>]
+        "budget" => {
+            use crate::model::tier::SessionState;
+            let mut state = SessionState::load();
+            let flags = parse_flags(&args.sub_args[1.min(args.sub_args.len())..]);
+            if let Some(t) = flags.get("tokens").and_then(|v| v.parse::<u64>().ok()) {
+                state.budget.tokens_cap = t;
+            }
+            if let Some(u) = flags.get("usd").and_then(|v| v.parse::<f64>().ok()) {
+                state.budget.usd_cap = u;
+            }
+            let _ = state.save();
+            println!(
+                "会话预算: tokens={}/{}  usd=${:.2}/${:.2}  剩余={:.0}%  状态={}",
+                state.budget.tokens_used,
+                state.budget.tokens_cap,
+                state.budget.usd_used,
+                state.budget.usd_cap,
+                state.budget.remaining_ratio() * 100.0,
+                state.budget.state().as_str()
+            );
+        }
         _ => {
             print_subcommand_help("model");
         }
@@ -1184,6 +1754,36 @@ fn mcp_handler(args: &Args, config: &Config) -> Result<()> {
                 }
             }
         }
+        "tools" => {
+            // 实时连接带 url 的 HTTP MCP 服务器并拉取工具目录（与编排器桥接同源）。
+            let rt = tokio::runtime::Runtime::new()?;
+            let mut connected = 0usize;
+            for server in &config.mcp.servers {
+                let Some(url) = server.url.as_deref().filter(|u| !u.trim().is_empty()) else {
+                    continue;
+                };
+                let name = server.name.clone();
+                let url_owned = url.trim().to_string();
+                let result = rt.block_on(async {
+                    let mut client = crate::mcp::client::McpClient::new(&url_owned);
+                    client.connect().await?;
+                    client.list_tools().await
+                });
+                match result {
+                    Ok(tools) => {
+                        connected += 1;
+                        println!("[{}] {}（{} 个工具）", name, url_owned, tools.len());
+                        for t in &tools {
+                            println!("  - {} — {}", t.name, t.description);
+                        }
+                    }
+                    Err(e) => eprintln!("[mcp] 连接/拉取 {name} ({url_owned}) 失败: {e}"),
+                }
+            }
+            if connected == 0 {
+                eprintln!("未连接任何 URL MCP 服务器（在 config.yaml 的 mcp.servers[].url 配置；命令式 stdio 桥为下一阶段）");
+            }
+        }
         _ => {
             print_subcommand_help("mcp");
         }
@@ -1195,11 +1795,12 @@ fn mcp_handler(args: &Args, config: &Config) -> Result<()> {
 fn skills_handler(args: &Args, config: &Config) -> Result<()> {
     use crate::skills::registry::{ranks, SkillRegistry};
     let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
-    let loader = SkillLoader::new(Path::new(&config.skills.skills_dir));
+    let skills_dir = crate::tools::skill_tools::resolve_skills_dir(&config.skills.skills_dir);
+    let loader = SkillLoader::new(&skills_dir);
     match sub {
         "list" => match loader.load_all() {
             Ok(skills) if skills.is_empty() => {
-                println!("未找到技能（目录: {}）", config.skills.skills_dir);
+                println!("未找到技能（目录: {}）", skills_dir.display());
             }
             Ok(skills) => {
                 println!("已安装技能 ({}):", skills.len());
@@ -1224,11 +1825,26 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
         },
         "ranks" => {
             println!("技能等级（rank 越小优先级越高；register-batch 按此拓扑排序注入）：");
-            println!("  SYSTEM    = {r:>3}  内置核心（锚定、冷启动、Bloom 编排）", r = ranks::SYSTEM);
-            println!("  PROJECT   = {r:>3}  项目级（工程脚手架、团队约定）", r = ranks::PROJECT);
-            println!("  DEFAULT   = {r:>3}  通用社区默认（不打标时）", r = ranks::DEFAULT);
-            println!("  USER      = {r:>3}  用户级（个人偏好、快捷键）", r = ranks::USER);
-            println!("  COMMUNITY = {r:>3}  第三方市场（低优先级覆写受保护前缀）", r = ranks::COMMUNITY);
+            println!(
+                "  SYSTEM    = {r:>3}  内置核心（锚定、冷启动、Bloom 编排）",
+                r = ranks::SYSTEM
+            );
+            println!(
+                "  PROJECT   = {r:>3}  项目级（工程脚手架、团队约定）",
+                r = ranks::PROJECT
+            );
+            println!(
+                "  DEFAULT   = {r:>3}  通用社区默认（不打标时）",
+                r = ranks::DEFAULT
+            );
+            println!(
+                "  USER      = {r:>3}  用户级（个人偏好、快捷键）",
+                r = ranks::USER
+            );
+            println!(
+                "  COMMUNITY = {r:>3}  第三方市场（低优先级覆写受保护前缀）",
+                r = ranks::COMMUNITY
+            );
         }
         "install" => {
             let url = args.sub_args.get(1).map(String::as_str).unwrap_or("");
@@ -1240,7 +1856,10 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             match rt.block_on(loader.download_and_register(url)) {
                 Ok(skill) => {
-                    println!("技能已安装: {} v{} (rank={})", skill.name, skill.version, skill.rank);
+                    println!(
+                        "技能已安装: {} v{} (rank={})",
+                        skill.name, skill.version, skill.rank
+                    );
                 }
                 Err(e) => eprintln!("安装失败: {e}"),
             }
@@ -1248,7 +1867,7 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
         "register-batch" => {
             let dir = args.sub_args.get(1).map(String::as_str).unwrap_or("");
             let target = if dir.is_empty() {
-                Path::new(&config.skills.skills_dir).to_path_buf()
+                skills_dir.clone()
             } else {
                 PathBuf::from(dir)
             };
@@ -1297,6 +1916,76 @@ fn skills_handler(args: &Args, config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// games — 内置小游戏（list / play）；离线可玩，输出确定性棋盘/结果。
+///
+/// 用法：
+///   marguerite games list
+///   marguerite games play <id> <动作...>
+///   marguerite games list --json
+fn games_handler(args: &Args, _config: &Config) -> Result<()> {
+    let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
+    let catalog = crate::games::catalog();
+    match sub {
+        "" | "list" | "ls" => {
+            if args.json {
+                let items: Vec<serde_json::Value> = catalog
+                    .iter()
+                    .map(|g| {
+                        serde_json::json!({
+                            "id": g.id,
+                            "name": g.name,
+                            "controls": g.controls,
+                            "status": "implemented",
+                        })
+                    })
+                    .collect();
+                print_json_ok(serde_json::json!({
+                    "total": catalog.len(),
+                    "games": items,
+                }));
+            } else {
+                println!("已实装小游戏（{}）：", catalog.len());
+                for g in catalog {
+                    println!("  {:<8} {:<16}（{}）", g.id, g.name, g.controls);
+                }
+                println!("玩法：marguerite games play <id> <动作...>");
+            }
+            Ok(())
+        }
+        "play" => {
+            let rest = &args.sub_args[1..];
+            let id = rest.first().map(String::as_str).unwrap_or("");
+            let moves: Vec<&str> = rest.iter().skip(1).map(|s| s.as_str()).collect();
+            if id.is_empty() {
+                eprintln!("用法: marguerite games play <id> <动作...>");
+                return Ok(());
+            }
+            match crate::games::run_game(id, &moves) {
+                Ok(out) => {
+                    if args.json {
+                        print_json_ok(serde_json::json!({
+                            "game": id,
+                            "moves": moves,
+                            "render": out,
+                        }));
+                    } else {
+                        println!("{out}");
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    // 玩法错误（未知游戏/非法动作）如实报错，不 panic
+                    Err(anyhow::anyhow!("{e}"))
+                }
+            }
+        }
+        _ => {
+            print_subcommand_help("games");
+            Ok(())
+        }
+    }
 }
 
 /// capabilities — 能力自检（真实落地状态）
@@ -1354,6 +2043,8 @@ fn capabilities_handler(args: &Args, _config: &Config) -> Result<()> {
             .collect();
         let data = serde_json::json!({
             "total": caps.len(),
+            "real": caps.iter().filter(|c| c.maturity == crate::domain::capabilities::CapabilityMaturity::Real).count(),
+            "partial": caps.iter().filter(|c| c.maturity == crate::domain::capabilities::CapabilityMaturity::Partial).count(),
             "implemented": caps.iter().filter(|c| c.maturity.is_implemented()).count(),
             "narrative": caps.iter().filter(|c| !c.maturity.is_implemented()).count(),
             "global": {
@@ -1361,6 +2052,8 @@ fn capabilities_handler(args: &Args, _config: &Config) -> Result<()> {
                 "exclusive": s.exclusive,
                 "enhanced": s.enhanced,
                 "baseline": s.baseline,
+                "real": s.real,
+                "partial": s.partial,
                 "implemented": s.implemented,
                 "narrative": s.narrative,
             },
@@ -1374,8 +2067,8 @@ fn capabilities_handler(args: &Args, _config: &Config) -> Result<()> {
     println!("Marguerite 能力自检（真实落地状态）");
     if filter.is_empty() {
         println!(
-            "  全量 {} 项 | 已实装 {} | 纯叙事 {}",
-            s.total, s.implemented, s.narrative
+            "  全量 {} 项 | 已实装 {}（真货 {} / 部分 {}） | 纯叙事 {}",
+            s.total, s.implemented, s.real, s.partial, s.narrative
         );
         println!(
             "  分级：独家 {} / 增强 {} / 基线 {}",
@@ -1478,7 +2171,13 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
 
     match sub {
         "create" => {
-            let objective = args.sub_args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+            let objective = args
+                .sub_args
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
             if objective.trim().is_empty() {
                 eprintln!("用法: marguerite goal create <目标描述>");
                 return Ok(());
@@ -1488,7 +2187,12 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
                     if args.json {
                         print_json_ok(crate::goal::goal_view(&g, true));
                     } else {
-                        println!("目标已创建 [{}] revision={} phase={} activation=armed", g.id, g.revision, g.phase.as_str());
+                        println!(
+                            "目标已创建 [{}] revision={} phase={} activation=armed",
+                            g.id,
+                            g.revision,
+                            g.phase.as_str()
+                        );
                         println!("  {}", g.objective);
                     }
                 }
@@ -1501,37 +2205,48 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
                 }
             }
         }
-        "get" => {
-            match reg.get() {
-                Some(g) => {
-                    let armed = reg.is_armed();
-                    if args.json {
-                        print_json_ok(crate::goal::goal_view(g, armed));
-                    } else {
-                        let cap = g.max_goal_rounds.map(|v| v.to_string()).unwrap_or_else(|| "不限".to_string());
-                        println!("目标 [{}] revision={}", g.id, g.revision);
-                        println!("  phase: {}  activation: {}", g.phase.as_str(), if armed { "armed" } else { "disarmed" });
-                        println!("  rounds: {} / {}", g.rounds_started, cap);
-                        println!("  objective: {}", g.objective);
-                        if let Some(r) = &g.blocked_reason {
-                            println!("  blocked_reason: {r}");
-                        }
-                    }
-                }
-                None => {
-                    if args.json {
-                        print_json_ok(serde_json::Value::Null);
-                    } else {
-                        println!("尚无目标。用 marguerite goal create <目标> 创建。");
+        "get" => match reg.get() {
+            Some(g) => {
+                let armed = reg.is_armed();
+                if args.json {
+                    print_json_ok(crate::goal::goal_view(g, armed));
+                } else {
+                    let cap = g
+                        .max_goal_rounds
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "不限".to_string());
+                    println!("目标 [{}] revision={}", g.id, g.revision);
+                    println!(
+                        "  phase: {}  activation: {}",
+                        g.phase.as_str(),
+                        if armed { "armed" } else { "disarmed" }
+                    );
+                    println!("  rounds: {} / {}", g.rounds_started, cap);
+                    println!("  objective: {}", g.objective);
+                    if let Some(r) = &g.blocked_reason {
+                        println!("  blocked_reason: {r}");
                     }
                 }
             }
-        }
+            None => {
+                if args.json {
+                    print_json_ok(serde_json::Value::Null);
+                } else {
+                    println!("尚无目标。用 marguerite goal create <目标> 创建。");
+                }
+            }
+        },
         "update" => {
             let action = args.sub_args.get(1).map(String::as_str).unwrap_or("");
             let result = match action {
                 "edit" => {
-                    let objective = args.sub_args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+                    let objective = args
+                        .sub_args
+                        .iter()
+                        .skip(2)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     if objective.trim().is_empty() {
                         eprintln!("用法: marguerite goal update edit <新目标>");
                         return Ok(());
@@ -1542,7 +2257,13 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
                 "resume" => reg.resume(),
                 "complete" => reg.complete(),
                 "blocked" => {
-                    let reason = args.sub_args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+                    let reason = args
+                        .sub_args
+                        .iter()
+                        .skip(2)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     if reason.trim().is_empty() {
                         eprintln!("用法: marguerite goal update blocked <原因>");
                         return Ok(());
@@ -1559,7 +2280,13 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
                     if args.json {
                         print_json_ok(crate::goal::goal_view(&g, reg.is_armed()));
                     } else {
-                        println!("目标 [{}] revision={} phase={} activation={}", g.id, g.revision, g.phase.as_str(), if reg.is_armed() { "armed" } else { "disarmed" });
+                        println!(
+                            "目标 [{}] revision={} phase={} activation={}",
+                            g.id,
+                            g.revision,
+                            g.phase.as_str(),
+                            if reg.is_armed() { "armed" } else { "disarmed" }
+                        );
                     }
                 }
                 Err(e) => {
@@ -1693,6 +2420,59 @@ fn cache_ratio(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// `export-diagnostics` — 导出脱敏诊断包（S6）。
+///
+/// `marguerite export-diagnostics [--output <路径>] [--json]`。
+///
+/// 纯只读、离线：只读磁盘，不改用户配置、不联网上报。归档为未压缩 tar
+/// （`tar` crate 已在 lockfile 内，且 `session/rollback.rs` 已用它避开 C 工具链
+/// 依赖；引入 `zip` 会新增依赖面）。
+///
+/// `--output` 语义：以 `.tar` 结尾按**文件**路径处理，否则按**目录**处理
+/// （在目录下自动生成带时间戳的文件名）。空串视为未给出。
+fn export_diagnostics_handler(args: &Args, _config: &Config) -> Result<()> {
+    use crate::observability::bundle::{
+        export_bundle, render_summary, resolve_output, BundleOptions,
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let explicit = flag_value(args, "--output");
+    let mut dest = resolve_output(explicit.as_deref(), now_ms);
+    // `--output <目录>`：补一个带时间戳的文件名，语义对齐 bundle 层。
+    if dest.extension().is_none() {
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        dest = crate::observability::bundle::default_bundle_path(now_ms).join(name);
+    }
+
+    let manifest = export_bundle(&dest, &BundleOptions::default())?;
+    if args.json {
+        print_json_ok(&manifest);
+    } else {
+        print!("{}", render_summary(&manifest));
+    }
+    Ok(())
+}
+
+/// 从 `sub_args` 里取 `--flag <value>` 的值（缺值或紧跟另一选项 → None）。
+///
+/// 与 argv 层约定一致：`SUBCOMMAND_FLAGS_WITH_VALUE` 里的旗标由各 handler
+/// 自行消费，此处只做取值，不做旗标识别（识别是argv 层的事）。
+fn flag_value(args: &Args, flag: &str) -> Option<String> {
+    let mut iter = args.sub_args.iter();
+    while let Some(token) = iter.next() {
+        if token == flag {
+            return iter
+                .next()
+                .filter(|v| !v.starts_with('-'))
+                .cloned();
+        }
+    }
+    None
+}
+
 /// exec — 沙箱命令执行
 ///
 /// `marguerite exec -- <argv...>`：命令经终端沙箱白名单/路径/模式门控后执行，
@@ -1805,10 +2585,7 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
         .sub_args
         .iter()
         .any(|s| s == "--reflect" || s == "--agentic");
-    let use_trellis = args
-        .sub_args
-        .iter()
-        .any(|s| s == "--trellis");
+    let use_trellis = args.sub_args.iter().any(|s| s == "--trellis");
     // 目标取 "team" 之后的第一个非旗标参数
     let goal = args
         .sub_args
@@ -1844,7 +2621,11 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
     let mut orch = crate::orchestration::Orchestrator::new(cfg);
     println!(
         "[subagent] 分解任务 DAG（Build 形态）… trellis={}",
-        if use_trellis { "事件驱动" } else { "默认（兼容忙轮询）" }
+        if use_trellis {
+            "事件驱动"
+        } else {
+            "默认（兼容忙轮询）"
+        }
     );
 
     rt.block_on(async move {
@@ -1919,8 +2700,21 @@ fn subagent_handler(args: &Args, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// team — 直接触发专家团队并行 spawn（`Team::run` 真实执行体，区别于 DAG 版 `subagent team`）
+// team — 直接触发专家团队并行 spawn（`Team::run` 真实执行体，区别于 DAG 版 `subagent team`）
+//
+/// P4：团队运行终态的退出码裁决（纯函数，便于单测锁死）。
 ///
+/// 门禁放行 → `None`（常规 0 退出）；未放行 → `Some(Conflict)`。
+/// 之所以不返回 0/1 两值：`Err(e)` 分支已用 1 表示「编排层抛错」，
+/// 二者语义需区分（前者是"跑完了但没做成"，后者是"根本没跑起来"）。
+fn team_failure_exit_code(completion_allowed: bool) -> Option<ExitCode> {
+    if completion_allowed {
+        None
+    } else {
+        Some(ExitCode::Conflict)
+    }
+}
+
 /// `marguerite team "<goal>"`：自动角色检测 → 专家团队并行 spawn → lead 综合。
 /// 离线降级：LLM 不可达时成员失败如实可见（不静默、不冒充成功），与 `subagent team` 一致。
 fn team_handler(args: &Args, config: &Config) -> Result<()> {
@@ -1959,6 +2753,17 @@ fn team_handler(args: &Args, config: &Config) -> Result<()> {
                 }
                 println!("\n[team] lead 综合:");
                 println!("{}", out.lead_reply);
+                // P4：完成门禁未放行时**如实非零退出**。此前这里只打印、随后 `Ok(())`，
+                // 于是「首席明说未能完成」与「真的做完了」在退出码上完全无法区分
+                // （实测：子专家 400 失败、首席答"未能完成"，退出码仍为 0）。
+                // 复用既有分层退出码 Conflict(9)，不新增码以免破坏既有约定。
+                if let Some(code) = team_failure_exit_code(out.completion_verdict.allowed) {
+                    eprintln!(
+                        "[team] 完成门禁未放行: {}",
+                        out.completion_verdict.warnings.join("；")
+                    );
+                    std::process::exit(code.code());
+                }
             }
             Err(e) => {
                 eprintln!("[team] 团队编排失败: {e}");
@@ -2406,6 +3211,9 @@ fn chat_handler(args: &Args, _config: &Config) -> Result<()> {
             let reply = if args.tools {
                 let workspace =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                // P0-1b：CLI 的工具注册表正是按这个根解析路径——必须如实同步给
+                // 运行时，否则模型猜绝对路径照样 1ms 失败后死循环重试。
+                runtime.set_workspace(crate::workspace::Workspace::resolve(Some(&workspace)));
                 let mut reg = ToolRegistry::new();
                 register_builtin_tools(&mut reg, &workspace, None, None, None)
                     .map_err(|e| anyhow!("工具注册失败：{e}"))?;
@@ -2525,7 +3333,7 @@ fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
             let items = available_targets();
             println!("11 路外部 agent CLI 目标（一体内置）：");
             for t in DispatchTarget::all() {
-                let avail = items.get(&t).cloned().flatten();
+                let avail = items.get(t).cloned().flatten();
                 let status = match &avail {
                     Some(ok) => format!("就绪 · {}", ok.bin_path.display()),
                     None => {
@@ -2583,7 +3391,9 @@ fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
                 return Ok(());
             }
             let target = DispatchTarget::from_str(target_s).map_err(|e| {
-                anyhow::anyhow!("未知目标 '{target_s}'：{e}（可用 `marguerite dispatch list` 查看）")
+                anyhow::anyhow!(
+                    "未知目标 '{target_s}'：{e}（可用 `marguerite dispatch list` 查看）"
+                )
             })?;
             let mut req = DispatchRequest::new(target, task, workspace).with_timeout(timeout_secs);
             // 可选注入环境（透传 --env K=V）
@@ -2603,7 +3413,7 @@ fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
             let result = rt.block_on(dispatch(req))?;
             render_dispatch_result(&result, args.json);
             if !result.ok {
-                std::process::exit(result.exit_code.unwrap_or(1).max(1).try_into().unwrap_or(1));
+                std::process::exit(result.exit_code.unwrap_or(1).max(1));
             }
         }
         "many" => {
@@ -2663,7 +3473,8 @@ fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
             for (i, r) in results.iter().enumerate() {
                 match r {
                     Ok(r) => {
-                        println!("\n=== [{}/{}] {} (ok={}, {}ms) ===",
+                        println!(
+                            "\n=== [{}/{}] {} (ok={}, {}ms) ===",
                             i + 1,
                             results.len(),
                             r.target.as_str(),
@@ -2678,10 +3489,7 @@ fn dispatch_handler(args: &Args, _config: &Config) -> Result<()> {
                     Err(e) => eprintln!("[dispatch] 内部错误（未启动）: {e}"),
                 }
             }
-            println!(
-                "\n[dispatch] 汇总：{ok_n}/{} 目标成功",
-                results.len()
-            );
+            println!("\n[dispatch] 汇总：{ok_n}/{} 目标成功", results.len());
             if ok_n != results.len() {
                 std::process::exit(3);
             }
@@ -2764,8 +3572,69 @@ mod tests {
                 "goal",
                 "capabilities",
                 "cache",
-                "dispatch"
+                "dispatch",
+                "games",
+                "export-diagnostics"
             ]
+        );
+    }
+
+    /// P0-D 缺陷 2 回归：`--help` 的「资源（子命令）」区块必须与 `SUBCOMMANDS`
+    /// **逐项 + 按序**一致。历史缺陷：注册 19 个路由但帮助只列 14 个，
+    /// `sandbox / subagent / team / browser / capabilities` 用户从帮助里发现不了。
+    #[test]
+    fn test_top_help_lists_every_subcommand() {
+        let help = render_top_help();
+        let listed = parse_help_subcommand_names(&help);
+        let expected: Vec<String> = SUBCOMMANDS.iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<&String> = expected.iter().filter(|s| !listed.contains(s)).collect();
+        assert!(
+            missing.is_empty(),
+            "print_top_help() 缺少子命令 {missing:?}\n帮助输出:\n{help}"
+        );
+        let extra: Vec<&String> = listed.iter().filter(|s| !expected.contains(s)).collect();
+        assert!(
+            extra.is_empty(),
+            "print_top_help() 列出了未在 SUBCOMMANDS 注册的子命令 {extra:?}"
+        );
+        assert_eq!(
+            listed.len(),
+            SUBCOMMANDS.len(),
+            "帮助清单 {} 项 != 路由 {} 项",
+            listed.len(),
+            SUBCOMMANDS.len()
+        );
+        assert_eq!(listed, expected, "帮助清单顺序应与 SUBCOMMANDS 一致");
+
+        // 历史回归钉：这 5 项曾被漏列，任何一项再次消失都必须失败。
+        for name in ["sandbox", "subagent", "team", "browser", "capabilities"] {
+            assert!(
+                listed.iter().any(|l| l == name),
+                "历史漏列项 {name} 未出现在帮助中"
+            );
+        }
+    }
+
+    /// 帮助清单 ↔ 路由注册表同源（路由三处同步的第三条腿：
+    /// `argv.rs::SUBCOMMANDS` / `route_table.register` / `print_top_help`）。
+    #[test]
+    fn test_top_help_matches_route_table() {
+        use std::collections::BTreeSet;
+        let program = Program::new();
+        let routes: BTreeSet<String> = program
+            .route_table()
+            .routes()
+            .iter()
+            .map(|r| r.name.to_string())
+            .collect();
+        let listed: BTreeSet<String> = parse_help_subcommand_names(&render_top_help())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            listed, routes,
+            "帮助清单与路由注册表不一致（帮助 {:?} / 路由 {:?}）",
+            listed, routes
         );
     }
 
@@ -2827,6 +3696,29 @@ mod tests {
             ..Args::default()
         };
         assert!(gateway_handler(&gateway_args, &config).is_ok());
+        // mcp tools：无配置服务器也应成功（打印“未连接”而非 panic）
+        let mcp_tools = Args {
+            mode: CliMode::Subcommand("mcp".to_string()),
+            sub_args: vec!["tools".to_string()],
+            ..Args::default()
+        };
+        assert!(mcp_handler(&mcp_tools, &config).is_ok());
+        // games：无参/列出/玩法均不依赖外部状态，必须成功
+        assert!(games_handler(&Args::default(), &config).is_ok());
+        let games_play = Args {
+            mode: CliMode::Subcommand("games".to_string()),
+            sub_args: vec![
+                "play".to_string(),
+                "tictactoe".to_string(),
+                "0".to_string(),
+                "3".to_string(),
+                "1".to_string(),
+                "4".to_string(),
+                "2".to_string(),
+            ],
+            ..Args::default()
+        };
+        assert!(games_handler(&games_play, &config).is_ok());
     }
 
     #[test]
@@ -2839,6 +3731,145 @@ mod tests {
         let config = Config::default();
         // 结构化输出契约：--json 必须成功产出（字段由 doctor_handler 构造）
         assert!(doctor_handler(&args, &config).is_ok());
+    }
+
+    /// P0-D 缺陷 3：`api_key` 项必须自述「仅存在性、未校验有效性」，
+    /// 不得再出现「已配置」这种会被读成「可用」的裸表述。
+    #[test]
+    fn test_api_key_check_is_honest_about_presence_only() {
+        let mut config = Config::default();
+
+        config.model.api_key = "sk-live-fixture".to_string();
+        let present = api_key_check(&config);
+        assert_eq!(present.state, CheckState::Ok);
+        assert!(
+            present.detail.contains("仅存在性") && present.detail.contains("未校验有效性"),
+            "已配置分支必须写明未校验有效性，实际: {}",
+            present.detail
+        );
+        assert!(
+            present.hint.contains("--probe"),
+            "已配置分支必须给出 --probe 指引，实际: {}",
+            present.hint
+        );
+
+        // 纯空白 = 未配置（与 needs_offline_echo 同判据）
+        config.model.api_key = "   ".to_string();
+        let blank = api_key_check(&config);
+        assert_eq!(blank.state, CheckState::Fail);
+        assert!(blank.detail.contains("未配置"), "实际: {}", blank.detail);
+
+        config.model.api_key = String::new();
+        assert_eq!(api_key_check(&config).state, CheckState::Fail);
+    }
+
+    /// P0-D 缺陷 3：默认路径（未加 `--probe`）**必须**离线跳过鉴权探测，
+    /// 既不计通过也不计失败——把「没查」粉饰成 `[OK]` 正是原缺陷。
+    #[test]
+    fn test_auth_probe_check_skips_without_probe_flag() {
+        let mut config = Config::default();
+        config.model.api_key = "sk-live-fixture".to_string();
+        config.model.base_url = "https://api.invalid.example/v1".to_string();
+
+        let skipped = auth_probe_check(&config, false);
+        assert_eq!(skipped.state, CheckState::Skip, "未加 --probe 必须 Skip");
+        assert!(
+            skipped.detail.contains("未探测"),
+            "Skip 详情须说明未探测，实际: {}",
+            skipped.detail
+        );
+        assert!(
+            skipped.hint.contains("--probe"),
+            "Skip 提示须给出开启方式，实际: {}",
+            skipped.hint
+        );
+
+        // 无密钥：同样 Skip（由 api_key 项负责 FAIL），并给出配置指引
+        config.model.api_key = String::new();
+        let no_key = auth_probe_check(&config, true);
+        assert_eq!(no_key.state, CheckState::Skip);
+        assert!(no_key.hint.contains("MARGUERITE_API_KEY"));
+    }
+
+    /// P0-D 缺陷 3：`--probe` 时对真实 HTTP 状态码判定真伪。
+    /// 401/403 → FAIL（密钥被拒）；2xx → OK。用本地 mock 监听器回明确状态码，
+    /// 不以「连接拒绝」作确定性失败源（见 crates 内 mock_http 基建说明）。
+    #[test]
+    fn test_auth_probe_check_judges_key_by_http_status() {
+        for (status, expect_ok) in [(200u16, true), (401u16, false), (403u16, false)] {
+            let base = spawn_status_mock(status);
+            let mut config = Config::default();
+            config.model.api_key = "sk-live-fixture".to_string();
+            config.model.base_url = base;
+
+            let check = auth_probe_check(&config, true);
+            if expect_ok {
+                assert_eq!(
+                    check.state,
+                    CheckState::Ok,
+                    "HTTP {status} 应为有效密钥，实际: {} / {}",
+                    check.detail,
+                    check.hint
+                );
+            } else {
+                assert_eq!(
+                    check.state,
+                    CheckState::Fail,
+                    "HTTP {status} 应判密钥被拒，实际: {}",
+                    check.detail
+                );
+                assert!(
+                    check.detail.contains("401/403"),
+                    "详情须标注鉴权失败，实际: {}",
+                    check.detail
+                );
+            }
+            // 任何分支都不得回显密钥明文
+            assert!(!check.detail.contains("sk-live-fixture"));
+            assert!(!check.hint.contains("sk-live-fixture"));
+        }
+    }
+
+    /// 起一个只回固定状态码的 loopback mock（独立线程 + 独立 runtime，
+    /// 因为被测函数是同步的、内部自建 runtime）。
+    fn spawn_status_mock(status: u16) -> String {
+        use tokio::io::AsyncWriteExt;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("mock runtime");
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("mock bind");
+                let addr = listener.local_addr().expect("mock addr");
+                let _ = tx.send(format!("http://{addr}"));
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
+                    let reason = match status {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        403 => "Forbidden",
+                        _ => "Error",
+                    };
+                    let body = format!("{{\"error\":\"fixture {status} {reason}\"}}");
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            });
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("mock 监听器未在 5s 内就绪")
     }
 
     #[test]
@@ -2896,7 +3927,10 @@ mod tests {
     #[test]
     fn test_program_default() {
         let program = Program::default();
-        assert_eq!(program.route_table().routes().len(), 18);
+        // 路由数守卫：新增/删除子命令时必须同步这里（S6 加了
+        // `export-diagnostics`，19 → 20）。这一条与 `SUBCOMMANDS`
+        // / `print_top_help` 的同步测试互为交叉检查。
+        assert_eq!(program.route_table().routes().len(), 20);
     }
 
     #[test]
@@ -2968,6 +4002,276 @@ mod tests {
             ..Args::default()
         };
         assert!(program.handle_direct(&args).is_err());
+    }
+
+    // ===== P4：team 终态退出码（完成门禁未放行 → 非零） =====
+
+    /// 门禁放行 → 常规成功（无特殊退出码）；未放行 → `Conflict(9)`。
+    ///
+    /// 锁定「跑完了但没做成」必须与「成功」在退出码上可区分：
+    /// 真机现象是子专家 400 失败、首席答"未能完成"，而进程仍以 0 退出。
+    #[test]
+    fn test_team_failure_exit_code_reflects_completion_verdict() {
+        assert_eq!(
+            team_failure_exit_code(true),
+            None,
+            "门禁放行时不得改写退出码（应由 Ok(()) 正常返回 0）"
+        );
+        let blocked = team_failure_exit_code(false).expect("未放行必须有非零退出码");
+        assert_eq!(blocked.code(), 9, "复用既有分层退出码 Conflict=9");
+    }
+
+    // ===== P0-B：无密钥离线回显（退出码 0，不伪造模型回答） =====
+
+    /// 无调用链模板的输入（Question/Unknown 意图）才会落到离线回显分支。
+    fn prompt_without_chain_template() -> &'static str {
+        "你好，介绍一下你自己"
+    }
+
+    fn program_with_key(api_key: &str) -> Program {
+        let mut program = Program::default();
+        let mut config = Config::default();
+        config.model.api_key = api_key.to_string();
+        program.config = Some(config);
+        program
+    }
+
+    #[test]
+    fn test_needs_offline_echo_gate() {
+        // 缺失 / 纯空白 → 离线；有真实密钥 → 走真实模型（不降级）
+        let mut config = Config::default();
+        config.model.api_key = String::new();
+        assert!(needs_offline_echo(&config), "空密钥必须走离线回显");
+        config.model.api_key = "   ".to_string();
+        assert!(needs_offline_echo(&config), "纯空白密钥必须走离线回显");
+        config.model.api_key = "sk-live".to_string();
+        assert!(!needs_offline_echo(&config), "有密钥不得降级为离线回显");
+    }
+
+    #[test]
+    fn test_handle_direct_offline_echo_without_key_returns_ok() {
+        let prompt = prompt_without_chain_template();
+        // 前提锁定：该输入没有调用链模板，因此必然进入「离线回显 vs 真实模型」这一段。
+        let intent = crate::intent::classifier::Classifier::new()
+            .classify(prompt)
+            .intent;
+        assert!(
+            crate::chain::executor::ChainExecutor::template_for_intent(&intent).is_none(),
+            "前提失效：{prompt:?} 命中调用链模板（intent={intent:?}），本用例需换输入"
+        );
+
+        let program = program_with_key("");
+        let args = Args {
+            mode: CliMode::Direct,
+            prompt: Some(prompt.to_string()),
+            ..Args::default()
+        };
+        // 无密钥：不再 Err/退出码 1，而是正常降级（Ok = 退出码 0）
+        assert!(
+            program.handle_direct(&args).is_ok(),
+            "无密钥时必须走离线回显并正常返回"
+        );
+    }
+
+    #[test]
+    fn test_handle_direct_offline_echo_whitespace_key_returns_ok() {
+        // 纯空白密钥与空密钥同语义（真实调用必失败），也必须降级而不是报错退出。
+        let program = program_with_key("  \t ");
+        let args = Args {
+            mode: CliMode::Direct,
+            prompt: Some(prompt_without_chain_template().to_string()),
+            ..Args::default()
+        };
+        assert!(program.handle_direct(&args).is_ok());
+    }
+
+    #[test]
+    fn test_handle_direct_offline_echo_json_contract() {
+        // --json 下离线结果同样走 {ok,data,meta} 契约（此处只校验不 panic 且返回 Ok）
+        let program = program_with_key("");
+        let args = Args {
+            mode: CliMode::Direct,
+            prompt: Some(prompt_without_chain_template().to_string()),
+            json: true,
+            ..Args::default()
+        };
+        assert!(program.handle_direct(&args).is_ok());
+    }
+
+    #[test]
+    fn test_render_offline_echo_has_input_analysis_and_config_hint() {
+        let prompt = "帮我把这个目录按类型整理";
+        let analysis = Orchestrator::new(Config::default()).analyze(prompt);
+        let text = render_offline_echo(prompt, &analysis, Path::new("C:/tmp/config.yaml"));
+
+        assert!(text.contains("[OFFLINE]"), "必须有离线标记: {text}");
+        assert!(text.contains(prompt), "必须回显原始输入: {text}");
+        assert!(
+            text.contains(analysis.strategy.label()),
+            "必须给出编排形态: {text}"
+        );
+        assert!(
+            text.contains(analysis.intent.task_label()),
+            "必须给出意图: {text}"
+        );
+        assert!(text.contains("未配置模型密钥"), "必须说明未配置密钥: {text}");
+        assert!(text.contains("model add"), "必须给出配置方法: {text}");
+        assert!(text.contains("MARGUERITE_API_KEY"), "必须给出环境变量法: {text}");
+        assert!(text.contains("C:/tmp/config.yaml"), "必须给出配置文件路径: {text}");
+        // 诚实性：必须显式声明未调用模型，且不出现任何"模型回答"式伪造
+        assert!(text.contains("未调用任何模型"), "必须声明未调用模型: {text}");
+        assert!(!text.contains("回答:"), "不得伪造模型回答: {text}");
+    }
+
+    #[test]
+    fn test_render_offline_echo_with_auth_hint_is_honest() {
+        // P0-1d：鉴权失败降级复用离线回显，但首行必须如实说「鉴权失败」，
+        // 不得谎称「未配置模型密钥」（诚实性边界）。
+        let prompt = "帮我把这个目录按类型整理";
+        let analysis = Orchestrator::new(Config::default()).analyze(prompt);
+        let text = render_offline_echo_with_hint(
+            prompt,
+            &analysis,
+            Path::new("C:/tmp/config.yaml"),
+            OFFLINE_ECHO_AUTH_HINT,
+        );
+        assert!(text.contains("[OFFLINE]"), "必须保留离线标记: {text}");
+        assert!(text.contains("鉴权失败"), "必须说明鉴权失败: {text}");
+        assert!(
+            !text.contains("未配置模型密钥"),
+            "鉴权失败不得谎称未配置密钥: {text}"
+        );
+        assert!(text.contains("未调用任何模型"), "必须声明未调用模型: {text}");
+    }
+
+    /// P0-1d 护栏（变异自检配套）：表驱动锁死「鉴权失败 → 离线降级」分支条件。
+    ///
+    /// 背景（QA 变异 M6）：此前条件内联在 `handle_direct`，改成永不相等的字面量后
+    /// 全部既有测试仍绿。现把条件收敛到 [`should_offline_echo_on_auth_failure`]，
+    /// 本测试保证「AUTH_FAILED → true，其余全部 → false」——把判定改掉必然变红。
+    #[test]
+    fn test_auth_failure_offline_echo_branch_condition() {
+        const CASES: &[(&str, bool)] = &[
+            ("AUTH_FAILED", true),
+            ("RATE_LIMITED", false),
+            ("NETWORK", false),
+            ("SERVER", false),
+            ("OTHER", false),
+        ];
+        for (code, expected) in CASES {
+            assert_eq!(
+                should_offline_echo_on_auth_failure(Some(code)),
+                *expected,
+                "错误码 {code} 的降级判定不符"
+            );
+        }
+        // 无归类错误（如编排层自身错误）不触发鉴权降级。
+        assert!(
+            !should_offline_echo_on_auth_failure(None),
+            "None 不得触发鉴权失败降级"
+        );
+    }
+
+    /// P0-1d 行为护栏：用真实构造的 401 归类错误驱动 `handle_direct` Err 分支
+    /// 所用的决策函数 [`auth_failure_echo_hint`]，并锁死三条行为语义——
+    /// ① 走离线回显且提示「鉴权失败」（不谎称「未配置」）；
+    /// ② `--json` 契约下 `offline: true`（正常降级路径，非错误）；
+    /// ③ 上游原始正文（`****gEni`）不得出现在任何用户可见输出中（锁 P0-4 成果）。
+    #[test]
+    fn test_auth_failure_branch_drives_offline_echo_and_hides_upstream_body() {
+        // 与真实 DeepSeek 401 同形的上游正文（P0-4 场景复刻）。
+        let raw_upstream = "Your api key: ****gEni is invalid";
+        let err = anyhow::Error::new(crate::model::ProviderError::from_status(401, raw_upstream));
+
+        // 分支决策：AUTH_FAILED → 专用提示行（这正是 Err 分支的分流条件）。
+        let hint = auth_failure_echo_hint(&err).unwrap_or_else(|| {
+            panic!("AUTH_FAILED 错误必须触发鉴权失败离线降级分支");
+        });
+        assert_eq!(hint, OFFLINE_ECHO_AUTH_HINT);
+
+        let prompt = prompt_without_chain_template();
+        let analysis = Orchestrator::new(Config::default()).analyze(prompt);
+        let path = Path::new("C:/tmp/config.yaml");
+
+        // 语义①：文本输出如实说明「鉴权失败」，不得谎称「未配置」。
+        let text = render_offline_echo_with_hint(prompt, &analysis, path, hint);
+        assert!(text.contains("鉴权失败"), "必须如实说明鉴权失败: {text}");
+        assert!(
+            !text.contains("未配置模型密钥"),
+            "鉴权失败不得谎称未配置密钥: {text}"
+        );
+
+        // 语义②：--json 契约 offline: true，且 hint 同步为鉴权失败文案。
+        let payload = offline_echo_payload_with_hint(prompt, &analysis, path, hint);
+        assert_eq!(payload["offline"], serde_json::json!(true));
+        assert_eq!(payload["hint"], serde_json::json!(OFFLINE_ECHO_AUTH_HINT));
+        let response = payload["response"].as_str().expect("response 必须是字符串");
+        assert!(response.contains("鉴权失败"), "JSON response 必须如实: {response}");
+
+        // 语义③：上游原始正文不得泄漏到用户可见输出（文本与 JSON 均查）。
+        assert!(!text.contains("****gEni"), "文本输出不得回显上游正文: {text}");
+        let payload_str = payload.to_string();
+        assert!(
+            !payload_str.contains("****gEni"),
+            "JSON 输出不得回显上游正文: {payload_str}"
+        );
+    }
+
+    /// 反向护栏：非 AUTH_FAILED 的归类错误不得触发离线降级——否则限流 / 网络抖动
+    /// 也会被静默降级成离线回显，掩盖真实故障。
+    #[test]
+    fn test_non_auth_failures_do_not_trigger_offline_echo() {
+        for status in [429_u16, 500, 503, 400] {
+            let err = anyhow::Error::new(crate::model::ProviderError::from_status(
+                status,
+                "upstream body",
+            ));
+            assert!(
+                auth_failure_echo_hint(&err).is_none(),
+                "HTTP {status} 不得触发鉴权失败降级分支"
+            );
+        }
+    }
+
+    #[test]
+    fn test_offline_echo_payload_json_contract() {
+        let prompt = "帮我把这个目录按类型整理";
+        let analysis = Orchestrator::new(Config::default()).analyze(prompt);
+        let payload = offline_echo_payload(prompt, &analysis, Path::new("C:/tmp/config.yaml"));
+
+        assert_eq!(payload["offline"], serde_json::json!(true));
+        assert_eq!(payload["prompt"], serde_json::json!(prompt));
+        assert_eq!(
+            payload["analysis"]["strategy_label"],
+            serde_json::json!(analysis.strategy.label())
+        );
+        assert_eq!(
+            payload["analysis"]["subtask_count"],
+            serde_json::json!(analysis.subtasks.len())
+        );
+        assert_eq!(
+            payload["config_path"],
+            serde_json::json!("C:/tmp/config.yaml")
+        );
+        let response = payload["response"].as_str().expect("response 必须是字符串");
+        assert!(response.contains(prompt));
+        assert!(response.contains("未配置模型密钥"));
+    }
+
+    #[test]
+    fn test_print_offline_echo_returns_ok_for_text_and_json() {
+        let config = Config::default();
+        for json in [false, true] {
+            let args = Args {
+                mode: CliMode::Direct,
+                json,
+                ..Args::default()
+            };
+            assert!(
+                print_offline_echo(&args, &config, "hello").is_ok(),
+                "离线回显必须正常返回（json={json}）"
+            );
+        }
     }
 
     #[test]

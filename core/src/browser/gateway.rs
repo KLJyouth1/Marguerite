@@ -89,6 +89,13 @@ pub async fn open(params: &Value, bridge: &BrowserBridge) -> Result<Value, RpcEr
         .get("url")
         .and_then(Value::as_str)
         .unwrap_or("about:blank");
+    // P2-9：SSRF 预检（不依赖 Chrome 内建拦截兜底）。about:blank 等非 http(s)
+    // 由 SsrfGuard 拒绝，但浏览器打开空白页属合法操作，此处显式放行。
+    if url != "about:blank" {
+        crate::security::ssrf_guard::SsrfGuard::new()
+            .check(url)
+            .map_err(|e| RpcError::new("SSRF_BLOCKED", format!("目标地址被安全策略拒绝: {e}")))?;
+    }
     let mut page = bridge
         .open(url)
         .await
@@ -145,13 +152,20 @@ pub async fn navigate(params: &Value) -> Result<Value, RpcError> {
     let url = params
         .get("url")
         .and_then(Value::as_str)
+        // P2-9：SSRF 预检（与 open 同策略；about:blank 显式放行）
+        .map(str::to_string)
         .unwrap_or_default();
+    if !url.is_empty() && url != "about:blank" {
+        crate::security::ssrf_guard::SsrfGuard::new()
+            .check(&url)
+            .map_err(|e| RpcError::new("SSRF_BLOCKED", format!("目标地址被安全策略拒绝: {e}")))?;
+    }
     let mut map = sessions().lock().await;
     let entry = take_session(&mut map, session_id).await?;
     entry
         .page
         .session
-        .navigate(url)
+        .navigate(&url)
         .await
         .map_err(|e| RpcError::new("BROWSER_NAVIGATE_FAILED", format!("导航失败: {e}")))?;
     tokio::time::sleep(Duration::from_millis(LOAD_SETTLE_MS)).await;

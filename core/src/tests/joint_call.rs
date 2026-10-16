@@ -75,7 +75,11 @@ async fn mock_llm_tool_loop(
             if let Ok((mut socket, _)) = listener.accept().await {
                 let _ = crate::tests::mock_http::read_request_full(&mut socket).await;
                 let n = served.fetch_add(1, Ordering::SeqCst);
-                let body = if n == 0 { &tool_calls_body } else { &final_body };
+                let body = if n == 0 {
+                    &tool_calls_body
+                } else {
+                    &final_body
+                };
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -98,6 +102,7 @@ fn offline_cfg(url: &str) -> Config {
             api_key: "offline-test".to_string(),
             base_url: url.to_string(),
             copilot_model: None,
+            timeout_secs: 0,
         },
         ..Default::default()
     }
@@ -157,6 +162,11 @@ fn routing_resolves_models_consistently() {
 /// 断言工具被执行、结果可取、mock 应答轮次正确。
 #[tokio::test]
 async fn joint_call_routes_spawns_and_executes_tool() {
+    // 清除全局缓存，防止先行测试填充 SEMANTIC_LAYER 后 HIT 跳过 mock LLM 调用
+    if let Some(layer) = crate::cache::semantic_layer() {
+        layer.clear();
+    }
+    crate::gateway::chat::gateway_prefix_cache().clear();
     let served = Arc::new(AtomicUsize::new(0));
     let tool_calls = Arc::new(AtomicUsize::new(0));
     let url = mock_llm_tool_loop(TOOL_CALLS_BODY, FINAL_BODY, served.clone()).await;
@@ -192,10 +202,7 @@ async fn joint_call_routes_spawns_and_executes_tool() {
     assert_eq!(statuses.len(), 1, "应只有一个子代理");
 
     // 断言 2：子代理完成后 result 可取（真实闭环产出）
-    let result = manager
-        .get_result(&id)
-        .await
-        .expect("子代理结果应可取");
+    let result = manager.get_result(&id).await.expect("子代理结果应可取");
     assert!(
         result.contains("final-answer-from-tool-loop"),
         "子代理结果应回传工具回路终答，实际: {result}"

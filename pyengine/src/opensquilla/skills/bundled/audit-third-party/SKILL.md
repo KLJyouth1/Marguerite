@@ -23,8 +23,14 @@ provenance:
   maintained_by: Marguerite
 metadata:
   opensquilla:
+    # ``bash`` is a *binary* requirement, not a tool requirement: listing it under
+    # ``requires_tools`` asked the runtime gate for a tool named "bash", which does
+    # not exist, so this skill was silently dropped from every prompt on every host.
+    requires:
+      bins:
+        - bash
     requires_tools:
-      - bash
+      - exec_command
 ---
 
 # Audit Third-Party Skill（供应链安全审查 · skill-vetter 协议 v2）

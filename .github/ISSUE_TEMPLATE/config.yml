@@ -1,0 +1,14 @@
+# =============================================================================
+# Issue chooser configuration.
+#
+# TODO(maintainers): replace OWNER/REPO below with the canonical GitHub slug
+# before the public announcement — these contact links must be absolute URLs.
+# =============================================================================
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability (private)
+    url: https://github.com/OWNER/REPO/security/advisories/new
+    about: Do not open a public issue for a vulnerability. Use the private advisory flow described in SECURITY.md.
+  - name: Usage question
+    url: https://github.com/OWNER/REPO/discussions
+    about: Ask "how do I …" questions and share setups here instead of in the issue tracker.

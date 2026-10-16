@@ -22,12 +22,34 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // 状态 / 只读
     "health",
     "status",
+    // S5：宿主（Python 侧车）退出结构化证据（exit_code + uptime_ms + stderr tail）。
+    // Rust 原生实现，**永不代理到侧车**——侧车可能就是已经死掉的那个。
+    "host.exit_evidence",
+    // 运维只读：由 transport-neutral ops adapter 接入
+    "ops.list_hosts",
+    "ops.status",
+    "ops.list_files",
+    "ops.tail_logs",
+    "ops.inspect_process",
+    // BUG-6 补登记：system.status 与 status 同义实现
+    "system.status",
     "doctor.status",
     "onboarding.router.configure",
     "onboarding.ensemble.configure",
     "onboarding.provider.probe",
     "onboarding.provider.configure",
+    // v3 补登记：设置页服务商档案保存/激活/移除（此前未实现也未声明，
+    // UI supportsMethod 探测不到 → 保存模型配置直接失败）
+    "onboarding.llmProfile.upsert",
+    "onboarding.llmProfile.activate",
+    "onboarding.llmProfile.active.remove",
     "config.get",
+    // P1-6 补登记：已实现但此前未声明，UI supportsMethod 探测不到而功能静默
+    "models.list",
+    "mcp.list",
+    "sessions.create",
+    "sessions.delete",
+    "sessions.get",
     "sandbox.status",
     "sessions.list",
     "sessions.messages.subscribe",
@@ -35,6 +57,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "sessions.messages.hydrate",
     "chat.history",
     "tools.catalog",
+    "tools.patch.get",
+    "tools.patch.set",
+    // 工作区根 / 绑定状态（P0-1b：未绑定时给可执行提示，前端据此展示落点）
+    "workspace.status",
+    // 网关层联网检索（与 tools.catalog 宣称对齐：此前目录有、方法无）
+    "tools.web_search",
+    "tools.web_research",
+    "tools.web_fetch",
     // 宝塔面板凭据（baota_login 落盘目标）
     "baota.credentials.set",
     "baota.credentials.get",
@@ -55,6 +85,13 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "mode.switch",
     "mode.status",
     // Bloom 会话（异步）
+    // v3.3 运行中插话（对齐 WebUI steer 状态机；无活动轮时 fallback_safe 降级）
+    // v3.4 PSI 意识引擎（Aris Brain）
+    "brain.status",
+    "brain.psi_cycle",
+    "brain.set_circadian",
+    "brain.interact",
+    "sessions.steer.v2",
     "chat.send",
     "chat.abort",
     // 技能
@@ -78,6 +115,19 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "memory.cross_project.expand",
     "memory.behavior.list",
     "memory.behavior.summary",
+    // 元智能体自迭代闭环（监控 → 诊断 → 规划 → 沙箱裁决 → 版本闭环）
+    "selfevolve.status",
+    "selfevolve.signals",
+    "selfevolve.analyze",
+    "selfevolve.history",
+    "selfevolve.sweep",
+    "selfevolve.cycle",
+    "selfevolve.approve",
+    "selfevolve.reject",
+    "selfevolve.promote",
+    "selfevolve.rollback",
+    // 联想记忆网络（突触图）状态
+    "memory.synapse.status",
     // 上下文管理 / 压缩（compact 走 async LLM 分支；rollback 恢复预压缩快照）
     "context.status",
     "context.compact",
@@ -97,6 +147,19 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "plans.run.advance",
     "plans.replan",
     "plans.parallel.run",
+    // 计划步骤增删改（B4 编辑器：`plan::plans_step_*` 真实实现）
+    "plans.step.add",
+    "plans.step.remove",
+    "plans.step.update",
+    // Goal Round Driver（通过 gateway::goal 适配器；methods.rs dispatch 接入待后续）
+    "goal.create",
+    "goal.get",
+    "goal.edit",
+    "goal.pause",
+    "goal.resume",
+    "goal.complete",
+    "goal.blocked",
+    "goal.begin_round",
     // 渠道
     "channels.status",
     "channels.pairings",
@@ -121,6 +184,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "workspaces.open",
     "workspace.file_changes.list",
     "workspace.file_changes.revert",
+    // 内置工作区编辑器（多文件）RPC：读取/写入工作区文本文件
+    "workspace.file.read",
+    "workspace.file.write",
+    // 企业协同与 SSH：主机台账 + 连接探测（部署/终端工具链复用）
+    "collab.ssh.list",
+    "collab.ssh.add",
+    "collab.ssh.remove",
+    "collab.ssh.probe",
     "artifacts.list",
     // Epic A：产物台账（Rust 原生，不代理 Python 侧车）
     "artifacts.get",
@@ -175,15 +246,82 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // 模型舰队（多角色路由）
     "fleet.list",
     "fleet.route",
+    // Rust 模型档案（models.json / ModelSelector）：WebUI 直接可视可切换
+    "models.config_path",
+    "models.profiles.list",
+    "models.profiles.set_active",
+    "models.profiles.set_copilot",
+    "models.profiles.add",
+    "models.profiles.remove",
+    // 本地模型中心（聚合下载源 + 智能推荐 + 一键部署/启停 + 本地/云路由标记）
+    "models.local.catalog",
+    "models.local.recommend",
+    "models.local.list",
+    "models.local.download",
+    "models.local.deploy",
+    "models.local.start",
+    "models.local.stop",
+    "models.local.remove",
+    "models.local.status",
+    "models.local.system",
+    "models.local.finetune",
+    "models.local.finetune.list",
+    "models.local.finetune.status",
+    "models.local.finetune.cancel",
+    "models.gate.check",
+    // MCP 服务器管理（Rust 配置持久化 + URL 探测；stdio 桥为下一阶段）
+    "mcp.servers.list",
+    "mcp.servers.add",
+    "mcp.servers.remove",
+    "mcp.servers.probe",
+    "mcp.tools.list",
     // 自进化历史
     "evolve.history",
     // 插件槽位
     "plugins.list",
+    "plugins.status",
+    // ── Rust 原生实现但长期漏声明的四组（前端 supportsMethod() 因此判 false、
+    //    功能入口被隐藏；已由 every_dispatch_arm_is_declared_in_supported_methods 守卫）──
+    // 信任校准（trust_rpc.rs）
+    "trust.list",
+    "trust.grant",
+    "trust.revoke",
+    "trust.revoke_all",
+    // 升级请求（escalation_rpc.rs）
+    "escalation.pending",
+    "escalation.ack",
+    // 任务队列（queue_rpc.rs）
+    "queue.list",
+    "queue.enqueue",
+    "queue.start",
+    "queue.pause",
+    "queue.resume",
+    "queue.cancel",
+    "queue.move",
     // ── 原生功能（Game Hall / 知识图谱 / 鲸鱼娘 / 用量日聚合）──
     "usage.daily",
+    "usage.cost",
+    "usage.taskCost",
+    "usage.budget.get",
+    "usage.budget.set",
+    // 三档模型分层 + 会话预算（5c）
+    "model.tier.get",
+    "model.tier.set",
+    "model.ledger",
+    "session.budget.get",
+    "session.budget.set",
+    // ── M3-D1 行为事件：最近活动时间线 ──
+    "activity.recent",
+    "games.list",
+    "games.play",
+    "runtime.status",
     "kb.graph.view",
     "kb.graph.related",
     "pet.status",
+    "pet.list",
+    "pet.setSkin",
+    "pet.setMood",
+    "pet.triggerAction",
     "pet.action",
     "poker.create",
     "poker.join",
@@ -193,6 +331,161 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "poker.auto",
     "workspaces.create",
     "modlens.analyze",
+    // ── 契约补登记（已实装但历史遗漏，导致 UI `supportsMethod` 探测不到而功能静默）──
+    // 配置读写对称（PY_FIRST_METHODS：侧车在线代理 Python，离线回退 Rust）
+    "config.effective",
+    "config.patch",
+    "config.patch.safe",
+    // 模型路由（PY_ENGINE_PREFIXES "models.routing." 前缀转发 + Rust 本地实现）
+    "models.routing.get",
+    "models.routing.set",
+    // 运行模式规格 / 蜂群规模上限（ModeSpec / BloomSpec 全字段可视化依赖）
+    "mode.spec",
+    // Bloom 三段锚定权威阶段（V2.2：ControlCenter 阶段显示）
+    "mode.stage",
+    "mode.swarm.get",
+    "mode.swarm.set",
+    // 前缀缓存与语义缓存统计（对话计量条命中率依赖）
+    "cache.status",
+    // 知识库混合检索（BM25 + 向量 + RRF 融合）
+    "kb.search.hybrid",
+    // 画像自动抽取（对话流水线自动更新用户画像）
+    "agent.profile.auto",
+    // SSH 远程执行（主机台账 + 部署工具链）
+    "collab.ssh.exec",
+    // 项目级知识图谱（保存 / 列出 / 查看 / 分析 / 删除）
+    "graph.project.save",
+    "graph.project.list",
+    "graph.project.view",
+    "graph.project.analyze",
+    "graph.project.delete",
+    // 长时任务（检查点 / 暂停 / 恢复 / 列表）
+    "long_running.checkpoint",
+    "long_running.pause",
+    "long_running.resume",
+    "long_running.list",
+    // 插件市场（检索 / 安装 / 批量安装 / 升级 / 审计 / 导入导出 / 源管理 / harness 生态）
+    "market.list",
+    "market.search",
+    "market.install",
+    "market.install.batch",
+    "market.upgrade",
+    "market.audit",
+    "market.import",
+    "market.export",
+    "market.sources",
+    "market.harness",
+    "market.categories",
+    // 页面台账（新增 / 列出 / 检索）
+    "pages.add",
+    "pages.list",
+    "pages.search",
+    // 沙箱终端（真实 PTY：spawn / read / input / kill / list）+ 运行上下文与环境准备
+    "sandbox.terminal.spawn",
+    "sandbox.terminal.read",
+    "sandbox.terminal.input",
+    "sandbox.terminal.kill",
+    "sandbox.terminal.list",
+    "sandbox.run_context.set",
+    "sandbox.setup.ensure",
+    // 跨平台终端后端探测与执行（WSL / Docker / Native）：让 Windows 用户也能跑 Linux 命令
+    "terminal.backends.status",
+    "terminal.backend.exec",
+    "terminal.backend.auto",
+    // 团队编排（编制保存/列出/删除 + 前台与后台一键启动）
+    "team.compositions.save",
+    "team.compositions.list",
+    "team.compositions.remove",
+    "team.run",
+    "team.run.background",
+    // ── P0 契约补齐（R5：前端调用但后端完全缺失的 23 个不可达方法）──
+    // 借鉴 wemux packages/shared 模式：所有跨端方法必须在 SUPPORTED_METHODS 声明，
+    // 确保 supportsMethod() 返回 true → UI 功能入口可见
+    // cron 全套（schedule 模块已有真实 CRUD，此前仅 list 声明且为 stub）
+    "cron.create",
+    "cron.update",
+    "cron.remove",
+    "cron.run",
+    "cron.runs",
+    "cron.subscribe",
+    "cron.unsubscribe",
+    // sessions 扩展（abort/patch/preview/reset/search/subscribe/unsubscribe）
+    "sessions.abort",
+    "sessions.patch",
+    "sessions.preview",
+    "sessions.reset",
+    "sessions.search",
+    "sessions.subscribe",
+    "sessions.unsubscribe",
+    // exec.proposals（转发到 Python 侧车）
+    //
+    // 曾在此声明 `.create/.update/.remove/.approve/.apply` —— 这 5 个名字**侧车里
+    // 根本不存在**（权威清单 `pyengine/.../gateway/scopes.py::METHOD_SCOPES` 里只有
+    // pending_count/list/show/accept/reject/settings.*/auto_enabled.*）。它们是早期 API
+    // 的残留名，声明了但调用必失败 → 已删除，改为按侧车真实方法名声明。
+    "exec.proposals.list",
+    "exec.proposals.pending_count",
+    "exec.proposals.show",
+    "exec.proposals.accept",
+    "exec.proposals.reject",
+    "exec.proposals.settings.get",
+    "exec.proposals.settings.set",
+    "exec.proposals.auto_enabled.list",
+    "exec.proposals.auto_enabled.disable",
+    // 其他缺失方法
+    "chat.clarify_submit",
+    "providers.status",
+    "sandbox.resume",
+    "skills.deps.install",
+    // ── P1 契约补齐（20 个已通过 PY_ENGINE_PREFIXES 转发但未声明的方法）──
+    // 这些方法 Python 侧车已实现，但 supportsMethod() 返回 false 导致 UI 隐藏
+    "channels.admin.set",
+    "channels.pairing.revoke",
+    "channels.probe",
+    "channels.restart",
+    "logs.status",
+    "logs.tail",
+    "meta.drafts.discard",
+    "meta.runs.confirm_preflight",
+    "migration.sources.list",
+    // 注：`migration.preview` 与 `onboarding.channel.configure` 曾在此声明，但侧车里
+    // 并不存在这两个名字（真实的是 `migration.sources.preview` / `onboarding.channel.{probe,upsert,remove,enable,disable}`）
+    // —— 幽灵声明会让 UI 显示一个调用必失败的入口，故删除。
+    "onboarding.audio.configure",
+    "onboarding.capability.reset",
+    "onboarding.imageGeneration.configure",
+    "onboarding.llmProfile.remove",
+    "onboarding.memory_embedding.configure",
+    "onboarding.provider.credential.reveal",
+    "onboarding.search.configure",
+    "router.feedback.submit",
+    // ── P2 契约补齐：前端在调、Python 侧车已实现，但长期漏声明 ──
+    // 其中 4 个被前端 `supportsMethod()` 直接门控 → 功能**永远不可达**（不是"偶尔失败"）：
+    //   sessions.promptCacheKeepalive.*（提示缓存保活对话框永不渲染）
+    //   migration.sources.preview（数据迁移预览被跳过）
+    //   onboarding.imageGeneration.models.discover（图片生成模型列表永远为空）
+    // 由 webui/scripts/check-rpc-contract.mjs 守卫，防止再次漂移。
+    "sessions.promptCacheKeepalive.status",
+    "sessions.promptCacheKeepalive.set",
+    "sessions.messages.unsubscribe",
+    "migration.sources.preview",
+    "onboarding.channel.probe",
+    "onboarding.channel.upsert",
+    "onboarding.channel.remove",
+    "onboarding.models.discover",
+    "onboarding.llmProfile.models.discover",
+    "onboarding.imageGeneration.models.discover",
+    "onboarding.channel.enable",
+    "onboarding.channel.disable",
+    "meta.run",
+    "meta.runs.recovery",
+    "meta.runs.replay",
+    "commands.list_for_surface",
+    "channels.pairing.approve",
+    // WP1 设备总线（devices.*：list/status/call；L2/L3 经审批队列抬升，fail-closed）
+    "devices.list",
+    "devices.status",
+    "devices.call",
 ];
 
 /// 支持的事件名清单（HelloOk `features.events`，一期为系统/会话事件）
@@ -495,5 +788,84 @@ mod tests {
         assert_eq!(a.retryable, Some(false));
         assert_eq!(c.retryable, Some(false));
         assert_eq!(c.code, "CANCELLED");
+    }
+
+    /// 从 dispatch 源码里抽出所有 dispatch 臂的方法名。
+    ///
+    /// 用源码扫描而不是运行时反射：`match` 臂无法在运行期枚举，而「实现了但没声明」
+    /// 这个漂移只存在于源码里。解析规则与 dispatch 的书写约定一一对应
+    /// （行首 `"a.b" =>`），并且跳过注释行。
+    ///
+    /// 覆盖三个真正持有 `match` 臂的文件：主分派 `methods.rs`，以及被它委托出去的
+    /// `goal.rs` / `ops_dispatch.rs`（两者各自有内部 match，同样会产生漏声明）。
+    fn dispatch_arm_names() -> Vec<String> {
+        const SOURCES: &[(&str, &str)] = &[
+            ("methods.rs", include_str!("methods.rs")),
+            ("goal.rs", include_str!("goal.rs")),
+            ("ops_dispatch.rs", include_str!("ops_dispatch.rs")),
+        ];
+        let mut out = Vec::new();
+        for (_, src) in SOURCES {
+            for raw in src.lines() {
+                let line = raw.trim();
+                if line.starts_with("//") {
+                    continue;
+                }
+                let Some(rest) = line.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else { continue };
+                let name = &rest[..end];
+                if !name.contains('.') {
+                    continue;
+                }
+                if !rest[end + 1..].trim_start().starts_with("=>") {
+                    continue;
+                }
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    /// 契约守卫：每个 dispatch 臂都必须在 `SUPPORTED_METHODS` 声明。
+    ///
+    /// 历史上曾有 `test_supported_methods_subset_of_dispatch` 守这个方向，但它**已被删除**
+    /// （`docs/archive` 里还留着它通过的记录，`methods.rs` 的注释也仍在引用它）——
+    /// 于是两个方向都无人看守，漂移就此发生：`trust.*` / `queue.*` / `escalation.*` /
+    /// `plans.step.*` 共 16 个方法后端完全可用，而前端 `supportsMethod()` 判 false →
+    /// 对应功能入口被隐藏，用户根本点不到。
+    ///
+    /// 反方向（声明 ⊆ 可分派）无法在 Rust 侧静态校验：`dispatch` 末尾有「Rust 未实现
+    /// 且侧车在线 → 自动全量代理」的兜底，Python 侧车实现的方法（权威清单在
+    /// `pyengine/.../gateway/scopes.py::METHOD_SCOPES`）在 Rust 源码里天然没有臂。
+    /// 前端门控点那一侧由 `webui/scripts/check-rpc-contract.mjs` 守卫。
+    #[test]
+    fn every_dispatch_arm_is_declared_in_supported_methods() {
+        // `agent_rpc_err` 里对「错误码字符串」的 match 不是 RPC 臂，显式排除。
+        const ERR_CODE_LOOKALIKES: &[&str] =
+            &["agent.exists", "agent.not_found", "agent.builtin_immutable"];
+        let missing: Vec<String> = dispatch_arm_names()
+            .into_iter()
+            .filter(|n| !ERR_CODE_LOOKALIKES.contains(&n.as_str()))
+            .filter(|n| !SUPPORTED_METHODS.contains(&n.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "以下 dispatch 臂未在 SUPPORTED_METHODS 声明（前端会判为不支持、功能入口被隐藏）：{missing:?}"
+        );
+    }
+
+    /// 守卫自身不得退化成空集（否则断言永远通过）。
+    #[test]
+    fn dispatch_arm_scan_finds_a_plausible_number_of_arms() {
+        let arms = dispatch_arm_names();
+        assert!(
+            arms.len() > 200,
+            "源码扫描只解析出 {} 个 dispatch 臂，解析规则可能已与书写约定脱节",
+            arms.len()
+        );
+        assert!(arms.iter().any(|a| a == "chat.send"));
+        assert!(arms.iter().any(|a| a == "plans.step.add"));
     }
 }

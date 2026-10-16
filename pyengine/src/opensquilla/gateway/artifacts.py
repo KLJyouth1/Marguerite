@@ -31,6 +31,7 @@ from opensquilla.gateway.origin_guard import (
 from opensquilla.gateway.origin_guard import (
     request_principal_is_owner as _request_principal_is_owner,
 )
+from opensquilla.gateway.session_key import request_session_key
 from opensquilla.paths import media_root_from_config, native_io_path
 
 _OPENABLE_HTML_MIMES = frozenset({"text/html", "application/xhtml+xml"})
@@ -163,12 +164,7 @@ def register_artifact_routes(
 
     async def download_handler(request: Request) -> FileResponse | JSONResponse:
         artifact_id = request.path_params.get("artifact_id", "")
-        session_key = (
-            request.query_params.get("sessionKey")
-            or request.query_params.get("session_key")
-            or request.headers.get("x-opensquilla-session-key")
-            or ""
-        )
+        session_key = request_session_key(request)
         session_id = await _session_id_for_download(session_manager, session_key)
         if not session_id:
             return JSONResponse(
@@ -208,12 +204,7 @@ def register_artifact_routes(
             )
 
         artifact_id = request.path_params.get("artifact_id", "")
-        session_key = (
-            request.query_params.get("sessionKey")
-            or request.query_params.get("session_key")
-            or request.headers.get("x-opensquilla-session-key")
-            or ""
-        )
+        session_key = request_session_key(request)
         session_id = await _session_id_for_download(session_manager, session_key)
         if not session_id:
             return JSONResponse(

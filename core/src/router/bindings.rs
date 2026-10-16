@@ -28,8 +28,9 @@ impl PromptPolicy {
 }
 
 impl RouteDecision {
-    /// 本决策的思考预算档位（T0->Off, T1->Deep）。
+    /// 本决策的思考预算档位：会话级/请求级覆盖（T3）优先，否则按 thinking_mode。
     pub fn thinking_effort(&self) -> ThinkingEffort {
-        self.thinking_mode.to_thinking_effort()
+        self.effort_override
+            .unwrap_or_else(|| self.thinking_mode.to_thinking_effort())
     }
 }

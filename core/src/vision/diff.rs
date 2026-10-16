@@ -61,7 +61,7 @@ pub fn pixel_diff(a: &[u8], b: &[u8], width: u32, height: u32) -> Vec<DiffRegion
             for c in 0..4 {
                 let av = a[idx + c] as i32;
                 let bv = b[idx + c] as i32;
-                diff_sum += (av - bv).abs() as u32;
+                diff_sum += (av - bv).unsigned_abs();
             }
             if diff_sum > CHANNEL_DIFF_SUM_THRESHOLD {
                 changed += 1;

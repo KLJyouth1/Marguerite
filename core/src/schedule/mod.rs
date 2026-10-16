@@ -363,7 +363,9 @@ fn execute_cmd(session: &str, cmd: &crate::cli::dslash::ScheduleCmd) -> String {
         crate::cli::dslash::ScheduleCmd::At { iso, message } => {
             let ts = match chrono::DateTime::parse_from_rfc3339(iso) {
                 Ok(t) => t.timestamp_millis(),
-                Err(_) => return format!("时刻解析失败（需要 RFC3339，如 2026-08-22T10:00:00Z）: {iso}"),
+                Err(_) => {
+                    return format!("时刻解析失败（需要 RFC3339，如 2026-08-22T10:00:00Z）: {iso}")
+                }
             };
             match store.register(session, message, ReminderTrigger::At { ts_ms: ts }, now_ms) {
                 Ok(r) => format!("已注册提醒 {}：{}「{}」", r.id, iso, r.message),
@@ -396,8 +398,8 @@ fn execute_cmd(session: &str, cmd: &crate::cli::dslash::ScheduleCmd) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
     /// 测试串行锁（与 goal 同策略：DB 路径为进程级环境变量，测试需互斥）
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -407,7 +409,8 @@ mod tests {
     }
 
     fn isolated_db(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mgt_schedule_{name}_{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("mgt_schedule_{name}_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("schedule.db")
     }
@@ -419,7 +422,12 @@ mod tests {
         let _g = lock_tests();
         let mut store = ScheduleStore::open(Some(isolated_db("after"))).unwrap();
         let r = store
-            .register("s1", "休息提醒", ReminderTrigger::After { seconds: 60 }, NOW)
+            .register(
+                "s1",
+                "休息提醒",
+                ReminderTrigger::After { seconds: 60 },
+                NOW,
+            )
             .unwrap();
         assert_eq!(r.next_fire_ms, NOW + 60_000);
         assert!(store.due("s1", NOW + 59_999).is_empty());
@@ -464,7 +472,14 @@ mod tests {
         let mut store = ScheduleStore::open(Some(isolated_db("every_min"))).unwrap();
         assert_eq!(
             store
-                .register("s1", "x", ReminderTrigger::Every { interval_seconds: 299 }, NOW)
+                .register(
+                    "s1",
+                    "x",
+                    ReminderTrigger::Every {
+                        interval_seconds: 299
+                    },
+                    NOW
+                )
                 .unwrap_err(),
             ScheduleError::FrequencyTooHigh
         );
@@ -502,7 +517,11 @@ mod tests {
         let after = store.list("s1");
         assert_eq!(after.len(), 1);
         assert!(!after[0].fired, "every 不置 fired");
-        assert_eq!(after[0].next_fire_ms, NOW + interval_ms * 4, "不枚举积压，锚点对齐");
+        assert_eq!(
+            after[0].next_fire_ms,
+            NOW + interval_ms * 4,
+            "不枚举积压，锚点对齐"
+        );
     }
 
     #[test]

@@ -44,6 +44,10 @@ impl Embedding for OrtEmbedding {
     fn dim(&self) -> usize {
         self.dim
     }
+
+    fn name(&self) -> &'static str {
+        "fastembed-minilm-l6-v2"
+    }
 }
 
 /// 运行时验证（仅 `--features real-embed` 下编译/运行）：

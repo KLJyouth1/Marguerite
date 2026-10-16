@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
+from spa_source import spa
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB_ROUTES = REPO_ROOT / "opensquilla-webui" / "src" / "router" / "webRoutes.ts"
-SETTINGS_VIEW = REPO_ROOT / "opensquilla-webui" / "src" / "views" / "web" / "SettingsView.vue"
+WEB_ROUTES = spa("src/router/webRoutes.ts")
+SETTINGS_VIEW = spa("src/views/web/SettingsView.vue")
 
 
 def test_setup_deep_link_redirects_into_vue_settings() -> None:

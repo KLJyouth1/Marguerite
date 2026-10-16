@@ -188,6 +188,9 @@ def install_firewall_rules(specs: tuple[FirewallRuleSpec, ...]) -> None:
         ],
         capture_output=True,
         text=True,
+        # 中文 Windows 的 PowerShell 输出为 GBK（本机代码页）；缺 `errors` 时
+        # 读取线程会抛 UnicodeDecodeError，防火墙安装的失败详情随之丢失。
+        errors="replace",
         check=False,
     )
     if completed.returncode != 0:

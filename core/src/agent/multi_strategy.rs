@@ -46,6 +46,8 @@ pub struct MultiStrategyStats {
     pub unique_results: AtomicU64,
     /// 被去重丢弃的重复结果数
     pub deduped: AtomicU64,
+    /// 执行失败的策略数（其结果被丢弃，但其余策略的产出仍保留）
+    pub failed: AtomicU64,
 }
 
 /// 一次多策略并行运行的结果
@@ -107,9 +109,29 @@ pub async fn run_multi_strategy<B: ChatBackend>(
     // 真正并行：join_all 同时驱动全部策略（修正「标称并行、实则顺序 await」的旧实现）。
     let raws = futures_util::future::join_all(futures).await;
 
+    // 保留成功策略的产出，只丢弃失败的那一个。
+    //
+    // 历史缺陷：原实现用 `contents.push(r?.content)`，任一策略出错就 `?` 提前返回，
+    // 把**所有已经算完的成功结果**一起丢掉 —— 一个策略网络抖动，整轮多策略白跑。
+    // 现在改为：收集全部成功产出；仅当**没有任何**策略成功时，才返回首个错误（保持
+    // fail-fast 语义，单策略失败仍会 propagate）。
     let mut contents = Vec::with_capacity(n);
+    let mut first_err: Option<anyhow::Error> = None;
+    let mut failed = 0u64;
     for r in raws {
-        contents.push(r?.content);
+        match r {
+            Ok(resp) => contents.push(resp.content),
+            Err(e) => {
+                failed += 1;
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    if contents.is_empty() {
+        return Err(first_err
+            .unwrap_or_else(|| anyhow::anyhow!("多策略并行没有可用策略（strategies 为空）")));
     }
     let (aggregated, dup) = dedupe(contents);
 
@@ -117,6 +139,7 @@ pub async fn run_multi_strategy<B: ChatBackend>(
         strategies_ran: AtomicU64::new(n as u64),
         unique_results: AtomicU64::new(aggregated.len() as u64),
         deduped: AtomicU64::new(dup),
+        failed: AtomicU64::new(failed),
     };
 
     let final_answer = match selector {
@@ -294,17 +317,19 @@ async fn run_tool_loop_for_strategy(
             .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
             .collect();
         let results = cycle.execute_sequential(calls).await?;
-        for (tc, res) in resp.tool_calls.iter().zip(results.into_iter()) {
+        for (tc, res) in resp.tool_calls.iter().zip(results) {
             let output = match &res {
                 ToolResult::Success { data, .. } => data.clone(),
                 ToolResult::Error { message, code } => format!("[工具错误 {code}] {message}"),
                 ToolResult::Timeout { tool_name, .. } => format!("[工具超时] {tool_name}"),
             };
+            // P2-10/T14：该路径未按单工具计时（多策略聚合），诚实置 None。
             messages.push(Message::Tool {
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
                 output,
                 timestamp: Utc::now(),
+                elapsed_ms: None,
             });
         }
     }
@@ -578,6 +603,57 @@ mod tests {
         let err = run_multi_strategy("任务", strategies, None::<Fail>).await;
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("strategy down"));
+    }
+
+    /// 回归守卫：部分策略失败时，成功策略的产出**必须保留**。
+    #[tokio::test]
+    async fn partial_failure_keeps_successes() {
+        struct Flaky {
+            fail: bool,
+            reply: String,
+        }
+        impl ChatBackend for Flaky {
+            async fn chat(&self, _m: &[Message]) -> Result<LLMResponse> {
+                if self.fail {
+                    return Err(anyhow!("strategy down"));
+                }
+                Ok(LLMResponse {
+                    content: self.reply.clone(),
+                    thinking: None,
+                    model: "flaky".into(),
+                    usage: crate::model::llm::TokenUsage::default(),
+                    tool_calls: Vec::new(),
+                })
+            }
+        }
+        let strategies = vec![
+            strategy(
+                "ok",
+                "s",
+                Flaky {
+                    fail: false,
+                    reply: "好结果".into(),
+                },
+            ),
+            strategy(
+                "bad",
+                "s",
+                Flaky {
+                    fail: true,
+                    reply: String::new(),
+                },
+            ),
+        ];
+        let r = run_multi_strategy("任务", strategies, None::<Flaky>)
+            .await
+            .expect("有一个策略成功就不应整轮失败");
+        assert_eq!(r.aggregated, vec!["好结果".to_string()]);
+        assert_eq!(r.final_answer.as_deref(), Some("好结果"));
+        assert_eq!(
+            r.stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "失败策略数应被计入统计"
+        );
     }
 
     #[test]

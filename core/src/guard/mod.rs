@@ -6,12 +6,18 @@
 //! 3. 事实检查（本地知识库 + MCP 查询）
 //! 4. 代码契约（@pre/@post/@invariant 验证）
 
+pub mod approval_registry;
 pub mod contract;
+pub mod device_perms;
+pub mod escalation;
+pub mod escalation_registry;
 pub mod fact;
 pub mod gateway;
 pub mod repair;
 pub mod semantic;
 pub mod syntax;
+pub mod tool_intent;
+pub mod trust;
 
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +120,10 @@ pub struct GuardConfig {
     /// 契约检查开关
     #[serde(default = "default_true")]
     pub contract: bool,
+    /// v3.3.1：审批门超时（秒）。挂起审批超过该时长自动拒绝（fail-closed）。
+    /// 0 = 使用默认 60s。此前硬编码 60s，长审批流（用户离开工位）常被误拒。
+    #[serde(default)]
+    pub approval_timeout_secs: u64,
 }
 
 fn default_true() -> bool {
@@ -127,6 +137,7 @@ impl Default for GuardConfig {
             semantic: true,
             fact: true,
             contract: true,
+            approval_timeout_secs: 0, // 0 = ApprovalGate 内部默认 60s
         }
     }
 }

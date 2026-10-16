@@ -25,9 +25,14 @@ provenance:
   maintained_by: Marguerite
 metadata:
   opensquilla:
+    # ``bash`` / ``git`` are *binary* requirements; see audit-third-party for why
+    # listing them under ``requires_tools`` silently hid this skill from every prompt.
+    requires:
+      bins:
+        - bash
+        - git
     requires_tools:
-      - bash
-      - git
+      - exec_command
 ---
 
 # Clone Third-Party Skill（批量克隆第三方仓库 · 生产级韧性协议）

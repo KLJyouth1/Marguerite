@@ -198,7 +198,14 @@ def test_audio_cog_is_openrouter_compatible_without_cellcog_key(
     assert spec.metadata is not None
     assert spec.metadata.requires is not None
     assert "CELLCOG_API_KEY" not in spec.metadata.requires.env
-    assert check_eligibility(spec, EligibilityContext.auto())
+    # The subject here is the credential contract, not the host: ``audio-cog``
+    # declares ``bins: [python3]``, a POSIX-only binary name that a stock Windows
+    # install does not expose, so an ``.auto()`` probe would fail this assertion on
+    # the interpreter rather than on the env semantics it is checking.
+    assert check_eligibility(
+        spec,
+        EligibilityContext(os_name="linux", has_bin_cache={"python3": True}),
+    )
 
 
 def test_awesome_webpage_config_contract_keeps_runtime_values_in_config() -> None:

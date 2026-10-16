@@ -25,11 +25,9 @@
 //!   [`StreamReceiver`]」的闭包。因此**无需网络即可单测**真流式行为。
 //! - **诚实**：`TextDelta` 是**收到即转发**，不做任何缓冲攒批；事件顺序即真实时序。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-
-#[cfg(test)]
-use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -37,13 +35,25 @@ use tokio::sync::mpsc;
 
 use crate::agent::runtime::parse_tool_args;
 use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
+use crate::agent::tool_schema::{discovery_query, ToolDisclosure, DISCOVER_TOOLS_NAME};
 use crate::mcp::registry::ToolRegistry;
-use crate::model::llm::{LLMChunk, ToolCall as LlmToolCall};
+use crate::model::llm::{LLMChunk, ToolCall as LlmToolCall, ToolDef};
 use crate::model::StreamReceiver;
 use crate::types::Message;
 
 /// opencode `DOOM_LOOP_THRESHOLD`（processor.ts:24）
+///
+/// **纠正阈值**：末尾连续这么多次「同名同参」调用 → 判定模型在重复自己，
+/// **不中止整轮**，而是在工具结果里注入纠正提示（见 [`DOOM_LOOP_ABORT`]）。
 pub const DOOM_LOOP_THRESHOLD: usize = 3;
+
+/// doom-loop **硬中止阈值**：注入纠正提示后仍以完全相同参数重复到此数 → 判定卡死，
+/// 如实上报并中止回路。
+///
+/// 历史缺陷（v0.2.10 修复）：此前只有一档阈值，命中即 `return Err` 炸掉整轮并触发
+/// 「降级为纯文本推理」——在单工具锚定面下（模型手上只有 `str_replace_editor`），
+/// 「同一编辑工具连续调用 3 次」是**必然发生**的正常轨迹，于是正常任务被误杀。
+pub const DOOM_LOOP_ABORT: usize = 5;
 
 /// 退化重复默认阈值：连续同一行重复达到此数即判定模型卡死并停止外发
 pub const DEFAULT_REPEAT_THRESHOLD: usize = 3;
@@ -62,10 +72,17 @@ pub enum AgentEvent {
     Thinking { text: String },
     /// 本轮结束（对应 `finish-step`）
     StepFinish { round: u32, reason: Option<String> },
-    /// 模型请求调用工具（对应 `tool-call`）
-    ToolCall { name: String, arguments: String },
-    /// 工具执行结果（对应 `tool-result` / `tool-error`）；`ok=false` 表示错误或超时
+    /// 模型请求调用工具（对应 `tool-call`）；`id` 为模型给出的调用 id（无则 `None`）
+    ToolCall {
+        id: Option<String>,
+        name: String,
+        arguments: String,
+    },
+    /// 工具执行结果（对应 `tool-result` / `tool-error`）；`ok=false` 表示错误或超时。
+    /// `id` 与对应 [`AgentEvent::ToolCall`] 的 id 一致 —— 供前端**精确配对**，
+    /// 不再靠「工具名 + 时钟」猜身份（那会让同毫秒的同名调用互相吞并 / 结果另起一条）。
     ToolResult {
+        id: Option<String>,
         name: String,
         output: String,
         ok: bool,
@@ -77,7 +94,14 @@ pub enum AgentEvent {
     /// 回路收敛，给出最终文本
     Done { text: String },
     /// 出错（对应 `error`）
-    Error { message: String },
+    ///
+    /// R65/B1：`code` 为**稳定错误码**（来自 `model::error_taxonomy::code_of`，如
+    /// `AUTH_FAILED`）；前端按码本地化，而不是回显 `message`（后者可能是上游英文正文
+    /// 或内部术语）。无法归类时为 `None`，前端回退到服务端文案。
+    Error {
+        message: String,
+        code: Option<String>,
+    },
 }
 
 /// 流式聚合器：边收边分离思考链、边检测退化重复（蓝图 §2.3 输出去冗余）
@@ -232,6 +256,53 @@ where
     F: FnMut(Vec<Message>) -> Fut,
     Fut: Future<Output = Result<StreamReceiver>>,
 {
+    run_tool_loop_streaming_inner(
+        history,
+        registry,
+        None,
+        events,
+        max_rounds,
+        move |messages, _tools| round_stream(messages),
+    )
+    .await
+}
+
+/// 带按需 schema 发现的流式工具回路。旧入口仍保持固定工具面的兼容契约。
+pub async fn run_tool_loop_streaming_with_disclosure<F, Fut>(
+    history: &mut Vec<Message>,
+    registry: Arc<ToolRegistry>,
+    disclosure: ToolDisclosure,
+    events: mpsc::Sender<AgentEvent>,
+    max_rounds: u32,
+    round_stream: F,
+) -> Result<String>
+where
+    F: FnMut(Vec<Message>, Vec<ToolDef>) -> Fut,
+    Fut: Future<Output = Result<StreamReceiver>>,
+{
+    run_tool_loop_streaming_inner(
+        history,
+        registry,
+        Some(disclosure),
+        events,
+        max_rounds,
+        round_stream,
+    )
+    .await
+}
+
+async fn run_tool_loop_streaming_inner<F, Fut>(
+    history: &mut Vec<Message>,
+    registry: Arc<ToolRegistry>,
+    mut disclosure: Option<ToolDisclosure>,
+    events: mpsc::Sender<AgentEvent>,
+    max_rounds: u32,
+    mut round_stream: F,
+) -> Result<String>
+where
+    F: FnMut(Vec<Message>, Vec<ToolDef>) -> Fut,
+    Fut: Future<Output = Result<StreamReceiver>>,
+{
     let cycle = ToolCycle::new(registry);
     // 按时序累积的 `(工具名, 入参)`，仅用于 doom-loop 判定
     let mut call_log: Vec<(String, String)> = Vec::new();
@@ -239,14 +310,16 @@ where
     for round in 1..=max_rounds {
         let _ = events.send(AgentEvent::StepStart { round }).await;
 
-        let mut rx = match round_stream(history.clone()).await {
+        let active_tools = disclosure
+            .as_ref()
+            .map(ToolDisclosure::active_tools)
+            .unwrap_or_default();
+        let mut rx = match round_stream(history.clone(), active_tools).await {
             Ok(rx) => rx,
             Err(e) => {
-                let _ = events
-                    .send(AgentEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
+                let message = e.to_string();
+                let code = crate::model::error_taxonomy::code_of(&e).map(str::to_string);
+                let _ = events.send(AgentEvent::Error { message, code }).await;
                 return Err(e);
             }
         };
@@ -261,11 +334,9 @@ where
             let chunk = match item {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = events
-                        .send(AgentEvent::Error {
-                            message: e.to_string(),
-                        })
-                        .await;
+                    let message = e.to_string();
+                    let code = crate::model::error_taxonomy::code_of(&e).map(str::to_string);
+                    let _ = events.send(AgentEvent::Error { message, code }).await;
                     return Err(e);
                 }
             };
@@ -312,6 +383,13 @@ where
             .await;
 
         // 无工具调用 → 回路收敛
+        // P2-B 兼容层：本地权重可能把动作写在 content 里（tool_calls 恒为空），
+        // 先尝试桥接成标准工具调用；桥得上就继续走工具执行，而不是当成最终答复收敛。
+        if tool_calls.is_empty() {
+            if let Some(bridged) = crate::model::llm::bridge_content_action(agg.content()) {
+                tool_calls.push(bridged);
+            }
+        }
         if tool_calls.is_empty() {
             let text = agg.content().to_string();
             let thinking = if agg.thinking().is_empty() {
@@ -328,46 +406,102 @@ where
             return Ok(text);
         }
 
-        // doom-loop 检测：先记账再判定，命中即如实上报并中止（不静默烧满轮数）
+        // doom-loop 检测（两档，先记账再判定）：
+        // - 达「硬中止阈值」：模型确实卡死 → 如实上报并中止（不静默烧满轮数）；
+        // - 达「纠正阈值」：**不中止整轮** —— 执行照旧，但在工具结果里注入纠正提示，
+        //   让模型改参数/换工具。同参重复本身不等于任务失败，炸整轮才是。
         for tc in &tool_calls {
             call_log.push((tc.name.clone(), tc.arguments.clone()));
         }
-        if let Some((tool, repeats)) = detect_doom_loop(&call_log, DOOM_LOOP_THRESHOLD) {
+        let repeated: Option<(String, usize)> = match detect_doom_loop(&call_log, DOOM_LOOP_ABORT) {
+            Some((tool, repeats)) => {
+                let _ = events
+                    .send(AgentEvent::DoomLoop {
+                        tool: tool.clone(),
+                        repeats,
+                    })
+                    .await;
+                return Err(anyhow!(
+                    "检测到 doom-loop：工具 `{tool}` 连续 {repeats} 次同名同参调用，已中止回路"
+                ));
+            }
+            None => detect_doom_loop(&call_log, DOOM_LOOP_THRESHOLD),
+        };
+        if let Some((tool, repeats)) = &repeated {
             let _ = events
-                .send(AgentEvent::DoomLoop {
-                    tool: tool.clone(),
-                    repeats,
+                .send(AgentEvent::Thinking {
+                    text: format!(
+                        "> 检测到重复调用：工具 `{tool}` 已连续 {repeats} 次以相同参数调用；\
+已注入纠正提示，不中止整轮。"
+                    ),
                 })
                 .await;
-            return Err(anyhow!(
-                "检测到 doom-loop：工具 `{tool}` 连续 {repeats} 次同名同参调用，已中止回路"
-            ));
         }
 
         for tc in &tool_calls {
             let _ = events
                 .send(AgentEvent::ToolCall {
+                    id: tc.id.clone(),
                     name: tc.name.clone(),
                     arguments: tc.arguments.clone(),
                 })
                 .await;
         }
 
-        let calls: Vec<CycleToolCall> = tool_calls
-            .iter()
-            .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
-            .collect();
-        let results = match cycle.execute_sequential(calls).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = events
-                    .send(AgentEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
-                return Err(e);
+        // P2：发现工具只扩充下一轮可见 schema，不进入执行注册表；真实工具仍走原 ToolCycle。
+        // 按模型返回顺序串行收集结果，保证每个 ToolCall 都有同序 ToolResult。
+        let tool_batch_started = std::time::Instant::now();
+        let mut results = Vec::with_capacity(tool_calls.len());
+        for tc in &tool_calls {
+            let result = if disclosure
+                .as_ref()
+                .is_some_and(|d| d.is_discovery_tool(&tc.name))
+            {
+                if let Some(disclosure) = disclosure.as_mut() {
+                    let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    let output = discovery_query(&args)
+                        .map(|query| disclosure.discover(query))
+                        .unwrap_or_else(|| "发现工具需要提供字符串参数 query。".to_string());
+                    Ok(vec![ToolResult::Success {
+                        data: output,
+                        metadata: HashMap::new(),
+                    }])
+                } else {
+                    cycle
+                        .execute_sequential(vec![CycleToolCall::new(
+                            &tc.name,
+                            parse_tool_args(&tc.arguments),
+                        )])
+                        .await
+                }
+            } else if disclosure.as_ref().is_some_and(|d| !d.permits(&tc.name)) {
+                Ok(vec![ToolResult::Error {
+                    message: format!(
+                        "工具 `{}` 尚未加载参数 schema。请先调用 `{}` 并描述所需能力，再在下一轮调用该工具。",
+                        tc.name, DISCOVER_TOOLS_NAME
+                    ),
+                    code: "TOOL_SCHEMA_NOT_LOADED".to_string(),
+                }])
+            } else {
+                cycle
+                    .execute_sequential(vec![CycleToolCall::new(
+                        &tc.name,
+                        parse_tool_args(&tc.arguments),
+                    )])
+                    .await
+            };
+            match result {
+                Ok(mut one) => results.append(&mut one),
+                Err(e) => {
+                    let message = e.to_string();
+                    let code = crate::model::error_taxonomy::code_of(&e).map(str::to_string);
+                    let _ = events.send(AgentEvent::Error { message, code }).await;
+                    return Err(e);
+                }
             }
-        };
+        }
+        let tool_batch_elapsed_ms = tool_batch_started.elapsed().as_millis() as u64;
 
         // 回传 reasoning_content（DeepSeek thinking 模式要求多轮回传）
         // 必须在 Tool 消息之前插入，messages_to_api 会将其合并到 assistant.tool_calls 消息
@@ -384,16 +518,28 @@ where
             });
         }
 
-        for (tc, res) in tool_calls.iter().zip(results.into_iter()) {
-            let (output, ok) = match &res {
+        for (tc, res) in tool_calls.iter().zip(results) {
+            let (mut output, ok) = match &res {
                 ToolResult::Success { data, .. } => (data.clone(), true),
                 ToolResult::Error { message, code } => {
                     (format!("[工具错误 {code}] {message}"), false)
                 }
                 ToolResult::Timeout { tool_name, .. } => (format!("[工具超时] {tool_name}"), false),
             };
+            // 同参重复的纠正提示：注进工具结果本身，模型下一轮必然读到；
+            // 只提醒、不改判定（`ok` 仍如实反映真实执行结果）。
+            if let Some((tool, repeats)) = &repeated {
+                if *tool == tc.name {
+                    output = format!(
+                        "[重复调用提醒] 你已连续 {repeats} 次以**完全相同的参数**调用 `{}`；\
+相同的参数不会得到不同结果。请改变参数、换用其它工具，或直接给出结论。\n\n{output}",
+                        tc.name
+                    );
+                }
+            }
             let _ = events
                 .send(AgentEvent::ToolResult {
+                    id: tc.id.clone(),
                     name: tc.name.clone(),
                     output: output.clone(),
                     ok,
@@ -405,6 +551,8 @@ where
                 input: tc.arguments.clone(),
                 output,
                 timestamp: Utc::now(),
+                // 单轮单工具 → 该批耗时即该工具耗时；多工具批无法拆分 → None（诚实）。
+                elapsed_ms: (tool_calls.len() == 1).then_some(tool_batch_elapsed_ms),
             });
         }
     }
@@ -695,10 +843,12 @@ mod tests {
         assert_eq!(text, "done");
         let events = drain(rx).await;
         assert!(events.contains(&AgentEvent::ToolCall {
+            id: None,
             name: "echo".to_string(),
             arguments: "{\"m\":\"x\"}".to_string()
         }));
         assert!(events.contains(&AgentEvent::ToolResult {
+            id: None,
             name: "echo".to_string(),
             output: "echo:x".to_string(),
             ok: true
@@ -712,20 +862,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_loop_loads_discovered_schema_on_next_request() {
+        let mut history = vec![user("解释一下这段代码")];
+        let mut tools = vec![
+            ToolDef {
+                name: "read_file".into(),
+                description: "读取文件".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
+            ToolDef {
+                name: "office_automation".into(),
+                description: "创建 Excel 工作簿".into(),
+                parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string"}}}),
+            },
+        ];
+        tools.extend((0..12).map(|i| ToolDef {
+            name: format!("special_{i}"),
+            description: "专用能力".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }));
+        let disclosure = ToolDisclosure::new(&tools, "解释项目用途", crate::mode::ModeKind::Agent);
+        let (tx, rx) = mpsc::channel(64);
+        let visible = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let seen = visible.clone();
+        let text = run_tool_loop_streaming_with_disclosure(
+            &mut history,
+            echo_registry(),
+            disclosure,
+            tx,
+            4,
+            move |_messages, active| {
+                let names = active
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>();
+                seen.lock().unwrap().push(names.clone());
+                let round = seen.lock().unwrap().len();
+                async move {
+                    if round == 1 {
+                        assert!(!names.iter().any(|name| name == "office_automation"));
+                        Ok(synthetic_stream(vec![tool_chunk(
+                            DISCOVER_TOOLS_NAME,
+                            r#"{"query":"操作 Excel 工作簿"}"#,
+                        )]))
+                    } else {
+                        assert!(names.iter().any(|name| name == "office_automation"));
+                        Ok(synthetic_stream(vec![
+                            text_chunk("完成"),
+                            finish_chunk("stop"),
+                        ]))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "完成");
+        assert_eq!(visible.lock().unwrap().len(), 2);
+        assert!(history.iter().any(|message| matches!(
+            message,
+            Message::Tool { name, output, .. }
+                if name == DISCOVER_TOOLS_NAME && output.contains("office_automation")
+        )));
+        let _ = drain(rx).await;
+    }
+
+    #[tokio::test]
     async fn stream_loop_breaks_on_doom_loop() {
         let mut history = vec![user("go")];
         let (tx, rx) = mpsc::channel(64);
-        // 永远返回同一工具同一入参 → 应在 DOOM_LOOP_THRESHOLD 处中止，而非烧满 max_rounds
+        // 永远返回同一工具同一入参 → 应在 DOOM_LOOP_ABORT（纠正无效后）处中止，而非烧满 max_rounds
         let result = run_tool_loop_streaming(&mut history, echo_registry(), tx, 20, |_m| async {
             Ok(synthetic_stream(vec![tool_chunk("echo", "{\"m\":\"x\"}")]))
         })
         .await;
-        assert!(result.is_err(), "doom-loop 应中止回路");
+        assert!(result.is_err(), "纠正后仍死循环应中止回路");
         let events = drain(rx).await;
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AgentEvent::DoomLoop { tool, repeats } if tool == "echo" && *repeats == DOOM_LOOP_THRESHOLD
+                AgentEvent::DoomLoop { tool, repeats } if tool == "echo" && *repeats == DOOM_LOOP_ABORT
             )),
             "须如实上报 DoomLoop 事件，实际事件：{events:?}"
         );
@@ -735,8 +951,77 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::StepStart { .. }))
             .count();
         assert!(
-            starts <= DOOM_LOOP_THRESHOLD + 1,
+            starts <= DOOM_LOOP_ABORT + 1,
             "应尽早中止，实跑 {starts} 轮"
+        );
+    }
+
+    /// **关键回归**：同参重复达「纠正阈值」时**绝不中止整轮** ——
+    /// 必须照常执行、把纠正提示注进工具结果，让模型有机会自行改道后正常收敛。
+    ///
+    /// 历史缺陷：命中即 `return Err` 会炸掉整轮并降级为纯文本推理；而在单工具锚定面下
+    /// （模型手上只有 `str_replace_editor`）「同一编辑工具连续调用 3 次」必然发生。
+    #[tokio::test]
+    async fn stream_loop_corrects_same_arg_repeats_without_aborting() {
+        let mut history = vec![user("go")];
+        let (tx, rx) = mpsc::channel(64);
+        let mut round = 0u32;
+        // 前 3 轮完全相同的调用（触发纠正阈值），第 4 轮改道 → 第 5 轮收敛给出正文
+        let text = run_tool_loop_streaming(&mut history, echo_registry(), tx, 8, move |_m| {
+            round += 1;
+            let r = round;
+            async move {
+                if r <= 3 {
+                    Ok(synthetic_stream(vec![tool_chunk(
+                        "echo",
+                        "{\"m\":\"same\"}",
+                    )]))
+                } else if r == 4 {
+                    Ok(synthetic_stream(vec![tool_chunk(
+                        "echo",
+                        "{\"m\":\"changed\"}",
+                    )]))
+                } else {
+                    Ok(synthetic_stream(vec![
+                        text_chunk("收敛"),
+                        finish_chunk("stop"),
+                    ]))
+                }
+            }
+        })
+        .await
+        .expect("同参重复达纠正阈值后不得中止整轮，应能正常收敛");
+
+        assert_eq!(text, "收敛");
+        let events = drain(rx).await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::DoomLoop { .. })),
+            "未达硬中止阈值不得上报 DoomLoop 中止事件"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::Thinking { text } if text.contains("已注入纠正提示") )
+            ),
+            "须如实上报「已注入纠正提示」，实际事件：{events:?}"
+        );
+        // 纠正提示确实注进了工具结果（模型下一轮必然读到）
+        assert!(
+            history.iter().any(|m| matches!(
+                m,
+                Message::Tool { output, .. } if output.contains("[重复调用提醒]")
+            )),
+            "纠正提示必须写进工具结果"
+        );
+        // 第 3 次同参调用的结果里，提醒文案须点明重复次数
+        assert!(
+            history.iter().any(|m| matches!(
+                m,
+                Message::Tool { output, .. }
+                    if output.contains(&format!("连续 {} 次", DOOM_LOOP_THRESHOLD))
+            )),
+            "提醒须点明重复次数 {DOOM_LOOP_THRESHOLD}"
         );
     }
 
@@ -751,10 +1036,54 @@ mod tests {
         assert!(result.is_err());
         let events = drain(rx).await;
         assert!(
-            events.iter().any(
-                |e| matches!(e, AgentEvent::Error { message } if message.contains("upstream exploded"))
-            ),
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. } if message.contains("upstream exploded")
+            )),
             "须如实上报上游错误，实际事件：{events:?}"
+        );
+        // R65/B1：未归类错误 → `code` 为 None（前端回退到服务端文案，不误报稳定码）。
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, AgentEvent::Error { code: Some(_), .. })),
+            "纯字符串错误不应伪造稳定码，实际事件：{events:?}"
+        );
+    }
+
+    /// R65/B1：内层已归类的错误（provider AUTH_FAILED）→ 事件带稳定码，
+    /// 前端据此本地化，而不是展示 `code: message` 英文正文。
+    #[tokio::test]
+    async fn stream_loop_attaches_stable_code_when_classified() {
+        let mut history = vec![user("hi")];
+        let (tx, rx) = mpsc::channel(64);
+        let boom = || {
+            anyhow::Error::new(crate::model::error_taxonomy::ProviderError::from_status(
+                401,
+                "raw upstream body",
+            ))
+        };
+        let result = run_tool_loop_streaming(&mut history, echo_registry(), tx, 4, move |_m| {
+            let boom = boom();
+            async move { Err(boom) }
+        })
+        .await;
+        assert!(result.is_err());
+        let events = drain(rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { code: Some(c), .. } if c == "AUTH_FAILED"
+            )),
+            "已归类错误须带稳定码 AUTH_FAILED，实际事件：{events:?}"
+        );
+        // 用户可见文案不得回显上游原始正文。
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                AgentEvent::Error { message, .. } if message.contains("raw upstream body")
+            )),
+            "不得回显上游原始正文：{events:?}"
         );
     }
 

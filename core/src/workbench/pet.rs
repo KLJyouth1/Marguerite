@@ -3,9 +3,9 @@
 //! 纯逻辑、无渲染、可单测。能量夹紧 `0..=100`；低能转 `Sleepy`；
 //! 互动（`pet`）/ 投喂（`feed`）回能并升 `Happy`。
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// 鲸鱼娘心情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,13 @@ fn now_ms() -> u64 {
 }
 
 fn store_path() -> PathBuf {
+    // 单测隔离：注入的临时配置目录优先（避免读写真实用户数据）
+    #[cfg(test)]
+    {
+        if let Some(dir) = crate::persistence::config::Config::current_config_dir_override() {
+            return dir.join("pet_state.json");
+        }
+    }
     crate::persistence::config::Config::data_dir().join("pet_state.json")
 }
 

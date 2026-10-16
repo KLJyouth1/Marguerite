@@ -2251,6 +2251,33 @@ class _EnvWithoutConfigVersion(PydanticBaseSettingsSource):
         return values
 
 
+class OpsHostRef(BaseModel):
+    """运维只读主机条目（``ops.hosts[]``）。
+
+    复用 Rust ``crate::ops::HostRef`` 的字段契约（``id``/``address``/
+    ``credential_ref``）。``credential_ref`` 只存引用不存密钥明文；它在
+    任何响应/错误边界都必须被脱敏（见 ``gateway/rpc_ops.py``）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    address: str
+    credential_ref: str = ""
+
+
+class OpsConfig(BaseModel):
+    """运维只读主机表（``ops.hosts``）。
+
+    空表表示未配置：``ops.list_hosts`` 返回空列表而非报错（与 Rust
+    ``Config::ops`` 默认行为一致）。主机条目经 :class:`OpsHostRef` 校验。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hosts: list[OpsHostRef] = Field(default_factory=list)
+
+
 class GatewayConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="OPENSQUILLA_GATEWAY_",
@@ -2327,6 +2354,11 @@ class GatewayConfig(BaseSettings):
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     diagnostics_enabled: bool = False
     channel_admin_senders: dict[str, list[str]] = Field(default_factory=dict)
+
+    # 运维只读主机表（``ops.hosts``）：``ops.list_hosts`` 的真实数据源。
+    # 默认空表（零行为变化），配置后 ``ops.*`` 才拿到真实主机。``credential_ref``
+    # 只存引用不存密钥明文；响应/错误边界一律脱敏（见 ``gateway/rpc_ops.py``）。
+    ops: OpsConfig = Field(default_factory=OpsConfig)
 
     @property
     def effective_run_mode(self) -> str:
@@ -3352,6 +3384,9 @@ _PUBLIC_SECRET_EXACT_KEYS = frozenset(
         "signing_secret",
         "app_secret",
         "verification_token",
+        # ``ops.hosts[].credential_ref`` names a host credential reference.
+        # It must never surface on a public control surface (see rpc_ops.py).
+        "credential_ref",
         # Channel-crypto secrets that no generic suffix above catches:
         # channels.feishu.encrypt_key (event decryption key) and
         # channels.wecom.encoding_aes_key (callback AES key). Exact names on

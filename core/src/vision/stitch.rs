@@ -35,7 +35,7 @@ pub struct StitchReport {
 fn bbox_valid(b: &[f64; 4]) -> bool {
     for &v in b.iter() {
         // NaN 不满足任何比较，故 `!is_finite()` 显式拦截。
-        if !v.is_finite() || v < 0.0 || v > 1.0 {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
             return false;
         }
     }
@@ -188,7 +188,13 @@ mod tests {
         assert!(merged.is_empty(), "空输入返回空");
         let (m2, report) = stitch_ocr_report(&[]);
         assert!(m2.is_empty());
-        assert_eq!(report, StitchReport { merged: 0, rejected: 0 });
+        assert_eq!(
+            report,
+            StitchReport {
+                merged: 0,
+                rejected: 0
+            }
+        );
     }
 
     #[test]

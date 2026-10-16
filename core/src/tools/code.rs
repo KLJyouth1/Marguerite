@@ -81,6 +81,11 @@ async fn run_code(language: &str, code: &str, timeout: Duration) -> Result<CodeO
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        // Python: 强制 UTF-8 输出，避免中文乱码
+        if interp.starts_with("python") {
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            cmd.env("PYTHONUTF8", "1");
+        }
         #[cfg(windows)]
         {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW

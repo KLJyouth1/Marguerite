@@ -227,8 +227,14 @@ mod tests {
         assert!(b.due(t0).is_empty(), "t0 未到点");
         assert_eq!(b.due(t10).len(), 1, "t10 到点");
         b.advance(&id, t10).unwrap();
-        assert_eq!(b.get(&id).unwrap().last_run_ms, Some(t10.timestamp_millis()));
-        assert_eq!(b.get(&id).unwrap().next_run_ms, Some(t20.timestamp_millis()));
+        assert_eq!(
+            b.get(&id).unwrap().last_run_ms,
+            Some(t10.timestamp_millis())
+        );
+        assert_eq!(
+            b.get(&id).unwrap().next_run_ms,
+            Some(t20.timestamp_millis())
+        );
         assert!(b.due(t10).is_empty(), "推进后 t10 不再到点");
     }
 

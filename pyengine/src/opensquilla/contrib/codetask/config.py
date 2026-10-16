@@ -97,6 +97,41 @@ def build_workspace_dir() -> Path:
     return default_opensquilla_home() / "workspace"
 
 
+# ---------------------------------------------------------------------------
+# Git-worktree isolation for parallel tasks (task = worktree)
+# ---------------------------------------------------------------------------
+# Worktree checkouts live OUTSIDE any source repo (default under the
+# OpenSquilla home) so the user's checkout is never polluted — mirroring the
+# clone-mode invariant in workspace.py. Only git-managed metadata under the
+# source repo's .git/worktrees/ is written, and `git worktree prune` clears it.
+DEFAULT_MAX_CONCURRENT_WORKTREES = 4
+
+
+def worktrees_root() -> Path:
+    """Root dir holding per-task git worktree checkouts + the registry.
+
+    Overridable with ``OPENSQUILLA_CODETASK_WORKTREES_DIR``.
+    """
+    override = os.environ.get("OPENSQUILLA_CODETASK_WORKTREES_DIR")
+    if override:
+        return Path(override).expanduser()
+    return default_opensquilla_home() / "worktrees"
+
+
+def max_concurrent_worktrees() -> int:
+    """Per-repo cap on simultaneously active task worktrees.
+
+    Env ``OPENSQUILLA_CODETASK_MAX_WORKTREES`` overrides; garbage values fall
+    back to the default. Always >= 1 (a cap of 0 would brick the feature).
+    """
+    raw = os.environ.get("OPENSQUILLA_CODETASK_MAX_WORKTREES", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_CONCURRENT_WORKTREES
+    return max(1, value)
+
+
 def run_dir(run_id: str) -> Path:
     """Per-run dir: <runs_root>/<run_id>/."""
     return runs_root() / run_id

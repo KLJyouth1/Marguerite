@@ -88,10 +88,7 @@ impl DecisionLog {
             fallback_reason: decision.fallback_reason.clone(),
             steps: decision.steps.clone(),
         };
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(f, "{}", serde_json::to_string(&entry)?)?;
         Ok(())
     }

@@ -81,25 +81,13 @@ pub fn decrypt_with_key(token: &str, key_b64: &str) -> Result<String> {
     String::from_utf8(plain).map_err(|_| anyhow!("api_key 解密后非 UTF-8"))
 }
 
-/// 加载或创建主密钥（首次使用自动生成并 0600 落盘）
+/// 加载主密钥（P0-2 起为「用户主口令 + PBKDF2 派生的 32 字节密钥」，经 [`crate::vault`]）。
+///
+/// 兼容旧签名保留函数名，但语义从「加载或随机生成」改为「**仅加载**」：
+/// Vault 未初始化（无 `vault.json`）时返回明确可诊断错误——**绝不静默回退为空密钥**。
+/// 首启须先经 `vault::set_master_passphrase` 显式设置主口令。
 pub fn load_or_create_master_key() -> Result<String> {
-    let p = key_path();
-    if p.exists() {
-        let k = std::fs::read_to_string(&p)?.trim().to_string();
-        if k.is_empty() {
-            return Err(anyhow!("主密钥文件为空: {}", p.display()));
-        }
-        // 校验长度
-        decode_key(&k)?;
-        return Ok(k);
-    }
-    let k = generate_key();
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&p, &k)?;
-    chmod_0600(&p)?;
-    Ok(k)
+    crate::vault::load_master_key()
 }
 
 /// 加密 API Key（使用主密钥，结果可直接存 `models.json`）

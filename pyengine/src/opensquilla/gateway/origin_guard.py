@@ -17,6 +17,14 @@ Policy (matches the bundle-route precedent):
   deliberately configured a separate frontend keeps a working deployment. The
   ``"*"`` wildcard never bypasses the guard; it would reopen the exact
   drive-by exposure this module exists to close.
+* The desktop WebView's ``localhost`` origin is trusted even when its port
+  differs from the gateway's (Tauri's dev server on ``:1420``, or a Tauri
+  asset-protocol port), and even when the page was loaded from ``localhost``
+  while the bundled frontend's API base resolves to ``127.0.0.1``. Both are
+  the same local machine, and the request authority has already been proven to
+  be the gateway's own loopback binding, so the port/name mismatch is allowed.
+  This relaxation is scoped to the ``localhost`` name and never to loopback IP
+  literals, so a cross-port ``127.0.0.1`` request stays rejected.
 * Everything else — including the opaque ``"null"`` origin and unparsable
   values — is rejected with 403 ``FORBIDDEN_ORIGIN``.
 """
@@ -97,6 +105,20 @@ def _is_loopback_hostname(hostname: str | None) -> bool:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return False
+
+
+def _is_localhost_hostname(hostname: str | None) -> bool:
+    """Match the literal ``localhost`` name and its ``.localhost`` subdomains.
+
+    Distinguished from the broader :func:`_is_loopback_hostname` (which also
+    covers loopback IP literals) because the WebView trust relaxation must apply
+    only to the ``localhost`` *name* — never to a cross-port ``127.0.0.1``
+    origin, which stays rejected to preserve the CSRF posture.
+    """
+    normalized = _normalized_hostname(hostname)
+    if normalized is None:
+        return False
+    return normalized == "localhost" or normalized.endswith(".localhost")
 
 
 def _is_ip_literal(hostname: str | None) -> bool:
@@ -189,6 +211,10 @@ def _origin_allowed(
     ):
         return True
     normalized_request_scheme = _http_equivalent_scheme(request_scheme)
+    # The request must genuinely target the gateway's own binding before any
+    # relaxation is considered. This blocks DNS-rebinding (a hostile hostname
+    # that resolves to loopback) and remote peers from reaching the branch
+    # below.
     if config is not None and not _request_authority_matches_config(
         request_scheme=normalized_request_scheme,
         request_hostname=request_hostname,
@@ -196,12 +222,28 @@ def _origin_allowed(
         config=config,
     ):
         return False
-    return (
+    # Exact same-origin (scheme + host + port) always passes.
+    if (
         parsed.scheme == normalized_request_scheme
         and _normalized_hostname(parsed.hostname)
         == _normalized_hostname(request_hostname)
         and _effective_port(parsed.scheme, parsed_port)
         == _effective_port(normalized_request_scheme, request_port)
+    ):
+        return True
+    # WebView trust relaxation: the desktop client embeds the control UI from a
+    # ``localhost`` origin whose port need not equal the gateway's (Tauri's dev
+    # server on ``:1420``, or a Tauri asset-protocol port), and the bundled
+    # frontend's API base may resolve to ``127.0.0.1`` while the page was loaded
+    # from ``localhost``. Both are the same local machine, and the authority
+    # check above already proved the gateway is serving its own loopback
+    # binding, so the port/name mismatch is allowed. Scoped to the
+    # ``localhost`` name (never loopback IP literals) so a cross-port
+    # ``127.0.0.1`` origin stays rejected.
+    return (
+        parsed.scheme == normalized_request_scheme
+        and _is_localhost_hostname(parsed.hostname)
+        and _is_loopback_hostname(request_hostname)
     )
 
 

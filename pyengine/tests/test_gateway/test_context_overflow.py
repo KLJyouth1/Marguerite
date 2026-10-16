@@ -261,6 +261,16 @@ class _FailingTurnCompactionMarker:
         raise RuntimeError(f"marker unavailable for {session_key}")
 
 
+# AUTO_SUMMARIZE 只有在**压缩后的载荷估算 ≤ budget** 时才算成功，否则按设计拒绝
+# （gateway/context_overflow.py 的 compaction_insufficient 分支）。本仓估算器有两档：
+# 装了 tiktoken 时 ≈ chars/4；未装时（tiktoken 被 pyproject 放在 memory/recommended
+# 可选 extra，而门禁只装 dev）回退到保守的 utf8 bytes/2，估算值约翻倍——两档下
+# 「kept entry + 回放的 summary 文本 + 新消息」的地板实测为 11 / ~7 tokens。
+# budget=10 落在保守档地板之下 ⇒ 成功分支不可达，用例只会走拒绝分支（那是另一条
+# 有专门断言的路径）。20 在两档下都成立，且远低于压缩前的估算（121 / ~60）。
+_AUTO_BUDGET = 20
+
+
 def _cfg(
     policy: ContextOverflowPolicy,
     budget: int = 20,
@@ -442,7 +452,7 @@ async def test_hard_truncate_drops_oldest_history_until_fits() -> None:
 async def test_auto_summarize_invokes_compaction_and_retries_once() -> None:
     """AUTO_SUMMARIZE retries only after compacted payload is inside budget."""
 
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _FakeSessionManager(_history(6, 40))
     outcome = await apply_context_overflow_policy(
         config=cfg,
@@ -463,7 +473,7 @@ async def test_auto_summarize_invokes_compaction_and_retries_once() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_summarize_preserves_root_and_splits_auxiliary_executions() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET, flush_enabled=True)
     sm = _ResultCompactionSessionManager(_history(6, 40))
     flush_service = SimpleNamespace(
         execute=AsyncMock(
@@ -517,7 +527,7 @@ async def test_auto_summarize_checkpoint_runs_before_compact() -> None:
     sm = _CheckpointingSessionManager(_history(6, 40))
 
     outcome = await apply_context_overflow_policy(
-        config=_cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10),
+        config=_cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET),
         message="m",
         transcript=sm._transcript,
         session_key="s-checkpoint",
@@ -535,7 +545,7 @@ async def test_auto_summarize_checkpoint_failure_propagates_without_ephemeral_fa
 
     with pytest.raises(RuntimeError, match="checkpoint write failed"):
         await apply_context_overflow_policy(
-            config=_cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10),
+            config=_cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET),
             message="m",
             transcript=sm._transcript,
             session_key="s-checkpoint-fails",
@@ -550,7 +560,7 @@ async def test_auto_summarize_checkpoint_failure_propagates_without_ephemeral_fa
 async def test_auto_summarize_emits_started_and_completed_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _ResultCompactionSessionManager(_history(6, 40))
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -635,7 +645,7 @@ async def test_auto_summarize_cancelled_during_post_commit_read_emits_completed(
             await self.release_post_commit_read.wait()
             return await super().get_transcript(session_key)
 
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = PostCommitReadManager(_history(6, 40))
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -677,7 +687,7 @@ async def test_auto_summarize_cancelled_during_post_commit_read_emits_completed(
 async def test_auto_summarize_reports_durable_effect_when_request_still_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _InsufficientResultCompactionSessionManager(_history(6, 40))
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -711,7 +721,7 @@ async def test_auto_summarize_reports_durable_effect_when_request_still_over_bud
 async def test_auto_summarize_uses_ephemeral_trim_on_compaction_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _FailingCompactionSessionManager(_history(6, 40))
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -744,7 +754,7 @@ async def test_auto_summarize_uses_ephemeral_trim_on_compaction_exception(
 async def test_auto_summarize_uses_ephemeral_trim_when_marker_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _FakeSessionManager(_history(6, 40))
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -777,7 +787,7 @@ async def test_auto_summarize_uses_ephemeral_trim_when_marker_fails(
 
 @pytest.mark.asyncio
 async def test_auto_summarize_refuses_when_compaction_still_exceeds_budget() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _InsufficientCompactionSessionManager(_history(6, 40))
 
     outcome = await apply_context_overflow_policy(
@@ -846,7 +856,7 @@ async def test_session_payload_estimate_counts_rendered_structured_context_state
 
 @pytest.mark.asyncio
 async def test_auto_summarize_uses_fallback_summary_when_context_cannot_be_verified() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _SummaryReadFailureSessionManager(_history(6, 40))
 
     outcome = await apply_context_overflow_policy(
@@ -867,7 +877,7 @@ async def test_auto_summarize_uses_fallback_summary_when_context_cannot_be_verif
 
 @pytest.mark.asyncio
 async def test_auto_summarize_compacts_while_protect_flush_runs_in_background() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET, flush_enabled=True)
     sm = _FakeSessionManager(_history(6, 40))
     flush_service = SimpleNamespace(
         execute=AsyncMock(
@@ -900,7 +910,7 @@ async def test_auto_summarize_compacts_while_protect_flush_runs_in_background() 
     assert outcome.lifecycle is not None
     assert outcome.lifecycle.flush_receipt is outcome.flush_receipt
     assert outcome.lifecycle.refused is False
-    _assert_armed_compact_call(sm, "agent:main:s-flush", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-flush", _AUTO_BUDGET)
     await asyncio.sleep(0)
     flush_service.execute.assert_awaited_once()
 
@@ -909,7 +919,7 @@ async def test_auto_summarize_compacts_while_protect_flush_runs_in_background() 
 async def test_auto_summarize_flush_enabled_without_trigger_skips_flush_service() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_pre_compaction=False,
     )
@@ -930,12 +940,12 @@ async def test_auto_summarize_flush_enabled_without_trigger_skips_flush_service(
     assert outcome.retried is True
     assert outcome.flush_receipt is None
     flush_service.execute.assert_not_called()
-    _assert_armed_compact_call(sm, "agent:main:s-flush-disabled-trigger", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-flush-disabled-trigger", _AUTO_BUDGET)
 
 
 @pytest.mark.asyncio
 async def test_auto_summarize_compacts_when_distill_fails_after_checkpoint() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET, flush_enabled=True)
     sm = _CheckpointingSessionManager(_history(6, 40))
     flush_service = SimpleNamespace(
         execute=AsyncMock(side_effect=RuntimeError("bad json"))
@@ -957,7 +967,7 @@ async def test_auto_summarize_compacts_when_distill_fails_after_checkpoint() -> 
     assert outcome.refusal is None
     assert outcome.flush_receipt is None
     assert sm.calls == ["checkpoint", "compact"]
-    _assert_armed_compact_call(sm, "agent:main:s-distill-fails", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-distill-fails", _AUTO_BUDGET)
     await asyncio.sleep(0)
     assert flush_service.execute.await_args.kwargs["message_window"] == 0
 
@@ -966,7 +976,7 @@ async def test_auto_summarize_compacts_when_distill_fails_after_checkpoint() -> 
 async def test_auto_summarize_strict_semantic_failure_after_checkpoint_refuses() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_compaction_requires_safe_receipt=True,
     )
@@ -1011,7 +1021,7 @@ async def test_auto_summarize_strict_semantic_failure_after_checkpoint_refuses()
 async def test_auto_summarize_strict_invalid_checkpoint_receipt_refuses_compaction() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_compaction_requires_safe_receipt=True,
     )
@@ -1057,7 +1067,7 @@ async def test_auto_summarize_strict_invalid_checkpoint_receipt_refuses_compacti
 async def test_auto_summarize_strict_flush_receipt_refuses_before_compaction() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_compaction_requires_safe_receipt=True,
     )
@@ -1105,7 +1115,7 @@ async def test_auto_summarize_strict_flush_receipt_refuses_before_compaction() -
 async def test_auto_summarize_protect_flush_receipt_degrades_without_refusal() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_compaction_safety_mode="protect",
     )
@@ -1139,7 +1149,7 @@ async def test_auto_summarize_protect_flush_receipt_degrades_without_refusal() -
     assert outcome.retried is True
     assert outcome.reason is None
     assert outcome.refusal is None
-    _assert_armed_compact_call(sm, "agent:main:s-protect-flush", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-protect-flush", _AUTO_BUDGET)
     assert sm.compact_kwargs[0]["flush_receipt_status"] == "degraded_forensic"
     assert sm.compact_kwargs[0]["trigger_reason"] == "gateway_auto_summarize"
     await asyncio.sleep(0)
@@ -1153,7 +1163,7 @@ async def test_auto_summarize_compaction_failure_uses_ephemeral_trim() -> None:
             self.compact_calls.append((session_key, budget, config))
             raise RuntimeError("preimage unavailable")
 
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=False)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET, flush_enabled=False)
     sm = _FailingSessionManager(_history(6, 40))
 
     outcome = await apply_context_overflow_policy(
@@ -1175,7 +1185,7 @@ async def test_auto_summarize_compaction_failure_uses_ephemeral_trim() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_summarize_compacts_when_flush_service_is_missing() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET, flush_enabled=True)
     sm = _FakeSessionManager(_history(6, 40))
 
     outcome = await apply_context_overflow_policy(
@@ -1191,14 +1201,14 @@ async def test_auto_summarize_compacts_when_flush_service_is_missing() -> None:
     assert outcome.retried is True
     assert outcome.reason is None
     assert outcome.refusal is None
-    _assert_armed_compact_call(sm, "agent:main:s-missing-flush", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-missing-flush", _AUTO_BUDGET)
 
 
 @pytest.mark.asyncio
 async def test_auto_summarize_compacts_while_slow_flush_runs_in_background() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
-        budget=10,
+        budget=_AUTO_BUDGET,
         flush_enabled=True,
         flush_timeout_seconds=0.001,
         flush_background_timeout_seconds=42.0,
@@ -1237,7 +1247,7 @@ async def test_auto_summarize_compacts_while_slow_flush_runs_in_background() -> 
     assert outcome.retried is True
     assert outcome.reason is None
     assert outcome.refusal is None
-    _assert_armed_compact_call(sm, "agent:main:s-slow-flush", 10)
+    _assert_armed_compact_call(sm, "agent:main:s-slow-flush", _AUTO_BUDGET)
     assert flush_service.execute.await_args.kwargs["timeout"] == 42.0
 
     flush_release.set()
@@ -1246,7 +1256,7 @@ async def test_auto_summarize_compacts_while_slow_flush_runs_in_background() -> 
 
 @pytest.mark.asyncio
 async def test_auto_summarize_does_not_compact_twice_in_same_turn() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _InsufficientCompactionSessionManager(_history(6, 40))
     marker = _TurnCompactionMarker({"s-once"})
 
@@ -1266,7 +1276,7 @@ async def test_auto_summarize_does_not_compact_twice_in_same_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_auto_summarize_does_not_mark_turn_compacted() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _InsufficientCompactionSessionManager(_history(6, 40))
     marker = _TurnCompactionMarker()
 
@@ -1287,7 +1297,7 @@ async def test_failed_auto_summarize_does_not_mark_turn_compacted() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_summarize_forwards_compaction_config() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _FakeSessionManager(_history(6, 40))
     compaction_config = CompactionConfig(api_key="key", model="model")
 
@@ -1301,12 +1311,12 @@ async def test_auto_summarize_forwards_compaction_config() -> None:
     )
 
     assert outcome.summarized is True
-    assert sm.compact_calls == [("s-auto", 10, compaction_config)]
+    assert sm.compact_calls == [("s-auto", _AUTO_BUDGET, compaction_config)]
 
 
 @pytest.mark.asyncio
 async def test_auto_summarize_keeps_legacy_compact_manager_compatible() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _LegacyCompactSessionManager(_history(6, 40))
     compaction_config = CompactionConfig(api_key="key", model="model")
 
@@ -1320,14 +1330,14 @@ async def test_auto_summarize_keeps_legacy_compact_manager_compatible() -> None:
     )
 
     assert outcome.summarized is True
-    assert sm.compact_calls == [("s-auto", 10, None)]
+    assert sm.compact_calls == [("s-auto", _AUTO_BUDGET, None)]
 
 
 @pytest.mark.asyncio
 async def test_chat_send_accepts_turn_without_synchronous_context_overflow_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = SimpleNamespace(
         get_or_create=AsyncMock(return_value=SimpleNamespace(session_key="s-auto")),
     )
@@ -1374,7 +1384,7 @@ async def test_chat_send_accepts_turn_without_synchronous_context_overflow_gate(
 def test_chat_send_creates_webchat_session_with_agent_from_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = SimpleNamespace(
         get_or_create=AsyncMock(
             return_value=SimpleNamespace(
@@ -1419,7 +1429,7 @@ def test_chat_send_creates_webchat_session_with_agent_from_key(
 
 @pytest.mark.asyncio
 async def test_rpc_chat_auto_summarize_builds_provider_compaction_config() -> None:
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     sm = _FakeSessionManager(_history(6, 40))
     sm._storage = SimpleNamespace(
         get_session=AsyncMock(
@@ -1445,7 +1455,7 @@ async def test_rpc_chat_auto_summarize_builds_provider_compaction_config() -> No
 async def test_auto_summarize_without_session_manager_uses_proxy() -> None:
     """Without a session manager, AUTO degrades to drop-oldest proxy."""
 
-    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=_AUTO_BUDGET)
     outcome = await apply_context_overflow_policy(
         config=cfg,
         message="m",

@@ -135,7 +135,10 @@ impl WorkflowEngine {
             let mut ids: Vec<(String, bool)> = Vec::with_capacity(phase.items.len());
             for item in &phase.items {
                 let task = match &phase.detail {
-                    Some(d) => format!("{}\n\n【阶段说明】{}\n【工作区】{}", item, d, workspace_hint),
+                    Some(d) => format!(
+                        "{}\n\n【阶段说明】{}\n【工作区】{}",
+                        item, d, workspace_hint
+                    ),
                     None => format!("{}\n\n【工作区】{}", item, workspace_hint),
                 };
                 let role = format!("工作流「{}」阶段执行子代理", phase.title);
@@ -203,6 +206,7 @@ mod tests {
                 api_key: "offline".to_string(),
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
+                timeout_secs: 0,
             },
             ..Default::default()
         };

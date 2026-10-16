@@ -30,7 +30,12 @@ assert.ok(redactString('AKIAIOSFODNN7EXAMPLE').includes(REDACTED),
   'AWS access key should be redacted');
 
 // OpenAI project tokens
-assert.ok(redactString('sk-proj-bxOCXoWsaPj0IDE1yqlXCXIkWO1f').includes(REDACTED),
+// NOTE: this fixture used to be a realistic-looking `sk-proj-` value. Fixtures must be
+// recognisable as fixtures -- `scripts/check-secrets.py` fails the gate on any
+// key-shaped string that is not obviously a placeholder, and it cannot tell a pasted
+// real key from a convenient one. Every other case in this file is self-labelling
+// (`AKIAIOSFODNN7EXAMPLE`, `sk-ant-api03-abcdef...`, `npm_abcdef...`); this one now is too.
+assert.ok(redactString('sk-proj-FAKEabcdefghijklmnopqrstuvwxyz01').includes(REDACTED),
   'sk-proj- token should be redacted');
 
 // Anthropic tokens

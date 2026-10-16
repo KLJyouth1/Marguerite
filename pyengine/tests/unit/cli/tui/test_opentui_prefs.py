@@ -145,7 +145,7 @@ def test_alternating_reasons_never_renag() -> None:
     prefs.record_fallback_notice("0.5.0", "missing")
     for build in range(20):
         prefs.record_fallback_notice(f"0.{build}.0", "missing")
-    records = json.loads(prefs._prefs_path().read_text())["fallbackNotices"]
+    records = json.loads(prefs._prefs_path().read_text(encoding="utf-8"))["fallbackNotices"]
     assert len(records) <= 8
     # Eviction must drop the OLDEST pairs: keeping the oldest instead would
     # evict each just-recorded pair and turn the notice into a per-launch nag.

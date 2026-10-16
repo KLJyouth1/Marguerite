@@ -5,9 +5,9 @@
 //! - 首轮提示词 = 目标 + 指令「把工作区当持久记忆；完成回报 `completed`，受阻回报
 //!   `blocker: <原因>`」；
 //! - 后续轮 = 目标 + 上一轮报告 + 同样指令；
-//! - 每轮经 [`parse_report`] 判定结局：`completed` → 完成、`blocker:` → 受阻（取冒号后
-//!   文本，空则默认 `unspecified blocker`）、否则继续；到 `max_rounds` 上限仍未终结 →
-//!   [`RalphOutcome::RoundLimit`]。
+//! - 每轮经 [`parse_report`] 判定结局：`blocker:` → 受阻（取冒号后文本，空则默认
+//!   `unspecified blocker`）、`completed` → 完成、否则继续；到 `max_rounds` 上限仍未
+//!   终结 → [`RalphOutcome::RoundLimit`]。（先判 blocker，见 [`parse_report`] 的说明。）
 //!
 //! 执行体把「每轮 spawn 子代理」做成同步闭包注入（[`RalphRunner::run_with`]），
 //! 测试注入确定性假回复、生产接真实 `SubAgentManager`；纯同步逻辑、离线可测。
@@ -151,16 +151,18 @@ impl RalphRunner {
 
 /// 解析子代理报告文本为 `(terminal, reason)`。
 ///
-/// 判定顺序（对齐上游）：
-/// - 含 `completed`（大小写不敏感）→ 完成（`(true, "")`）；
+/// 判定顺序：
 /// - 含 `blocker:`（大小写不敏感）→ 受阻（`(true, 冒号后文本)`，空则默认
 ///   `"unspecified blocker"`）；
+/// - 否则含 `completed`（大小写不敏感）→ 完成（`(true, "")`）；
 /// - 否则继续（`(false, "")`）。
+///
+/// ⚠️ **必须先判 `blocker:` 再判 `completed`**。历史缺陷：原实现先查 `completed`，
+/// 于是 `"blocker: task not completed"` / `"blocker: 尚未 completed"` 这类**否定式**
+/// 报告被误判为「已完成」，Ralph 会在任务实际受阻时提前收工。显式声明的 blocker
+/// 应压过任何 `completed` 字样。
 pub fn parse_report(text: &str) -> (bool, String) {
     let lower = text.to_ascii_lowercase();
-    if lower.contains("completed") {
-        return (true, String::new());
-    }
     if let Some(pos) = lower.find("blocker:") {
         let after = text[pos + "blocker:".len()..].trim();
         let reason = if after.is_empty() {
@@ -169,6 +171,9 @@ pub fn parse_report(text: &str) -> (bool, String) {
             after.to_string()
         };
         return (true, reason);
+    }
+    if lower.contains("completed") {
+        return (true, String::new());
     }
     (false, String::new())
 }
@@ -189,7 +194,9 @@ pub fn sanitize_name(name: &str) -> String {
 /// 工作区记忆文件路径：`workspace/ralph/<sanitized_name>.json`。
 pub fn memory_path(workspace: &str, name: &str) -> PathBuf {
     let safe = sanitize_name(name);
-    PathBuf::from(workspace).join("ralph").join(format!("{safe}.json"))
+    PathBuf::from(workspace)
+        .join("ralph")
+        .join(format!("{safe}.json"))
 }
 
 /// 由目标派生记忆文件名（清理 + 去边界下划线 + 截断；空则回退 `ralph-run`）。
@@ -223,7 +230,10 @@ fn write_memory(
         "terminal": round.terminal,
         "reason": reason,
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap_or_default())
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    )
 }
 
 #[cfg(test)]
@@ -258,9 +268,28 @@ mod tests {
         assert!(term);
         assert_eq!(reason, "no access");
         // blocker: 后为空 → 默认原因。
-        assert_eq!(parse_report("blocker:"), (true, "unspecified blocker".to_string()));
+        assert_eq!(
+            parse_report("blocker:"),
+            (true, "unspecified blocker".to_string())
+        );
         // 否则继续。
         assert_eq!(parse_report("继续思考中..."), (false, String::new()));
+    }
+
+    /// 回归守卫：否定式 `completed` 不得盖过显式 blocker。
+    #[test]
+    fn parse_report_blocker_beats_negative_completed() {
+        // 历史缺陷：先判 `completed` → 这两条会被误判成「已完成」。
+        let (term, reason) = parse_report("blocker: task not completed");
+        assert!(term);
+        assert_eq!(reason, "task not completed");
+
+        let (term, reason) = parse_report("blocker: 尚未 completed");
+        assert!(term);
+        assert_eq!(reason, "尚未 completed");
+
+        // 没有 blocker 时，`completed` 仍判完成。
+        assert_eq!(parse_report("all done, completed"), (true, String::new()));
     }
 
     #[test]
@@ -350,6 +379,9 @@ mod tests {
     #[test]
     fn memory_path_shape() {
         let p = memory_path("/tmp/ws", "my/name");
-        assert_eq!(p, PathBuf::from("/tmp/ws").join("ralph").join("my_name.json"));
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/ws").join("ralph").join("my_name.json")
+        );
     }
 }

@@ -19,11 +19,11 @@ from typing import Any
 import pytest
 import structlog.testing
 from syrupy.assertion import SnapshotAssertion
-from test_tools.dispatch_corpus import ALL_CASES, CorpusCase
 
 from opensquilla.tool_boundary import ToolResult
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.types import current_tool_context
+from tests.test_tools.dispatch_corpus import ALL_CASES, CorpusCase
 
 # ---------------------------------------------------------------------------
 # Snapshot serialisation helpers

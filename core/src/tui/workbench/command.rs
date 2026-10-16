@@ -4,6 +4,7 @@
 //! 产生 [`UiEffect`] 交 `WorkbenchApp::apply_effects` 执行。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::mode::ModeKind;
 use crate::model::selector::profile_from_flags;
@@ -60,6 +61,8 @@ pub enum BuiltinCommand {
     Exit,
     /// 退出（别名）
     Quit,
+    /// 侧边栏聚焦并展开指定路径（dsh.sidebar.open_path）
+    Open,
 }
 
 /// 全部内置命令
@@ -67,7 +70,7 @@ pub fn all_commands() -> Vec<BuiltinCommand> {
     use BuiltinCommand::*;
     vec![
         Mode, Plan, Model, Models, Compact, New, Sessions, Restore, Export, Skills, Mcp, Ctx,
-        Memory, Tree, Automation, Status, Doctor, Help, Deploy, Collab, Exit, Quit,
+        Memory, Tree, Automation, Status, Doctor, Help, Deploy, Collab, Exit, Quit, Open,
     ]
 }
 
@@ -98,6 +101,7 @@ impl BuiltinCommand {
             Collab => "/collab",
             Exit => "/exit",
             Quit => "/quit",
+            Open => "/open",
         }
     }
 
@@ -127,6 +131,7 @@ impl BuiltinCommand {
             Collab => "协作事件流：join <名> / leave / send <消息>",
             Exit => "退出工作台",
             Quit => "退出工作台",
+            Open => "侧边栏聚焦并展开指定路径 → /open <path>",
         }
     }
 }
@@ -166,6 +171,17 @@ pub fn dispatch(state: &mut WorkbenchState, raw: &str) -> Vec<UiEffect> {
         "tree" => {
             state.active_activity = ActivityKind::Files;
             state.active_sidebar = SlotId::LeftSidebarFileTree;
+            vec![UiEffect::SwitchActivity(ActivityKind::Files)]
+        }
+        "open" => {
+            // dsh.sidebar.open_path：聚焦并展开侧边栏指定路径节点
+            let path = args.trim();
+            if path.is_empty() {
+                return vec![UiEffect::Render];
+            }
+            state.active_activity = ActivityKind::Files;
+            state.active_sidebar = SlotId::LeftSidebarFileTree;
+            state.sidebar_open_path = Some(PathBuf::from(path));
             vec![UiEffect::SwitchActivity(ActivityKind::Files)]
         }
         "automation" => vec![UiEffect::Render],
@@ -411,6 +427,23 @@ mod tests {
             eff.as_slice(),
             [UiEffect::SwitchMode(ModeKind::Plan)]
         ));
+    }
+
+    #[test]
+    fn test_dispatch_open_path_focuses_sidebar() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/open src/main.rs");
+        assert_eq!(s.active_activity, ActivityKind::Files);
+        assert_eq!(s.active_sidebar, SlotId::LeftSidebarFileTree);
+        assert_eq!(
+            s.sidebar_open_path.as_deref(),
+            Some(std::path::Path::new("src/main.rs"))
+        );
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, UiEffect::SwitchActivity(ActivityKind::Files))));
+        let eff2 = dispatch(&mut s, "/open");
+        assert!(eff2.iter().any(|e| matches!(e, UiEffect::Render)));
     }
 
     #[test]

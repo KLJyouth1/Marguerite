@@ -301,7 +301,7 @@ pub struct Reflection {
 ///
 /// 判定规则（确定性）：
 /// - 产出为空或纯空白 → 视为缺失；
-/// - 产出以 `[子任务` 开头且含 `失败` / `无结果` → 视为该阶段执行失败；
+/// - 产出是执行器写下的**失败占位**（见 [`is_failed_stage_output`]）→ 视为失败；
 /// - 其余视为有效产出。
 /// - `go = failed_stages.is_empty()`。
 ///
@@ -313,10 +313,7 @@ pub fn reflect_pass(summaries: &[String]) -> Reflection {
     for (i, s) in summaries.iter().enumerate() {
         let label = format!("阶段 {}", i + 1);
         let trimmed = s.trim();
-        let failed = trimmed.is_empty()
-            || (trimmed.starts_with("[子任务")
-                && (trimmed.contains("失败") || trimmed.contains("无结果")));
-        if failed {
+        if is_failed_stage_output(trimmed) {
             failed_stages.push(label.clone());
             notes.push(format!("{label}: 缺失/失败（工作记忆不可信）"));
         } else {
@@ -332,6 +329,36 @@ pub fn reflect_pass(summaries: &[String]) -> Reflection {
         failed_stages,
         notes,
     }
+}
+
+/// 判定一段阶段产出是否为「失败占位」（工作记忆不可信）。
+///
+/// 覆盖所有真实执行器产出的失败标记（见 `agent::team` / `agent::subagent`）：
+/// `[子任务 … 失败/无结果]`、`[子专家执行失败]`、`[子专家执行超时]`、
+/// `[子专家未完成]`、`[子专家无结果返回]`、`[成员 spawn 失败…]`、`[依赖环…]`。
+///
+/// ⚠️ 历史缺陷：原实现只认 `[子任务` 一种前缀，而真实执行器发的是
+/// `[子专家执行失败]` / `[成员 spawn 失败]` / `[依赖环…]`，于是反思门对失败的
+/// 阶段照样判 `go=true` —— 上游注释里写着的「fail-closed 交付门」形同虚设，
+/// 失败产出被当成有效结论交付。此函数与执行器的标记集合必须保持同步。
+fn is_failed_stage_output(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    const MARKERS: &[&str] = &[
+        "[子专家执行失败]",
+        "[子专家执行超时]",
+        "[子专家未完成]",
+        "[子专家无结果返回]",
+        "[成员 spawn 失败",
+        "[依赖环",
+    ];
+    if MARKERS.iter().any(|m| text.contains(m)) {
+        return true;
+    }
+    // 通用兜底：`[子任务 …]` / `[子专家 …]` 里含「失败 / 无结果 / 超时」。
+    (text.starts_with("[子任务") || text.starts_with("[子专家"))
+        && (text.contains("失败") || text.contains("无结果") || text.contains("超时"))
 }
 
 /// Kahn 拓扑分层：返回按依赖约束可分层的节点 id 批次（同批可并行）。
@@ -684,6 +711,30 @@ mod tests {
         let r = reflect_pass(&summaries);
         assert!(!r.go);
         assert_eq!(r.failed_stages, vec!["阶段 3".to_string()]);
+    }
+
+    /// 回归守卫：反思门必须识别**真实执行器**写下的失败占位，
+    /// 而不只是 `[子任务 …]` 这一种历史前缀。
+    #[test]
+    fn test_reflect_pass_detects_real_executor_markers() {
+        for marker in [
+            "[子专家执行失败] network error",
+            "[子专家执行超时]",
+            "[子专家未完成]",
+            "[子专家无结果返回]",
+            "[成员 spawn 失败: boom]",
+            "[依赖环：成员 b 的前置未达成，无法调度]",
+        ] {
+            let r = reflect_pass(&[marker.to_string()]);
+            assert!(
+                !r.go,
+                "反思门应把 `{marker}` 判为失败阶段，否则失败产出会被当成有效结论交付"
+            );
+            assert_eq!(r.failed_stages, vec!["阶段 1".to_string()]);
+        }
+        // 真实产出不得被误杀。
+        let ok = reflect_pass(&["[子专家 编码] 已交付 foo.rs，测试通过".to_string()]);
+        assert!(ok.go, "含 `[子专家 ` 前缀的真实产出不应被判失败");
     }
 
     #[test]

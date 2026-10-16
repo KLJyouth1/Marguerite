@@ -32,6 +32,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::proc::SilentCommand;
 use crate::tools::git::GitOutput;
 
 /// git 调用默认超时
@@ -270,7 +271,8 @@ impl GitCheckpoints {
         }
 
         let mut cmd = Command::new("git");
-        cmd.arg(subcommand)
+        cmd.silent()
+            .arg(subcommand)
             .args(extra)
             .current_dir(repo)
             .stdin(Stdio::null())

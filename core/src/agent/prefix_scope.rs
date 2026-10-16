@@ -92,6 +92,32 @@ mod tests {
         assert_ne!(stable_prefix_key(&a), stable_prefix_key(&b));
     }
 
+    /// 中段 volatile System（记忆召回/经验提示）逐轮变化，**不得**改变共享前缀键。
+    /// 否则团队/多轮共享缓存每次都是「新前缀」，`prefix_hits` 永远不涨。
+    #[test]
+    fn stable_prefix_key_ignores_mid_sequence_volatile_system() {
+        let turn = |recall: &str| {
+            vec![
+                sys("persona + kb"),
+                Message::User {
+                    content: "q".into(),
+                    timestamp: Utc::now(),
+                },
+                sys(recall),
+            ]
+        };
+        assert_eq!(
+            stable_prefix_key(&turn("召回 A")),
+            stable_prefix_key(&turn("召回 B —— 完全不同")),
+            "中段 volatile System 不得进入稳定前缀键"
+        );
+        // 但 leading System 变化必须检出
+        assert_ne!(
+            stable_prefix_key(&turn("召回 A")),
+            stable_prefix_key(&[sys("persona changed"), sys("x")])
+        );
+    }
+
     #[test]
     fn observe_records_reuse_on_repeat() {
         let s = shared_cache();

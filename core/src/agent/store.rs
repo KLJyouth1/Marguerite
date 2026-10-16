@@ -110,6 +110,10 @@ impl AgentStore {
                     existing.tools = b.tools;
                     existing.system_prompt = b.system_prompt;
                     existing.skills = b.skills;
+                    // P0-5：同步 `enabled`。内置智能体不可经 RPC 编辑（builtin_immutable），
+                    // 故其启用态只来自模板；不在这同步，旧装机（enabled:false）即使升级代码
+                    // 也不会被修正——缺陷会「修了等于没修」。
+                    existing.enabled = b.enabled;
                     changed = true;
                 }
             } else {
@@ -158,6 +162,10 @@ fn builtin_agents() -> Vec<AgentRecord> {
         "write_file",
         "edit_file",
         "apply_patch",
+        "make_dir",
+        "copy_file",
+        "move_file",
+        "delete_file",
         "list_dir",
         "find_files",
         "grep",
@@ -177,14 +185,14 @@ fn builtin_agents() -> Vec<AgentRecord> {
         "kb_search",
         "kb_ingest",
     ]);
-    vec![
+    let mut agents = vec![
         AgentRecord {
             id: "main".to_string(),
             name: "主智能体".to_string(),
             description: "通用助手，负责日常对话、任务编排与工具调用。".to_string(),
             tools: all_tools.clone(),
             skills: s(&["通用问答", "代码生成", "文件操作", "联网搜索", "浏览器操控"]),
-            system_prompt: "你是 Marguerite 主智能体，一个能力全面的 AI 助手。你拥有文件操作、联网搜索、浏览器自动化、电脑操控、代码执行、知识库、记忆、技能等工具。\n\n核心原则：\n1. 绝不轻易说「无法」「不能」「建议您手动」——你有工具，先调用工具尝试。\n2. 一个工具失败时，换另一个工具或方法继续，不要因一次失败就放弃整个任务。\n3. 已获取的信息要充分利用来完成任务，不要因为缺少某一条信息就宣布失败。\n4. 需要实时信息时用 web_search/web_fetch；需要网页交互时用 browser；需要操控电脑软件时用 system_control/computer_use。\n5. 主动判断何时需要调用工具，不要凭空猜测可查询的信息。\n6. 用与用户相同的语言回复，语言简洁、逻辑清晰，给出可执行的结果而非建议。\n\n上下文连续性（最重要）：\n7. 你必须仔细阅读并理解本次对话中的所有历史消息（用户和助手的每一轮），后续指令通常基于前文内容。\n8. 当用户说「整理成网页」「继续」「把上面的内容做成文件」等指代性指令时，必须回溯前文找到对应内容并直接执行，绝不能要求用户重新提供。\n9. 每次回复前先回顾：用户之前说了什么？我之前做了什么？用户现在要我做什么？确保行为连贯。\n10. 跨会话记忆：调用 memory_search 检索历史会话中的相关信息，结合记忆理解用户意图和偏好。\n11. 如果上下文中已有足够信息完成任务，直接完成，不要反问或要求重复输入。".to_string(),
+            system_prompt: "你是 Marguerite 主智能体，一个能力全面的 AI 助手。你拥有文件操作、联网搜索、浏览器自动化、电脑操控、代码执行、知识库、记忆、技能等工具。\n\n核心原则：\n1. 绝不轻易说「无法」「不能」「建议您手动」——你有工具，先调用工具尝试。\n2. 一个工具失败时，换另一个工具或方法继续，不要因一次失败就放弃整个任务。\n3. 已获取的信息要充分利用来完成任务，不要因为缺少某一条信息就宣布失败。\n4. 需要实时信息时用 web_search/web_fetch；需要网页交互时用 browser；需要操控电脑软件时用 system_control/computer_use。**但仅当任务确实需要外部实时信息时才联网**：创建/生成/整理/转换本地文件（Excel/Word/PPT/HTML/报告等）不需要联网，直接产出即可——为这类任务检索纯属浪费（拖长耗时且与交付无关）。\n5. 主动判断何时需要调用工具，不要凭空猜测可查询的信息；也**不要为了显得在做事而调用与任务无关的工具**，优先选最直接的那一个。\n5b. 生成文件（如 Excel/Word/PPT）时若需一次性脚本，**把脚本写到工作区之外的临时目录**（如 %TEMP%）并执行完即删；不要留在工作区——留在工作区的辅助脚本会被当作产物登记，淹没真正的交付物。\n6. 用与用户相同的语言回复，语言简洁、逻辑清晰，给出可执行的结果而非建议。\n\n上下文连续性（最重要）：\n7. 你必须仔细阅读并理解本次对话中的所有历史消息（用户和助手的每一轮），后续指令通常基于前文内容。\n8. 当用户说「整理成网页」「继续」「把上面的内容做成文件」等指代性指令时，必须回溯前文找到对应内容并直接执行，绝不能要求用户重新提供。\n9. 每次回复前先回顾：用户之前说了什么？我之前做了什么？用户现在要我做什么？确保行为连贯。\n10. 跨会话记忆：调用 memory_search 检索历史会话中的相关信息，结合记忆理解用户意图和偏好。\n11. 如果上下文中已有足够信息完成任务，直接完成，不要反问或要求重复输入。".to_string(),
             is_builtin: true,
             ..Default::default()
         },
@@ -298,7 +306,22 @@ fn builtin_agents() -> Vec<AgentRecord> {
             is_builtin: true,
             ..Default::default()
         },
-    ]
+    ];
+    // P0-5：内置智能体此前全用 `..Default::default()`，而 `AgentRecord` 的 `Default`
+    // 让 `enabled` 落为 `false` → `personality_for()` 对 `!enabled` 直接返回 `None`，
+    // 12 个内置专家的人格永不注入。这里按 id **显式**启用 main + 4 个常用角色，
+    // 其余保持禁用（用户可在界面按需打开）。不依赖 `Default`（其语义会被误读）。
+    const DEFAULT_ENABLED_BUILTINS: &[&str] = &[
+        "main",
+        "code-engineer",
+        "researcher",
+        "data-analyst",
+        "code-reviewer",
+    ];
+    for a in &mut agents {
+        a.enabled = DEFAULT_ENABLED_BUILTINS.contains(&a.id.as_str());
+    }
+    agents
 }
 
 fn apply_patch(record: &mut AgentRecord, params: &Value) {
@@ -380,7 +403,8 @@ pub fn personality_for(id: &str) -> Option<String> {
     }
     let mut sections: Vec<crate::persona::PersonaSection> = Vec::new();
     if !record.system_prompt.trim().is_empty() {
-        let (content, complete) = crate::persona::strip_complete_marker(record.system_prompt.trim());
+        let (content, complete) =
+            crate::persona::strip_complete_marker(record.system_prompt.trim());
         sections.push(crate::persona::PersonaSection {
             id: "core".into(),
             content,
@@ -522,6 +546,74 @@ mod tests {
         assert_eq!(v["systemPrompt"], v["system_prompt"]);
         assert_eq!(v["type"], "builtin");
         assert!(v["skills"].is_array());
+    }
+
+    /// P0-5：内置智能体默认启用 main + 4 个常用角色；其余保持禁用。
+    /// 直接对 `builtin_agents()` 断言（纯内存，不落盘、不触碰用户运行期 agents.json）。
+    #[test]
+    fn builtins_enable_only_the_common_set() {
+        let agents = builtin_agents();
+        let enabled: Vec<&str> = agents
+            .iter()
+            .filter(|a| a.enabled)
+            .map(|a| a.id.as_str())
+            .collect();
+        for id in [
+            "main",
+            "code-engineer",
+            "researcher",
+            "data-analyst",
+            "code-reviewer",
+        ] {
+            assert!(
+                enabled.contains(&id),
+                "{id} 应默认启用；实际启用: {enabled:?}"
+            );
+        }
+        for id in [
+            "writer",
+            "devops",
+            "browser-operator",
+            "computer-operator",
+            "code-architect",
+            "qa-engineer",
+            "product-manager",
+        ] {
+            let a = agents
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap_or_else(|| panic!("内置智能体 {id} 应存在"));
+            assert!(!a.enabled, "{id} 应保持禁用；实际启用: {enabled:?}");
+        }
+        assert_eq!(
+            enabled.len(),
+            5,
+            "应恰好启用 5 个内置智能体；实际: {enabled:?}"
+        );
+    }
+
+    /// P0-5 直接断言（QA 要求）：白名单 builtin 经**真实 API** `personality_for`
+    /// 必须能取到人格。此前只靠「`builtin_agents()` 白名单 + `personality_for` 对
+    /// `!enabled` 返回 `None`」的逻辑链间接保证；本测试对行为终点直接断言——
+    /// 首次访问触发全局台账 `seed_builtins`（含 P0-5 的 `enabled` 同步，升级路径）。
+    #[test]
+    fn personality_for_returns_some_for_whitelisted_builtin() {
+        for id in [
+            "main",
+            "code-engineer",
+            "researcher",
+            "data-analyst",
+            "code-reviewer",
+        ] {
+            let persona = personality_for(id)
+                .unwrap_or_else(|| panic!("白名单 builtin {id} 必须能取到人格（enabled 且非空）"));
+            assert!(!persona.trim().is_empty(), "{id} 的人格不得为空");
+        }
+        // 反向：非白名单 builtin 保持禁用 → personality_for 返回 None（P0-5 行为终点）。
+        assert!(
+            personality_for("writer").is_none(),
+            "writer 未在白名单，必须保持禁用（personality_for → None）"
+        );
     }
 
     #[test]

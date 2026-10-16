@@ -498,12 +498,11 @@ def test_windows_native_move_refuses_real_cross_volume_move() -> None:
     volume_a_value = os.environ.get("OPENSQUILLA_WINDOWS_TEST_VOLUME_A")
     volume_b_value = os.environ.get("OPENSQUILLA_WINDOWS_TEST_VOLUME_B")
     if not volume_a_value or not volume_b_value:
-        running_in_ci = os.environ.get("CI", "").strip().lower() not in {
-            "",
-            "0",
-            "false",
-        }
-        if running_in_ci:
+        # Fail closed on a *hosted* runner, skip on a developer machine. The
+        # probe is ``GITHUB_ACTIONS`` rather than the generic ``CI`` flag: many
+        # local tool shells export ``CI=true`` (this repository's own gate shell
+        # does), which turned a legitimate local skip into a hard failure.
+        if os.environ.get("GITHUB_ACTIONS", "").strip().lower() not in {"", "0", "false"}:
             pytest.fail("Windows CI must provide both synthetic test volume roots")
         pytest.skip("requires the two synthetic Windows test volume roots")
 

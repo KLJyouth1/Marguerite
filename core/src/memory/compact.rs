@@ -518,15 +518,23 @@ mod tests {
     }
 
     #[test]
-    fn compacted_memory_lands_in_stable_prefix_head() {
-        // P-9 ↔ P-7 接线证据：压缩记忆注入后必须落在 reorder_stable_prefix 的稳定半区。
+    fn compacted_memory_lands_in_volatile_zone_not_prefix_head() {
+        // P-9 ↔ P-7 接线证据（M2 降耗引擎修订）：压缩记忆是按本轮查询文本召回的
+        // 逐轮变化内容，注入后必须落在 reorder_stable_prefix 不再移动的 volatile
+        // 区（首个非 System 消息之后保持原位），不得抢占稳定前缀头——否则服务端
+        // KV 前缀从第 0 字节失配（实测 0/40 客户端命中、仅 9.7% 服务端命中的根因）。
         let mem = as_stable_prefix(&[obs("prior session learned X", &["X works"])]).unwrap();
         let mixed = vec![user("now do Y"), mem, assistant("ok")];
         let ordered = crate::context::optimize::reorder_stable_prefix(&mixed);
         assert_eq!(
+            ordered[1].role(),
+            "system",
+            "压缩记忆注入后保持原位（mid-sequence System 不被前置）"
+        );
+        assert_ne!(
             ordered[0].role(),
             "system",
-            "compacted memory must sit in the cacheable prefix"
+            "稳定前缀头不得被逐轮变化的召回内容占据"
         );
     }
 

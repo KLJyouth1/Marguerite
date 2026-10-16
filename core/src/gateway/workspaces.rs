@@ -125,6 +125,12 @@ fn view(entry: &WorkspaceEntry) -> Value {
     })
 }
 
+/// 按 id 取工作区条目（编辑器文件树/读写共用）
+pub fn get(id: &str) -> Option<WorkspaceEntry> {
+    let guard = store().lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(id).cloned()
+}
+
 /// `workspaces.list`
 pub fn list(_params: &Value) -> Value {
     let guard = store().lock().unwrap_or_else(|e| e.into_inner());

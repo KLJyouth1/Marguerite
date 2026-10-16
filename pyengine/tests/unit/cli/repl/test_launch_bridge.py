@@ -461,7 +461,7 @@ def test_launch_bridge_routes_interactive_structlog_to_file(
         assert captured.out == ""
         assert captured.err == ""
         assert terminal_stream.getvalue() == ""
-        log_text = (tmp_path / "interactive.log").read_text()
+        log_text = (tmp_path / "interactive.log").read_text(encoding="utf-8")
         assert "ui.hidden_warning" in log_text
         assert "ui.hidden_stdlib_warning" in log_text
     finally:

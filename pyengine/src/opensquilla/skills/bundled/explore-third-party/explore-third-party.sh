@@ -3,9 +3,16 @@
 # 逐仓分析，产出可吸收能力清单（语言/构建系统/入口/核心模式/供应链风险）。
 # 仅做只读侦察，不修改任何上游代码。
 #
-# 用法: bash explore-third-party.sh [<third_party 目录>]   （默认 /d/Downloads/Marguerite/third_party）
+# 用法: bash explore-third-party.sh [<third_party 目录>]   （默认 ./third_party，相对当前目录）
 set +e
-TP="${1:-/d/Downloads/Marguerite/third_party}"
+# 这里曾写死一个作者本机的绝对路径。third_party/ 本身是被 .gitignore 整个忽略的
+# （不随仓库分发），所以任何写死的绝对路径都只对作者成立。
+TP="${1:-third_party}"
+if [ ! -d "$TP/harness" ] && [ ! -d "$TP/computer_use" ]; then
+  echo "[FAIL] 找不到 $TP/{harness,computer_use} —— 请显式传入 third_party 目录。" >&2
+  echo "       用法: bash explore-third-party.sh <third_party 目录>" >&2
+  exit 2
+fi
 OUT="$TP/exploration_report.md"
 : > "$OUT"
 

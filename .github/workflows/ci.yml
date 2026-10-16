@@ -1,0 +1,373 @@
+# =============================================================================
+# Marguerite — continuous integration
+# -----------------------------------------------------------------------------
+# Five jobs, each answering one question a reviewer would ask:
+#
+#   docs     : do the docs still describe CLI surface that actually exists?
+#   webui    : does the Vue 3 console typecheck, pass its unit tests, and bundle?
+#   gui      : does the desktop shell's front end install from a clean checkout,
+#              then typecheck / lint / test / bundle?
+#   rust     : does the engine build, pass its unit tests, and stay warning-free?
+#   pyengine : does the Python sidecar's pytest suite pass?
+#
+# `rust` needs `webui` because the console bundle is a declared Tauri resource —
+# see the comment above the webui job. It consumes the real bundle as an
+# artifact instead of fabricating a placeholder, so a broken console fails CI.
+#
+# Two environment quirks of this repository are handled explicitly below and are
+# the reason this workflow is not a copy of a generic Rust/Node template:
+#
+#   1. rust-toolchain.toml pins `channel = "1.95.0-x86_64-pc-windows-msvc"` for
+#      the Windows developer machines. rustup cannot execute msvc binaries on a
+#      Linux runner, so every job selects a host-native 1.95.0 via
+#      RUSTUP_TOOLCHAIN (which outranks the toolchain file).
+#   2. NO_COLOR must be unset. With NO_COLOR=1 two pre-existing theme tests take
+#      the monochrome fallback path and fail even though nothing is broken
+#      (AGENTS.md §2). `scripts/verify.sh` unsets it for the same reason.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# Read-only: CI never needs to write to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the running job obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the pinned minor version in one place.
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Doc / Code CLI drift gate — pure standard-library Python, no deps.
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs / CLI drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships a python3; the script only imports re/sys/pathlib,
+      # so no setup-python and no pip install are required.
+      - name: Doc/Code CLI drift check
+        run: python3 scripts/check-doc-cli-drift.py
+
+      # The four front ends each declare a version and `core/Cargo.toml` is the
+      # single source of truth for it. Stdlib-only (io/json/os/re/sys), so it
+      # needs no setup-python either.
+      - name: Version consistency across the four front ends
+        run: python3 scripts/check-version-sync.py
+
+      # A real key reached this repository's history once (see AGENTS.md §4).
+      # This guard scans the commit set for key-shaped strings; a fixture must
+      # label itself (`sk-fake-...`) or it fails here. `git` comes from checkout.
+      - name: Secret scan of the shipping file set
+        run: python3 scripts/check-secrets.py
+
+      # Relative links in first-party docs must resolve. Scope is a positive
+      # allowlist, so vendored third-party skill packs cannot make this red.
+      - name: Doc link check (first-party docs)
+        run: python3 scripts/check-doc-links.py
+
+      # The two READMEs must agree on hard facts, and the gate total they print
+      # must equal the number of checks `verify.sh --all` dispatches -- this is
+      # what stops the landing page from advertising a gate that does not exist.
+      - name: README claims vs verify.sh
+        run: python3 scripts/check-readme-claims.py
+
+  # ---------------------------------------------------------------------------
+  # 2. Rust: unit tests, workspace build, clippy at -D warnings.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: rust / tests + workspace + clippy
+    runs-on: ubuntu-latest
+    # The workspace build cannot start until the console bundle exists (see the
+    # `webui` job); this job downloads that artifact rather than fabricating a
+    # placeholder, so CI exercises exactly the tree a user gets.
+    needs: [webui]
+    # Three heavy compilations share one target dir on a 2-core runner
+    # (core tests, full workspace incl. Tauri, clippy --all-targets).
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cargo build --workspace` includes gui/src-tauri (Tauri 2), which needs
+      # the WebKitGTK/GTK development packages at link time.
+      - name: Install Tauri 2 Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+
+      # rust-toolchain.toml pins the Windows msvc host triple; RUSTUP_TOOLCHAIN
+      # outranks that file, so select the host-native twin installed here.
+      - name: Select host-native Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests (marguerite-core lib)
+        run: |
+          # NO_COLOR=1 flips two existing theme tests to the monochrome fallback.
+          unset NO_COLOR
+          cargo test -p marguerite-core --lib
+
+      # gui/src-tauri calls `tauri::generate_context!()` with
+      # `bundle.resources = ["webui/dist", …]`, and Tauri 2 aborts the build
+      # script when a declared resource path is missing. gui/src-tauri/build.rs
+      # copies the repository-root `webui/dist` into `gui/src-tauri/webui/dist`
+      # during the build, so the console bundle must exist before this step.
+      # Verified locally: without it `cargo build --release -p marguerite-gui`
+      # exits 101 with "resource path `webui\dist` doesn't exist".
+      - name: Fetch console bundle built by the webui job
+        uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui/dist
+
+      - name: Workspace build
+        run: |
+          unset NO_COLOR
+          cargo build --workspace
+
+      - name: Clippy (marguerite-core, all targets, -D warnings)
+        run: |
+          unset NO_COLOR
+          cargo clippy -p marguerite-core --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # 3. Web UI: Vue 3 console — typecheck, unit tests, production bundle.
+  #
+  # This job also produces the artifact the `rust` job needs. `gui/src-tauri`
+  # declares `bundle.resources = ["webui/dist", …]` and Tauri 2 fails its build
+  # script outright when a declared resource path is absent:
+  #
+  #   error: failed to run custom build command for `marguerite-gui`
+  #   resource path `webui\dist` doesn't exist
+  #
+  # A fresh clone has no webui/dist (it is git-ignored, and gui/src-tauri/build.rs
+  # copies it in from the repository root during the build), so
+  # `cargo build --workspace` cannot succeed until the console has been built
+  # once. Verified locally on Windows/msvc: release build of `marguerite-gui`
+  # exits 101 with the message above when both webui/dist and
+  # gui/src-tauri/webui/dist are missing, and exits 0 once webui/dist exists.
+  # ---------------------------------------------------------------------------
+  webui:
+    name: webui / typecheck + tests + bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+
+      # webui/package.json declares engines.node >= 22.12.0 (Vite 8 / Vitest 4),
+      # so CI uses Node 22 rather than 20.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The console renders model output, so a sanitizer (dompurify) or id
+      # generator (nanoid) advisory is a real product risk, not just noise.
+      # CI previously had no audit step, and this repository was carrying
+      # 4 advisories (3 moderate + 1 high: dompurify XSS, nanoid loop) that
+      # nobody could see. `npm ci` above is the strict install; this step makes
+      # the advisory state visible and blocking so it cannot silently rot again.
+      # If this fails, run `npm audit` for the detail and `npm audit fix` when
+      # the fix is within the declared ranges.
+      - name: Dependency audit (moderate+)
+        run: npm run security:audit
+      # Runs the ten architecture guards (colors/motion/radius/theme-contract/
+      # i18n/…) and then `vue-tsc --noEmit`.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Keeps the README translations in lockstep with the app's locale list and
+      # the pinned Node minimum. Reads webui/.node-version + src/i18n/index.ts and
+      # the translated READMEs at the repo root, so it must run from webui/.
+      - name: README locale parity
+        run: node scripts/check-readme-locales.mjs
+
+      # `npm run build` = typecheck + vite build + dist/ artifact assertions.
+      - name: Production bundle
+        run: npm run build
+
+      - name: Upload console bundle for the rust job
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-dist
+          path: webui/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 4. Desktop shell front end (`gui/src`, React + Vite).
+  #
+  # `scripts/verify.sh --gui` has always covered this stack locally, but CI did
+  # not — and that omission is precisely how `gui/package-lock.json` drifted 85
+  # entries away from `gui/package.json` without anyone noticing. On a developer
+  # machine the four gui checks reuse an already-populated `node_modules` and so
+  # never run `npm ci`; on a clean checkout they could not even start
+  # (`'tsc' is not recognized`). This job runs the same five checks
+  # `verify.sh --gui` does, from a genuinely fresh install, so that class of drift
+  # fails here instead of on a user's first clone.
+  #
+  # Deliberately NOT included: `npm run security:audit`. This package carries 4
+  # advisories whose fix needs a breaking major bump of vite (8.x), and this React
+  # app is not reachable from the product UI — the Tauri window loads the
+  # gateway-served Vue console (AGENTS.md §1) — so that upgrade waits on the
+  # wire-up-or-remove decision rather than being forced here. `webui/`, the console
+  # users actually see, *is* audited in the job above.
+  # ---------------------------------------------------------------------------
+  gui:
+    name: gui / lockfile + typecheck + lint + tests + bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      # Runs before the install, and fails with the offending package names when
+      # `package.json` and `package-lock.json` disagree. `npm ci` below would also
+      # fail, but this step names the drift explicitly.
+      - name: Lockfile self-consistency
+        run: npm run --silent deps:lockfile-sync
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # `npm run build` = typecheck + vite build.
+      - name: Production bundle
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # 5. Python sidecar: the pytest suite that nothing else here ran.
+  # ---------------------------------------------------------------------------
+  # Every other job is Rust or Node, so before this job existed the sidecar's
+  # suite was executed by *nothing* in CI while the README advertised the
+  # `--pyengine` gate (AGENTS.md §2). A green badge that says nothing about the
+  # `pyengine/` tree is worse than no badge.
+  #
+  # Two details are deliberate:
+  #
+  #   1. It runs the same gate layer a developer runs (`verify.sh --pyengine`)
+  #      instead of a copy of the pytest invocation, so the marker exclusion list
+  #      has exactly one definition and cannot drift from the local gate.
+  #   2. It installs the dependency *sets* declared in `pyproject.toml` rather
+  #      than `pip install -e .`. An editable/wheel build of this package fails
+  #      closed by design: `hatch_build.py` demands a verified WebUI artifact at
+  #      `src/opensquilla/gateway/static/dist` (absent here) and inspects an
+  #      `opensquilla-webui/` directory that was never migrated -- this repo's
+  #      console is `webui/`. The suite does not need the package installed at
+  #      all: `[tool.pytest.ini_options] pythonpath = ["src"]` puts it on the
+  #      path, which is why `pip show opensquilla` is empty on a machine where
+  #      all 758 gated tests pass.
+  pyengine:
+    name: pyengine / sidecar unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pyengine
+    steps:
+      - uses: actions/checkout@v4
+
+      # The declared floor (`requires-python = ">=3.12"`), not the newest
+      # release: the floor is what the metadata promises users.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyengine/pyproject.toml
+
+      - name: Install declared dependencies (no package build)
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+          import tomllib
+
+          project = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]
+          deps = list(project["dependencies"])
+          deps += list(project.get("optional-dependencies", {}).get("dev", []))
+          subprocess.check_call(
+              [sys.executable, "-m", "pip", "install", "--upgrade", "pip"]
+          )
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
+          print(f"installed {len(deps)} declared dependencies")
+          PY
+
+      # `verify.sh` records a missing prerequisite as [SKIP] and still exits 0
+      # ("skipped != passed", AGENTS.md §8). Without this step a broken
+      # interpreter would let the job below go green having run nothing.
+      - name: Assert the gate layer can actually run
+        run: |
+          python -c "import pytest, pytest_asyncio"
+          test -d tests/unit
+          test -d tests/test_gateway
+
+      - name: Sidecar tests (tests/unit + tests/test_gateway, no network / no LLM)
+        run: bash ../scripts/verify.sh --pyengine
+
+      # Cheap whole-tree guard (~10s): 0 collection errors, and the
+      # not-collected list is printed with a named reason. Deliberately not part
+      # of `verify.sh`, which confines itself to the two gates it can actually
+      # finish (`tests/unit` + `tests/test_gateway`); a fresh CI container is the
+      # right place to import every test module.
+      - name: Whole-tree collection check (0 collection errors)
+        run: python ../scripts/check-pyengine-collection.py

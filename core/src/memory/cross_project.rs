@@ -110,8 +110,39 @@ fn expand_query(query: &str) -> String {
     format!("{} {}", query, extra.join(" "))
 }
 
+/// 大小写不敏感地在**原始串**中定位 ASCII 模式，返回原始串的字节偏移。
+///
+/// 直接扫描原串（不经过 `to_lowercase()` 副本），保证返回的偏移一定落在字符边界上，
+/// 从而修复「用 lowercase 副本的偏移去切原串」在非 ASCII 文本前的错位/越界缺陷。
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let n = needle.len();
+    if n == 0 || haystack.len() < n {
+        return None;
+    }
+    let hbytes = haystack.as_bytes();
+    let nbytes = needle.as_bytes();
+    let last = haystack.len() - n;
+    let mut i = 0;
+    while i <= last {
+        if haystack.is_char_boundary(i)
+            && haystack.is_char_boundary(i + n)
+            && hbytes[i..i + n].eq_ignore_ascii_case(nbytes)
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// 脱敏：替换形如 key=value / key: value 的敏感值
+///
+/// 对每个敏感键替换**全部**出现（而非仅第一处），且大小写不敏感匹配基于原串偏移，
+/// 避免非 ASCII 前缀下 `to_lowercase()` 变长导致的错位/越界。值仍替换为 `[REDACTED]`，
+/// 并保留既有 `end <= 64` 长度守卫。
 pub(crate) fn redact(text: &str) -> String {
+    /// 单模式最多处理的匹配数（防病态输入下的死循环；正常日志远低于此）。
+    const MAX_REDACT_MATCHES: usize = 4096;
     let mut out = text.to_string();
     for k in SECRET_KEYS {
         let lower = k.to_lowercase();
@@ -122,8 +153,14 @@ pub(crate) fn redact(text: &str) -> String {
             format!("\"{lower}\":"),
         ];
         for p in patterns {
-            if let Some(idx) = out.to_lowercase().find(&p) {
-                let start = idx + p.len();
+            // 游标推进：每次匹配后从 `key+分隔符` 之后继续。替换只改 `start` 之后的
+            // 内容，`out[..start]` 不变，故偏移在替换后依旧稳定。
+            let mut from = 0usize;
+            for _ in 0..MAX_REDACT_MATCHES {
+                let Some(rel) = find_ci(&out[from..], &p) else {
+                    break;
+                };
+                let start = from + rel + p.len();
                 let rest = &out[start..];
                 let end = rest
                     .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
@@ -132,6 +169,9 @@ pub(crate) fn redact(text: &str) -> String {
                     let replacement = format!("{}[REDACTED]", &out[..start]);
                     out = format!("{replacement}{}", &rest[end..]);
                 }
+                // 无论是否替换都前进：替换后 `out[..start]` 未变，偏移仍有效；
+                // 未替换则跳过本处匹配继续找下一个，避免死循环。
+                from = start;
             }
         }
     }
@@ -327,23 +367,51 @@ pub fn cross_project_expand(params: &Value) -> Value {
     })
 }
 
-/// 跨项目记忆自动注入：按查询召回本机各项目记忆，格式化为系统提示片段。
-///
-/// 与 [`cross_project_search`] 同一检索面（`~/.trae-cn/memory/projects/`），但直接产出
-/// 供系统提示注入的纯文本（来源项目标注 + 去重 + 脱敏 + 限长），避免把整段记忆塞进
-/// 上下文。无记忆目录 / 无相关命中 / 空查询时返回空串，绝不阻塞对话。
-///
-/// 用途：`run_turn` 前置调用，把跨项目既有经验随系统提示一起喂给模型。
 /// 跨项目记忆检索（纯召回，不含渲染）：返回去重后的 `(项目名, 脱敏片段)` 列表
 /// （按相似度降序、按 `limit` 截断）。`cross_project_recall_hint` 与 W-6 的
 /// `recall_stable_prefix` 共用同一检索面，保证两路召回结果一致。
-fn gather_recall_snippets(query: &str, limit: usize) -> Vec<(String, String)> {
+fn gather_recall_snippets_for_session(
+    query: &str,
+    limit: usize,
+    session: &str,
+) -> Vec<(String, String)> {
+    let mut rows = gather_recall_scored(query, limit);
+    let _ = integrate_synapse(session, query, &mut rows);
+    rows.into_iter().map(|r| (r.project, r.snippet)).collect()
+}
+
+/// 召回一条（内部）：含稳定 id 与分数，供联想记忆网络接入。
+#[derive(Debug, Clone)]
+struct RecallScored {
+    /// 稳定条目 id（隐私红线：仅哈希，不含记忆正文）
+    id: String,
+    project: String,
+    snippet: String,
+    score: f64,
+}
+
+/// 记忆条目稳定 id：`project + 片段` 的 FNV-1a 哈希（复用既有 [`crate::cache::hash_text`]）。
+/// 仅暴露哈希 id，绝不泄露记忆正文（隐私红线）。
+fn recall_id(project: &str, snippet: &str) -> String {
+    format!(
+        "{:016x}",
+        crate::cache::hash_text(&format!("{project}\u{1}{snippet}"))
+    )
+}
+
+/// 联想记忆网络对激活分的权重（基础相似度分 + 该权重 × 激活分）。
+const SYNAPSE_ACT_WEIGHT: f64 = 0.15;
+/// 事件 `ids` 字段上限。
+const RECALL_IDS_MAX: usize = 8;
+
+/// 与 [`gather_recall_snippets_for_session`] 同一打分逻辑，但保留稳定 id 与分数（synapse 接入所需）。
+fn gather_recall_scored(query: &str, limit: usize) -> Vec<RecallScored> {
     if query.trim().is_empty() {
         return Vec::new();
     }
     let q_vec = EmbeddingProvider::global().embed(&expand_query(query));
     let root = memory_root();
-    let mut hits: Vec<(String, String, f64)> = Vec::new(); // (project, snippet, score)
+    let mut hits: Vec<RecallScored> = Vec::new();
     for (project, path, _kind) in collect_files(&root) {
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
@@ -361,31 +429,94 @@ fn gather_recall_snippets(query: &str, limit: usize) -> Vec<(String, String)> {
                 continue;
             }
             let combined = line_score * 0.7 + full_score * 0.3;
-            hits.push((
-                project.clone(),
-                redact(&truncate_chars(&line, SNIPPET_CHARS)),
-                combined,
-            ));
+            let snippet = redact(&truncate_chars(&line, SNIPPET_CHARS));
+            hits.push(RecallScored {
+                id: recall_id(&project, &snippet),
+                project: project.clone(),
+                snippet,
+                score: combined,
+            });
         }
     }
-    // 分数降序 + 去重（同 project+snippet 只留一条），按 limit 截断
-    hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (project, snippet, _score) in hits {
-        if !seen.insert(format!("{project}:{snippet}")) {
-            continue;
-        }
-        out.push((project, snippet));
-        if out.len() >= limit.max(1) {
-            break;
-        }
-    }
-    out
+    hits.retain(|h| seen.insert(h.id.clone()));
+    hits.truncate(limit.max(1));
+    hits
 }
 
-pub fn cross_project_recall_hint(query: &str, limit: usize) -> String {
-    let snips = gather_recall_snippets(query, limit);
+/// 联想记忆网络接入点：① 共召回强化；② 扩散激活分参与重排；③ 落盘；④ 发
+/// `session.event.memory_recall` 事件。
+///
+/// 可关闭：`memory.synapse_enabled=false` 时**不**强化、**不**重排、**不**发事件，
+/// 结果与引入该功能前逐位一致。返回本次强化的共现对数。
+fn integrate_synapse(session: &str, query: &str, rows: &mut [RecallScored]) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    // 关闭开关：完全等价于既有行为（顺序/内容零变化，且不发事件）。
+    if !crate::memory::synapse::synapse_enabled() {
+        return 0;
+    }
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let graph = crate::memory::synapse::global_graph();
+    let reinforced = {
+        let mut g = graph.lock().unwrap_or_else(|e| e.into_inner());
+        let now = crate::cache::now_ms();
+        // 时间驱动的遗忘（生产接线）：权重不再只增不减，老边按间隔衰减直至被剪枝。
+        // 首次调用仅建立基准（不衰减）；间隔不足一个周期时是 no-op。
+        let _ = g.maybe_decay_by_elapsed(now);
+        let reinforced = g.reinforce(&ids, now);
+        // 扩散激活：以本轮命中的 id 为种子，取邻居激活分（确定性）
+        let act: std::collections::HashMap<String, f64> =
+            g.activate(&ids, rows.len().max(1)).into_iter().collect();
+        // 落盘（失败静默：联想记忆是尽力而为的增强，绝不阻塞召回）
+        let _ = g.save_to(&crate::memory::synapse::synapse_path());
+        drop(g);
+        // 重排：基础相似度 + 权重 × 激活分（同分按 id 稳定排序）
+        for r in rows.iter_mut() {
+            r.score += SYNAPSE_ACT_WEIGHT * act.get(&r.id).copied().unwrap_or(0.0);
+        }
+        rows.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        reinforced
+    };
+
+    // 事件（诚实可视化契约）：仅在有命中时发布；hits==0 不发。
+    let top_score = rows.first().map(|r| r.score.clamp(0.0, 1.0)).unwrap_or(0.0);
+    let ids_top: Vec<String> = rows
+        .iter()
+        .take(RECALL_IDS_MAX)
+        .map(|r| r.id.clone())
+        .collect();
+    if let Some(bus) = crate::events::global_bus() {
+        bus.publish(crate::events::Envelope::new(
+            crate::events::EventType::MemoryRecall,
+            serde_json::json!({
+                "sessionKey": session,
+                "query": query,
+                "hits": rows.len(),
+                "topScore": (top_score * 1000.0).round() / 1000.0,
+                "ids": ids_top,
+                "reinforced": reinforced,
+            }),
+            session,
+        ));
+    }
+    reinforced
+}
+
+pub fn cross_project_recall_hint(query: &str, limit: usize, session: &str) -> String {
+    let snips = gather_recall_snippets_for_session(query, limit, session);
     if snips.is_empty() {
         return String::new();
     }
@@ -403,8 +534,8 @@ pub fn cross_project_recall_hint(query: &str, limit: usize) -> String {
 /// 与 [`cross_project_recall_hint`] 同源检索，但产出固定格式（`## Recalled memory (compacted)`）
 /// 的 System 消息：相同召回结果逐字节稳定，可被 `PrefixCache` / 服务端 prompt caching 复用。
 /// 无命中 / 空查询时返回 `None`，绝不阻塞对话。
-pub fn recall_stable_prefix(query: &str, limit: usize) -> Option<Message> {
-    let snips = gather_recall_snippets(query, limit);
+pub fn recall_stable_prefix(query: &str, limit: usize, session: &str) -> Option<Message> {
+    let snips = gather_recall_snippets_for_session(query, limit, session);
     snippets_to_stable_prefix(&snips)
 }
 
@@ -462,6 +593,29 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_all_occurrences() {
+        // B1 回归：同一敏感键多次出现时，旧实现只替换第一处 → 后续值泄漏。
+        let s = redact("token=AAA 中间 token=BBB 末尾 token=CCC");
+        assert!(!s.contains("AAA"), "第一处应脱敏: {s}");
+        assert!(!s.contains("BBB"), "第二处不得泄漏: {s}");
+        assert!(!s.contains("CCC"), "第三处不得泄漏: {s}");
+        assert_eq!(s.matches("[REDACTED]").count(), 3, "三处都应脱敏: {s}");
+    }
+
+    #[test]
+    fn test_redact_non_ascii_prefix_no_panic() {
+        // 'İ' 的 to_lowercase() 会变长（2→3 字节）：旧实现用 lowercase 副本的偏移切原串，
+        // 会错位漏脱敏甚至切在非字符边界上 panic。
+        let s = redact("İİ token=SECRET123 结束");
+        assert!(!s.contains("SECRET123"), "非 ASCII 前缀不得漏脱敏: {s}");
+        assert!(s.contains("[REDACTED]"));
+        // 纯中文（多字节）前缀同样不得 panic
+        let s2 = redact("中文前缀 password=hunter2 后续");
+        assert!(!s2.contains("hunter2"), "中文前缀不得漏脱敏: {s2}");
+        assert!(s2.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn test_cross_project_search_empty_query() {
         let v = cross_project_search(&json!({}));
         assert!(v["items"].is_array());
@@ -492,16 +646,16 @@ mod tests {
 
     #[test]
     fn test_recall_hint_empty_query_returns_empty() {
-        assert!(cross_project_recall_hint("", 4).is_empty());
-        assert!(cross_project_recall_hint("   ", 4).is_empty());
+        assert!(cross_project_recall_hint("", 4, "s").is_empty());
+        assert!(cross_project_recall_hint("   ", 4, "s").is_empty());
     }
 
     #[test]
     fn test_recall_hint_missing_root_returns_empty() {
         // 无法覆盖 memory_root（固定 USERPROFILE）；至少保证确定性返回不 panic，
         // 且 limit=0 被 clamp 为 1 后行为一致。
-        let _ = cross_project_recall_hint("编译错误修复", 0);
-        let _ = cross_project_recall_hint("部署上线", 8);
+        let _ = cross_project_recall_hint("编译错误修复", 0, "s");
+        let _ = cross_project_recall_hint("部署上线", 8, "s");
     }
 
     // ── W-6：记忆召回主路径默认注入 as_stable_prefix（稳定前缀）──

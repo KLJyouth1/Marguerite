@@ -13,6 +13,7 @@
 //! 实时集成测试为 `#[ignore]`，需本机安装 Chromium 且联网（手动 `cargo test -- --ignored`）。
 
 pub mod cdp;
+pub mod collect;
 pub mod gateway;
 
 use std::path::PathBuf;
@@ -27,6 +28,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command as TokioCommand};
 use tokio_tungstenite::tungstenite::Message;
+
+use crate::proc::SilentCommand;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::warn;
 
@@ -301,6 +304,7 @@ impl BrowserBridge {
             .ok_or_else(|| anyhow!("未找到 Chromium/Chrome 可执行文件；browser_bridge 不可用"))?;
 
         let mut child = TokioCommand::new(&chrome)
+            .silent()
             .arg("--headless=new")
             .arg("--disable-gpu")
             .arg("--no-sandbox")
@@ -474,7 +478,7 @@ pub fn find_chrome() -> Option<PathBuf> {
         "msedge.exe",
     ];
     for name in names {
-        if let Ok(out) = std::process::Command::new(name).arg("--version").output() {
+        if let Ok(out) = std::process::Command::new(name).silent().arg("--version").output() {
             if out.status.success() {
                 return Some(PathBuf::from(name));
             }

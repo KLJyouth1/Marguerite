@@ -28,6 +28,7 @@ impl AppKind {
     }
 
     /// 从字符串解析（接受 snake_case 或原始名），未知返回 None。
+    #[allow(clippy::should_implement_trait)] // 命名仿 FromStr 但返回 Option，保留为解析辅助
     pub fn from_str(s: &str) -> Option<AppKind> {
         match s {
             "wps_ppt" | "WpsPpt" => Some(AppKind::WpsPpt),
@@ -48,6 +49,11 @@ pub enum DesktopError {
     ComError(String),
     UnsupportedAction(String),
     NotRunning(String),
+    /// 元素级定位失败：应用在跑、通道也通，但按 `ref_id` / `name` 找不到那个控件。
+    ///
+    /// 单列一个变体是为了不把「找不到控件」混进 `ComError`（那是通道/OS 层失败）或
+    /// `NotRunning`（那是应用层失败）——UIA 驱动的 `click` 恰恰最容易命中这一种。
+    ElementNotFound(String),
 }
 
 impl std::fmt::Display for DesktopError {
@@ -58,6 +64,7 @@ impl std::fmt::Display for DesktopError {
             DesktopError::ComError(s) => write!(f, "COM 错误: {s}"),
             DesktopError::UnsupportedAction(s) => write!(f, "不支持的桌面动作: {s}"),
             DesktopError::NotRunning(s) => write!(f, "应用未运行: {s}"),
+            DesktopError::ElementNotFound(s) => write!(f, "控件未找到: {s}"),
         }
     }
 }
@@ -108,7 +115,10 @@ impl UiAction {
             .map(str::to_string)
     }
     pub fn param_bool(&self, key: &str) -> bool {
-        self.params.get(key).and_then(Value::as_bool).unwrap_or(false)
+        self.params
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 }
 

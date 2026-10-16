@@ -14,10 +14,13 @@ pub mod experience;
 pub mod federated;
 pub mod gateway;
 pub mod hooks;
+pub mod home_memory;
 pub mod long_term;
+pub mod pages;
 pub mod recall;
 pub mod sensory;
 pub mod short_term;
+pub mod synapse;
 
 pub use self::compact::{
     compact_messages, hybrid_retrieve, render_timeline, token_economics, MemoryHit, Observation,
@@ -34,5 +37,7 @@ pub use self::hooks::{MemoryHookEvent, MemoryHooks};
 pub use self::long_term::{
     HierarchicalMemory, LocalEmbedding, LongTermMemory, MemoryItem, RetrievalResult,
 };
+pub use self::pages::{KnowledgePage, PageStore};
 pub use self::sensory::SensoryMemory;
 pub use self::short_term::{SessionSummary, ShortTermMemory};
+pub use self::synapse::{SynapseEdge, SynapseGraph, SynapseStats};

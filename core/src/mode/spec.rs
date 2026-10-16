@@ -293,6 +293,7 @@ impl ModeSpec {
 /// 内置模式规格（include_str! 嵌入，零运行时文件依赖）
 pub mod builtin {
     use super::ModeSpec;
+    use crate::mode::ModeKind;
 
     pub fn plan() -> ModeSpec {
         ModeSpec::from_yaml(include_str!("modes/plan.yaml")).expect("内置 plan.yaml 必须合法")
@@ -304,6 +305,38 @@ pub mod builtin {
 
     pub fn bloom() -> ModeSpec {
         ModeSpec::from_yaml(include_str!("modes/bloom.yaml")).expect("内置 bloom.yaml 必须合法")
+    }
+
+    /// Ensemble 扁平强编排（不做锚定三阶段晋升）
+    ///
+    /// 历史缺陷：`modes/ensemble.yaml` 从未被 `include_str!` 引用，是纯死文件；
+    /// `mode.spec` 遇到 `ModeKind::Ensemble` 时冒用 `bloom()` 规格，导致
+    /// 「Ensemble 与 Bloom 参数完全一致」的假象。此处接回真实规格。
+    pub fn ensemble() -> ModeSpec {
+        ModeSpec::from_yaml(include_str!("modes/ensemble.yaml"))
+            .expect("内置 ensemble.yaml 必须合法")
+    }
+
+    /// 全谱超模 Omni-Transcend（超星 x）
+    pub fn omni_transcend() -> ModeSpec {
+        ModeSpec::from_yaml(include_str!("modes/omni_transcend.yaml"))
+            .expect("内置 omni_transcend.yaml 必须合法")
+    }
+
+    /// 按模式类型取内置规格（单一事实源；网关 / CLI / TUI 共用）
+    pub fn for_kind(kind: ModeKind) -> ModeSpec {
+        match kind {
+            ModeKind::Plan => plan(),
+            ModeKind::Agent => agent(),
+            ModeKind::Ensemble => ensemble(),
+            ModeKind::Bloom => bloom(),
+            ModeKind::OmniTranscend => omni_transcend(),
+        }
+    }
+
+    /// 全部内置规格（顺序对齐 [`ModeKind::ALL`]）
+    pub fn all() -> Vec<ModeSpec> {
+        ModeKind::ALL.iter().copied().map(for_kind).collect()
     }
 }
 
@@ -325,6 +358,89 @@ mod tests {
         let bloom = builtin::bloom();
         assert_eq!(bloom.name, "bloom");
         assert_eq!(bloom.approval_policy.mutating, ApprovalAction::Allow);
+    }
+
+    /// 契约守卫：`ModeKind::ALL` 的每一种模式都必须有可解析的内置规格，
+    /// 且 name 字段与 `as_str()` 严格一致（防止 YAML 与枚举漂移）。
+    #[test]
+    fn test_every_mode_kind_has_a_parsable_builtin_spec() {
+        use crate::mode::ModeKind;
+        assert_eq!(ModeKind::ALL.len(), 5, "模式总数应为 5");
+        for kind in ModeKind::ALL {
+            let spec = builtin::for_kind(*kind);
+            assert_eq!(
+                spec.name,
+                kind.as_str(),
+                "{} 的 YAML name 字段与 ModeKind::as_str() 不一致",
+                kind.as_str()
+            );
+            assert!(
+                !spec.description.trim().is_empty(),
+                "{} 缺少 description（模式选择器需要展示）",
+                kind.as_str()
+            );
+            assert!(
+                ModeKind::from_name(kind.as_str()) == Some(*kind),
+                "{} 无法通过 from_name 往返解析",
+                kind.as_str()
+            );
+            assert!(
+                !kind.label().trim().is_empty(),
+                "{} 缺少 label",
+                kind.as_str()
+            );
+        }
+        assert_eq!(builtin::all().len(), 5);
+    }
+
+    /// 契约守卫：ensemble.yaml 必须真正解析出 BloomSpec（历史上它是死文件，
+    /// `mode.spec` 冒用 bloom() 规格），且以 anchoring 关闭区别于 Bloom。
+    #[test]
+    fn test_ensemble_spec_is_live_and_distinct_from_bloom() {
+        let e = builtin::ensemble();
+        assert_eq!(e.name, "ensemble");
+        assert_eq!(e.risk_level, RiskLevel::High);
+        assert_eq!(e.approval_policy.mutating, ApprovalAction::Allow);
+        let eb = e
+            .bloom
+            .as_ref()
+            .expect("ensemble.yaml 的 bloom: 块必须解析成功，否则又变回死文件");
+        // 原文件声明的数值逐字保留
+        assert_eq!(eb.thinking_depth, 3);
+        assert_eq!(eb.verification_passes, 3);
+        assert_eq!(eb.reasoning_effort, "max");
+        assert_eq!(eb.max_swarm_shards, 11);
+        assert_eq!(eb.auto_retry_failures, 5);
+        assert_eq!(eb.privileges.max_concurrent_tools, 20);
+        assert!(eb.snapshot_enabled);
+        assert_eq!(eb.auto_revert_max, 2);
+        // 与 Bloom 的实质差异：Ensemble 扁平编排，不做锚定三阶段晋升
+        assert!(!eb.anchoring.enabled, "Ensemble 不应启用锚定冷启动");
+        let b = builtin::bloom();
+        let bb = b.bloom.as_ref().expect("bloom 应有 BloomSpec");
+        assert!(bb.anchoring.enabled, "Bloom 必须启用锚定冷启动");
+    }
+
+    #[test]
+    fn test_omni_transcend_spec_parses_with_liangshen_anchoring() {
+        let s = builtin::omni_transcend();
+        assert_eq!(s.name, "omni-transcend");
+        assert_eq!(s.risk_level, RiskLevel::High);
+        assert_eq!(s.approval_policy.mutating, ApprovalAction::Allow);
+        // 梁神两阶段锚定：最小工具 2 件（bash_persistent + str_replace_editor）
+        let bloom = s.bloom.as_ref().expect("omni-transcend 应配置 bloom");
+        assert_eq!(bloom.anchoring.minimal_tools.len(), 2);
+        assert_eq!(bloom.anchoring.minimal_tools[0], "bash_persistent");
+        assert_eq!(bloom.anchoring.minimal_tools[1], "str_replace_editor");
+        assert!(bloom.anchoring.promote_after_first_response);
+        assert_eq!(bloom.anchoring.bootstrap_max_tokens, Some(1024));
+        // MAX 强化：thinking_depth 4 + 验证 4 遍 + 推理 max
+        assert_eq!(bloom.thinking_depth, 4);
+        assert_eq!(bloom.verification_passes, 4);
+        assert_eq!(bloom.reasoning_effort, "max");
+        // YOLO：免确认 + 快照安全网
+        assert!(bloom.privileges.auto_approve);
+        assert!(bloom.snapshot_enabled);
     }
 
     #[test]
@@ -435,11 +551,13 @@ bloom:
         assert!(b.anchoring.enabled);
         assert_eq!(b.anchoring.prefix_gate, "deepseek");
         assert_eq!(b.anchoring.minimal_tools.len(), 2);
-        assert!(b.anchoring
+        assert!(b
+            .anchoring
             .minimal_tools
             .iter()
             .any(|t| t == "bash_persistent"));
-        assert!(b.anchoring
+        assert!(b
+            .anchoring
             .minimal_tools
             .iter()
             .any(|t| t == "str_replace_editor"));
@@ -473,5 +591,45 @@ bloom:
         let spec = builtin::bloom();
         let b = spec.bloom.as_ref().unwrap();
         assert!(b.privileges.deep_dual_model);
+    }
+
+    /// 端到端守卫：声明的思考深度必须真的换算出更多推理轮数。
+    ///
+    /// 此前 `thinking_depth` / `verification_passes` 在执行层零消费，改多改少都无差别；
+    /// 现由 `DeepPlan::from_mode_spec` 接线。本测试盯住「OmniTranscend 必须比 Bloom 更深」，
+    /// 若日后有人把 omni_transcend.yaml 的深度改回与 bloom 相同，这里会立刻失败。
+    #[test]
+    fn test_declared_depth_translates_to_more_reasoning_rounds() {
+        use crate::model::ensemble_deep::DeepPlan;
+
+        let bloom = builtin::bloom().bloom.expect("bloom.yaml 必须带 bloom 段");
+        let omni = builtin::omni_transcend()
+            .bloom
+            .expect("omni_transcend.yaml 必须带 bloom 段");
+
+        let p_bloom = DeepPlan::from_mode_spec(bloom.thinking_depth, bloom.verification_passes);
+        let p_omni = DeepPlan::from_mode_spec(omni.thinking_depth, omni.verification_passes);
+
+        assert!(
+            omni.thinking_depth > bloom.thinking_depth,
+            "OmniTranscend 声明的推理深度应高于 Bloom"
+        );
+        assert!(
+            p_omni.max_llm_calls() > p_bloom.max_llm_calls(),
+            "深度差异必须落到实际轮数：omni={} bloom={}",
+            p_omni.max_llm_calls(),
+            p_bloom.max_llm_calls()
+        );
+        // 任何带 bloom 段的模式，轮数下限都不得退化成 0
+        for kind in crate::mode::ModeKind::ALL {
+            if let Some(b) = builtin::for_kind(*kind).bloom {
+                let p = DeepPlan::from_mode_spec(b.thinking_depth, b.verification_passes);
+                assert!(
+                    p.refine_rounds >= 1 && p.verify_rounds >= 1,
+                    "模式 {} 的轮数不得为 0",
+                    kind.as_str()
+                );
+            }
+        }
     }
 }

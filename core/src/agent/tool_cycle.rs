@@ -288,6 +288,15 @@ async fn execute_tool_internal(
     name: &str,
     args: &HashMap<String, String>,
 ) -> Result<ToolResult> {
+    // 模式门控（MSC-2）：Plan（只读探索）模式在**工具执行链路上**硬拒绝写类工具，
+    // 使 `mode.switch` 切到 Plan 后真实拒绝修改类动作，而非仅注入提示段。
+    // 非 Plan 模式不受影响（读一次全局运行时模式，零行为回归）。
+    if crate::mode::runtime_denies_tool(name) {
+        return Ok(ToolResult::Error {
+            message: format!("Plan 模式（只读探索）禁止执行写类工具：{name}"),
+            code: "MODE_DENIED".to_string(),
+        });
+    }
     // 先检查本地工具
     if registry.has_tool(name) {
         // 本地工具经 get_tool 返回 None，走 execute_local_tool；
@@ -307,6 +316,7 @@ async fn execute_tool_internal(
 ///   `execute_tool_internal` 并按「幂等 + 成功」门控回填缓存（非幂等/失败不缓存，诚实）。
 /// - 未注入缓存时：退化为直接超时包装执行，语义与旧 `call_tool` 一致。
 /// 若注入了压缩器则压缩工具结果，否则原样返回（确定性、无副作用）。
+#[allow(clippy::doc_lazy_continuation)] // 单行续写文档，非列表项
 fn maybe_compress(
     compressor: &Option<Arc<ToolCompressor>>,
     name: &str,
@@ -364,17 +374,18 @@ async fn dispatch_cached(
             .await;
     }
     // 无缓存：直接超时包装执行 + 压缩
-    let raw = match tokio::time::timeout(timeout, execute_tool_internal(&registry, name, args)).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => ToolResult::Error {
-            message: e.to_string(),
-            code: "EXECUTION_ERROR".to_string(),
-        },
-        Err(_) => ToolResult::Timeout {
-            tool_name: name.to_string(),
-            duration: timeout,
-        },
-    };
+    let raw =
+        match tokio::time::timeout(timeout, execute_tool_internal(&registry, name, args)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => ToolResult::Error {
+                message: e.to_string(),
+                code: "EXECUTION_ERROR".to_string(),
+            },
+            Err(_) => ToolResult::Timeout {
+                tool_name: name.to_string(),
+                duration: timeout,
+            },
+        };
     maybe_compress(&compressor, name, raw)
 }
 
@@ -469,6 +480,31 @@ mod tests {
         registry.register_local(Box::new(EchoTool));
         registry.register_local(Box::new(FailingTool));
         Arc::new(registry)
+    }
+
+    /// 写类工具（名字命中门控矩阵的 Write 类），用于验证 Plan 只读模式硬拒绝。
+    struct WriteTool;
+
+    #[async_trait]
+    impl ToolExecutor for WriteTool {
+        fn name(&self) -> &str {
+            "edit_file"
+        }
+
+        fn description(&self) -> &str {
+            "Write tool for Plan-mode denial test"
+        }
+
+        async fn execute(&self, _args: &HashMap<String, String>) -> Result<ToolResult> {
+            Ok(ToolResult::Success {
+                data: "written".to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
     }
 
     #[tokio::test]
@@ -627,6 +663,45 @@ mod tests {
             }
             _ => panic!("Expected Error"),
         }
+    }
+
+    #[test]
+    fn test_plan_mode_denies_write_tool_at_execution() {
+        // MSC-2 验收④：Plan（只读）模式在**真实工具执行链路**上拒绝写类工具；
+        // 其他模式（Agent）放行——证明 mode.switch 到 Plan 后是「真拒绝」而非仅提示。
+        //
+        // 用同步 `#[test]` + `block_on`（而非 `#[tokio::test]`）：既满足「改写全局
+        // runtime_mode 必须持有 test_runtime_mode_guard」的约束，又不把 MutexGuard
+        // 跨 await 持有（clippy::await_holding_lock）。
+        use crate::mode::{set_runtime_mode, test_runtime_mode_guard, ModeKind};
+        let _g = test_runtime_mode_guard();
+        let prev = crate::mode::runtime_mode();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut registry = ToolRegistry::new();
+        registry.register_local(Box::new(WriteTool));
+        let cycle = ToolCycle::new(Arc::new(registry));
+
+        // Plan：写类工具被硬拒绝（MODE_DENIED），且不触碰底层工具。
+        set_runtime_mode(ModeKind::Plan);
+        let denied = rt.block_on(cycle.call_tool("edit_file", &HashMap::new()));
+        match &denied {
+            ToolResult::Error { code, message } => {
+                assert_eq!(code, "MODE_DENIED");
+                assert!(message.contains("Plan"));
+            }
+            other => panic!("Plan 模式应拒绝写类工具，得到 {other:?}"),
+        }
+
+        // Agent：同一工具正常执行（无回归）。
+        set_runtime_mode(ModeKind::Agent);
+        let allowed = rt.block_on(cycle.call_tool("edit_file", &HashMap::new()));
+        assert!(
+            allowed.is_success(),
+            "Agent 模式写类工具应放行，得到 {allowed:?}"
+        );
+
+        set_runtime_mode(prev);
     }
 
     #[tokio::test]
@@ -792,7 +867,10 @@ mod tests {
     #[async_trait]
     impl ToolExecutor for CountingTool {
         fn name(&self) -> &str {
-            "count"
+            // 用**真实只读工具名**，才能被默认幂等策略（只读白名单）缓存 ——
+            // 这正是这两个用例要验证的缓存机制。历史上用的是 `count`，而新策略
+            // 只缓存已知只读工具，故改名以保持用例意图。
+            "read_file"
         }
         fn description(&self) -> &str {
             "counts executions"
@@ -821,8 +899,8 @@ mod tests {
         let cycle = ToolCycle::new(registry).with_tool_cache(cache.clone());
         let args = HashMap::from([("x".to_string(), "1".to_string())]);
 
-        let _r1 = cycle.call_tool("count", &args).await;
-        let _r2 = cycle.call_tool("count", &args).await;
+        let _r1 = cycle.call_tool("read_file", &args).await;
+        let _r2 = cycle.call_tool("read_file", &args).await;
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -852,8 +930,8 @@ mod tests {
 
         let args = HashMap::from([("x".to_string(), "1".to_string())]);
         let calls_tc = vec![
-            ToolCall::new("count", args.clone()),
-            ToolCall::new("count", args),
+            ToolCall::new("read_file", args.clone()),
+            ToolCall::new("read_file", args),
         ];
         let _ = cycle.execute_sequential(calls_tc).await.unwrap();
 

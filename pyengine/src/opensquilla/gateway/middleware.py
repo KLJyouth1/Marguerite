@@ -43,6 +43,8 @@ def _is_artifact_preview_control_path(path: str) -> bool:
 
 
 _CONTROL_PLANE_PATHS = frozenset({"/health", "/healthz", "/ready", "/readyz"})
+#: Liveness probes are never rate limited (see RateLimitMiddleware.dispatch).
+_LIVENESS_PATHS = _CONTROL_PLANE_PATHS | frozenset({"/api/health"})
 
 
 def _path_is_at_or_below(path: str, prefix: str) -> bool:
@@ -234,6 +236,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)  # type: ignore[no-any-return]
         if request.method == "GET" and path == "/api/approvals":
+            return await call_next(request)  # type: ignore[no-any-return]
+
+        # Liveness/readiness must never be rate limited. A supervisor reads them as
+        # "the engine is alive", so answering 429 under load makes the watchdog kill
+        # a healthy engine. Measured (R61): during the webui e2e suite 21/90 probes
+        # of the sidecar `/health` got 429 → the Rust sidecar watchdog restarted the
+        # engine → 21 s of downtime during which every console RPC failed.
+        if path in _LIVENESS_PATHS:
             return await call_next(request)  # type: ignore[no-any-return]
 
         client_ip = self._get_client_ip(request)
