@@ -325,7 +325,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
 
 - Version numbers across the four front ends are now pinned to `core/Cargo.toml`
   and enforced by `scripts/check-version-sync.py` in CI. The engine version is
-  authoritative (`marguerite-core --version`; currently `0.2.12`).
+  authoritative (`marguerite-core --version`; currently `0.2.13`).
 - The desktop app expects the web console bundle next to it. Run it from a packaged
   installer or from the repository — a bare copied `.exe` cannot serve a console it
   does not have. Since this round it no longer fails silently in that case: the
@@ -337,7 +337,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   its own Python backend (`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`),
   its own React SPA served by FastAPI on `:8011`, its own packaging pipeline, and
   **its own version line** (`workbench/VERSION`, currently `1.1.0` — independent of the
-  engine's `0.2.12`). It bridges the core store through `core_bridge`, in the same spirit
+  engine's `0.2.13`). It bridges the core store through `core_bridge`, in the same spirit
   as `pyengine/`; the Rust binaries do not import it. Its 71 offline tests and its
   version gate had never been run by any gate until this round, even though the
   sub-project ships — `verify.sh --workbench` now covers both.

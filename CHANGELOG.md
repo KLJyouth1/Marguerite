@@ -9,6 +9,38 @@
 > 四端（core / tui / gui / webui）的版本号由 `python scripts/check-version-sync.py` 强制对齐，
 > 并已接入 `bash scripts/verify.sh --all` 门禁。
 
+## [0.2.13] - 2026-10-16
+
+岛屿从「可视化」升级为**可玩的 3D 开放世界**，并补齐资产热加载闭环、会话级成本治理与三处真缺陷修复。
+
+### Added
+
+- **3D 开放世界岛屿**（`webui/src/components/island/world3d/`）：程序化噪声地形 + 水面 + 程序化道具 +
+  WASD/PointerLock 漫游；四档模型档位（旗舰推理 / 高效推理 / 极速产出 / 全模态帕累托）映射为粒子预算、
+  生成节律、NPC 对话深度、极光强度与时间流速；游戏 ↔ Agent 双向绑定（拾取道具 → 确定性委托提示词入
+  outbox，断线积压不假装送达；运行时事件 → 场景脉冲可视化）。`/island-game` 增加
+  「3D 开放世界 ↔ 经典岛屿」切换，默认 3D，两种模式互斥持有 WebGL 上下文（切入才建、切出即 dispose）。
+- **GLB 资产热加载闭环**：资产规格 → Blender（bpy headless）导出 GLB → 运行时校验（含 Mesh /
+  非退化包围盒 / 三角形预算 ≤ 50k）→ 原子替换 + revision 递增；失败或缺失一律回退程序化几何，
+  HUD 如实显示「程序化几何 / 已热加载 N 件（rev K）/ 校验失败」。共享几何/材质带实例标记，
+  清理时绝不 dispose 共享资源。
+- **AI 自主设计契约层**（`world3d/gdd/`）：GDD 机器可读契约 + 手写校验器（枚举收口 / id 唯一 /
+  数值边界 / 悬空引用；未知字段仅 warning 前向兼容），整份通过才热加载、失败保持旧配置。
+- **会话级思考强度 + 上下文长度持久化**：`sessions` 表新增 `reasoning_effort` / `context_window`
+  （幂等迁移），`sessions.patch` 三态语义（缺省不动 / null 清除 / 值设置），会话抽屉内即改即存。
+- **git worktree 并行任务编排**：`WorktreeManager` 为子代理分配隔离工作树（RAII 自动回收、
+  路径穿越防护、fail-closed 白名单），复用既有并发闸门与预算。
+
+### Fixed
+
+- `gateway.status` 的 doctor 项数断言写死 8，而 `doctor::collect_items_async` 早已新增第 9 项
+  `check_tier_caps` → 断言与注释同步为 9，测试改名以免再次误读。
+- `gui` 侧 `ModelProfile` 构造缺必需字段 `tier_caps_declared`，导致 `cargo clippy --workspace
+  --all-targets` 直接编译失败（E0063）→ 补 `false`（手工添加的档案从未声明档位能力）。
+- worktree 的 git 调用只用 `current_dir` 指定仓库、未清 `GIT_DIR` / `GIT_INDEX_FILE` 等继承变量：
+  在 git 钩子（pre-commit）里调用时，嵌套 git 会作用到**外层仓库**（实测触发 `reset: moving to HEAD`
+  与 `index.lock` 冲突）→ 每个子进程显式清 7 个覆盖变量。
+
 ## [0.2.11] - 2026-09-29
 
 修掉**「桌面端默认路径根本没有工具」**这一条最致命的功能缺口，并让完成门禁与退出码开始说真话。
