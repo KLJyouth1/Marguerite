@@ -35,8 +35,11 @@ async def main():
         tp = tools.get("payload", tools)
         tool_names = [t.get("name") for t in (tp.get("items") or [])]
         assert "system_control" in tool_names, f"缺少 system_control 工具"
-        assert any(n.startswith("baota.") for n in tool_names), f"缺少 baota.* 工具"
-        print("OK  tools       system_control + baota.*")
+        # 内置 baota 工具名已规范为下划线形式（`baota_system_info` 等）。此前断言
+        # 点号形式 `baota.*`，而点号名在 MCP 注册表里属非法字符、注册时会被静默改写，
+        # 因此旧断言校验的其实是「不可派发的名字」——是假阳性。契约见 docs/mcp.md。
+        assert any(n.startswith("baota_") for n in tool_names), f"缺少 baota_* 工具"
+        print("OK  tools       system_control + baota_*")
 
         cfg = await call(ws, "c5", "config.get", {})
         assert cfg.get("ok") is True, f"config.get 失败: {cfg}"

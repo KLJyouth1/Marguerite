@@ -2,10 +2,15 @@
 
 链路：MCPServerConfig(stdio) → discover_and_register → ToolRegistry 注册 mcp_* 工具。
 tools/list 无需真实面板凭据；工具调用缺凭据时返回友好错误（不触网）。
+
+前置：`btpanel-mcp` 就在本仓库内（`<repo>/btpanel-mcp`），默认直接用它；
+若你的检出在别处，用 `BTPANEL_MCP_PATH=<目录>` 覆盖。
 """
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 
 from opensquilla.mcp.discovery import discover_and_register
 from opensquilla.mcp.types import MCPServerConfig
@@ -32,13 +37,25 @@ EXPECTED_TOOLS = {
 
 
 async def main() -> int:
+    # 这里曾经硬编码本机检出路径（且指向一个本仓库里并不存在的嵌套目录），
+    # 配合 Windows 专有的 `py -3.14` —— 换台机器就跑不起来。
+    # 现在默认用**仓库内**的 btpanel-mcp，并支持环境变量覆盖。
+    in_repo = Path(__file__).resolve().parents[1] / "btpanel-mcp"
+    mcp_path = os.environ.get("BTPANEL_MCP_PATH") or str(in_repo)
+    if not os.path.isdir(mcp_path):
+        print(
+            f"[FAIL] btpanel-mcp 目录不存在: {mcp_path}\n"
+            "       用 BTPANEL_MCP_PATH=<目录> 指向你的检出。"
+        )
+        return 1
+
     cfg = MCPServerConfig(
         name="btpanel",
         transport="stdio",
-        command="py",
-        args=["-3.14", "-m", "btpanel_mcp.cli", "stdio"],
+        command=sys.executable,
+        args=["-m", "btpanel_mcp.cli", "stdio"],
         tool_timeout_seconds=30,
-        env={"PYTHONPATH": "d:/Downloads/Marguerite/marguerite/btpanel-mcp"},
+        env={"PYTHONPATH": mcp_path},
     )
     registry = ToolRegistry()
     registered = await discover_and_register(cfg, registry, owner="smoke")

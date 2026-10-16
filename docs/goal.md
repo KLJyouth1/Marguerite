@@ -1,7 +1,7 @@
 # Marguerite goal — 目标循环（自治续轮 + blocked 门控）
 
 > Track 1：把 DeepSeek Harness 的 goal 子系统（持久目标 + 自治续轮 + resume/pause/complete/blocked）
-> 原生二次开发进 Marguerite Rust 核心。持久化于 `~/.marguerite/goal.db`（SQLite）。
+> 原生二次开发进 Marguerite Rust 核心。持久化于 `$1marguerite/goal.db`（SQLite）。
 
 ## 语义
 

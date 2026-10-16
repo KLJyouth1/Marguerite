@@ -50,9 +50,9 @@ async def main():
                 elif method == "tools.catalog":
                     tools = payload.get("items") or []
                     names = sorted(t.get("name") for t in tools)
-                    baota = [n for n in names if n.startswith("baota.")]
-                    print(f"[OK  ] {method} -> {len(tools)} 个工具; baota.*={baota}")
-                    print(f"      其余: {[n for n in names if not n.startswith('baota.')]}")
+                    baota = [n for n in names if n.startswith("baota_")]
+                    print(f"[OK  ] {method} -> {len(tools)} 个工具; baota_*={baota}")
+                    print(f"      其余: {[n for n in names if not n.startswith('baota_')]}")
                 elif method == "config.get":
                     mcp = (payload.get("mcp") or {}).get("servers") or []
                     print(f"[OK  ] {method} -> mcp.servers={mcp}")

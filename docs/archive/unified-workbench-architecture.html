@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marguerite 统一工作台 — 系统架构图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 20px;
+    min-height: 100vh;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { text-align: center; font-size: 24px; color: #58a6ff; margin-bottom: 8px; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 30px; font-size: 13px; }
+
+  .layer {
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  .layer-label {
+    position: absolute;
+    top: -10px;
+    left: 16px;
+    background: #0d1117;
+    padding: 0 8px;
+    font-size: 12px;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* 入口层 */
+  .entry-layer {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 8px;
+    background: #161b22;
+  }
+  .entry-box {
+    background: #1a1f2e;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 12px;
+    text-align: center;
+    transition: border-color 0.2s;
+  }
+  .entry-box:hover { border-color: #58a6ff; }
+  .entry-box .icon { font-size: 28px; margin-bottom: 4px; }
+  .entry-box .title { font-weight: 600; color: #58a6ff; font-size: 13px; }
+  .entry-box .tech { font-size: 11px; color: #8b949e; margin-top: 2px; }
+  .entry-box .proto { font-size: 10px; color: #f0883e; margin-top: 4px; font-family: monospace; }
+
+  /* 网关层 */
+  .gateway-layer {
+    background: #161b22;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+  }
+  .gw-box {
+    background: #1c2331;
+    border: 1px solid #384858;
+    border-radius: 6px;
+    padding: 10px 20px;
+    text-align: center;
+    flex: 1;
+  }
+  .gw-box .title { color: #f0883e; font-weight: 600; font-size: 13px; }
+  .gw-box .desc { font-size: 11px; color: #8b949e; }
+
+  /* 核心引擎层 */
+  .engine-layer {
+    background: #161b22;
+  }
+  .engine-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .engine-cell {
+    background: #1a2332;
+    border: 1px solid #2d3a4f;
+    border-radius: 4px;
+    padding: 8px;
+    text-align: center;
+    font-size: 12px;
+  }
+  .engine-cell .name { color: #7ee787; font-weight: 600; }
+  .engine-cell .detail { font-size: 10px; color: #8b949e; margin-top: 2px; }
+
+  .mode-bar {
+    background: #1c2331;
+    border: 1px solid #384858;
+    border-radius: 4px;
+    padding: 8px 12px;
+    text-align: center;
+    font-size: 12px;
+  }
+  .mode-bar .label { color: #f0883e; font-weight: 600; }
+  .mode-bar .modes { color: #c9d1d9; }
+  .mode-badge {
+    display: inline-block;
+    background: #238636;
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    margin: 0 2px;
+  }
+
+  /* 侧车层 */
+  .sidecar-layer {
+    background: #161b22;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .sc-box {
+    background: #1a1f2e;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .sc-box .title { color: #d2a8ff; font-weight: 600; font-size: 13px; }
+  .sc-box .desc { font-size: 11px; color: #8b949e; margin-top: 2px; }
+  .sc-box .port { font-size: 10px; color: #f0883e; font-family: monospace; }
+
+  /* 连接线 */
+  .connector {
+    text-align: center;
+    color: #30363d;
+    font-size: 20px;
+    margin: 2px 0;
+  }
+
+  /* 事件总线 */
+  .event-bus {
+    background: #161b22;
+    border: 1px dashed #384858;
+    border-radius: 4px;
+    padding: 8px;
+    text-align: center;
+    font-size: 11px;
+    color: #8b949e;
+    margin-top: 8px;
+  }
+  .event-bus code { color: #f0883e; font-family: monospace; }
+
+  /* 图例 */
+  .legend {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin-top: 20px;
+    font-size: 11px;
+    color: #8b949e;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+
+  /* 不变量 */
+  .invariants {
+    margin-top: 20px;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px;
+    background: #161b22;
+  }
+  .invariants h3 { color: #f0883e; font-size: 14px; margin-bottom: 8px; }
+  .inv-list { list-style: none; }
+  .inv-list li {
+    padding: 4px 0;
+    font-size: 12px;
+    color: #c9d1d9;
+    border-bottom: 1px solid #21262d;
+  }
+  .inv-list li:last-child { border-bottom: none; }
+  .inv-list code { color: #7ee787; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Marguerite 统一工作台</h1>
+  <p class="subtitle">单 Rust 引擎 · 四前端统一入口 · 回环安全 · 离线可运行</p>
+
+  <!-- L1: 统一入口层 -->
+  <div class="layer entry-layer">
+    <span class="layer-label">L1 — 统一入口层（4 容器）</span>
+    <div class="entry-box">
+      <div class="icon">⌨️</div>
+      <div class="title">CLI</div>
+      <div class="tech">marguerite-core bin</div>
+      <div class="proto">Rust 函数调用</div>
+    </div>
+    <div class="entry-box">
+      <div class="icon">🖥️</div>
+      <div class="title">TUI</div>
+      <div class="tech">ratatui · tui/</div>
+      <div class="proto">Rust 函数调用</div>
+    </div>
+    <div class="entry-box">
+      <div class="icon">🪟</div>
+      <div class="title">Tauri 桌面</div>
+      <div class="tech">Tauri v2 + Vue3 · gui/</div>
+      <div class="proto">WebSocket RPC</div>
+    </div>
+    <div class="entry-box">
+      <div class="icon">🌐</div>
+      <div class="title">Web 控制台</div>
+      <div class="tech">Vue3 + Pinia · webui/</div>
+      <div class="proto">WebSocket + HTTP</div>
+    </div>
+  </div>
+
+  <div class="connector">│</div>
+
+  <!-- L2: 统一网关层 -->
+  <div class="layer gateway-layer">
+    <span class="layer-label">L2 — 统一网关层（core/src/gateway/）</span>
+    <div class="gw-box">
+      <div class="title">WebSocket RPC</div>
+      <div class="desc">实时双向 · session.* / onboarding.* / mode.*</div>
+    </div>
+    <div class="gw-box">
+      <div class="title">HTTP JSON-RPC</div>
+      <div class="desc">请求-响应 · {ok, data, meta}</div>
+    </div>
+    <div class="gw-box">
+      <div class="title">ACP 薄壳</div>
+      <div class="desc">127.0.0.1 only · 绝不 0.0.0.0</div>
+    </div>
+  </div>
+
+  <div class="connector">│</div>
+
+  <!-- L3: Rust 核心引擎层 -->
+  <div class="layer engine-layer">
+    <span class="layer-label">L3 — Rust 核心引擎（core/src/）</span>
+    <div class="engine-grid">
+      <div class="engine-cell">
+        <div class="name">CLI 路由</div>
+        <div class="detail">argv.rs · 19 子命令</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">意图分类</div>
+        <div class="detail">Orchestrator::analyze</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">Agent 运行时</div>
+        <div class="detail">tool_cycle · stream_loop</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">模型路由</div>
+        <div class="detail">direct/router/ensemble/bloom</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">MCP</div>
+        <div class="detail">客户端/服务端/注册表</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">三层记忆</div>
+        <div class="detail">感知/短期/长期</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">四层护栏</div>
+        <div class="detail">语法/语义/事实/契约</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">上下文引擎</div>
+        <div class="detail">分页/缓存/预算</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">技能引擎</div>
+        <div class="detail">JIT 按意图触发</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">插件系统</div>
+        <div class="detail">18 harness 清单 · DI</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">缓存三层</div>
+        <div class="detail">Tier 0/1/2 · 诚实计量</div>
+      </div>
+      <div class="engine-cell">
+        <div class="name">安全底座</div>
+        <div class="detail">RBAC · 凭据加密 · 限流</div>
+      </div>
+    </div>
+    <div class="mode-bar">
+      <span class="label">模式系统:</span>
+      <span class="modes">
+        <span class="mode-badge">plan</span>
+        <span class="mode-badge">agent</span>
+        <span class="mode-badge">ensemble</span>
+        <span class="mode-badge">bloom</span>
+        <span class="mode-badge">omni</span>
+      </span>
+      <span style="color:#8b949e; margin-left:8px;">+ 蜂群控制 · 团队持久化 · BloomSpec · 思考链 S1-S5</span>
+    </div>
+  </div>
+
+  <div class="connector">│ core_bridge (物理桥接)</div>
+
+  <!-- L4: Python 侧车层 -->
+  <div class="layer sidecar-layer">
+    <span class="layer-label">L4 — Python 侧车层</span>
+    <div class="sc-box">
+      <div class="title">OpenSquilla 微内核</div>
+      <div class="desc">pyengine/ · 技能执行 · 工具封装 · 迁移</div>
+      <div class="port">经网关代理方法组</div>
+    </div>
+    <div class="sc-box">
+      <div class="title">文件智能 + LLM 实验台</div>
+      <div class="desc">workbench/ · FastAPI · 注意力热力图 · BPE · TTC</div>
+      <div class="port">port 8011 (回环 only)</div>
+    </div>
+  </div>
+
+  <!-- 事件总线 -->
+  <div class="event-bus">
+    <strong>跨端事件总线:</strong>
+    <code>session.event.*</code> (usage/done/error/tool_use_start)
+    · <code>sessions.changed</code> (顶层)
+    · <code>session.event.mode.changed</code> (模式广播)
+    — 所有视图订阅同一 Pinia store → 状态单一来源
+  </div>
+
+  <!-- 图例 -->
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#58a6ff;"></div>
+      <span>入口/前端</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#f0883e;"></div>
+      <span>网关/协议</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#7ee787;"></div>
+      <span>核心引擎模块</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#d2a8ff;"></div>
+      <span>Python 侧车</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#238636;"></div>
+      <span>模式系统</span>
+    </div>
+  </div>
+
+  <!-- 不变量 -->
+  <div class="invariants">
+    <h3>架构不变量（违反即缺陷）</h3>
+    <ul class="inv-list">
+      <li><code>INV-1</code> Web UI 仅回环托管 — <code>127.0.0.1:18790</code>，禁止公网监听</li>
+      <li><code>INV-2</code> ACP 仅回环 — <code>serve</code> 永远只监听 <code>127.0.0.1</code></li>
+      <li><code>INV-3</code> 离线可运行 — <code>Orchestrator::analyze</code> 不调 LLM，无 Key 降级回显</li>
+      <li><code>INV-4</code> 内部可变性 — 跨 await 共享状态用 <code>Arc&lt;Mutex&lt;T&gt;&gt;</code></li>
+      <li><code>INV-5</code> 治理双闭环 — PlanGate(C1-C4) + CompletionGate(四检查)</li>
+      <li><code>INV-6</code> CLI 输出契约 — <code>{ok,data,meta}</code> · ASCII [OK]/[FAIL] · 禁止 emoji</li>
+      <li><code>INV-7</code> 路由三处同步 — argv.rs + program.rs + 测试断言 = 19 路由</li>
+      <li><code>INV-8</code> 缓存三层诚实性 — Tier 0 共享 Arc · 不冒充 100%</li>
+      <li><code>INV-9</code> WebUI 导航分组 — Work/Operate/Observe/Settings 四组</li>
+      <li><code>RED-1</code> 禁止全上下文重注入 — 会话内只增量追加</li>
+      <li><code>RED-2</code> 避免中途替换工具面 — 工具集单调扩展</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

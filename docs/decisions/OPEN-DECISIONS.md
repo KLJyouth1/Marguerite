@@ -11,6 +11,8 @@
 | 2026-08-08 | Phase D 后续推进 | tool.terminal（终端操控）：Narrative → 实装 | 行模式命令执行器 + ANSI 安全剥离；PTY/ConPTY 交互式待补 | 已实装行模式 + Windows ConPTY 交互式（desktop/src/conpty.rs + terminal_panel PTY 模式 + vt100 渲染），注册表升 Real | — | 单测全过（含 ConPTY 实跑 echo 回显） | RESOLVED（2026-08-08，PTY 交互式实装） |
 | 2026-08-08 | 终端增强 | tool.terminal 行模式补强：持久工作目录(cd/cd /d 切换并跨命令生效) + 命令历史上/下回溯 | 不引入新依赖、可离线测试 | 已实装（core handle_cd 持久化 + 面板 history_index 回溯） | — | 单测全过 | RESOLVED（增强部分） |
 | 2026-08-08 | 记忆系统增强 | mem.persistent（跨会话记忆持久化）：User/Feedback/Auto 三类 JSON 落盘 | 原仅 project(BM25) 持久，其余会话级内存；recall.rs 注释预留持久层入口 | 已实装 PersistentKV + KbBackedMemory::with_persistence，ACP serve 注入 workspace 目录 | — | 单测全过（持久化往返） | RESOLVED |
+| 2026-08-31 | 任务执行质量（B1） | 预算按任务类型分档（C2）：按 intent/complexity 映射不同 max_steps/step_timeout | 当前默认 max_steps=12 / step_timeout=120s 全局统一；无真实分布数据 | 倾向 C2 分档可调 | 待 C1 遥测产出真实 LLM 耗时/轮次分布后由数据驱动决定 | 出数据后 | OPEN |
+| 2026-08-31 | 版本一致性 | 产品发布版本（v0.1.5-dev / wxs 0.1.5 / gui/package.json 0.1.5）vs Rust crate 语义版本（core/gui 0.2.6、tui 0.1.6、tauri.conf 0.2.6）两个维度不一致 | Cargo 语义版本用于 Rust 依赖解析，产品版本用于安装包/用户可见。Tauri 打包时 tauri.conf.json + Cargo.toml version 驱动运行时升级检查 | 产品统一 0.1.5（安装包维度），Rust crate 语义版本保持独立（脱敏 0.x.y 递增）。不强行统一两维度（会破坏 crate 依赖解析） | —（用户已拍板） | 用户拍板后 | RESOLVED（2026-08-31，产品头 v0.1.5） |
 
 ## 关闭记录
 
@@ -54,8 +56,46 @@
 - **收口"B 桶零代码"差距**：三引擎从零实装，解锁 auto_fix/auto_review/verifier 闭环，使编排器/完成门可在运行期启用自动修复与评审。
 - **质量门禁**：core lib 1035 passed / 0 failed / 2 ignored（mcp 环境 flake）、desktop 68 passed 零回归；release 构建通过，exe 23.8 MB，打包 `marguerite-desktop-v0.2.0-bbucket-win64.zip`（8.22 MB）。
 
+### 版本一致性 → RESOLVED（2026-08-31，产品头 v0.1.5）
+- **用户拍板**：「产品统一 0.1.5，Crate 独立」。
+- **实勘结论（机械证据）**：
+  - **产品/安装包维度 = 0.1.5**：CHANGELOG 第 2 行 `Version v0.1.5 · Build 2026-08-23`（原 `v0.1.5-dev`，仅改产品头，历史 entry `[0.1.5-dev]` 保留以保历史事实准确）；`gui/package.json` 0.1.5；`Marguerite_0.1.5_x64_en-US.wxs` 0.1.5。
+  - **Rust crate 语义维度（独立）= core 0.2.6 / gui 0.2.6 / tui 0.1.6 / tauri.conf 0.2.6**，保持不动（Cargo.lock 依赖解析）。
+  - **WebUI（`webui/package.json` 0.2.1）判为嵌入式控制面**：`gui/src-tauri/build.rs` 经 `bundle.resources webui/dist/**` 打进安装壳，但**不对外呈现版本号**（无 `__APP_VERSION__`、vite `define` 仅 vue-i18n flags、无 About footer 读取 package.json version）——属 build artifact 而非用户可见产品版本，**不强制统一**。登记为既有设计边界（非缺陷）。
+- **无遗漏**：`0.1.5-dev` 在 gui 层零残留（仅 CHANGELOG 历史 entry）；README 无版本行、cli-reference 无版本头；webui 版本无任何脚本消费。
+
 ## 仍 OPEN 项
-- **已全部收口**：A 桶(KB+security) RESOLVED；B 桶(auto_fix/auto_review/verifier) RESOLVED；C 桶(browser_bridge) RESOLVED；tool.terminal 行模式增强 RESOLVED；tool.terminal PTY 交互式(ConPTY) RESOLVED（2026-08-08）。当前无遗留 OPEN 项。
+- **版本一致性已收口**（RESOLVED 2026-08-31）。
+- **剩余 OPEN（1 条）**：B1 预算按任务类型分档（C2）——Blocked By C1 遥测产出真实 LLM 耗时/轮次分布后由数据驱动决定。C1 遥测已实装（llm_call_count/total_elapsed_ms 回填 + bus plan_telemetry），待真实任务跑出分布数据。
+- **外部依赖项（非 OPEN，属前置条件缺失）**：真实主机 SSH 端到端实测（需真实主机+密钥）；代码签名（需 EV 证书）。两者均等用户具备前置条件后再推进，非本项目悬而未决决策。
+
+## M1 安全底座复验登记（2026-09-01）
+
+### 已亲跑通过（0 回归，2410 passed / 0 failed / 17 ignored）
+- **M1.1 RBAC**（`core/src/rbac/`）6 passed
+- **M1.2 独立 audit.db**（`core/src/audit_store/`）5 passed
+- **M1.3 凭据加密闭环**（`core/src/credentials/`）23 passed
+- **M1.4 安全接缝 SecuritySeam**（`gateway/security_seam.rs`）5 passed
+- **M1.5 限流 RateLimiter**（`gateway/rate_limit.rs`）8 passed
+
+### 剩余 M1 缺口（2 条，均非阻断，等派发）
+| Date | Source | Open Item | Related Constraints | Current Leaning | Blocked By | Resolves When | Status |
+|------|--------|-----------|---------------------|-----------------|------------|---------------|--------|
+| 2026-09-01 | M1 复验 | M1.6 设置页「RBAC 防误操作不防本地恶意用户」权限边界告知文案未落位 | Q10 决策；webui settings 组件齐全但无此文案 | 补一条提醒文案到 SettingsPrivacyPanel/SetupConnectionPanel | — | 派发前端落位 | RESOLVED（2026-09-01，总监亲做） |
+| 2026-09-01 | M1 复验 | M1.3 主口令 PBKDF2 + 首启解锁 UI/doctor 未完成 | 当前加密主密钥为本地 key（`model.key`）非用户口令派生；首启解锁与 doctor 体检缺证据 | 补 PBKDF2 派生 + 首启 UI/doctor 闭环 | — | 用户确认主口令方案后 | OPEN |
+
+### M1.6 权限边界告知 → RESOLVED（2026-09-01，项目总监亲自落位）
+- **落点**：`webui/src/components/settings/SetupConnectionPanel.vue`（网关 token/鉴权边界，语义上最贴切）+ `setup.connection.rbacBoundaryNote` 六语言 key。
+- **文案**：zh-Hans「角色访问控制用于防止误操作，但无法防御可修改网关配置或进程本身的本地恶意用户。」（en/ja/fr/de/es 同义译文）。
+- **复验（亲跑）**：i18n parity EXIT 0（6 locale key 对齐）；`rbacBoundaryNote` 6 locale 全 present + 组件 `t()` 正确解析到 `setup.connection.*`（避开 check-i18n 只查奇偶不查解析的盲区）；P0 扫描我的改动 0 emoji / 0 渐变 / 0 hex（全量 gate 仅报 `ops_dispatch.rs` 345 行——**M3 既有未跟踪文件，非本次改动**）；vue-tsc EXIT 0；webui vitest **3129 passed / 301 文件** 零回归。
+- **文件**：SetupConnectionPanel.vue 218 行（≤300）。
+
+> 注：M1.1/M1.5「接入全量 methods.rs dispatch」为**设计边界**（IMPL-PLAN 明示「尚未接入全量 dispatch，真实认证未实现」），非缺陷。`gateway/methods.rs` 的 4518 行未归属重构 diff 禁止触碰。
+
+### 项目总监方向决策（2026-09-01，M2/M3 探明后）
+- **M2（降本内核）**：契约完成（usage 40 / omni 20 / dev 8 / routing 8 / prompt_layout 6 / hitcache 6 / bloom_failover 6 / selfcheck 3），但**核心价值 −40% 降耗不可证明**——`bench-30.json`（30 条/25 编程）与 `bench-30-runner.cjs --validate` 均就绪、校验通过，但**零 baseline/optimized 实测数据**（无测量记录）。属**测量缺口**，非代码缺口。
+- **M3（运维闭环）**：契约很强（ops 64 / rollback_policy 8 / ops_dispatch 6），但剩余缺口为**真实 SSH/WS 传输 + 主机池**——需真实主机（外部前置条件）。
+- **综上**：M2、M3 的主价值均被**外部/难证因子**卡住（M2 需真实 LLM 测量运行；M3 需真实主机）。**当前最有价值、纯代码、立即可证的增量**是第二批 backlog **F22 左栏 workspace（分组/新建任务/ pin/archive）**——已基本实装（SidebarConversations.workspaces 13 + ProjectWorkspaceCreateDialog 3 + PickerDialog 20 = 36 passed），方向定为「补齐 F22 收口 + 复验」。
 
 ## 相关 ADR
 - ADR-001: 原生 egui 桌面 + ratatui TUI 双前端（Phase D，已 Accepted）

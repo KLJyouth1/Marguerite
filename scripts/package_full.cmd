@@ -6,7 +6,7 @@ REM  打包内容：webui / 全 skills / 全工具 / 全配置 / 网关 / pyengi
 REM ============================================================
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "REPO_ROOT=%~dp0..\.."
+set "REPO_ROOT=%~dp0.."
 pushd "%REPO_ROOT%"
 set "REPO_ROOT=%CD%"
 popd
@@ -30,12 +30,33 @@ if exist "%TARGET_DIR%" (
 )
 mkdir "%TARGET_DIR%" 2>nul
 
-REM --------- Step 2. webui/dist 拷贝（覆盖） ---------
+REM --------- Step 2. 清理旧构建残留 ---------
+echo [2/7] 清理 webui/dist.old* 旧目录 ...
+for /d %%D in ("%REPO_ROOT%\webui\dist.old*") do (
+    if exist "%%D" rmdir /s /q "%%D" 2>nul && echo   removed %%~nxD
+)
+
+REM --------- Step 3. webui/dist 拷贝（覆盖） ---------
 echo [2/7] 嵌入 Web UI（webui/dist -^> gui/src-tauri/webui/dist）
 if not exist "%WEBUI_SRC%" (
     echo [ERROR] 未找到 webui/dist！请先在 webui 下执行: npm run build
     exit /b 1
 )
+REM 桌宠图片皮肤完整性检查：打包产物若缺 pets/ 目录，精灵皮肤会 404，
+REM 桌面宠物退化为「一张静态图」（已知 P0）。此处强制校验，缺失即中止。
+if not exist "%WEBUI_SRC%\pets" (
+    echo [ERROR] webui/dist 缺少 pets/ 目录（桌宠图片皮肤）。
+    echo         请确认 webui/public/pets/*.jpg 存在并已构建（npm run build）。
+    exit /b 1
+)
+for %%F in (skin-blue.jpg skin-green.jpg skin-pink.jpg skin-purple.jpg) do (
+    if not exist "%WEBUI_SRC%\pets\%%F" (
+        echo [ERROR] 桌宠皮肤缺失：pets\%%F
+        echo         请确认 webui/public/pets\%%F 已存在并重新构建。
+        exit /b 1
+    )
+)
+echo       桌宠皮肤完整性检查通过（4 张精灵图均存在）。
 if exist "%WEBUI_DST%" rmdir /s /q "%WEBUI_DST%" 2>nul
 xcopy /E /I /Y /Q "%WEBUI_SRC%" "%WEBUI_DST%" >nul
 echo       完成。
@@ -67,12 +88,38 @@ if exist "%REPO_ROOT%\core\src\mode\modes" (
     xcopy /E /I /Y /Q "%REPO_ROOT%\core\src\mode\modes" "%RES%\modes\" >nul
 )
 
-REM 4c. pyengine（轻量：仅 src + pyproject + 版本声明）
+REM 4c. pyengine（轻量：仅 src + migrations + pyproject + 版本声明）
+REM     ⚠️ `migrations/` **必须**一起打进去：`resolve_migrations_dir()` 的仓库候选是
+REM     `Path(__file__).parents[3]/"migrations"` —— 安装后即
+REM     `<install>/resources/pyengine/migrations`。缺它时引擎启动直接
+REM     `RuntimeError: opensquilla migrations directory not found`（实测），
+REM     桌面端于是只剩纯 Rust 能力子集。
 if exist "%REPO_ROOT%\pyengine" (
     xcopy /E /I /Y /Q "%REPO_ROOT%\pyengine\src" "%RES%\pyengine\src\" >nul
+    if exist "%REPO_ROOT%\pyengine\migrations" (
+        xcopy /E /I /Y /Q "%REPO_ROOT%\pyengine\migrations" "%RES%\pyengine\migrations\" >nul
+    ) else (
+        echo [ERROR] 未找到 pyengine\migrations —— 打包后的引擎无法启动（migrations 缺失）。
+        exit /b 1
+    )
     if exist "%REPO_ROOT%\pyengine\pyproject.toml" copy /Y "%REPO_ROOT%\pyengine\pyproject.toml" "%RES%\pyengine\" >nul
     if exist "%REPO_ROOT%\pyengine\.python-version" copy /Y "%REPO_ROOT%\pyengine\.python-version" "%RES%\pyengine\" >nul
 )
+
+REM 4c-bis. Control UI 必须同时落到 pyengine 的 static/dist
+REM     Control UI 由内嵌网关提供，它只在
+REM     resources/pyengine/src/opensquilla/gateway/static/dist 找已构建的 Vue 控制台
+REM     （Tauri 另装一份到 <install>/webui/dist，control_ui._resolve_dist_dir 会回退命中）。
+REM     缺失时桌面端只显示「资源不可用」告警 —— 2026-10-12 实测缺陷，故此处强制校验。
+echo [4c-bis] 复制 webui/dist -^> resources/pyengine/src/opensquilla/gateway/static/dist
+set "GW_STATIC_DIST=%RES%\pyengine\src\opensquilla\gateway\static\dist"
+if exist "%GW_STATIC_DIST%" rmdir /s /q "%GW_STATIC_DIST%" 2>nul
+xcopy /E /I /Y /Q "%WEBUI_SRC%\*" "%GW_STATIC_DIST%\" >nul
+if not exist "%GW_STATIC_DIST%\index.html" (
+    echo [ERROR] 控制台未落入 resources/pyengine/.../gateway/static/dist —— Control UI 将不可用
+    exit /b 1
+)
+echo       桌面控制台就位（index.html + assets + pets/）.
 
 REM 4d. btpanel-mcp（宝塔 MCP 服务端）
 if exist "%REPO_ROOT%\btpanel-mcp" (
@@ -88,7 +135,7 @@ if exist "%REPO_ROOT%\docs" (
 REM 4f. scripts（冒烟 / 校验子集）
 if exist "%REPO_ROOT%\scripts" (
     mkdir "%RES%\scripts" 2>nul
-    for %%f in (check-doc-cli-drift.py smoke_gateway.cjs ws_full_health.py package_app.cmd) do (
+    for %%f in (check-doc-cli-drift.py ws_full_health.py package_app.cmd) do (
         if exist "%REPO_ROOT%\scripts\%%f" copy /Y "%REPO_ROOT%\scripts\%%f" "%RES%\scripts\" >nul
     )
 )
@@ -104,14 +151,32 @@ set "TCONF=%TAURI_DIR%\tauri.conf.json"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$c=Get-Content '%TCONF%' -Raw | ConvertFrom-Json;" ^
   "$c.bundle.targets = @('msi','nsis');" ^
-  "$c.bundle.resources = @('webui/dist','skills','resources/*','resources/**');" ^
-  "$c.bundle.resources += 'resources/modes/**';" ^
-  "$c.bundle.resources += 'resources/pyengine/**';" ^
-  "$c.bundle.resources += 'resources/btpanel-mcp/**';" ^
-  "$c.bundle.resources += 'resources/docs/**';" ^
-  "$c.bundle.resources += 'resources/scripts/**';" ^
-  "$c | ConvertTo-Json -Depth 100 | Set-Content '%TCONF%' -Encoding UTF8"
+  "$c.bundle.resources = @('webui/dist','skills','resources');" ^
+  "$c.bundle.resources += 'resources/modes';" ^
+  "$c.bundle.resources += 'resources/pyengine';" ^
+  "$c.bundle.resources += 'resources/btpanel-mcp';" ^
+  "$c.bundle.resources += 'resources/docs';" ^
+  "$c.bundle.resources += 'resources/scripts';" ^
+  "$c | ConvertTo-Json -Depth 100 | Out-String | Set-Content -LiteralPath '%TCONF%' -Encoding UTF8;" ^
+  "$t=[System.IO.File]::ReadAllText('%TCONF%').TrimStart([char]0xFEFF);" ^
+  "[System.IO.File]::WriteAllText('%TCONF%', $t, (New-Object System.Text.UTF8Encoding($false)))"
 echo       完成。
+
+REM --------- Step 5b. Git LFS 指针守卫（fail-closed） ----------
+REM 2026-10-12 实测缺陷：squilla_router 的 .onnx/.pkl 在仓库里是 ~133 字节的 LFS 指针
+REM （未 `git lfs pull`），被打进安装包后 V4 router **静默降级**为 fallback，本地 ML 路由失效
+REM —— 安装包看起来正常、功能却悄悄少一块。此处 fail-closed：检出指针即中止。
+echo [5b] Git LFS 指针守卫（模型资源必须是真实二进制）...
+where python >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] 未找到 python，无法执行 scripts\check-lfs-models.py 守卫
+    exit /b 1
+)
+python "scripts\check-lfs-models.py"
+if errorlevel 1 (
+    echo [ERROR] Git LFS 指针守卫未通过，打包中止（详见上方）
+    exit /b 1
+)
 
 REM --------- Step 6. cargo tauri build ---------
 where cargo >nul 2>nul

@@ -247,7 +247,7 @@ existing fusion state in `docs/dsh-fusion-v2-2026-08-21.md`):
    editable live in the settings UI and re-run the mount `refresh()` on change,
    with a graceful fallback to the composition entry when the settings service is
    absent. The Rust equivalent maps to the existing mode-config override path
-   (`~/.marguerite/modes/*.yaml` / `ModeSpec`): bind a plugin's enable/announce
+   (`$1marguerite/modes/*.yaml` / `ModeSpec`): bind a plugin's enable/announce
    flags to a live, reloadable source with an idempotent, disposer-clean
    `refresh()` — clear the old section before re-registering — and fall back to
    the static spec when the settings surface is absent. Optional; not a blocking

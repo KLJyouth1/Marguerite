@@ -25,7 +25,7 @@ MCP（Model Context Protocol）是 Agent 与外部工具 / 数据源之间的标
 
 ### 配置
 
-在 `~/.marguerite/config.yaml` 中声明 MCP 服务器：
+在 `$1marguerite/config.yaml` 中声明 MCP 服务器：
 
 ```yaml
 mcp:
@@ -130,7 +130,7 @@ cd C:\Users\Administrator\WorkBuddy\xiaoyuangou\tools\baota_bridge
 
 ### 4. 接入 Marguerite（`config.mcp.servers`）
 
-编辑 `~/.marguerite/config.yaml`，在 `mcp.servers` 增加一条带 `url` 的条目：
+编辑 `$1marguerite/config.yaml`，在 `mcp.servers` 增加一条带 `url` 的条目：
 
 ```yaml
 mcp:
