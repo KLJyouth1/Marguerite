@@ -22,7 +22,16 @@ Thumbs.db
 .DS_Store
 
 # Tauri 构建期由 build.rs 复制进 src-tauri 的资源（体积大，非源码，不提交）
-gui/src-tauri/webui/dist
+#
+# 这里用 `dist*/` 而不是 `dist`：本仓库曾把三份过期的整包构建产物提交进了索引
+# （594 个文件 / 24 MB，全是 2026-08-11 的快照）：
+#   gui/src-tauri/webui/dist_old_202608110032
+#   gui/src-tauri/webui/dist_old_202608110146
+#   gui/src-tauri/webui/dist_opensquilla_upstream_202608110033
+# 只写 `dist` 匹配不到 `dist_old_*` / `dist_opensquilla_upstream_*`，于是它们被一路带进
+# 每次 clone（含多份重复的 KaTeX 字体等二进制）。已用 `git rm -r --cached` 移出索引
+# （文件仍在磁盘上）。`dist*/` 同时挡住未来任何构建快照目录。
+gui/src-tauri/webui/dist*/
 gui/src-tauri/skills
 
 # 前端依赖与构建产物（源码侧，非源码，体积大）
@@ -41,6 +50,10 @@ _*.txt
 
 # 构建输出目录（任意层级，含 gui/dist、pyengine/*/dist、根级 dist）
 dist/
+# 带后缀的旧构建快照（`dist.v1/`、`dist.bak/` …）：`dist/` 只匹配名字**正好**是 dist 的目录，
+# 实测 `webui/dist.v1/`（280 个文件的旧整包产物）就这样漏进了未跟踪列表。补 `dist.*/` 兜住。
+# 注意不要写成 `dist*/`——那会把 Python 的 `distutils/` 之类目录一并误伤。
+dist.*/
 
 # Python 运行/缓存产物
 __pycache__/
@@ -56,5 +69,109 @@ _tak*/
 
 # 桌面端打包资源（模型权重等二进制，体积大，非源码）
 /gui/src-tauri/resources
-# 写入工具的原子写 tmpdir 残留
+
+# 原子写（write 工具）留下的 tmpdir 残留。
+# 实测真实命名是 `.<文件名>.<pid>.<uuid>.tmpdir/`，例如：
+#   core/src/kb/.project_graph.rs.30984.74a026a4-….tmpdir/project_graph.rs.tmp
+#   webui/src/views/.TerminalView.vue.30984.….tmpdir/TerminalView.vue.tmp
+# 下面那条 `.dsh-*.tmpdir` 只覆盖另一种前缀写法，**匹配不到它**（实测 git check-ignore
+# 返回 exit 1）。于是这些残留一直是「未跟踪且未忽略」，`git add -A` 会把机器状态提交进去。
+# `*.tmpdir/` 覆盖全部写法。
+*.tmpdir/
 **/.dsh-*.tmpdir
+
+# 同一类残留还有**文件**形态（不是目录），所以上面那条目录规则看不见它。
+# 实测一例（R28）：`workbench/frontend/_tmp_32456_50033095d6122e050fba89244b7152f9`，0 字节，
+# 命名是 `_tmp_<pid>_<32位hex>` —— 原子写在目标目录留下的中间文件，
+# 写成功时会被 rename 掉，中断时就永久留在那里。实测它在 `git add -A` 集合里，
+# 也就是会被提交（0 字节垃圾，但仍是机器状态）。这条补的是文件形态。
+**/_tmp_[0-9]*_[0-9a-f][0-9a-f]*
+
+# 运行期数据库（桥接 / 缓存等本机状态）。索引里当前没有任何 *.db / *.sqlite，
+# 所以整类忽略是安全的：不会误伤已跟踪文件。
+*.db
+*.sqlite
+*.sqlite3
+
+# =============================================================================
+# 本地工作区卫生（开源发布要件补丁）
+# 以下目录全部是「本机生成 / 智能体工具产物」，不含项目源码。
+# 注意：ignore 只对**未跟踪**文件生效。已被跟踪的文件必须用
+# `git rm -r --cached <path>` 才会移出索引，加 ignore 规则没有作用。
+# =============================================================================
+
+# 清理/诊断用临时区（scratch 输出、探针脚本）
+/.tmp/
+
+# 本机一次性材料，**不属于仓库**（`scripts/README.md` 已如此声明）：
+#   scripts/qa/     —— 25 个一次性 QA 探针 + 截图 + 结果 JSON
+#   scripts/launch/ —— 中文名的个人启动器（启动.bat / 启动.ps1）
+# 它们此前是「未跟踪且未忽略」，`git add -A` 会把个人脚本与机器截图一起提交，
+# 所以在这里显式挡掉。真正属于仓库的门禁脚本都在 scripts/ 顶层。
+/scripts/qa/
+/scripts/launch/
+
+# 引擎与智能体运行期状态（会话库、审计日志、工具落盘）。
+#
+# 这里必须是 `**/.marguerite/` 而不是 `/.marguerite/`：后者只锚定仓库根，漏掉了嵌套的那一份。
+# 实测 `core/.marguerite/security-audit/skill_block.jsonl` 就是一个**被跟踪的运行期日志**——
+# `core/src/security/skill_scan.rs::log_skill_block` 是「尽力而为地追加一行 JSON」，
+# 测试跑一次就追加一行（文件已 51 KB，全是 skill_block 事件），于是**每跑一次测试仓库就变脏**。
+# 已用 `git rm --cached` 移出索引（代码里没有任何地方读取该文件，它是纯追加产物，
+# 需要时会自行重建）。`**/` 同时覆盖根目录与任何嵌套工作区。
+# 下面这一组**同样全部改成 `**/`**：`/.foo/` 只锚定仓库根，任何嵌套的工作区副本都会漏过去。
+# 实测漏过两个：`docs/reports/.dumate/20260902-…-onboarding-report/input.md` 与
+# `webui/.workbuddy/memory/2026-08-1{3,4}.md`（都是智能体工具的记忆/产物目录，
+# 在 `git add -A` 时会被一起提交）。根锚定 → 任意层级，是这一类规则的正确写法。
+**/.marguerite/
+**/.marguerite-audit/
+**/.agent-teams/
+**/.design/
+**/.dumate/
+**/.trae/
+**/.workbuddy/
+# ⚠ `.workbuddy-ai/` 与 `.workbuddy/` 是**两个不同的目录**，上面那条规则**不匹配**它
+# （前缀不同，不是子路径）。实测根目录 `.workbuddy-ai/` 有 1492 个未跟踪文件，
+# 内容是智能体记忆（`memory/2026-10-1x.md`）与临时脚本（`tmp/*.cjs`）——
+# 属本机私有工作状态，不该进仓库、更不该随公开仓库外泄会话内容。
+**/.workbuddy-ai/
+**/.versions/
+
+# 本地产出的报告 / 交付物 / 实验（体积大，非源码）。
+# 注：deliverables/gstack/ 下 3 个 md 已被跟踪，会继续留在仓库里；
+# 本规则只阻止**新增**的本地产物再次进入索引。
+/artifacts/
+/deliverables/
+/experiments/
+
+# Python 侧车在本机生成的大体量数据目录（约 85k 文件 / 750MB，纯本地状态）
+/dsh-data/
+
+# 本地归档与临时目录（核验过：0 个被跟踪文件）
+/_archive/
+/temp/
+
+# 测试与覆盖率产物
+test-results/
+playwright-report/
+# Playwright 的历史 trace/失败截图快照目录（实测曾把 4 个 `webui/stale-tr-<时间戳>/`
+# 连同几百张 test-failed-*.png 提交进索引；它们是调试产物，不属于源码）
+/webui/stale-tr-*/
+lcov.info
+*.lcov
+# vitest 的 JSON reporter 输出。实测 `webui/vitest-report.json` **曾被提交进索引**：
+# 1.03 MB、内容是一次旧测试运行的汇总（`numTotalTests: 3059`），全仓**零引用**
+# （`git grep` 与文件系统 grep 都没有命中，`vitest.config` 里也没配 JSON reporter）。
+# 它是仓库里第 2 大的文件，纯噪音 → 已 `git rm --cached` 移出索引，并用本条挡住复发。
+vitest-report.json
+*-report.json
+
+# 本机生成的静态预览页（HTML 原型，非源码）
+/pages/
+
+# --- /website/ 保持「不忽略」，原因如下（勿直接取消注释）---
+# website/ 是 8 个**已被跟踪**的静态站点源文件：index.html / main.js / motion.js /
+# styles.css + 3 张截图 + _verify.cjs，属于源码而非构建产物。
+# 若决定不再随仓库发布，正确做法是 `git rm -r --cached website`，而不是加一条
+# ignore 规则——ignore 对已跟踪文件无效。
+# /website/

@@ -1,4 +1,0 @@
-/d/Downloads/Marguerite
-done
-ls: cannot access 'Cargo.toml': No such file or directory
-EXIT=2

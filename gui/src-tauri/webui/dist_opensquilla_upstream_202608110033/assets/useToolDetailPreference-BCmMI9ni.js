@@ -1,2 +1,0 @@
-import{ot as e,st as t}from"./_plugin-vue_export-helper-fLx7XHM7.js";var n=[`auto`,`compact`,`expanded`],r=`opensquilla.appearance.toolDetails.v1`;function i(e){return n.includes(e)?e:`auto`}function a(){if(typeof window>`u`)return null;try{return window.localStorage}catch{return null}}function o(){try{return i(a()?.getItem(r))}catch{return`auto`}}var s=t(o());function c(e){let t=i(e);s.value=t;try{a()?.setItem(r,t)}catch{}}function l(){return{mode:e(s),setMode:c}}export{l as n,n as t};
-//# sourceMappingURL=useToolDetailPreference-BCmMI9ni.js.map

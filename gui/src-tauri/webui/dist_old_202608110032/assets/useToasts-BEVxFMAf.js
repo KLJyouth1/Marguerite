@@ -1,2 +1,0 @@
-import{st as e}from"./_plugin-vue_export-helper-fLx7XHM7.js";var t=5e3,n=4,r=e([]),i=new Map,a=0;function o(e){let t=i.get(e);t&&(clearTimeout(t),i.delete(e)),r.value=r.value.filter(t=>t.id!==e)}function s(e,s={}){let c=e.trim();if(!c)return;for(;r.value.length>=n;)o(r.value[0].id);let l=++a;r.value=[...r.value,{id:l,message:c,tone:s.tone??`info`}],i.set(l,setTimeout(()=>o(l),s.duration??t))}function c(){return{toasts:r,pushToast:s,dismissToast:o}}export{c as t};
-//# sourceMappingURL=useToasts-BEVxFMAf.js.map
