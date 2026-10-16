@@ -1,0 +1,118 @@
+/* =====================================================================
+   Bloom design tokens (V2 brand anchor + V3 tokenized theming).
+   Per Bloom R19/R12: color / spacing / font-size values are defined ONLY
+   here as CSS variables. Components MUST reference var(--token); the only
+   raw hex allowed elsewhere is #fff / #000.
+   ===================================================================== */
+
+:root {
+  /* ---- Brand: 蓝主 + 橙强 (synced with marguerite/webui themes contract) ----
+     --brand ≙ webui --accent; --accent-2 ≙ webui --accent-secondary.
+     Light values follow webui/src/themes/light/tokens.css (#1A56DB / #C2410C),
+     dark follows #60A5FA / #F97316 — one brand family across all front-ends. */
+  --brand: #1a56db;
+  --brand-strong: #153ea6;
+  --brand-soft: #6366f1; /* pure indigo, allowed */
+  --brand-slate: #4f46e5; /* slate, allowed */
+  --brand-tint: rgba(26, 86, 219, 0.09);
+  --brand-tint-strong: rgba(26, 86, 219, 0.16);
+  --brand-on: #ffffff;
+  --accent-2: #c2410c;
+  --accent-2-tint: rgba(194, 65, 12, 0.12);
+
+  /* ---- Light theme surfaces & text (all hex belong to tokens, not components) ---- */
+  --surface-0: #f4f7fb;
+  --surface-1: #ffffff;
+  --surface-2: #eef2f8;
+  --surface-3: #e4eaf3;
+  --border: #d8e0ec;
+  --border-strong: #c2cddd;
+  --text: #18222f;
+  --text-muted: #586474;
+  --text-faint: #8a96a6;
+
+  /* ---- Semantic status (calm; no pink/purple) ---- */
+  --success: #15a05a;
+  --success-tint: rgba(21, 160, 90, 0.12);
+  --warning: #b9790b;
+  --warning-tint: rgba(185, 121, 11, 0.14);
+  --danger: #d23b3b;
+  --danger-tint: rgba(210, 59, 59, 0.12);
+  --info: var(--brand);
+
+  /* ---- Spacing scale (V5 pixel lock: 48 / 236 / 288 / 24) ---- */
+  --rail: 48px;
+  --nav: 236px;
+  --panel-min: 288px;
+  --gap: 24px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
+
+  /* ---- Radii ---- */
+  --radius-1: 6px;
+  --radius-2: 9px;
+  --radius-3: 13px;
+  --radius-pill: 999px;
+
+  /* ---- Font sizes ---- */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+
+  /* ---- Typography ---- */
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', Verdana, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+
+  /* ---- Shadows (no glow) ---- */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-2: 0 6px 18px rgba(16, 24, 40, 0.08), 0 2px 6px rgba(16, 24, 40, 0.06);
+  --ring: 0 0 0 3px var(--brand-tint-strong);
+
+  /* ---- Calm, tokenized motion (Bloom V4: no bounce easing) ---- */
+  --t-fast: 120ms ease;
+  --t-base: 200ms ease;
+  --t-slow: 300ms ease;
+
+  --icon-size: 18px;
+}
+
+[data-theme='dark'] {
+  --brand: #60a5fa;
+  --brand-strong: #3b82f6;
+  --brand-soft: #818cf8;
+  --brand-slate: #818cf8;
+  --brand-tint: rgba(96, 165, 250, 0.14);
+  --brand-tint-strong: rgba(96, 165, 250, 0.22);
+  --brand-on: #0b1220;
+  --accent-2: #f97316;
+  --accent-2-tint: rgba(249, 115, 22, 0.16);
+
+  --surface-0: #0e131c;
+  --surface-1: #161d29;
+  --surface-2: #1d2633;
+  --surface-3: #27313f;
+  --border: #2a3543;
+  --border-strong: #3a4757;
+  --text: #e7edf5;
+  --text-muted: #9aa7b8;
+  --text-faint: #6b7889;
+
+  --success: #3fbf73;
+  --success-tint: rgba(63, 191, 115, 0.16);
+  --warning: #e0a53a;
+  --warning-tint: rgba(224, 165, 58, 0.16);
+  --danger: #f06666;
+  --danger-tint: rgba(240, 102, 102, 0.16);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 8px 22px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --ring: 0 0 0 3px var(--brand-tint-strong);
+}

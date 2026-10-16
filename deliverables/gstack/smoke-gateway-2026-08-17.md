@@ -65,7 +65,7 @@ cargo build --release --offline \
 
 ## 3. 关键发现
 
-- **隔离 HOME 冒烟范式可复用**：以 `USERPROFILE=$SMOKE_HOME HOME=$SMOKE_HOME` + `MARGUERITE_API_KEY/MARGUERITE_MODEL` 启动**独立**网关（端口 18799，**绝不触碰线上 18790**），是对「源码已修复」做运行时确认、且不干扰用户正在运行 App 的安全方法。线上实时网关 `pid 8308` 持有 18790 与 `~/.marguerite/*.db`，全程未被触动。
+- **隔离 HOME 冒烟范式可复用**：以 `USERPROFILE=$SMOKE_HOME HOME=$SMOKE_HOME` + `MARGUERITE_API_KEY/MARGUERITE_MODEL` 启动**独立**网关（端口 18799，**绝不触碰线上 18790**），是对「源码已修复」做运行时确认、且不干扰用户正在运行 App 的安全方法。线上实时网关 `pid 8308` 持有 18790 与 `$1marguerite/*.db`，全程未被触动。
 - **DB 只读告警非致命**：`attempt to write a readonly database` 来自与实时网关 (8308) 共享 `AppData/Local/Marguerite` 的 `sessions.db`/`usage.db` 写锁；代码已 `(忽略，不影响本轮)`。这**正面证明** D1–D3 修复走的是内存态 `EventBus` / 会话管理器路径（UI 实际订阅的正是该路径），与 DB 冷持久化解耦。
 - **D4 未单独验证**：本次冒烟聚焦 D1–D3 + D5 编排；D4 记忆召回需在真实记忆库存在时触发 recall RPC，留待集成测试阶段。
 

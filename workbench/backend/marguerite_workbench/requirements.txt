@@ -1,0 +1,19 @@
+# Marguerite File Intelligence Workbench — dependency-light requirements.
+# Core (required to run the service + tests):
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.7
+pygments>=2.17
+httpx>=0.27            # used by TestClient and optional LLM / research calls
+pytest>=8.0            # test suite
+
+# Optional (auto-detected at runtime; absence degrades gracefully):
+#   requests   — alternative HTTP client for research / LLM
+#   httpx      — OpenAI-compatible LLM + Serper web search (联网)
+#   pygments   — richer syntax highlighting (falls back to escaped <pre>)
+
+# Optional environment variables (all have working deterministic fallbacks):
+#   UNIV_LLM_BASE_URL / UNIV_LLM_KEY / UNIV_LLM_MODEL  — OpenAI-compatible LLM
+#   SERPER_API_KEY / UNIV_SEARCH_KEY                   — web search (联网)
+#   MARGERITE_WORKSPACE                                — file sandbox root
+#   MARGERITE_DATA_DIR                                 — JSONL persistence dir

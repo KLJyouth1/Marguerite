@@ -1,0 +1,10 @@
+{
+  "schema": "marguerite.patch/v1",
+  "target": "dsh-modlens",
+  "layer": 1,
+  "profile": ["desktop"],
+  "ops": [
+    {"op": "insert", "slot": "tools", "id": "dsh-modlens.analyze", "order": 10, "label": "ModLens 视觉取证"},
+    {"op": "set", "key": "ui.theme", "value": "dark"}
+  ]
+}

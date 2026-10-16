@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marguerite 万物互联工作台 · 下一代升级方案报告</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2360A5FA'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%230E1116'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23F97316'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Sans+SC:wght@400;500;700;900">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+:root{
+  --bg:#0E1116;
+  --bg-2:#141922;
+  --surface:#181E28;
+  --surface-2:#1F2632;
+  --border:#2A323E;
+  --border-strong:#3A4553;
+  --text:#E8ECF1;
+  --text-dim:#9AA4B2;
+  --text-faint:#6B7482;
+  --blue:#60A5FA;
+  --blue-dim:#3B6FB0;
+  --orange:#F97316;
+  --orange-dim:#B85A1A;
+  --ok:#39D7A2;
+  --warn:#E8B23A;
+  --danger:#FF6B6B;
+  --purple:#8C7DF2;
+  --cyan:#56C2E6;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:'Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;
+  line-height:1.7;
+  font-size:15px;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1280px;margin:0 auto;padding:0 32px}
+/* ===== 顶部导航 ===== */
+.topnav{
+  position:sticky;top:0;z-index:100;
+  background:rgba(14,17,22,.92);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border);
+}
+.topnav-inner{display:flex;align-items:center;gap:20px;height:52px;max-width:1280px;margin:0 auto;padding:0 32px;overflow-x:auto}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px;white-space:nowrap}
+.brand svg{flex:none}
+.navlinks{display:flex;gap:4px;overflow-x:auto;flex:1}
+.navlinks a{
+  color:var(--text-dim);font-size:12.5px;padding:5px 10px;border-radius:6px;white-space:nowrap;
+}
+.navlinks a:hover{color:var(--text);background:var(--surface-2);text-decoration:none}
+/* ===== 封面 ===== */
+.hero{
+  padding:72px 0 56px;
+  border-bottom:1px solid var(--border);
+  background:
+    radial-gradient(ellipse 800px 300px at 20% 0%,rgba(96,165,250,.10),transparent 60%),
+    radial-gradient(ellipse 600px 260px at 85% 20%,rgba(249,115,22,.08),transparent 60%);
+}
+.hero-tag{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:12px;letter-spacing:.12em;color:var(--orange);
+  border:1px solid var(--orange-dim);border-radius:999px;padding:5px 14px;margin-bottom:22px;
+  text-transform:uppercase;font-weight:500;
+}
+.hero h1{font-size:42px;line-height:1.2;font-weight:900;letter-spacing:-.01em;max-width:900px}
+.hero h1 .hl{color:var(--blue)}
+.hero h1 .hl-o{color:var(--orange)}
+.hero-sub{margin-top:18px;font-size:17px;color:var(--text-dim);max-width:820px}
+.hero-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:38px;max-width:960px}
+.stat-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+}
+.stat-num{font-size:28px;font-weight:900;color:var(--blue);line-height:1.1}
+.stat-num .unit{font-size:14px;font-weight:500;color:var(--text-dim);margin-left:3px}
+.stat-label{font-size:12.5px;color:var(--text-dim);margin-top:6px;line-height:1.5}
+.stat-card:nth-child(2) .stat-num{color:var(--orange)}
+.stat-card:nth-child(3) .stat-num{color:var(--ok)}
+.hero-diff{
+  margin-top:26px;padding:14px 18px;border-left:3px solid var(--orange);
+  background:rgba(249,115,22,.06);border-radius:0 8px 8px 0;font-size:14px;color:var(--text);max-width:960px;
+}
+.hero-diff b{color:var(--orange)}
+/* ===== 章节通用 ===== */
+section{padding:56px 0;border-bottom:1px solid var(--border)}
+.sec-kicker{font-size:12px;letter-spacing:.15em;color:var(--orange);font-weight:700;margin-bottom:10px;text-transform:uppercase}
+.sec-title{font-size:28px;font-weight:900;line-height:1.25;margin-bottom:8px}
+.sec-desc{color:var(--text-dim);font-size:14.5px;max-width:880px;margin-bottom:30px}
+h3.block-title{font-size:17px;font-weight:700;margin:28px 0 14px;color:var(--text)}
+h4{font-size:14.5px;font-weight:700;margin:18px 0 8px;color:var(--blue)}
+p{margin-bottom:12px;color:var(--text)}
+p.note{font-size:12.5px;color:var(--text-faint)}
+.src{font-size:11.5px;color:var(--text-faint);word-break:break-all}
+.src a{color:var(--text-faint);text-decoration:underline;text-underline-offset:2px}
+/* ===== 图表容器 ===== */
+.chart{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px}
+.chart-title{font-size:13px;font-weight:700;color:var(--text-dim);padding:4px 6px 8px}
+.chart-box{width:100%;height:380px}
+.chart-box.tall{height:460px}
+.chart-box.short{height:300px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+/* ===== 表格 ===== */
+.tbl-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--border);border-radius:12px}
+table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:13px}
+th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--border);word-wrap:break-word}
+th{background:var(--surface-2);font-weight:700;color:var(--text);font-size:12.5px;position:sticky;top:0}
+tr:last-child td{border-bottom:none}
+td.dim{color:var(--text-dim)}
+tr.hl-row td{background:rgba(96,165,250,.08)}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;line-height:1.6}
+.pill-blue{background:rgba(96,165,250,.15);color:var(--blue)}
+.pill-orange{background:rgba(249,115,22,.15);color:var(--orange)}
+.pill-ok{background:rgba(57,215,162,.15);color:var(--ok)}
+.pill-warn{background:rgba(232,178,58,.15);color:var(--warn)}
+.pill-danger{background:rgba(255,107,107,.15);color:var(--danger)}
+.pill-purple{background:rgba(140,125,242,.15);color:var(--purple)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+/* ===== 卡片 ===== */
+.card{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+}
+.card h4{margin-top:0}
+.wp-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.wp-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;
+  border-top:3px solid var(--blue);display:flex;flex-direction:column;gap:10px;
+}
+.wp-card.pri{border-top-color:var(--orange)}
+.wp-head{display:flex;align-items:center;gap:10px}
+.wp-id{
+  font-size:11px;font-weight:900;color:var(--bg);background:var(--blue);
+  padding:3px 8px;border-radius:6px;letter-spacing:.05em;
+}
+.wp-card.pri .wp-id{background:var(--orange)}
+.wp-name{font-size:15px;font-weight:700}
+.wp-meta{font-size:12px;color:var(--text-dim);line-height:1.7}
+.wp-meta b{color:var(--text);font-weight:700}
+.wp-row{font-size:12.5px;color:var(--text-dim);border-top:1px dashed var(--border);padding-top:8px}
+.wp-row b{color:var(--cyan)}
+/* ===== 六层架构 ===== */
+.arch{display:flex;flex-direction:column;gap:6px}
+.arch-layer{
+  display:grid;grid-template-columns:64px 1fr;gap:14px;align-items:center;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;
+}
+.arch-lv{
+  font-size:18px;font-weight:900;text-align:center;color:var(--blue);
+  background:rgba(96,165,250,.1);border-radius:8px;padding:8px 0;
+}
+.arch-layer.bottom .arch-lv{color:var(--ok);background:rgba(57,215,162,.1)}
+.arch-body .t{font-size:14px;font-weight:700;margin-bottom:2px}
+.arch-body .d{font-size:12.5px;color:var(--text-dim)}
+/* ===== 时间轴 ===== */
+.timeline{display:grid;grid-template-columns:90px 24px 1fr;gap:0 0;row-gap:0}
+.tl-time{font-size:13px;font-weight:700;color:var(--orange);text-align:right;padding:14px 12px 0 0}
+.tl-axis{position:relative;justify-self:center;width:24px}
+.tl-dot{
+  width:14px;height:14px;border-radius:50%;background:var(--blue);
+  border:3px solid var(--bg);box-shadow:0 0 0 2px var(--blue);
+  margin-top:18px;position:relative;z-index:1;
+}
+.tl-line{position:absolute;left:50%;top:30px;bottom:-14px;width:2px;background:var(--border-strong);transform:translateX(-50%)}
+.tl-item:last-child .tl-line{display:none}
+.tl-content{padding:12px 0 22px 16px}
+.tl-content .ph{font-size:15px;font-weight:700;margin-bottom:4px}
+.tl-content .pd{font-size:13px;color:var(--text-dim)}
+/* ===== 缺口矩阵 ===== */
+.gap-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.gap-cell{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.gap-cell.now{border-left:3px solid var(--ok)}
+.gap-cell.future{border-left:3px solid var(--warn)}
+.gap-cell h5{font-size:13.5px;font-weight:700;margin-bottom:4px}
+.gap-cell p{font-size:12.5px;color:var(--text-dim);margin:0}
+/* ===== GitHub 列表 ===== */
+.gh-list{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.gh-item{
+  display:flex;align-items:flex-start;gap:12px;background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;padding:12px 14px;
+}
+.gh-star{
+  flex:none;font-size:11.5px;font-weight:700;color:var(--warn);
+  background:rgba(232,178,58,.1);padding:2px 8px;border-radius:6px;white-space:nowrap;
+}
+.gh-body .name{font-size:13.5px;font-weight:700}
+.gh-body .desc{font-size:12px;color:var(--text-dim);margin-top:2px;line-height:1.55}
+/* ===== 安全 L0-L3 ===== */
+.lv-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.lv-card{border-radius:10px;padding:14px;border:1px solid var(--border);background:var(--surface)}
+.lv-card .lvl{font-size:22px;font-weight:900}
+.lv-card .nm{font-size:13px;font-weight:700;margin:4px 0}
+.lv-card .ds{font-size:12px;color:var(--text-dim);line-height:1.55}
+.lv0 .lvl{color:var(--cyan)} .lv1 .lvl{color:var(--ok)} .lv2 .lvl{color:var(--warn)} .lv3 .lvl{color:var(--danger)}
+/* ===== 页脚 ===== */
+footer{padding:36px 0 60px;color:var(--text-faint);font-size:12.5px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text-dim);margin:8px 0 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+@media (max-width:900px){
+  .wrap{padding:0 18px}
+  .hero{padding:48px 0 36px}
+  .hero h1{font-size:28px}
+  .hero-stats,.grid-2,.grid-3,.wp-grid,.gap-grid,.gh-list{grid-template-columns:1fr}
+  .lv-grid{grid-template-columns:1fr 1fr}
+  .chart-box{height:320px}
+  .sec-title{font-size:22px}
+  .topnav-inner{padding:0 14px}
+}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#60A5FA"/><circle cx="16" cy="16" r="6" fill="#0E1116"/><circle cx="16" cy="16" r="2.5" fill="#F97316"/></svg>
+      Marguerite · 万物互联工作台
+    </div>
+    <div class="navlinks">
+      <a href="#market">市场</a>
+      <a href="#competitors">竞品</a>
+      <a href="#iot">万物互联</a>
+      <a href="#edge">特殊人群</a>
+      <a href="#gaps">缺口</a>
+      <a href="#arch">架构</a>
+      <a href="#wp">任务包</a>
+      <a href="#deps">依赖</a>
+      <a href="#roadmap">路线</a>
+      <a href="#security">安全</a>
+      <a href="#github">灵感</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ===== 封面 / 执行摘要 ===== -->
+<header class="hero">
+  <div class="wrap">
+    <div class="hero-tag">Next-Gen Plan · 2026-09-28 · 研发并行方案</div>
+    <h1>从「能操控电脑的本地 Agent」<br>升级为<span class="hl">本地优先、可治理、能操控数字与物理世界</span>的<br>个人智能体操作系统 <span class="hl-o">万物互联工作台</span></h1>
+    <p class="hero-sub">一台回环网关，向下通过统一设备总线连接家居 / 车 / 手机 / 工业设备，向上用 MCP + A2A 接入工具与其它 Agent，横向用 3D 岛屿工作空间做可视化，纵向用审批队列与 fail-closed 保证安全。</p>
+    <div class="hero-stats">
+      <div class="stat-card">
+        <div class="stat-num">90–120<span class="unit">亿美元</span></div>
+        <div class="stat-label">2026 年全球 AI Agent 市场规模预测区间（主流机构口径），2025 年约 70–83 亿美元，CAGR 40–47%<br><span class="src">来源：<a href="https://www.fortunebusinessinsights.com/ai-agents-market-111574">Fortune BI</a> / <a href="https://www.thebusinessresearchcompany.com/report/ai-agents-global-market-report">TBRC</a> / <a href="https://www.marknteladvisors.com/research-library/ai-agent-market.html">MarkNtel</a></span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">449<span class="unit">亿元</span></div>
+        <div class="stat-label">2026 年中国企业级 AI 智能体市场预计（证券时报口径，2025 年 212 亿元，年翻倍）<br><span class="src">来源：<a href="https://www.stcn.com/article/detail/3952045.html">证券时报 2026-06</a></span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">9400+<span class="unit">公开 MCP server</span></div>
+        <div class="stat-label">2026-04 公开 MCP server 数量；SDK 月下载 9700 万；A2A 已 150+ 组织生产使用，并入 Linux 基金会 AAIF<br><span class="src">来源：<a href="https://dev.to/nishilbhave/mcp-servers-in-2026-complete-model-context-protocol-guide-52le">MCP 生态调研</a> / <a href="https://www.linuxfoundation.org/press/a2a-protocol-surpasses-150-organizations-lands-in-major-cloud-platforms-and-sees-enterprise-production-use-in-first-year">LF 公告</a></span></div>
+      </div>
+    </div>
+    <div class="hero-diff">
+      <b>核心差异化：</b>业界唯一把「真物理设备操控 + 3D 空间可视化 + 组织级审批治理 + 跨会话记忆图谱」做进同一个本地桌面产品。Cline 没有 3D 与设备总线；Open Interpreter 没有治理与可视化；Home Assistant 不做通用桌面办公。
+    </div>
+  </div>
+</header>
+
+<!-- ===== 2. 市场与趋势 ===== -->
+<section id="market">
+  <div class="wrap">
+    <div class="sec-kicker">01 · Market</div>
+    <h2 class="sec-title">市场与趋势：Agent 从「能对话」转向「能做事」</h2>
+    <p class="sec-desc">行业焦点已从「能否对话 / 能否推理」转向「能否落地、能否形成业务闭环」。2025–2026 协议层完成收敛：MCP（工具接入）+ A2A（Agent 互操作）并入 Linux 基金会 AAIF。下表并列多家机构口径——「AI Agent 市场」定义分歧极大，窄口径与宽口径相差可达 60 倍。</p>
+
+    <div class="grid-2">
+      <div class="chart">
+        <div class="chart-title">全球 AI Agent 市场规模（亿美元，多家机构并列）</div>
+        <div id="ch-global" class="chart-box"></div>
+        <p class="src">口径：各机构「AI Agents Market」报告 2026-09 更新；360iResearch 为保守口径，仅约主流机构一半。<a href="https://www.360iresearch.com/library/intelligence/ai-agents">360iResearch</a></p>
+      </div>
+      <div class="chart">
+        <div class="chart-title">中国市场规模（亿元，分口径）</div>
+        <div id="ch-china" class="chart-box"></div>
+        <p class="src">窄口径=智能体软件收入（<a href="http://paper.chinahightech.com/pc/content/202511/17/content_160155.html">中国科技网</a>）；企业级口径=证券时报。4509 亿 / 2.6 万亿为宽口径带动效应，<b>不可作 TAM 收入引用</b>，未入图。</p>
+      </div>
+    </div>
+
+    <h3 class="block-title">五条已验证趋势</h3>
+    <div class="grid-3">
+      <div class="card">
+        <h4>协议标准化完成收敛</h4>
+        <p class="wp-meta">2025-06 Google 捐 A2A 给 Linux 基金会；2025-12 成立 AAIF 统一托管 MCP / A2A / goose / AGENTS.md；2026-04 A2A v1.0 稳定，150+ 组织生产使用；2026-08 A2A 正式并入 AAIF。</p>
+      </div>
+      <div class="card">
+        <h4>私有化部署是政企硬门槛</h4>
+        <p class="wp-meta">调研显示 67% 企业选「公有云训练 + 私有化部署」混合模式；金融 / 政务 / 制造等强监管行业私有化需求已超 70%。</p>
+      </div>
+      <div class="card">
+        <h4>端侧 / 开源模型抬头</h4>
+        <p class="wp-meta">HA 2025-09 起在智能家居 OS 内集成 LLM（本地 Ollama / Whisper + Piper 全本地语音）；Cline 明确支持本地模型 BYOK。</p>
+      </div>
+      <div class="card">
+        <h4>大厂定型为「持久后台 Agent」</h4>
+        <p class="wp-meta">ChatGPT agent（2026-04）合并 Operator + Deep Research；Grok 4.20 起原生多智能体，2026-07 推持久后台跨端运行。</p>
+      </div>
+      <div class="card">
+        <h4>企业落地节奏</h4>
+        <p class="wp-meta">咨询机构预测到 2026 年底 40% 企业应用将内置任务型 Agent（一方称，咨询预测）。</p>
+      </div>
+      <div class="card">
+        <h4>国内算力背景</h4>
+        <p class="wp-meta">新华社《经济参考报》：2026 年中国 AI 算力市场预计 515 亿美元（+37%），2030 年 1501 亿美元。</p>
+      </div>
+    </div>
+    <p class="src" style="margin-top:14px">趋势来源：<a href="https://presenc.ai/research/a2a-vs-mcp-agent-communication-2026">presenc.ai</a> · <a href="https://www.practicallogix.com/the-2026-agent-interoperability-reset-a2a-mcp-under-aaif">practicallogix</a> · <a href="https://cloud.tencent.com/developer/article/2748912">腾讯云</a> · <a href="https://www.home-assistant.io/blog/2025/09/11/ai-in-home-assistant/">HA 博客</a> · <a href="http://jjckb.xinhuanet.com/20260928/d5ed5eb6e66c4838ae34fe6b1327d16f/c.html">经济参考报</a></p>
+  </div>
+</section>
+
+<!-- ===== 3. 竞品对比矩阵 ===== -->
+<section id="competitors">
+  <div class="wrap">
+    <div class="sec-kicker">02 · Competition</div>
+    <h2 class="sec-title">竞品对比矩阵：四派格局，一个空位</h2>
+    <p class="sec-desc">竞品分四派——云端通用（不碰本地机器）、编程垂直（锁代码）、企业编排（不做桌面执行）、隐私端侧（无一家做全「真桌面操控 + 可视化工作台 + 审批治理 + 长期记忆」）。评级：● 强/原生 · ◐ 部分/需配置 · ○ 弱/不支持。</p>
+
+    <div class="chart">
+      <div class="chart-title">竞品定位散点：X = 操控本地桌面/物理设备能力，Y = 可视化与治理成熟度（气泡=开源热度/装机量，示意）</div>
+      <div id="ch-competitor" class="chart-box tall"></div>
+      <p class="legend">
+        <span><i class="sw" style="background:#60A5FA"></i>云端通用</span>
+        <span><i class="sw" style="background:#F97316"></i>编程垂直</span>
+        <span><i class="sw" style="background:#8C7DF2"></i>企业编排</span>
+        <span><i class="sw" style="background:#39D7A2"></i>隐私端侧 / 硬件</span>
+        <span><i class="sw" style="background:#FF6B6B"></i>Marguerite 目标空位</span>
+      </p>
+    </div>
+
+    <h3 class="block-title">能力对比大表（节选重点产品）</h3>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup>
+          <col style="width:13%"><col style="width:16%"><col style="width:11%"><col style="width:7%"><col style="width:7%"><col style="width:9%"><col style="width:11%"><col style="width:13%"><col style="width:13%">
+        </colgroup>
+        <thead><tr>
+          <th>产品</th><th>定位</th><th>本地桌面/设备操控</th><th>多 Agent</th><th>开源</th><th>自托管/离线</th><th>生态(MCP/插件)</th><th>可视化交互</th><th>治理/审批</th>
+        </tr></thead>
+        <tbody>
+          <tr><td><b>Manus</b></td><td>云端自主 Agent，SMB/个人</td><td>○ 云端虚拟电脑，不碰本地</td><td>◐</td><td>○</td><td>○ 纯云</td><td>网页级工具</td><td>任务时间线回放</td><td>◐ 沙箱内</td></tr>
+          <tr><td><b>ChatGPT agent</b></td><td>消费级通用 Agent</td><td>○ OpenAI 远程虚拟电脑</td><td>◐</td><td>○</td><td>○ 纯云</td><td>连接器 OAuth</td><td>任务回放+浏览器</td><td>◐ 远程沙箱</td></tr>
+          <tr><td><b>Claude Code</b></td><td>终端编程 Agent</td><td>● 桌面 App 内 computer use</td><td>○ 单 Agent</td><td>○</td><td>○ 需账号</td><td>模型锁定</td><td>◐ 终端为主</td><td>◐ diff 审批</td></tr>
+          <tr><td><b>Cline</b></td><td>开源编程 Agent 运行时</td><td>● Desktop 原生桌面会话</td><td>◐ 并行会话</td><td>●</td><td>● BYOK 含本地模型</td><td>Marketplace 工具</td><td>◐ IDE diff</td><td>◐ 逐步骤批准</td></tr>
+          <tr><td><b>Open Interpreter</b></td><td>开源桌面 Agent（Rust）</td><td>● 本地代码/浏览器/文档</td><td>◐ 有限</td><td>● Apache 2.0</td><td>● 本地模型无遥测</td><td>开源模型专属优化</td><td>◐ 文档编辑器</td><td>○ 弱</td></tr>
+          <tr><td><b>OpenHands</b></td><td>开源 AI 软件工程师</td><td>● Docker 沙箱内（非本机桌面）</td><td>● 并行编排</td><td>● MIT</td><td>● 可自托管</td><td>模型无关 100+</td><td>Web GUI+CLI</td><td>◐ 沙箱隔离</td></tr>
+          <tr><td><b>Dify</b></td><td>可视化 LLM 应用平台</td><td>○ 服务端 Agent</td><td>◐ 工作流</td><td>◐ 社区版</td><td>● Docker 自托管</td><td>50+ 工具+插件市场</td><td>● 可视化画布最成熟</td><td>● SSO/RBAC/SOC2</td></tr>
+          <tr><td><b>n8n</b></td><td>开源自动化工作流+Agent</td><td>○ 服务端工作流</td><td>◐ Agent 节点</td><td>◐ fair-code</td><td>● 自托管免费</td><td>400+ 集成</td><td>● 节点画布</td><td>◐ 2.0 RBAC</td></tr>
+          <tr><td><b>LangGraph</b></td><td>有状态多 Agent 框架</td><td>○ 框架层</td><td>● 循环图/层级</td><td>● MIT</td><td>● 可自托管</td><td>1000+ 集成</td><td>○ 代码优先</td><td>● HITL 断点</td></tr>
+          <tr><td><b>Home Assistant</b></td><td>开源智能家居 OS + 本地语音</td><td>● 直接控家庭 IoT 设备</td><td>◐ Assist 命令式</td><td>●</td><td>● 全本地离线</td><td>数千设备集成+MCP</td><td>◐ 仪表盘+语音</td><td>○ 弱</td></tr>
+          <tr class="hl-row"><td><b>Marguerite（目标）</b></td><td>本地优先桌面 Agent OS</td><td>● 真本机桌面 + 设备总线</td><td>● 子代理/团队/Bloom</td><td>●</td><td>● 仅回环离线</td><td>MCP 双向 + A2A</td><td>● 3D 岛屿 + 桌宠</td><td>● PlanGate + 跨引擎审批</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="block-title">最直接的三个威胁</h3>
+    <div class="grid-3">
+      <div class="card"><h4 style="color:var(--danger)">Cline Desktop</h4><p class="wp-meta">1100 万+ 安装、69.4k stars、开源 BYOK、Marketplace、并行会话——与 Marguerite「开源+本地+桌面」正面重叠。若从编程外延到通用桌面，是最直接威胁。</p></div>
+      <div class="card"><h4 style="color:var(--danger)">Open Interpreter (0s)</h4><p class="wp-meta">Apache 2.0、Rust 终端 Agent、专为 DeepSeek/Kimi/Qwen/GLM 优化、60k+ stars——技术栈与 Marguerite 几乎同构。</p></div>
+      <div class="card"><h4 style="color:var(--warn)">大厂远程虚拟电脑</h4><p class="wp-meta">ChatGPT agent / Manus 当前不碰本地机器，但若 OpenAI/Meta 把远程虚拟电脑换成本地桌面客户端，会瞬间用品牌与模型能力碾压开源桌面 Agent。</p></div>
+    </div>
+    <p class="src" style="margin-top:12px">竞品数据来源：<a href="https://cline.bot/">Cline</a> · <a href="https://github.com/OpenInterpreter/open-interpreter">Open Interpreter</a> · <a href="https://github.com/All-Hands-AI/OpenHands">OpenHands</a> · <a href="https://www.home-assistant.io/">Home Assistant</a> · 各产品官网（2026-09 时点）</p>
+  </div>
+</section>
+
+<!-- ===== 4. 万物互联、操控万物 ===== -->
+<section id="iot">
+  <div class="wrap">
+    <div class="sec-kicker">03 · IoT</div>
+    <h2 class="sec-title">万物互联、操控万物：统一设备总线</h2>
+    <p class="sec-desc">Matter 本身没有给 Agent 的开放 API——Agent 要操控物理设备，现实路径是「接入一个已在跑的 controller」。Home Assistant 是唯一一个已把自己暴露成 REST/WS/MCP、且本地优先的聚合层：接一次 = 背后 2500+ 集成全部可达。</p>
+
+    <h3 class="block-title">家庭生态平台对比</h3>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup><col style="width:13%"><col style="width:24%"><col style="width:13%"><col style="width:9%"><col style="width:18%"><col style="width:9%"><col style="width:14%"></colgroup>
+        <thead><tr><th>平台</th><th>Agent 接入路径</th><th>本地/云</th><th>离线</th><th>可控设备规模</th><th>接入难度</th><th>判断</th></tr></thead>
+        <tbody>
+          <tr class="hl-row"><td><b>Home Assistant</b></td><td>REST + WebSocket + 官方内置 MCP Server；社区 ha-mcp 87+ 工具</td><td>本地优先</td><td>是</td><td>~2500–3000 集成，1000+ 品牌；活跃安装百万级</td><td><span class="pill pill-ok">低</span></td><td><b>首选接入点</b>，一次接入收拢全部生态</td></tr>
+          <tr><td>米家/小米</td><td>官方 ha_xiaomi_home 经 OAuth；社区 hass-xiaomi-miot 2000+ 款</td><td>需中枢网关才本地</td><td>有中枢可</td><td>2000+ 款（社区口径）</td><td><span class="pill pill-warn">中</span></td><td>经 HA 间接接入；直连云需明文 token</td></tr>
+          <tr><td>Apple HomeKit</td><td>HAP 经 MFi；Matter 可被框架抽象</td><td>本地 LAN</td><td>是</td><td>依赖配件，不开放枚举</td><td><span class="pill pill-danger">高</span></td><td>非 Apple 生态无开放 LAN API，不直连</td></tr>
+          <tr><td>Google Home</td><td>Home APIs + Matter Commissioning，需云项目</td><td>偏云</td><td>依赖云</td><td>Matter 1.4.1 正式</td><td><span class="pill pill-warn">中</span></td><td>需云项目，不适合裸连</td></tr>
+          <tr><td>华为鸿蒙智联</td><td>设备商侧 SDK / 云对云；无面向任意 Agent 的公开 REST</td><td>端+云联动</td><td>B 端可</td><td>数百小类</td><td><span class="pill pill-danger">高</span></td><td>硬件伙伴生态，不做开放 API</td></tr>
+          <tr><td>Aqara 绿米</td><td>Android/iOS SDK；Hub M3 LAN 本地；M300 接 500 台</td><td>M3 边缘本地</td><td>是</td><td>M300 专业网关 500 台</td><td><span class="pill pill-warn">中</span></td><td>SDK 方式，门锁/摄像头不在 SDK</td></tr>
+          <tr><td>Samsung SmartThings</td><td>云 API，率先支持 Matter 摄像头</td><td>云为主</td><td>部分</td><td>4700+ 型号，58 种 Matter 类型</td><td><span class="pill pill-warn">中</span></td><td>云 API，本地能力有限</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="src">来源：<a href="https://www.home-assistant.io/integrations/http">HA HTTP API</a> · <a href="https://www.home-assistant.io/integrations/mcp_server/">HA MCP Server</a> · <a href="https://glama.ai/mcp/servers/homeassistant-ai/ha-mcp">ha-mcp 87+ tools</a> · <a href="https://csa-iot.org/zh-CN/newsroom/matter-1-5-introduces-cameras-closures-and-enhanced-energy-management-capabilities/">CSA Matter 1.5</a></p>
+
+    <h3 class="block-title">通信协议选型（南向/北向通道）</h3>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup><col style="width:12%"><col style="width:18%"><col style="width:14%"><col style="width:14%"><col style="width:42%"></colgroup>
+        <thead><tr><th>协议</th><th>传输</th><th>本地/IP</th><th>功耗</th><th>对 Marguerite 的意义</th></tr></thead>
+        <tbody>
+          <tr><td><b>MQTT</b></td><td>TCP 发布/订阅</td><td>IP</td><td>—</td><td>HA 里 44% 活跃安装在用；agent 订阅传感器事件 + 下发指令的自然通道</td></tr>
+          <tr><td><b>WebSocket</b></td><td>TCP 全双工</td><td>IP</td><td>—</td><td>HA/网关推状态用；设备事件订阅的北向通道</td></tr>
+          <tr><td><b>REST over LAN</b></td><td>HTTP</td><td>IP</td><td>—</td><td>HA 取状态、下发指令的主通道</td></tr>
+          <tr><td>Thread</td><td>802.15.4 Mesh</td><td>原生 IPv6</td><td>极低</td><td>Matter 低功耗底座；新但生态长大</td></tr>
+          <tr><td>Zigbee / Z-Wave</td><td>Mesh</td><td>非 IP，需网关</td><td>极低</td><td>成熟设备多，经 Matter Bridge / HA 收拢，不直连</td></tr>
+          <tr><td>BLE Mesh</td><td>2.4G</td><td>非 IP</td><td>极低</td><td>配网用（Matter commissioning）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">结论：对「本地优先、回环网关」架构，<b>MQTT + WebSocket + REST over LAN</b> 是最现实的三类通道；Zigbee/Z-Wave 经 HA/Matter Bridge 收拢。</p>
+
+    <h3 class="block-title">六层设备总线架构（L0–L6 中的设备侧）</h3>
+    <div class="arch">
+      <div class="arch-layer"><div class="arch-lv">L4</div><div class="arch-body"><div class="t">Agent / 编排层（现有 Orchestrator + 子代理）</div><div class="d">Bloom 三段锚定，把设备当 tool 调用</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L3</div><div class="arch-body"><div class="t">统一能力描述层（Capability Schema）</div><div class="d">每个设备 = 一组 tool/resource 原语 + 元数据（类型 / 可读可写 / 危险等级 / 本地或云），复用 MCP 原语不自造</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L2</div><div class="arch-body"><div class="t">权限与危险分级（PlanGate 扩展）</div><div class="d">L0 只读 / L1 安全写自动 / L2 需审批 / L3 人确认，fail-closed</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L1</div><div class="arch-body"><div class="t">协议适配层（Adapters 可插拔）</div><div class="d">Home Assistant(REST/WS/MCP) · MQTT · 像素 computer_use · 无障碍树 UI · ADB 手机 ·（远期 Modbus / OPC-UA / Tesla Fleet / ROS2）</div></div></div>
+      <div class="arch-layer bottom"><div class="arch-lv">L0</div><div class="arch-body"><div class="t">传输与安全底座</div><div class="d">仅 127.0.0.1 网关 + LAN 出向；凭证加密隔离存储；本地优先、云端降级并显式标注「数据离网」</div></div></div>
+    </div>
+
+    <h3 class="block-title">优先接入三个生态（按 ROI 排序）</h3>
+    <div class="grid-3">
+      <div class="card"><h4><span class="pill pill-orange">首选</span> Home Assistant</h4><p class="wp-meta">一次接入 = 2500+ 集成、1000+ 品牌、本地优先、已有官方 MCP server、离线可用。与 Marguerite「仅回环、离线」铁律完全同构。</p></div>
+      <div class="card"><h4><span class="pill pill-blue">双向</span> MCP（client + server）</h4><p class="wp-meta">生态 9400+ server、97M 月下载、全主流客户端支持。内部设备总线既接外部 server，也把自己暴露成 MCP server。</p></div>
+      <div class="card"><h4><span class="pill pill-ok">南向</span> MQTT (LAN broker)</h4><p class="wp-meta">轻量、HA 44% 安装在用、Thread/CoAP 天然 IP 化；作为自研/ESPHome 设备南向通道，不依赖厂商云。</p></div>
+    </div>
+    <p class="note" style="margin-top:10px">次优先：米家（经 HA 间接接入）、Tesla Fleet API（唯一开放真实车控的主流车厂，OAuth + 车队私钥签名）、ROS2→MCP（具身智能远期期权）。HomeKit / 鸿蒙智联 / Google Home 暂不直连。</p>
+  </div>
+</section>
+
+<!-- ===== 5. 特殊人群与特殊场景 ===== -->
+<section id="edge">
+  <div class="wrap">
+    <div class="sec-kicker">04 · Edge Cases</div>
+    <h2 class="sec-title">特殊人群与特殊场景：无障碍作为一等公民</h2>
+    <p class="sec-desc">竞品只宣传「配色好看」，Marguerite 做「色觉安全 + 输入自由 + 紧急停止」。每类人群落到具体功能与代码层，不停留在名词。合规对标 WCAG 2.2 AA、GB/T 37668-2019、工信部适老化规范。</p>
+
+    <div class="grid-3">
+      <div class="card"><h4>视障 / 低视力</h4><p class="wp-meta"><b>功能：</b>全局 aria-label 语义审计；流式输出区 aria-live 节流播报（审批/错误用 assertive）；3D 画布在屏幕阅读器模式下替换为文字状态卡；三档字号（14/18/22px）+ 纯黑高对比主题；全局 Alt+空格语音指令条。</p></div>
+      <div class="card"><h4>听障</h4><p class="wp-meta"><b>功能：</b>视觉提醒中心（所有声音事件同时发顶部横幅 + 任务栏脉冲）；实时字幕面板，说话人区分用颜色<b>加</b>姓名标签；错误不只红字，配图标 + 文字 + 修复按钮。</p></div>
+      <div class="card"><h4>运动障碍 / 肢体障碍</h4><p class="wp-meta"><b>功能：</b>全键盘可达 + 快捷跳转主区/侧栏/审批；易点模式目标 ≥44×44px；拖拽全部有等价按钮（WCAG 2.5.7）；dwell clicking 悬停即点预留；focus ring 对比 ≥3:1。</p></div>
+      <div class="card"><h4>老年人（长辈模式）</h4><p class="wp-meta"><b>功能：</b>侧栏只留 3 入口（说话 / 昨天的文件 / 叫孩子来帮我）；字号 20px 起、按钮 60×60、无动效；方言语音大字麦；危险操作二次确认 + 常驻撤销；6 位协助码子女远程只读代点（双人确认）。</p></div>
+      <div class="card"><h4>儿童（少儿模式）</h4><p class="wp-meta"><b>功能：</b>沙箱限定 ~/Marguerite/儿童工作区/，禁全局装包与白名单外联网；少儿导师人格比喻讲解；家长 4 位 PIN 控时长 + 周报；无内购/无社交/无广告。</p></div>
+      <div class="card"><h4>神经多样（ADHD/自闭）</h4><p class="wp-meta"><b>功能：</b>F9 专注模式只留当前面板；感官友好开关（关动效/声音/彩色背景）；大任务自动展开 checklist 进度条；「每屏只一个主按钮」原则。</p></div>
+      <div class="card"><h4>色盲 / 色弱</h4><p class="wp-meta"><b>判断：</b>品牌蓝(#60A5FA)+橙(#F97316)本身色觉安全；风险在状态绿/红。<b>功能：</b>颜色绝不单独承载信息（WCAG 1.4.1 A），状态点加图标+文字；色觉安全主题把 ok 改蓝青；图表用线型/纹理区分系列。</p></div>
+      <div class="card"><h4>方言 / 多语言</h4><p class="wp-meta"><b>功能：</b>离线方言 ASR 可选包（Fun-ASR-Nano 800M 支持 7 大方言+26 口音；sherpa-onnx int8 粤语/四川话），~500MB 模型断网可用；中英混说自动识别；ASR/TTS provider 可插拔。</p></div>
+      <div class="card"><h4>离线 / 弱网 / 低配</h4><p class="wp-meta"><b>功能：</b>三档模型自动降级（本地 Ollama Qwen3 量化）；写操作 SQLite 同步队列，断网可恢复；资源三档自动探测，轻量档关 3D、整段渲染；BitNet 1.58bit 在 4GB RAM 可跑。</p></div>
+      <div class="card"><h4>政企内网 / 国产化</h4><p class="wp-meta"><b>功能：</b>气隙模式一键禁外网 + 出站白名单；全量 JSONL 审计可导出 CSV；三架构交叉编译（x86/ARM64/LoongArch）适配麒麟 V10 / 统信 UOS；国密加密与 SSO 钩子预留。</p></div>
+      <div class="card"><h4>安全紧急场景</h4><p class="wp-meta"><b>功能：</b>高危动作默认暂停等批准、超时 fail-closed；Esc×2 全局紧急停止 + 自动回滚快照；危险边界白名单（禁访问文档/D盘）作 prompt injection 物理防线。</p></div>
+      <div class="card"><h4>左撇子 / 低视力补充</h4><p class="wp-meta"><b>功能：</b>菜单栏/停靠面板可整体镜像翻转（CSS direction + 布局变量）；仅放大聊天区不动侧栏；prefers-reduced-motion 自动关转场。</p></div>
+    </div>
+
+    <h3 class="block-title">WCAG 2.2 硬指标落地</h3>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup><col style="width:22%"><col style="width:10%"><col style="width:34%"><col style="width:34%"></colgroup>
+        <thead><tr><th>条目</th><th>等级</th><th>要求</th><th>Marguerite 动作</th></tr></thead>
+        <tbody>
+          <tr><td>1.4.1 颜色的使用</td><td>A</td><td>颜色不能是唯一信息载体</td><td>状态统一加图标+文字标签（成本最低收益最大）</td></tr>
+          <tr><td>1.4.3 对比度</td><td>AA</td><td>正文 ≥4.5:1，大字 ≥3:1</td><td>复核 --text-dim/#87878E、placeholder，axe 扫描</td></tr>
+          <tr><td>1.4.11 非文本对比</td><td>AA</td><td>UI 组件/图标 ≥3:1</td><td>边框/focus 框/开关提对比</td></tr>
+          <tr><td>2.5.7 拖拽动作</td><td>AA</td><td>拖拽要有等价非拖拽控件</td><td>上传/分栏/排序全部加按钮</td></tr>
+          <tr><td>2.5.8 目标尺寸</td><td>AA</td><td>指针目标 ≥24×24px</td><td>侧栏小图标 padding 加到 24×24</td></tr>
+          <tr><td>2.4.7 焦点可见</td><td>AA</td><td>focus 有清晰指示</td><td>--border-focus 从 #55555B 提到 ≥3:1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="src">标准来源：<a href="https://www.w3.org/WAI/standards-guidelines/wcag/new-in-22/">W3C WCAG 2.2</a> · <a href="http://wza.isc.org.cn/bztx/bzjd/mobile/index.html">工信部适老化规范</a> · <a href="https://std.samr.gov.cn/gb/search/gbDetailed?id=91890A0DA54C80C6E05397BE0A0A065D">GB/T 37668-2019</a> · <a href="https://bugs.webkit.org/show_bug.cgi?id=319904">WebKit bug #319904</a></p>
+  </div>
+</section>
+
+<!-- ===== 6. 缺口地图 ===== -->
+<section id="gaps">
+  <div class="wrap">
+    <div class="sec-kicker">05 · Gap Map</div>
+    <h2 class="sec-title">缺口地图 G1–G8：现在做与未来做</h2>
+    <p class="sec-desc">市场缺口 × Marguerite 已有底座的卡位关系。G1–G7 是现在就该抓的空位，G8 是远期期权。</p>
+
+    <div class="chart">
+      <div class="chart-title">缺口优先级矩阵：横轴 = 市场紧迫度，纵轴 = Marguerite 已有底座契合度（气泡大小=差异化强度）</div>
+      <div id="ch-gap" class="chart-box"></div>
+    </div>
+
+    <div class="gap-grid" style="margin-top:18px">
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G1 四位一体空位</h5><p>「开源 + 本地优先 + 真桌面操控 + 可视化工作台」无竞品。底座：四入口、computer_use、3D 岛屿、审批队列。<b>核心</b></p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G2 企业桌面执行器 + 组织治理</h5><p>员工桌面这一执行层在企业治理里是空的。底座：仅回环、审批队列、沙箱、原子回滚。</p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G3 跨会话长期记忆 / 知识图谱</h5><p>Manus/ChatGPT/Grok 全是会话级失忆。底座：Hebbian synapse 共现图、多层记忆。<b>差异化</b></p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G4 3D / 空间化 Agent 工作台</h5><p>3D 岛屿 + 桌宠在主流 Agent 产品无人做。底座：Three.js。<b>品牌差异</b></p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G5 协议中立本地桌面底座</h5><p>同时原生 MCP + A2A、跑在本地桌面的开源底座稀缺。底座：已用 ACP，需原生 MCP+A2A。</p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-orange">现在做</span> G6 Agent 操控物理世界总线</h5><p>缺本地 LAN 优先、危险分级的设备总线。底座：网关 + PlanGate 审批。<b>万物互联核心</b></p></div>
+      <div class="gap-cell now"><h5><span class="pill pill-ok">现在做</span> G7 无障碍 / 适老 / 方言 / 儿童</h5><p>Agent 产品里几乎没人做。底座：i18n、computer_use、TTS 基础。<b>差异化口碑</b></p></div>
+      <div class="gap-cell future"><h5><span class="pill pill-warn">未来做</span> G8 工业 IIoT / 车 / 具身机器人</h5><p>开放接口早期。底座：总线 adapter 架构。<b>期权，不押注</b></p></div>
+    </div>
+
+    <h3 class="block-title">五个「我们是唯一」的差异化点</h3>
+    <div class="grid-3">
+      <div class="card"><h4>1. 四合一集成</h4><p class="wp-meta">唯一把真物理设备操控 + 3D 空间可视化 + 组织级审批治理 + 跨会话记忆图谱做在一个本地桌面产品里。</p></div>
+      <div class="card"><h4>2. 设备危险四级分级</h4><p class="wp-meta">L0 只读 / L1 自动 / L2 审批 / L3 人确认，把 PlanGate 从「操作文件」扩展到「操作物理世界」，开锁/动车/动机械臂默认 fail-closed。</p></div>
+      <div class="card"><h4>3. 无障碍一等公民</h4><p class="wp-meta">色觉安全主题 + 状态图标冗余 + aria-live 流式播报 + 长辈极简模式 + 离线方言 ASR。</p></div>
+      <div class="card"><h4>4. 记忆即资产</h4><p class="wp-meta">Hebbian 共现图 + 家庭记忆 MCP（记住家里设备/资产/习惯），把 agent 从会话失忆变成「越用越懂你家」。</p></div>
+      <div class="card"><h4>5. 双引擎审批合并护城河</h4><p class="wp-meta">Rust 进程与 pyengine 侧车审批队列已合并快照、裁决可转发（R54/R57），扩展到跨引擎设备裁决。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 7. 目标分层架构 ===== -->
+<section id="arch">
+  <div class="wrap">
+    <div class="sec-kicker">06 · Architecture</div>
+    <h2 class="sec-title">目标分层架构：六层</h2>
+    <p class="sec-desc">从传输底座到多端交互，每层职责清晰。新增能力只能多层扩展，不破坏现有 invariant（回环铁律、缓存诚实性、路由三处同步）。</p>
+    <div class="arch">
+      <div class="arch-layer"><div class="arch-lv">L6</div><div class="arch-body"><div class="t">多端交互层</div><div class="d">CLI / ratatui TUI / Tauri 桌面 / Web 控制台 / 移动端遥控；3D 岛屿 + 桌宠 + 长辈/少儿/专注/高对比/色觉安全主题</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L5</div><div class="arch-body"><div class="t">安全治理层</div><div class="d">PlanGate（宪法 C1–C4）+ CompletionGate；设备危险 L0–L3 + 跨引擎审批合并 + 审计日志 + RBAC</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L4</div><div class="arch-body"><div class="t">记忆与认知层</div><div class="d">感官/短期/长期/跨项目 + Hebbian synapse；家庭记忆 MCP + 个人知识图谱召回进岛屿</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L3</div><div class="arch-body"><div class="t">Agent 编排与协作层</div><div class="d">Orchestrator + 子代理/团队；Bloom 三段锚定 + 并行扇出 + A2A agent 卡片 + 元-harness</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L2</div><div class="arch-body"><div class="t">统一工具-协议总线</div><div class="d">Capability Schema（tool/resource 原语）；MCP client + MCP server 双向 + A2A well-known 卡片</div></div></div>
+      <div class="arch-layer"><div class="arch-lv">L1</div><div class="arch-body"><div class="t">设备互联接入层（可插拔 adapter）</div><div class="d">Home Assistant(REST/WS/MCP) / MQTT / 像素 computer_use / 无障碍树 UI / ADB 手机 /（远期 Modbus / OPC-UA / Tesla / ROS2）</div></div></div>
+      <div class="arch-layer bottom"><div class="arch-lv">L0</div><div class="arch-body"><div class="t">传输与安全底座</div><div class="d">仅 127.0.0.1 网关 + LAN 出向 + 凭证加密隔离；离线可运行，无 key 降级回显</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 8. 8 个并行研发任务包 ===== -->
+<section id="wp">
+  <div class="wrap">
+    <div class="sec-kicker">07 · Work Packages</div>
+    <h2 class="sec-title">8 个可并行研发任务包 WP1–WP8</h2>
+    <p class="sec-desc">每个 WP 含目标 / 接口契约 / 依赖 / 代码落点 / 验收。橙色顶边 = 关键路径上的核心包。</p>
+    <div class="wp-grid">
+      <div class="wp-card pri">
+        <div class="wp-head"><span class="wp-id">WP1</span><span class="wp-name">设备接入总线（核心，最早启动）</span></div>
+        <div class="wp-meta"><b>目标：</b>打通 Home Assistant，做第一个物理世界 adapter；定义统一 Capability Schema 与危险等级。<br><b>契约：</b>新增 <code>core/src/devices/</code>：DeviceRegistry + Adapter trait（list_entities/call_service/subscribe_events）；Capability schema JSON（id/name/domain/read/write/hazard_level 0-3/transport/last_seen）；RPC <code>devices.list / devices.call / devices.subscribe</code>，WS 事件 <code>device.state_changed</code>。</div>
+        <div class="wp-row"><b>依赖：</b>无（立即并行）　<b>落点：</b><code>core/src/devices/{mod,registry,adapter_ha}.rs</code>；control-center 新增「设备」岛建筑</div>
+        <div class="wp-row"><b>验收：</b>接真实 HA 后 devices.list 返回灯/开关；devices.call 开关灯 ok；lock 自动标 hazard=2；verify.sh --core 全绿；新增集成测试 20+。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP2</span><span class="wp-name">MCP / A2A 双向化</span></div>
+        <div class="wp-meta"><b>目标：</b>内部设备总线既当 MCP client（接外部 server）又暴露为 MCP server；实现 A2A agent 卡片发现。<br><b>契约：</b>MCP server 把 devices.* 暴露成 tool；<code>/.well-known/agent-card.json</code>（技能/认证/能力：流式/文件/工具）。</div>
+        <div class="wp-row"><b>依赖：</b>WP1（Capability Schema 定义完）　<b>落点：</b><code>core/src/mcp/</code> 新增 device 桥；<code>core/src/serve/a2a/</code></div>
+        <div class="wp-row"><b>验收：</b>外部 MCP client 能调 Marguerite 控灯；A2A 名片可被另一 agent 拉取；MCP 工具策略仍走 ExactOnly（invariant §3.8）。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP3</span><span class="wp-name">计算机操控双轨增强</span></div>
+        <div class="wp-meta"><b>目标：</b>在像素 patch 网格 computer_use 之上，增加「无障碍树 UI 结构」通道，提升稳定与省 token（参照 agent-desktop 1685★ Rust）。<br><b>契约：</b><code>computer_use.snapshot(mode:"pixels"|"a11y")</code>；a11y 回结构化控件树（role/name/ref），ref 稳定可重试。</div>
+        <div class="wp-row"><b>依赖：</b>无（独立）　<b>落点：</b><code>core/src/computer_use/</code> 新增 a11y backend（Windows UIA / macOS NSAccessibility / Linux AT-SPI）</div>
+        <div class="wp-row"><b>验收：</b>对真实应用 a11y 能定位并点击按钮；像素模式保留；视觉模型未配置时 VISION_UNAVAILABLE 软失败。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP4</span><span class="wp-name">无障碍与特殊人群第一梯队</span></div>
+        <div class="wp-meta"><b>目标：</b>WCAG 2.2 AA 硬指标落地 + 长辈模式框架。<br><b>契约：</b>主题 token 扩展 --hazard 图标/纹理冗余；aria-live 节流播报组件；voice.command.* RPC 一组（ASR/TTS provider 可插拔）；长辈模式 layout。</div>
+        <div class="wp-row"><b>依赖：</b>无（前端为主，立即并行）　<b>落点：</b><code>webui/src/themes/</code>（色觉安全主题）、<code>webui/src/components/a11y/</code>、<code>webui/src/views/ElderMode.vue</code></div>
+        <div class="wp-row"><b>验收：</b>axe 扫描零 A 级违规；状态去颜色依赖；焦点对比 ≥3:1；目标尺寸 ≥24px；长辈模式 3 入口；npm run test:unit 不回退。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP5</span><span class="wp-name">离线 / 隐私 / 政企</span></div>
+        <div class="wp-meta"><b>目标：</b>气隙模式、审计日志、弱网同步队列、三架构构建准备。<br><b>契约：</b><code>audit.write(actor,action,target,result)</code> JSONL；网络出站白名单；同步队列 SQLite。</div>
+        <div class="wp-row"><b>依赖：</b>无　<b>落点：</b><code>core/src/audit/</code>、<code>core/src/config/</code>（气隙开关）；<code>scripts/package_app.cmd</code> 增 x86/ARM64 target</div>
+        <div class="wp-row"><b>验收：</b>气隙开启后无任何出站连接；审计可导出 CSV；弱网写操作排队可恢复；麒麟/UOS 真机实测列入 GA 前。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP6</span><span class="wp-name">多端与 3D 交互升级</span></div>
+        <div class="wp-meta"><b>目标：</b>3D 岛屿新增「设备岛」（灯/传感器可视化）、移动端只读遥控、子女远程协助码。<br><b>契约：</b>设备状态事件驱动进岛屿（复用现有事件总线零轮询）；协助通道 WebRTC 只读投屏（默认关、双人确认）。</div>
+        <div class="wp-row"><b>依赖：</b>WP1（设备数据）+ WP4（无障碍基线）　<b>落点：</b><code>webui/src/three/</code> 新增 device island builder；<code>gui/src-tauri/</code> 协助通道插件</div>
+        <div class="wp-row"><b>验收：</b>岛屿上灯随设备状态变色；协助码可只读投屏；开启需双确认。</div>
+      </div>
+      <div class="wp-card">
+        <div class="wp-head"><span class="wp-id">WP7</span><span class="wp-name">记忆与认知升级</span></div>
+        <div class="wp-meta"><b>目标：</b>家庭记忆 MCP（记住设备/资产/习惯）+ 个人知识图谱召回进岛屿。<br><b>契约：</b><code>memory.home.*</code> RPC；Hebbian synapse 扩展设备/场景节点；岛屿「记忆召回」建筑可视化共现。</div>
+        <div class="wp-row"><b>依赖：</b>无（复用现有 memory/synapse.rs）　<b>落点：</b><code>core/src/memory/</code>、<code>pyengine/</code></div>
+        <div class="wp-row"><b>验收：</b>agent 能记住「我家玄关灯睡前关」类事实并在召回图可视化；不引入深度神经网络（保持 Hebbian 路线）。</div>
+      </div>
+      <div class="wp-card pri">
+        <div class="wp-head"><span class="wp-id">WP8</span><span class="wp-name">治理与权限模型</span></div>
+        <div class="wp-meta"><b>目标：</b>设备危险 L0–L3 落到 PlanGate；企业 RBAC 三角色；跨引擎设备审批合并。<br><b>契约：</b><code>permission.device_level(entity,action)</code>；角色 admin/dev/viewer；审批卡片扩展「危险设备操作」模板。</div>
+        <div class="wp-row"><b>依赖：</b>WP1（设备注册）　<b>落点：</b><code>core/src/guard/approval_registry.rs</code>、<code>core/src/permissions/</code></div>
+        <div class="wp-row"><b>验收：</b>开锁默认 L2 审批、超时 fail-closed；跨引擎审批合并可见；RBAC 按角色过滤会话。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 9. 工作流依赖与并行图 ===== -->
+<section id="deps">
+  <div class="wrap">
+    <div class="sec-kicker">08 · Dependencies</div>
+    <h2 class="sec-title">工作流依赖与并行图</h2>
+    <p class="sec-desc">第 1 周即可并行启动 6 条线；关键路径为 WP1 → WP2 → GA 的 A2A 生态，以及 WP1 → WP8 → 设备危险操作上线。绿色 = 立即并行可独立交付，橙色 = 关键路径。</p>
+    <div class="chart">
+      <div class="chart-title">WP 依赖关系图（节点 = 任务包，边 = 依赖）</div>
+      <div id="ch-wp" class="chart-box tall"></div>
+      <p class="legend">
+        <span><i class="sw" style="background:#39D7A2"></i>立即并行 / 独立</span>
+        <span><i class="sw" style="background:#F97316"></i>关键路径</span>
+        <span><i class="sw" style="background:#60A5FA"></i>有依赖后置</span>
+      </p>
+    </div>
+    <div class="grid-3" style="margin-top:16px">
+      <div class="card"><h4>立即并行（第 1 周启动）</h4><p class="wp-meta">WP1 设备总线、WP3 操控双轨、WP4 无障碍一梯队、WP5 离线/隐私/审计、WP7 记忆/家庭记忆——五条线互不阻塞。</p></div>
+      <div class="card"><h4>WP1 出口后分叉</h4><p class="wp-meta">WP1 完成后同时喂出三条：→ WP2 MCP/A2A 双向、→ WP6 3D 设备岛（+WP4）、→ WP8 设备权限 L0–L3。</p></div>
+      <div class="card"><h4>关键路径</h4><p class="wp-meta">WP1 → WP2 → GA 的 A2A 生态；WP1 → WP8 → 设备危险操作上线。WP3/WP4/WP5/WP7 全程与 WP1 并行不阻塞。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 10. 里程碑路线图 ===== -->
+<section id="roadmap">
+  <div class="wrap">
+    <div class="sec-kicker">09 · Roadmap</div>
+    <h2 class="sec-title">里程碑路线图：MVP → Beta → GA</h2>
+    <p class="sec-desc">三段式，按周排期。MVP 先打通物理世界最小闭环 + 无障碍硬指标；Beta 补全协议双向与治理体验；GA 及以后做信创适配与远期期权。</p>
+
+    <div class="chart">
+      <div class="chart-title">研发甘特（周）</div>
+      <div id="ch-gantt" class="chart-box"></div>
+    </div>
+
+    <h3 class="block-title">阶段交付物</h3>
+    <div class="timeline">
+      <div class="tl-time">第 1–8 周</div>
+      <div class="tl-axis"><div class="tl-dot" style="background:#F97316;box-shadow:0 0 0 2px #F97316"></div><div class="tl-line"></div></div>
+      <div class="tl-content"><div class="ph" style="color:var(--orange)">MVP · 物理世界最小闭环</div><div class="pd">HA adapter + Capability schema + L0–L3 权限 + 无障碍 A 级全绿 + a11y 操控原型。对应 WP1 / WP3 / WP4 / WP8。</div></div>
+
+      <div class="tl-time">第 9–20 周</div>
+      <div class="tl-axis"><div class="tl-dot" style="background:#60A5FA;box-shadow:0 0 0 2px #60A5FA"></div><div class="tl-line"></div></div>
+      <div class="tl-content"><div class="ph" style="color:var(--blue)">Beta · 协议双向 + 治理体验</div><div class="pd">MCP 双向 + A2A 卡片 + 气隙/审计/同步队列 + 家庭记忆 + 长辈模式 + 3D 设备岛 + 子女远程协助。对应 WP2 / WP5 / WP6 / WP7。</div></div>
+
+      <div class="tl-time">第 21 周起</div>
+      <div class="tl-axis"><div class="tl-dot" style="background:#39D7A2;box-shadow:0 0 0 2px #39D7A2"></div><div class="tl-line"></div></div>
+      <div class="tl-content"><div class="ph" style="color:var(--ok)">GA 及以后 · 信创与期权</div><div class="pd">三架构（麒麟/统信）构建 + Orca 实测 + 少儿模式 + 方言 ASR 包 + MQTT/Tesla/ROS2 adapter 期权。</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 11. 安全合规章 ===== -->
+<section id="security">
+  <div class="wrap">
+    <div class="sec-kicker">10 · Security</div>
+    <h2 class="sec-title">安全合规章：设备操控专项</h2>
+    <p class="sec-desc">把 Marguerite 已有的 PlanGate / fail-closed / 回环铁律，从「操作文件」扩展到「操作物理世界」。任何物理致动不做无人值守。</p>
+
+    <h3 class="block-title">设备危险四级分级（L0–L3）</h3>
+    <div class="lv-grid">
+      <div class="lv-card lv0"><div class="lvl">L0</div><div class="nm">只读</div><div class="ds">读传感器状态、查历史。无副作用，自动执行。</div></div>
+      <div class="lv-card lv1"><div class="lvl">L1</div><div class="nm">自动安全写</div><div class="ds">开灯、关窗帘等可逆无害操作。自动执行，事后审计。</div></div>
+      <div class="lv-card lv2"><div class="lvl">L2</div><div class="nm">审批</div><div class="ds">开空调、锁门。走审批队列，人在回路确认。</div></div>
+      <div class="lv-card lv3"><div class="lvl">L3</div><div class="nm">人确认 / fail-closed</div><div class="ds">开锁、动车、动机械臂、燃气水电。默认人确认，超时按拒绝。</div></div>
+    </div>
+
+    <h3 class="block-title">七条红线</h3>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup><col style="width:24%"><col style="width:76%"></colgroup>
+        <thead><tr><th>红线</th><th>具体要求</th></tr></thead>
+        <tbody>
+          <tr><td><b>1. 回环铁律不破</b></td><td>统一网关永远只听 127.0.0.1；设备控制出向仅限 LAN（192.168/10.x）；任何云端设备 API（米家/Tesla）须 UI 显式标注「数据离网」并经用户授权。</td></tr>
+          <tr><td><b>2. 凭证加密隔离</b></td><td>HA long token、米家 token、Tesla 车队私钥全部走现有 credential 加固，绝不明文落配置（对齐 R52 config 写锁）。</td></tr>
+          <tr><td><b>3. 危险分级 fail-closed</b></td><td>L3 默认人在回路、超时按拒绝；L2 走审批队列；L1 自动；L0 只读。物理致动不做无人值守。</td></tr>
+          <tr><td><b>4. id 不接受路径</b></td><td>设备接口只接受已登记 entity id，拒绝路径参数（对齐 R56 artifacts 安全模型），防任意读取与 DNS rebinding；跨源做同源校验 + 回环 authority 校验。</td></tr>
+          <tr><td><b>5. 跨引擎审批合并</b></td><td>Rust 进程与 pyengine 侧车审批队列必须合并快照、裁决可转发（对齐 R54/R57），禁止「侧车抬起的审批点了没反应」。</td></tr>
+          <tr><td><b>6. 物理边界声明</b></td><td>不直接控制医疗设备/工业 PLC；首次进入相关能力弹窗告知「需人工复核」。</td></tr>
+          <tr><td><b>7. 审计留痕</b></td><td>谁 / 何时 / 读了哪个设备 / 下发了什么指令，全量 JSONL 落盘可导出。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 12. GitHub 灵感 ===== -->
+<section id="github">
+  <div class="wrap">
+    <div class="sec-kicker">11 · Inspiration</div>
+    <h2 class="sec-title">GitHub 灵感：真实仓库与可落地做法</h2>
+    <p class="sec-desc">星标为 2026-09-28 实时检索实测。每个仓库都标注它对接到哪个 WP。</p>
+    <div class="gh-list">
+      <div class="gh-item"><span class="gh-star">26,419★</span><div class="gh-body"><div class="name">humanlayer/12-factor-agents</div><div class="desc">生产级 LLM 软件 12 原则。落地：作为 Marguerite 工程实践对照清单（context window/memory/orchestration）。</div></div></div>
+      <div class="gh-item"><span class="gh-star">14,479★</span><div class="gh-body"><div class="name">casdoor/casdoor</div><div class="desc">Agent-first IAM（OAuth/OIDC/SAML/LDAP/MFA）。落地：WP8 设备/多用户 RBAC 权限模型参考。</div></div></div>
+      <div class="gh-item"><span class="gh-star">13,829★</span><div class="gh-body"><div class="name">microsoft/agent-framework</div><div class="desc">微软官方多 agent 编排 SDK（Python+.NET）。落地：参考多 agent workflow 抽象。</div></div></div>
+      <div class="gh-item"><span class="gh-star">10,300★</span><div class="gh-body"><div class="name">omnigent-ai/omnigent</div><div class="desc">元-harness：统一编排 Claude Code/Codex/Cursor，harness 可插拔 + 策略治理前置。落地：WP3/WP8 治理思路。</div></div></div>
+      <div class="gh-item"><span class="gh-star">7,543★</span><div class="gh-body"><div class="name">mnfst/llm-gateway</div><div class="desc">多 provider 统一网关 + 成本/token 追踪。落地：观测与计费内置参考。</div></div></div>
+      <div class="gh-item"><span class="gh-star">5,726★</span><div class="gh-body"><div class="name">ageerle/ruoyi-ai</div><div class="desc">企业级 agent + 多 provider + RAG + 可视化工作流。落地：企业治理对标。</div></div></div>
+      <div class="gh-item"><span class="gh-star">4,922★</span><div class="gh-body"><div class="name">SolaceLabs/solace-agent-mesh</div><div class="desc">事件驱动多 agent mesh，A2A+MCP。落地：事件驱动零轮询，与现有架构一致。</div></div></div>
+      <div class="gh-item"><span class="gh-star">4,866★</span><div class="gh-body"><div class="name">homeassistant-ai/ha-mcp</div><div class="desc">最火非官方 HA MCP server（87+ 工具）。落地：WP1 直接对接范式，优先接入点。</div></div></div>
+      <div class="gh-item"><span class="gh-star">4,170★</span><div class="gh-body"><div class="name">EverMind-AI/Raven</div><div class="desc">Harness of Harnesses，持久自进化多 agent 生态。落地：元-harness 参考。</div></div></div>
+      <div class="gh-item"><span class="gh-star">1,920★</span><div class="gh-body"><div class="name">skalesapp/skales</div><div class="desc">跨平台个人 agent：桌面+浏览器+定时任务+A2A+MCP+computer use+本地 Ollama。落地：几乎是 Marguerite 终极形态参照系。</div></div></div>
+      <div class="gh-item"><span class="gh-star">1,685★</span><div class="gh-body"><div class="name">lahfir/agent-desktop</div><div class="desc"><b>Rust</b>，经 OS 无障碍树（UIA/AT-SPI）读真实 UI 结构操控，ref 稳定可重试。落地：WP3 无障碍树路线。</div></div></div>
+      <div class="gh-item"><span class="gh-star">176★</span><div class="gh-body"><div class="name">mr-tbot/mesh-api</div><div class="desc">LoRa mesh 离网 + MCP，接 Ollama/HA，支持 SMS/Discord 紧急 GPS 告警。落地：WP7 离线应急叙事。</div></div></div>
+      <div class="gh-item"><span class="gh-star">103★</span><div class="gh-body"><div class="name">reolink/reolink-cli</div><div class="desc">官方摄像头 CLI，<b>LAN only 无云</b>，内置 MCP server。落地：「厂商亲自出 LAN-only CLI+MCP」新趋势，总线优先本地协议。</div></div></div>
+      <div class="gh-item"><span class="gh-star">77★</span><div class="gh-body"><div class="name">impactjo/home-memory</div><div class="desc">MCP server 让 AI 记住房屋一切（资产/文档/清单）。落地：WP7 家庭记忆与 Hebbian synapse 结合。</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- @@SECTIONS@@ -->
+
+<footer>
+  <div class="wrap">
+    <p>本报告基于四份本地调研综合：市场竞品调研、IoT 生态调研、特殊人群/场景调研、GitHub 实时灵感（星标为 2026-09-28 实测）。所有市场数字均标注口径与来源；材料中未获取或需复核的条目已如实标注。本报告为规划文档，本轮不改代码、不提交、不停用户正在运行的网关。</p>
+    <p class="src">Marguerite · 终端优先 · 仅回环 · 离线可运行 · Rust + Tauri + Vue3 + Python 侧车</p>
+  </div>
+</footer>
+
+<script>
+/* ===== ECharts 全局默认 ===== */
+const AX = {axisLine:{lineStyle:{color:'#3A4553'}},axisLabel:{color:'#9AA4B2',fontSize:11},splitLine:{lineStyle:{color:'#222A35'}}};
+const TT = {backgroundColor:'#1F2632',borderColor:'#2A323E',textStyle:{color:'#E8ECF1',fontSize:12}};
+const CHART_COLORS = ['#60A5FA','#F97316','#39D7A2','#E8B23A','#8C7DF2','#56C2E6','#FF6B6B'];
+const charts = [];
+function mk(id,opt){const el=document.getElementById(id);if(!el)return;const c=echarts.init(el);c.setOption(opt);charts.push(c);}
+window.addEventListener('resize',()=>charts.forEach(c=>c.resize()));
+function initAll(){
+/* ===== 2. 市场规模柱状图 ===== */
+mk('ch-global',{
+  color:CHART_COLORS,
+  tooltip:{...TT,trigger:'axis',axisPointer:{type:'shadow'}},
+  legend:{textStyle:{color:'#9AA4B2',fontSize:11},top:0},
+  grid:{left:50,right:20,top:36,bottom:30},
+  xAxis:{type:'category',data:['Fortune BI','TBRC','MarkNtel','360iResearch(保守)'],...AX,axisLabel:{...AX.axisLabel,interval:0,fontSize:10}},
+  yAxis:{type:'value',name:'亿美元',...AX},
+  series:[
+    {name:'2025',type:'bar',data:[80.3,82.9,76,71.2],itemStyle:{color:'#3B6FB0',borderRadius:[4,4,0,0]}},
+    {name:'2026E',type:'bar',data:[117.8,120.6,109,88.1],itemStyle:{color:'#60A5FA',borderRadius:[4,4,0,0]}}
+  ]
+});
+
+/* ===== 中国市场 ===== */
+mk('ch-china',{
+  tooltip:{...TT,trigger:'axis',axisPointer:{type:'shadow'}},
+  legend:{textStyle:{color:'#9AA4B2',fontSize:11},top:0},
+  grid:{left:50,right:20,top:36,bottom:30},
+  xAxis:{type:'category',data:['窄口径\n智能体软件','企业级\n智能体'],...AX,axisLabel:{...AX.axisLabel,interval:0,fontSize:10}},
+  yAxis:{type:'value',name:'亿元',...AX},
+  series:[
+    {name:'2025',type:'bar',data:[78.4,212],itemStyle:{color:'#B85A1A',borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:'#9AA4B2',fontSize:11}},
+    {name:'2026E',type:'bar',data:[null,449],itemStyle:{color:'#F97316',borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:'#F97316',fontSize:11,fontWeight:700}}
+  ]
+});
+
+/* ===== 竞品定位散点 ===== */
+mk('ch-competitor',{
+  color:CHART_COLORS,
+  tooltip:{...TT,formatter:p=>`${p.data[3]}<br/>本地操控力: ${p.data[0]} / 10<br/>可视化治理: ${p.data[1]} / 10`},
+  grid:{left:50,right:30,top:30,bottom:50},
+  xAxis:{type:'value',name:'操控本地桌面/物理设备 →',min:0,max:10,...AX,nameLocation:'middle',nameGap:30},
+  yAxis:{type:'value',name:'↑ 可视化 / 治理成熟度',min:0,max:10,...AX,nameLocation:'middle',nameGap:40},
+  series:[
+    {name:'云端通用',type:'scatter',symbolSize:d=>d[2],data:[
+      [2.5,7,26,'Manus'],[2,6.5,24,'ChatGPT agent'],[3,5.5,20,'Grok']
+    ],itemStyle:{color:'rgba(96,165,250,.75)'}},
+    {name:'编程垂直',type:'scatter',symbolSize:d=>d[2],data:[
+      [7.5,4.5,30,'Claude Code'],[8,5,34,'Cline'],[7,4,28,'Open Interpreter'],[5,5,26,'OpenHands']
+    ],itemStyle:{color:'rgba(249,115,22,.75)'}},
+    {name:'企业编排',type:'scatter',symbolSize:d=>d[2],data:[
+      [2,8.5,32,'Dify'],[2,7.5,24,'n8n'],[1.5,7,26,'LangGraph']
+    ],itemStyle:{color:'rgba(140,125,242,.75)'}},
+    {name:'隐私端侧/硬件',type:'scatter',symbolSize:d=>d[2],data:[
+      [9,4,28,'Home Assistant']
+    ],itemStyle:{color:'rgba(57,215,162,.75)'}},
+    {name:'Marguerite 空位',type:'scatter',symbolSize:38,data:[[8.5,8.5,38,'Marguerite 目标']],
+      itemStyle:{color:'#FF6B6B',borderColor:'#fff',borderWidth:2},
+      label:{show:true,formatter:'Marguerite',position:'right',color:'#FF6B6B',fontWeight:700,fontSize:12}}
+  ]
+});
+
+/* ===== 缺口优先级矩阵 ===== */
+mk('ch-gap',{
+  tooltip:{...TT,formatter:p=>`${p.data[3]}<br/>紧迫度: ${p.data[0]} / 10<br/>底座契合: ${p.data[1]} / 10`},
+  grid:{left:50,right:30,top:30,bottom:50},
+  xAxis:{type:'value',name:'市场紧迫度 →',min:0,max:10,...AX,nameLocation:'middle',nameGap:30},
+  yAxis:{type:'value',name:'↑ 底座契合度',min:0,max:10,...AX,nameLocation:'middle',nameGap:40},
+  series:[{
+    type:'scatter',symbolSize:d=>d[2],
+    data:[
+      [9,9,34,'G1 四位一体空位'],
+      [7.5,8,26,'G2 企业桌面执行器'],
+      [7,8.5,28,'G3 长期记忆/知识图谱'],
+      [6,7,22,'G4 3D 空间工作台'],
+      [8,7.5,26,'G5 协议中立底座'],
+      [9,8.5,32,'G6 物理世界总线'],
+      [6.5,6.5,22,'G7 无障碍/适老'],
+      [4,5,16,'G8 IIoT/车/机器人(期权)']
+    ],
+    itemStyle:{color:p=>p.data[3].includes('期权')?'#E8B23A':'#60A5FA',opacity:.85},
+    label:{show:true,formatter:p=>p.data[3].split(' ')[0],position:'right',color:'#E8ECF1',fontSize:11,fontWeight:700}
+  }]
+});
+
+/* ===== WP 依赖关系图 ===== */
+mk('ch-wp',{
+  tooltip:{...TT,formatter:p=>p.dataType==='node'?`${p.data.name}`:''},
+  series:[{
+    type:'graph',layout:'force',roam:true,draggable:true,
+    force:{repulsion:320,edgeLength:[80,140],gravity:.12},
+    label:{show:true,color:'#E8ECF1',fontSize:11,fontWeight:700},
+    edgeSymbol:['none','arrow'],edgeSymbolSize:8,
+    lineStyle:{color:'#3A4553',width:1.5,curveness:.1},
+    emphasis:{lineStyle:{width:3}},
+    categories:[
+      {name:'立即并行'},
+      {name:'关键路径'},
+      {name:'有依赖后置'}
+    ],
+    data:[
+      {name:'WP1 设备总线',category:1,symbolSize:56,itemStyle:{color:'#F97316'}},
+      {name:'WP2 MCP/A2A',category:1,symbolSize:42,itemStyle:{color:'#F97316'}},
+      {name:'WP3 操控双轨',category:0,symbolSize:40,itemStyle:{color:'#39D7A2'}},
+      {name:'WP4 无障碍',category:0,symbolSize:40,itemStyle:{color:'#39D7A2'}},
+      {name:'WP5 离线/审计',category:0,symbolSize:40,itemStyle:{color:'#39D7A2'}},
+      {name:'WP6 3D设备岛',category:2,symbolSize:42,itemStyle:{color:'#60A5FA'}},
+      {name:'WP7 记忆',category:0,symbolSize:40,itemStyle:{color:'#39D7A2'}},
+      {name:'WP8 权限L0-L3',category:1,symbolSize:46,itemStyle:{color:'#F97316'}}
+    ],
+    links:[
+      {source:'WP1 设备总线',target:'WP2 MCP/A2A'},
+      {source:'WP1 设备总线',target:'WP6 3D设备岛'},
+      {source:'WP1 设备总线',target:'WP8 权限L0-L3'},
+      {source:'WP4 无障碍',target:'WP6 3D设备岛'}
+    ]
+  }]
+});
+
+/* ===== 甘特图 ===== */
+mk('ch-gantt',{
+  tooltip:{...TT,formatter:p=>`${p.data.name}<br/>第 ${p.data.value[1]}–${p.data.value[2]} 周`},
+  grid:{left:110,right:40,top:20,bottom:40},
+  xAxis:{type:'value',name:'周',min:0,max:26,...AX},
+  yAxis:{type:'category',data:['WP8 权限','WP3 操控双轨','WP4 无障碍','WP1 设备总线','WP2 MCP/A2A','WP5 离线/审计','WP6 3D设备岛','WP7 记忆'],...AX},
+  series:[{
+    type:'custom',
+    renderItem:(params,api)=>{
+      const cat=api.value(0),start=api.coord([api.value(1),cat]),end=api.coord([api.value(2),cat]);
+      const h=16;
+      return {type:'rect',shape:{x:start[0],y:start[1]-h/2,width:end[0]-start[0],height:h,r:4},
+        style:{fill:api.value(4)}};
+    },
+    encode:{x:[1,2],y:0},
+    data:[
+      {value:[3,1,8,'WP1','#F97316'],name:'WP1 设备总线'},
+      {value:[2,1,8,'WP8','#F97316'],name:'WP8 权限L0-L3'},
+      {value:[1,1,8,'WP3','#39D7A2'],name:'WP3 操控双轨'},
+      {value:[0,1,8,'WP4','#39D7A2'],name:'WP4 无障碍'},
+      {value:[5,9,20,'WP5','#60A5FA'],name:'WP5 离线/审计'},
+      {value:[4,9,20,'WP2','#F97316'],name:'WP2 MCP/A2A'},
+      {value:[6,9,20,'WP6','#60A5FA'],name:'WP6 3D设备岛'},
+      {value:[7,9,20,'WP7','#39D7A2'],name:'WP7 记忆'}
+    ]
+  },{
+    type:'line',markLine:{
+      symbol:'none',label:{color:'#9AA4B2',fontSize:10},
+      data:[{xAxis:8,label:{formatter:'MVP→Beta'}},{xAxis:20,label:{formatter:'Beta→GA'}}]
+    },data:[]
+  }]
+});
+}
+if(document.readyState==='complete'){setTimeout(initAll,200);}
+else{window.addEventListener('load',()=>setTimeout(initAll,200));}
+</script>
+
+</body>
+</html>

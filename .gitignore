@@ -151,6 +151,11 @@ _tak*/
 /_archive/
 /temp/
 
+# 演示/文档工具生成的草稿目录（形如 `draft_<uuid>_folder/`，内容只有
+# `.presentation-decision.json` 与 `draft.xml` 两个中间态文件）——属工具暂存区，
+# 不是源码，也不该随仓库分发。
+/draft_*/
+
 # 测试与覆盖率产物
 test-results/
 playwright-report/

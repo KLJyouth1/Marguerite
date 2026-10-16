@@ -1,0 +1,11 @@
+# ===========================================================================
+# DeepSeek Harness profile patch
+# 用途：禁用独立安装的 dsh-better-sidebar，避免与 @linxin666/dsh-web-ui-all
+#       内自带的同名（web-ui-better-sidebar）插件产生路由冲突
+#       （两者都会注册 /sidebar/api，重复会导致启动失败）
+# 使用：dsh web --patch e:/DeepSeek/disable-duplicate-better-sidebar.yaml
+# ===========================================================================
+
+- id: better-sidebar
+  name: dsh-better-sidebar
+  disabled: true

@@ -1,0 +1,109 @@
+# =============================================================================
+# Marguerite — line-ending and binary policy
+# -----------------------------------------------------------------------------
+# Why this file exists
+#   The project is developed on Windows but built, reviewed and released on
+#   Linux/macOS runners. With only `core.autocrlf` in play, every checkout
+#   rewrites LF -> CRLF and every `git diff` prints
+#       "warning: LF will be replaced by CRLF the next time Git touches it"
+#   This file pins the policy in the repository so it is identical for everyone.
+#
+#   * repository storage: LF (normalised on `git add`)
+#   * working tree: LF, except Windows-only script formats (.cmd/.bat/.ps1)
+#   * binary assets are never converted and never diffed
+# =============================================================================
+
+# --- default: normalise text to LF in the repository and in the working tree ---
+* text=auto eol=lf
+
+# --- Windows-only script formats keep CRLF (cmd.exe / PowerShell editors) ---
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# --- POSIX shell: a CRLF shebang line breaks `./script.sh` with "bad interpreter" ---
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# --- explicit source/docs coverage (self-documenting, and protects against a
+#     future `* text=auto` override by a nested .gitattributes) ---
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.py    text eol=lf
+*.js    text eol=lf
+*.cjs   text eol=lf
+*.mjs   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.vue   text eol=lf
+*.css   text eol=lf
+*.scss  text eol=lf
+*.html  text eol=lf
+*.svg   text eol=lf
+
+# --- binary assets: never convert, never diff ---
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.bmp    binary
+*.ico    binary
+*.icns   binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
+*.tgz    binary
+*.bz2    binary
+*.xz     binary
+*.7z     binary
+*.tar    binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary
+*.a      binary
+*.lib    binary
+*.pdb    binary
+*.rlib   binary
+*.node   binary
+*.wasm   binary
+*.msi    binary
+*.wxs    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.eot    binary
+*.mp3    binary
+*.wav    binary
+*.ogg    binary
+*.mp4    binary
+*.webm   binary
+*.mov    binary
+*.db     binary
+*.sqlite binary
+*.sqlite3 binary
+*.bin    binary
+*.onnx   binary
+*.gguf   binary
+*.safetensors binary
+
+# --- generated lockfiles: keep them, but collapse them in diffs and language stats ---
+Cargo.lock            -diff linguist-generated
+package-lock.json     -diff linguist-generated
+webui/package-lock.json -diff linguist-generated
+gui/package-lock.json   -diff linguist-generated
+pnpm-lock.yaml        -diff linguist-generated
+
+# --- vendored / frozen third-party snapshots ---
+third_party/** -diff linguist-vendored

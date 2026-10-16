@@ -1,0 +1,26 @@
+{
+  "name": "marguerite-workbench-web",
+  "private": true,
+  "version": "1.1.0",
+  "type": "module",
+  "description": "Marguerite File Intelligence Workbench — frontend SPA consuming the FastAPI file-intel contract (port 8011).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^7.1.11"
+  }
+}
