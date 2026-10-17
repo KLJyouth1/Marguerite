@@ -136,10 +136,12 @@ def test_files_load_rejects_path_escape(capsys):
 # ---------------------------------------------------------------------------
 # experts
 # ---------------------------------------------------------------------------
-def test_experts_list_has_five_roles(capsys):
+def test_experts_list_includes_core_roles(capsys):
     envelope = run_json(capsys, "experts", "list")
     roles = {r["role"] for r in envelope["data"]}
-    assert len(roles) == 5
+    # 核心 5 角色必须存在；总数不再写死——注册表已合并 8 个专家团的 43 个团队角色。
+    core = {"product_reviewer", "security_officer", "qa_lead", "designer", "investigator"}
+    assert core <= roles, f"缺少核心角色: {core - roles}"
     assert "security_officer" in roles
 
 
@@ -170,7 +172,11 @@ def test_harness_adapters_and_capabilities(capsys):
 
     caps = run_json(capsys, "harness", "capabilities")
     assert caps["data"]["service"] == "marguerite-file-intel"
-    assert caps["data"]["native_capabilities"]["expert_count"] == 5
+    # 契约：上报的 expert_count 必须与注册表实际角色数一致。
+    # 不要写死数字——它此前是 5，而注册表已合并专家团扩到 48，导致这条断言误报。
+    from marguerite_workbench.experts import list_roles
+
+    assert caps["data"]["native_capabilities"]["expert_count"] == len(list_roles())
 
 
 def test_harness_dispatch_internal_loop(capsys, sample_file):

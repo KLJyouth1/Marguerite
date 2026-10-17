@@ -71,7 +71,43 @@ def _handler_executable_lines() -> set[int]:
         for _start, _end, lineno in code.co_lines():
             if lineno is not None:
                 executable.add(lineno)
-    return executable
+    return executable - _pragma_excluded_lines()
+
+
+def _pragma_excluded_lines() -> set[int]:
+    """剔除显式标记 `# pragma: no cover` 的语句所占的行号。
+
+    为什么需要：这个门禁用**标准库 trace** 统计行覆盖，而不是 `coverage.py`，
+    所以它看不懂 `# pragma: no cover`。于是 dispatch.py 里作者**明确声明有意排除**
+    的行（``except Exception:  # pragma: no cover - cache failures should not fail tools``
+    及其后的 ``log.exception(...)`` 续行）仍被算进分母——一个纯日志兜底分支
+    就能把基线从 95% 压到 94.3%，让门禁误报。
+
+    语义：pragma 所在行 + 其后**缩进更深**的连续续行（同一条语句）。
+    空白行或缩进回到同级即认为语句结束。
+    """
+    src_lines = _DISPATCH_SOURCE.read_text(encoding="utf-8").splitlines()
+    pragma = "# pragma: no cover"
+    excluded: set[int] = set()
+    i = 0
+    while i < len(src_lines):
+        line = src_lines[i]
+        if pragma not in line:
+            i += 1
+            continue
+        base_indent = len(line) - len(line.lstrip())
+        excluded.add(i + 1)
+        j = i + 1
+        while j < len(src_lines):
+            nxt = src_lines[j]
+            if not nxt.strip():
+                break
+            if len(nxt) - len(nxt.lstrip()) <= base_indent:
+                break
+            excluded.add(j + 1)
+            j += 1
+        i = j
+    return excluded
 
 
 # ---------------------------------------------------------------------------

@@ -196,14 +196,17 @@ def test_kb_ingest_and_search(client):
 # ---------------------------------------------------------------------------
 # Experts
 # ---------------------------------------------------------------------------
-def test_experts_list_has_five_roles(client):
+def test_experts_list_includes_core_roles(client):
     r = client.get("/api/experts")
     assert r.status_code == 200
     roles = r.json()
-    assert len(roles) == 5
-    assert {x["role"] for x in roles} == {
-        "product_reviewer", "security_officer", "qa_lead", "designer", "investigator",
-    }
+    ids = [x["role"] for x in roles]
+    # 核心 5 角色是产品契约的一部分，必须始终存在。
+    # 不再断言「总数 == 5」：`experts.py` 已把 8 个专家团的 43 个团队角色合并进注册表
+    # （见 experts.py 的 “Team roles — the eight expert teams” 注释），总数会随团队扩充而增长。
+    core = {"product_reviewer", "security_officer", "qa_lead", "designer", "investigator"}
+    assert core <= set(ids), f"缺少核心角色: {core - set(ids)}"
+    assert len(ids) == len(set(ids)), "角色 id 必须唯一（合并团队时不得重名）"
     # templates + skills are real, not empty labels
     for role in roles:
         assert role["problem_solving_template"].strip()
