@@ -368,6 +368,20 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
   它们都不属于面向用户的产品契约；与代码冲突时，以代码为准。
   仓库根目录只放入口、构建清单与构建脚本。
 
+## 📦 相关仓库
+
+本仓库是**源码仓库**。另外两个仓库分别承载安装包与模型：
+
+| 仓库 | 内容 |
+|---|---|
+| **[Marguerite](https://github.com/KLJyouth1/Marguerite)** —— 本仓库 | Rust 引擎、TUI、Tauri 桌面端、回环 Web 控制台、Python 侧车 |
+| **[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases)** | 安装包：`.msi`（WiX）与 `-setup.exe`（NSIS），每个版本附 `SHA256SUMS.txt` |
+| **[OmniPilot](https://github.com/KLJyouth1/OmniPilot)** | 配套本地智能体模型：fp16 GGUF / safetensors 权重、7-Zip 分卷、推理与量化说明 |
+
+只想**运行** Marguerite？去
+[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases/releases/latest) 下载安装包。
+需要改引擎或界面时再从源码构建。
+
 ## 🤝 参与贡献
 
 欢迎贡献。先读 [CONTRIBUTING.md](CONTRIBUTING.md)：简而言之，改动完成的判据是

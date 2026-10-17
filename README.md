@@ -424,6 +424,20 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   part of the user-facing contract; where it disagrees with the code, the code wins.
   The repository root holds only entry points, build manifests and build scripts.
 
+## 📦 Related repositories
+
+This is the **source** repository. Two sibling repositories carry the binaries and the model:
+
+| Repository | What is in it |
+|---|---|
+| **[Marguerite](https://github.com/KLJyouth1/Marguerite)** — this repo | Rust engine, TUI, Tauri desktop app, loopback web console, Python sidecar |
+| **[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases)** | Installers: `.msi` (WiX) and `-setup.exe` (NSIS), each release with `SHA256SUMS.txt` |
+| **[OmniPilot](https://github.com/KLJyouth1/OmniPilot)** | The companion local agent model: fp16 GGUF / safetensors weights, 7-Zip split archives, inference notes |
+
+Just want to **run** Marguerite? Download an installer from
+[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases/releases/latest).
+Build from source only if you intend to change the engine or the UI.
+
 ## 🤝 Contributing
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md); the short
