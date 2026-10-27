@@ -65,16 +65,19 @@ $downloaderTarget = Join-Path $outputDir "MargueriteDownloader.exe"
 [System.IO.File]::Copy($downloaderExe, $downloaderTarget, $true)
 
 $payloadTarget = Join-Path $outputDir $payloadItem.Name
-if (Test-Path $payloadTarget) {
-    [System.IO.File]::Delete($payloadTarget)
+$linked = $false
+if (-not (Test-Path $payloadTarget)) {
+    try {
+        New-Item -ItemType HardLink -Path $payloadTarget -Target $payloadItem.FullName | Out-Null
+        $linked = $true
+    }
+    catch {
+        $linked = $false
+    }
 }
 
-$linked = $false
-try {
-    New-Item -ItemType HardLink -Path $payloadTarget -Target $payloadItem.FullName | Out-Null
-    $linked = $true
-}
-catch {
+if (-not $linked) {
+    # 覆盖已有同名产物：不再先删再建，少一步会失败在半路的破坏性操作。
     [System.IO.File]::Copy($payloadItem.FullName, $payloadTarget, $true)
 }
 
@@ -83,7 +86,7 @@ foreach ($file in @($setupTarget, $downloaderTarget, $payloadTarget)) {
     $lines += (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() + "  " + (Split-Path $file -Leaf)
 }
 $sums = Join-Path $outputDir "SHA256SUMS.txt"
-$lines | Set-Content -Path $sums -Encoding ASCII
+[System.IO.File]::WriteAllLines($sums, [string[]]$lines, (New-Object System.Text.ASCIIEncoding))
 
 Write-Host ""
 Write-Host "===== Marguerite cinematic setup + downloader ====="

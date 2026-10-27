@@ -10,6 +10,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32;
 
 namespace MargueriteSetup
 {
@@ -65,10 +66,10 @@ namespace MargueriteSetup
     {
         public const string ExpectedVersion = "0.2.17";
 
-        public const string ExpectedSha256 = "a55bd21b6dd37aa8884d941135f2e607f714e8771b17da6810f427364261c2d0";
+        public const string ExpectedSha256 = "e4164b3e10459454ee200ad94922944258adcf9f33342f38e0bb822608eaf77e";
 
-        // ESTIMATEDSIZE in the generated installer.nsi is 372497 KB.
-        public const long EstimatedInstalledBytes = 372497L * 1024L;
+        // ESTIMATEDSIZE in the generated installer.nsi is 375249 KB (0.2.17, 2026-10-27 重打)。
+        public const long EstimatedInstalledBytes = 375249L * 1024L;
 
         private static readonly Regex PayloadName = new Regex(
             @"^Marguerite_(\d+\.\d+\.\d+)_x64-setup\.exe$",
@@ -86,9 +87,95 @@ namespace MargueriteSetup
             Directory.CreateDirectory(dir);
             LogPath = System.IO.Path.Combine(dir, "setup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
             _log = new StreamWriter(LogPath, false, new UTF8Encoding(false)) { AutoFlush = true };
+            LogEnvironment();
         }
 
         public string LogPath { get; private set; }
+
+        /// <summary>
+        /// 装之前先记一行机器环境。出问题时日志要能回答「这台机器缺什么」，
+        /// 而不是只留一个 NSIS 退出码。
+        /// </summary>
+        private void LogEnvironment()
+        {
+            try
+            {
+                Log("os=" + Environment.OSVersion.VersionString + " x64=" + Environment.Is64BitOperatingSystem);
+                Log("clr=" + Environment.Version);
+                Log("webview2=" + (WebView2RuntimePresent() ? "present" : "absent"));
+                Log("python=" + (PythonOnPath() ? "present" : "absent"));
+            }
+            catch (Exception ex)
+            {
+                Log("environment log failed: " + ex.Message);
+            }
+        }
+
+        private static bool WebView2RuntimePresent()
+        {
+            const string guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+            var subkeys = new[]
+            {
+                @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\" + guid,
+                @"SOFTWARE\Microsoft\EdgeUpdate\Clients\" + guid
+            };
+            foreach (var subkey in subkeys)
+            {
+                foreach (var root in new[] { Registry.LocalMachine, Registry.CurrentUser })
+                {
+                    try
+                    {
+                        using (var key = root.OpenSubKey(subkey))
+                        {
+                            if (key != null && key.GetValue("pv") != null)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // 权限受限的机器读不到就当缺失，由主流程继续。
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool PythonOnPath()
+        {
+            var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            foreach (var dir in path.Split(';'))
+            {
+                if (string.IsNullOrWhiteSpace(dir))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (File.Exists(System.IO.Path.Combine(dir.Trim(), "python.exe")))
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // 非法 PATH 段直接跳过。
+                }
+            }
+
+            try
+            {
+                return File.Exists(System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe"));
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         public static PayloadInfo DescribePayload(string path)
         {
