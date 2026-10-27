@@ -66,10 +66,10 @@ namespace MargueriteSetup
     {
         public const string ExpectedVersion = "0.2.17";
 
-        public const string ExpectedSha256 = "e4164b3e10459454ee200ad94922944258adcf9f33342f38e0bb822608eaf77e";
+        public const string ExpectedSha256 = "38a56a6a58eee6aaf7578c67d0387beabe675d8deb26f8afd3b41fbeca1130fe";
 
-        // ESTIMATEDSIZE in the generated installer.nsi is 375249 KB (0.2.17, 2026-10-27 重打)。
-        public const long EstimatedInstalledBytes = 375249L * 1024L;
+        // ESTIMATEDSIZE in the generated installer.nsi is 647859 KB (0.2.17 内置 Python 运行时后重打)。
+        public const long EstimatedInstalledBytes = 647859L * 1024L;
 
         private static readonly Regex PayloadName = new Regex(
             @"^Marguerite_(\d+\.\d+\.\d+)_x64-setup\.exe$",

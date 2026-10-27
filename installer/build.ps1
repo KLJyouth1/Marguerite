@@ -1,7 +1,8 @@
-param(
+﻿param(
     [string]$Configuration = "Release",
     [string]$Payload,
-    [string]$OutputRoot
+    [string]$OutputRoot,
+    [string[]]$Extras = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,8 +82,20 @@ if (-not $linked) {
     [System.IO.File]::Copy($payloadItem.FullName, $payloadTarget, $true)
 }
 
+# 复制后再按内容核对一遍：曾出现过「打印了源大小、目标却没变」的静默失败，
+# 那种包会被安装器的 SHA256 拦下，但错误信息离真正原因很远。
+$srcHash = (Get-FileHash $payloadItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+$dstHash = (Get-FileHash $payloadTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($srcHash -ne $dstHash) {
+    throw "payload copy mismatch: target=$payloadTarget（期望 $srcHash，实际 $dstHash）"
+}
+
 $lines = @()
-foreach ($file in @($setupTarget, $downloaderTarget, $payloadTarget)) {
+$packaged = @($setupTarget, $downloaderTarget, $payloadTarget)
+foreach ($extra in $Extras) {
+    if ($extra -and (Test-Path $extra)) { $packaged += (Resolve-Path $extra).Path }
+}
+foreach ($file in $packaged) {
     $lines += (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() + "  " + (Split-Path $file -Leaf)
 }
 $sums = Join-Path $outputDir "SHA256SUMS.txt"

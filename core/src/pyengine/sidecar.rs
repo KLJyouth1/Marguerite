@@ -89,8 +89,37 @@ impl SidecarConfig {
     }
 }
 
+/// 安装包内置 Python 的候选路径（纯函数，便于守卫）。
+///
+/// 安装布局是 `<install>/marguerite-gui.exe` + `<install>/resources/python/python.exe`；
+/// 从 `target/release/` 直接跑时也允许上溯几层命中 `resources/`。
+/// **内置优先于系统 Python**：用户机器上不一定装了 3.12，而内置那份的依赖是齐的。
+pub(crate) fn bundled_python_candidates(exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(exe) = exe {
+        if let Some(mut dir) = exe.parent() {
+            for _ in 0..4 {
+                out.push(dir.join("resources").join("python").join("python.exe"));
+                match dir.parent() {
+                    Some(p) => dir = p,
+                    None => break,
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn detect_python() -> Result<PathBuf> {
-    // 在 Windows 上使用 py launcher 的 3.12+；找不到再查 PATH
+    // ① 安装包自带的解释器：无需用户预装任何 Python
+    let exe = std::env::current_exe().ok();
+    for candidate in bundled_python_candidates(exe.as_deref()) {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    // ② 系统 Python：py launcher 的 3.14/3.13/3.12；找不到再查 PATH
     let candidates: Vec<(&str, Vec<&str>)> = vec![
         ("py", vec!["-3.14", "--version"]),
         ("py", vec!["-3.13", "--version"]),
@@ -134,7 +163,7 @@ pub fn detect_python() -> Result<PathBuf> {
         }
     }
     Err(anyhow!(
-        "未找到 Python >=3.12。请安装 Python 3.12+，并确保 `py -3.14`/`python3.12` 或 `python --version` 可达"
+        "未找到 Python >=3.12：安装包应自带 `resources/python/python.exe`；系统安装可用 `py -3.12` / `python3.12` / `python --version` 验证"
     ))
 }
 
@@ -1911,6 +1940,36 @@ mod health_verdict_tests {
         let hit = first_valid_src(cands).expect("必须找到打包进来的引擎源码");
         assert_eq!(hit, packaged, "应命中打包资源布局");
         assert!(!is_pyengine_src(&decoy), "干扰项不合法（缺 main.py）");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 内置解释器必须排在首位：安装版是 `<install>/resources/python/python.exe`。
+    #[test]
+    fn bundled_python_path_is_the_install_resource_layout() {
+        let exe = PathBuf::from("D:/install/Marguerite/marguerite-gui.exe");
+        let cands = bundled_python_candidates(Some(exe.as_path()));
+        assert_eq!(
+            cands.first().map(|p| p.to_string_lossy().replace('\\', "/")),
+            Some("D:/install/Marguerite/resources/python/python.exe".to_string()),
+            "内置 Python 必须是第一候选（否则会退回系统 Python 或直接失败）"
+        );
+    }
+
+    /// 真实目录夹具：`resources/python/python.exe` 存在时必须选中它。
+    #[test]
+    fn detect_python_prefers_bundled_runtime() {
+        let root = std::env::temp_dir().join(format!("marg_py_fixture_{}", std::process::id()));
+        let install = root.join("install");
+        let bundled = install.join("resources/python/python.exe");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"").unwrap();
+
+        let exe = install.join("marguerite-gui.exe");
+        let hit = bundled_python_candidates(Some(exe.as_path()))
+            .into_iter()
+            .find(|p| p.is_file());
+        assert_eq!(hit.as_deref(), Some(bundled.as_path()), "应命中内置运行时");
 
         std::fs::remove_dir_all(&root).ok();
     }

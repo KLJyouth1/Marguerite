@@ -97,7 +97,7 @@ namespace MargueriteSetup
             { "Feature1", "多智能体编排与专家团" },
             { "Feature2", "本地优先的会话与记忆" },
             { "Feature3", "桌面、浏览器与终端一体" },
-            { "WelcomeNote", "约 375 MB，内含离线 WebView2 运行时。" },
+            { "WelcomeNote", "约 411 MB，内含离线 WebView2 运行时与内置 Python。" },
 
             { "LicenseEyebrow", "LICENSE · MIT" },
             { "LicenseTitle", "在开始之前" },
@@ -209,7 +209,7 @@ namespace MargueriteSetup
             { "Feature1", "Multi-agent orchestration" },
             { "Feature2", "Local-first sessions and memory" },
             { "Feature3", "Desktop, browser and terminal in one" },
-            { "WelcomeNote", "About 375 MB, including the offline WebView2 runtime." },
+            { "WelcomeNote", "About 411 MB, including the offline WebView2 runtime and a bundled Python." },
 
             { "LicenseEyebrow", "LICENSE · MIT" },
             { "LicenseTitle", "Before we begin" },
