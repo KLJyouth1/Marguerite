@@ -16,6 +16,13 @@
 
 <a class="skip" href="#main">跳到正文</a>
 
+<div class="notice" data-notice>
+  <p class="notice__text"><span class="notice__tag">0.2.17</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
+  <button class="notice__close" type="button" data-notice-close aria-label="关闭公告">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6 18 18M18 6 6 18"/></svg>
+  </button>
+</div>
+
 <div class="aura" aria-hidden="true"></div>
 <div class="grain" aria-hidden="true"></div>
 
@@ -30,6 +37,7 @@
       <a href="#shots">真实界面</a>
       <a href="#demo">操作演示</a>
       <a href="#compare">差异</a>
+      <a href="#faq">常见问题</a>
       <a href="#download">下载</a>
     </nav>
     <button class="sound" id="soundToggle" type="button" aria-pressed="false" aria-label="开启背景音乐 focus-pulse">
@@ -46,6 +54,7 @@
     <a href="#shots">真实界面</a>
     <a href="#demo">操作演示</a>
     <a href="#compare">差异</a>
+    <a href="#faq">常见问题</a>
     <a href="#download">下载</a>
   </nav>
 </header>
@@ -80,7 +89,20 @@
         </a>
       </div>
 
-      <ul class="facts rise d4">
+      <form class="ask rise d4" data-ask action="#demo" novalidate>
+        <span class="ask__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.2"/></svg>
+        </span>
+        <label class="sr-only" for="askInput">写下你要它做的事</label>
+        <input class="ask__input" id="askInput" data-ask-input type="text" autocomplete="off"
+               placeholder="把这轮排查整理成一页纸：根因、证据、下一步。">
+        <button class="ask__go" type="submit" aria-label="提交到下面的演示">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12h15"/><path d="m13 6 6 6-6 6"/></svg>
+        </button>
+      </form>
+      <p class="ask__note rise d4">提交后直接带进下面的真实输入框跑一遍。演示在浏览器内运行，不联网、不发送内容。</p>
+
+      <ul class="facts rise d5">
         <li><b>85<small>s</small></b><span>卡点短片 · 56 BPM</span></li>
         <li><b>1</b><span>个可执行文件</span></li>
         <li><b>0</b><span>外部开放端口</span></li>
@@ -431,27 +453,96 @@
     </div>
   </section>
 
+  <!-- ================= FAQ ================= -->
+  <section class="band" id="faq" aria-labelledby="faqTitle">
+    <div class="wrap faq">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">FAQ</p>
+        <h2 class="sec-title" id="faqTitle">把该问的先问完</h2>
+        <p class="sec-dek">六条，答案都对得上仓库里的文件或命令；没有把握的我们不写。</p>
+      </header>
+
+      <div class="faq__list">
+        <details class="faq__item reveal-up">
+          <summary>一定要联网才能用吗？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>安装不需要联网：安装包内含离线 WebView2，装完就能打开。运行时是否联网取决于你配置的模型——接本地模型可以完全离线，接云端提供方时才需要网络。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
+          <summary>我的内容会被发到哪里？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>内嵌网关默认只绑定 <code>127.0.0.1:18790</code>，同一局域网里的其他机器也访问不到。本站页面本身不含第三方统计脚本——你在这一页上的所有操作都只发生在浏览器里。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
+          <summary>为什么下载前要先播一段片头？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>下载器把「下载 → 校验 → 安装」串成一段能看懂的流程：片头完整播过一遍才打开安装界面，避免安装包没下完就启动安装。安装包约 372 MB。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
+          <summary>支持哪些系统？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>目前提供的是 Windows x64 的桌面安装包。其他平台的进展以发布仓库里的实际产物为准，不做预告。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
+          <summary>怎么确认安装包没被改过？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>发布仓库会给出每个产物的 SHA256；下载器内建了同一个校验值，下载完成后可以直接对照。两者不一致就别装。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
+          <summary>可以自己从源码构建吗？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>可以。内核是 Rust：<code>cargo build --release -p marguerite-core</code>；桌面壳在仓库的 <code>gui/</code> 目录下，与内核共用同一个引擎。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= DOWNLOAD ================= -->
   <section class="band band--cta" id="download" aria-labelledby="dlTitle">
-    <div class="wrap cta">
-      <h2 class="cta__title reveal-up" id="dlTitle">先看一遍片头，再开始用</h2>
-      <p class="cta__dek reveal-up">Windows x64 · 约 372 MB · 内含离线 WebView2，断网也能装。</p>
-      <div class="cta__actions reveal-up">
-        <a class="btn btn--solid btn--lg"
-           href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
-           rel="noopener" aria-label="下载 Marguerite 视频下载器">
-          下载视频下载器
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-        </a>
-        <a class="btn btn--ghost btn--lg"
-           href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest"
-           target="_blank" rel="noopener noreferrer">
-          发布仓库与校验文件
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7"/><path d="M21 3 10 14"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
-        </a>
+    <div class="wrap">
+      <div class="cta">
+        <h2 class="cta__title reveal-up" id="dlTitle">先看一遍片头，再开始用</h2>
+        <p class="cta__dek reveal-up">Windows x64 · 约 372 MB · 内含离线 WebView2，断网也能装。</p>
       </div>
-      <div class="build reveal-up">
-        <pre class="code"><code>直接从源码构建：cargo build --release -p marguerite-core</code></pre>
+
+      <div class="dl">
+        <article class="dl__card dl__card--primary reveal-up">
+          <p class="dl__k">推荐路径</p>
+          <h3 class="dl__t">视频下载器</h3>
+          <p class="dl__d">先完整播一遍片头，再打开安装界面。单文件 exe，内建 SHA256 校验。</p>
+          <p class="dl__m">MargueriteDownloader.exe · GitHub Releases</p>
+          <a class="btn btn--solid"
+             href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
+             rel="noopener" aria-label="下载 Marguerite 视频下载器">
+            下载
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+          </a>
+        </article>
+
+        <article class="dl__card reveal-up">
+          <p class="dl__k">所有版本</p>
+          <h3 class="dl__t">发布仓库</h3>
+          <p class="dl__d">历史安装包、SHA256 校验文件与更新记录都放在这里，按版本可查。</p>
+          <p class="dl__m">github.com/KLJyouth1/Marguerite-Releases</p>
+          <a class="btn btn--ghost"
+             href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest"
+             target="_blank" rel="noopener noreferrer">
+            打开 Releases
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7"/><path d="M21 3 10 14"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
+          </a>
+        </article>
+
+        <article class="dl__card reveal-up">
+          <p class="dl__k">开发者</p>
+          <h3 class="dl__t">从源码构建</h3>
+          <p class="dl__d">内核与桌面壳在同一个仓库，共用一套引擎。需要 Rust 工具链。</p>
+          <pre class="code"><code>cargo build --release -p marguerite-core</code></pre>
+          <a class="btn btn--ghost"
+             href="https://github.com/KLJyouth1/Marguerite"
+             target="_blank" rel="noopener noreferrer">
+            查看源码
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7"/><path d="M21 3 10 14"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
+          </a>
+        </article>
       </div>
     </div>
   </section>

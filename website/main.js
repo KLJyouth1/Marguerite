@@ -1,6 +1,7 @@
 /* ============================================================================
    Marguerite 官网 · 渐进增强脚本
-   本站在禁用 JS 时功能完整。本文件只补两件事：移动端菜单开合、命令复制按钮。
+   本站在禁用 JS 时功能完整。本文件只补四件事：移动端菜单、命令复制、
+   顶部公告条的关闭记忆、首屏提问带进下面的真实演示。
    复制做三段降级：Clipboard API → execCommand → 明确报失败（绝不静默吞错）。
    ========================================================================== */
 (function () {
@@ -95,6 +96,43 @@
 
   var blocks = document.querySelectorAll('pre.code');
   for (var i = 0; i < blocks.length; i++) attach(blocks[i], i);
+
+  /* ---- 顶部公告条：关闭后记在本地，下次不再占位 ---- */
+  (function notice() {
+    var bar = document.querySelector('[data-notice]');
+    if (!bar) return;
+    var KEY = 'marguerite.notice.v1';
+    try { if (window.localStorage.getItem(KEY) === 'closed') bar.hidden = true; } catch (err) {}
+    var close = bar.querySelector('[data-notice-close]');
+    if (close) {
+      close.addEventListener('click', function () {
+        bar.hidden = true;
+        try { window.localStorage.setItem(KEY, 'closed'); } catch (err) {}
+      });
+    }
+  })();
+
+  /* ---- 首屏提问：把这句话带进下面的真实演示输入框并跑一次 ---- */
+  (function ask() {
+    var form = document.querySelector('[data-ask]');
+    var field = document.querySelector('[data-ask-input]');
+    var demo = document.getElementById('demo');
+    var input = document.querySelector('[data-demo-input]');
+    var send = document.querySelector('[data-demo-send]');
+    if (!form || !field || !demo || !input || !send) return;
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var text = (field.value || '').trim() || input.getAttribute('placeholder') || '';
+      var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      input.value = text;
+      demo.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+      window.setTimeout(function () {
+        send.click();
+        try { input.focus({ preventScroll: true }); } catch (err) { input.focus(); }
+      }, reduce ? 90 : 700);
+    });
+  })();
 
   /* ---- 操作演示：真实输入 + 工具回执 + 流式生成 ---- */
   (function demo() {

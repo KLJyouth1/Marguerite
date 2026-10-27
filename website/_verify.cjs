@@ -48,13 +48,18 @@ const SLOGAN = '让思考 成为你的工作台';
         compare: !!document.querySelector('.cmp'),
         scene: !!document.getElementById('brandScene'),
         bpm: window.MARGUERITE_BEATS ? window.MARGUERITE_BEATS.beatBpm : null,
+        notice: !!document.querySelector('[data-notice]'),
+        ask: !!document.querySelector('[data-ask]'),
+        faq: document.querySelectorAll('#faq details').length,
+        dl: document.querySelectorAll('.dl__card').length,
       };
     });
 
-    const structureOk = m.player && m.acts === 6 && m.demo && m.compare && m.scene && m.bpm === 56;
+    const structureOk = m.player && m.acts === 6 && m.demo && m.compare && m.scene && m.bpm === 56 &&
+      m.notice && m.ask && m.faq === 6 && m.dl === 3;
     if (!structureOk) {
       allPass = false;
-      errors.push(s.name + ' structure: ' + JSON.stringify({ player: m.player, acts: m.acts, demo: m.demo, compare: m.compare, scene: m.scene, bpm: m.bpm }));
+      errors.push(s.name + ' structure: ' + JSON.stringify({ player: m.player, acts: m.acts, demo: m.demo, compare: m.compare, scene: m.scene, bpm: m.bpm, notice: m.notice, ask: m.ask, faq: m.faq, dl: m.dl }));
     }
 
     const sloganOk = m.text === SLOGAN;
@@ -79,7 +84,7 @@ const SLOGAN = '让思考 成为你的工作台';
     console.log('  标语精确    : ' + (sloganOk ? 'PASS' : 'FAIL ' + JSON.stringify(m.text)));
     console.log('  横向溢出    : ' + (noOverflow ? 'PASS (scrollW ' + m.scrollW + ' / vw ' + m.vw + ')' : 'FAIL'));
     console.log('  事实条目    : ' + m.facts + (m.facts === 4 ? ' OK' : ' *** 期望 4 ***'));
-    console.log('  短片/演示/对比: ' + (structureOk ? 'PASS（6 幕 · 56 BPM）' : 'FAIL ' + JSON.stringify(m)));
+    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（6 幕 · 56 BPM · FAQ 6 · 下载 3）' : 'FAIL ' + JSON.stringify(m)));
 
     try {
       await page.screenshot({ path: '_shot-' + s.name + '.png', fullPage: false, animations: 'disabled', timeout: 4000 });
