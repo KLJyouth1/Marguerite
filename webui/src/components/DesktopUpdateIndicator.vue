@@ -19,6 +19,8 @@ const status = computed(() => update.state.value.status)
 const latestVersion = computed(() => update.latestVersion.value)
 const manualInstall = computed(() => update.state.value.installMode === 'manual')
 const canInstall = computed(() => update.state.value.installMode !== 'unsupported')
+const canLaunchDownloader = computed(() => update.canLaunchDownloader.value)
+const downloaderNote = ref<'' | 'opened' | 'missing'>('')
 const busy = computed(() => update.actionBusy.value || status.value === 'downloading' || status.value === 'applying')
 const progressText = computed(() => {
   const progress = update.state.value.progress
@@ -102,6 +104,13 @@ async function download() {
   await update.download()
 }
 
+/** 视频下载器：片头播完一整遍才打开安装界面。找不到可执行文件时如实提示。 */
+async function openDownloader() {
+  downloaderNote.value = ''
+  const result = await update.launchDownloader()
+  downloaderNote.value = result?.launched ? 'opened' : 'missing'
+}
+
 async function relaunch() {
   await update.relaunch()
 }
@@ -142,7 +151,31 @@ useDocumentEvent('click', (event) => {
           <strong>{{ title }}</strong>
         </div>
         <p class="desktop-update__desc">{{ description }}</p>
+        <p
+          v-if="canLaunchDownloader"
+          class="desktop-update__note"
+          :class="{ 'desktop-update__note--warn': downloaderNote === 'missing' }"
+        >
+          {{
+            downloaderNote === 'opened'
+              ? t('updates.desktop.downloaderLaunched')
+              : downloaderNote === 'missing'
+                ? t('updates.desktop.downloaderMissing')
+                : t('updates.desktop.downloaderHint')
+          }}
+        </p>
         <div class="desktop-update__actions">
+          <button
+            v-if="canLaunchDownloader && (status === 'available' || status === 'downloaded')"
+            type="button"
+            class="btn btn--ghost"
+            data-testid="desktop-update-downloader"
+            :disabled="busy"
+            @click="openDownloader"
+          >
+            <Icon name="download" :size="14" aria-hidden="true" />
+            <span>{{ t('updates.desktop.useDownloader') }}</span>
+          </button>
           <button
             v-if="status === 'available' && canInstall"
             type="button"
@@ -256,6 +289,17 @@ useDocumentEvent('click', (event) => {
   font-size: var(--fs-xs);
   line-height: 1.45;
   margin: 0;
+}
+
+.desktop-update__note {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.desktop-update__note--warn {
+  color: var(--danger);
 }
 
 .desktop-update__actions {

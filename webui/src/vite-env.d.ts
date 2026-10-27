@@ -150,6 +150,21 @@ declare global {
     petOverlayShow?: () => Promise<{ created: boolean; label: string }>
     petOverlayHide?: () => Promise<void>
     petOverlayToggle?: () => Promise<{ created: boolean; label: string }>
+    /**
+     * 启动视频下载器（壳里真实存在 `launch_downloader`）。
+     * 找不到可执行文件时返回 `{ok:false, code:'NOT_FOUND', searched:[...]}`，
+     * 前端必须如实展示，不得当作已启动。
+     */
+    launchDownloader?: (options?: { url?: string }) => Promise<DownloaderLaunchResult>
+  }
+
+  interface DownloaderLaunchResult {
+    ok: boolean
+    launched: boolean
+    code?: string
+    message?: string
+    path?: string
+    searched?: string[]
   }
 
   interface Window {

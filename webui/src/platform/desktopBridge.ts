@@ -192,6 +192,22 @@ function buildBridge() {
       if (!invoke) throw new Error('desktop bridge unavailable')
       return await invoke('pet_overlay_toggle') as { created: boolean; label: string }
     },
+    // 视频下载器：壳里真实存在 launch_downloader（lib.rs）。只在壳里转发；
+    // 找不到时把 searched 数组原样带回，UI 展示真实搜索路径而不是「失败」两个字。
+    launchDownloader: async (options?: { url?: string }) => {
+      const invoke = getTauriInvoke()
+      if (!invoke) throw new Error('desktop bridge unavailable')
+      return await invoke('launch_downloader', {
+        url: options?.url ?? null,
+      }) as {
+        ok: boolean
+        launched: boolean
+        code?: string
+        message?: string
+        path?: string
+        searched?: string[]
+      }
+    },
   }
 }
 

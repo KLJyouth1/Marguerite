@@ -132,4 +132,36 @@ describe('SettingsUpdatePanel', () => {
     expect(el.querySelector('[data-testid="settings-update-relaunch"]')).toBeNull()
     app.unmount()
   })
+
+  it('launches the video downloader from the update panel', async () => {
+    const launchDownloader = vi.fn(async () => ({ ok: true, launched: true, path: 'C:/MargueriteDownloader.exe' }))
+    const api = desktopUpdateApi({ status: 'available', latestVersion: '99.0.0' }, { launchDownloader })
+    const { app, el } = await mountPanel(api)
+
+    const button = el.querySelector('[data-testid="settings-update-downloader"]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    button.click()
+    await settle()
+
+    expect(launchDownloader).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toContain('Downloader opened')
+    app.unmount()
+  })
+
+  it('reports the real missing-downloader state instead of pretending success', async () => {
+    const launchDownloader = vi.fn(async () => ({
+      ok: false,
+      launched: false,
+      code: 'NOT_FOUND',
+      searched: ['C:/Marguerite/MargueriteDownloader.exe'],
+    }))
+    const api = desktopUpdateApi({ status: 'available' }, { launchDownloader })
+    const { app, el } = await mountPanel(api)
+
+    ;(el.querySelector('[data-testid="settings-update-downloader"]') as HTMLButtonElement).click()
+    await settle()
+
+    expect(el.textContent).toContain('MargueriteDownloader.exe was not found')
+    app.unmount()
+  })
 })

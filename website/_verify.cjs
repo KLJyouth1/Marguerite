@@ -10,7 +10,9 @@ const SIZES = [
   { w: 768, h: 1000, name: 'tablet-768' },
   { w: 1440, h: 1000, name: 'desktop-1440' },
 ];
-const SLOGAN = '只要做到极致 什么都能成功';
+// 2026-10-27：主页改为以产品为首屏（下载器 / 安装器 / 工作台同一条叙事），
+// 校验目标同步为新首屏标题，避免脚本与新文案脱节。
+const SLOGAN = '让思考 成为你的工作台';
 
 (async () => {
   const browser = await chromium.launch();

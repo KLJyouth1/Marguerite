@@ -380,6 +380,11 @@ export interface PlatformUpdatesApi {
   relaunch(): Promise<DesktopUpdateState>
   dismiss(): Promise<DesktopUpdateState>
   onState(callback: (state: DesktopUpdateState) => void): () => void
+  /**
+   * 启动随包分发的视频下载器（真壳才有）。Web 端缺席时 UI 必须隐藏该入口，
+   * 不得伪造「已启动」。
+   */
+  launchDownloader?: (options?: { url?: string }) => Promise<DownloaderLaunchResult>
 }
 
 export interface Platform {

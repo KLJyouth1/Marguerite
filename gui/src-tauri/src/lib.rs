@@ -2211,6 +2211,74 @@ fn fs_delete(path: String) -> Result<(), String> {
     }
 }
 
+/// 启动视频下载器：桌面端「检查更新」与官网下载共用同一个可执行文件。
+///
+/// 有意做成「找不到就如实说找不到」：不尝试自动下载下载器本身（那会变成
+/// 另一个静默失败点），而是把搜索过的路径一并回给前端，让用户能自己放到位。
+#[tauri::command]
+fn launch_downloader(url: Option<String>) -> Result<serde_json::Value, String> {
+    let mut searched: Vec<String> = Vec::new();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Ok(explicit) = std::env::var("MARGUERITE_DOWNLOADER") {
+        if !explicit.trim().is_empty() {
+            candidates.push(std::path::PathBuf::from(explicit));
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("MargueriteDownloader.exe"));
+            candidates.push(dir.join("downloader").join("MargueriteDownloader.exe"));
+        }
+    }
+
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let base = std::path::PathBuf::from(local).join("Marguerite");
+        candidates.push(base.join("downloader").join("MargueriteDownloader.exe"));
+        candidates.push(base.join("MargueriteDownloader.exe"));
+    }
+
+    for candidate in &candidates {
+        searched.push(candidate.display().to_string());
+        if !candidate.is_file() {
+            continue;
+        }
+
+        let mut command = std::process::Command::new(candidate);
+        if let Some(target) = url.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            command.arg("--url").arg(target);
+        }
+
+        match command.spawn() {
+            Ok(child) => {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "launched": true,
+                    "path": candidate.display().to_string(),
+                    "pid": child.id(),
+                }));
+            }
+            Err(err) => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "launched": false,
+                    "code": "SPAWN_FAILED",
+                    "message": err.to_string(),
+                    "path": candidate.display().to_string(),
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": false,
+        "launched": false,
+        "code": "NOT_FOUND",
+        "searched": searched,
+    }))
+}
+
 /// 在系统默认浏览器打开链接（仅 http/https）
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -3472,6 +3540,7 @@ pub fn run() {
             fs_write_file,
             fs_mkdir,
             fs_delete,
+            launch_downloader,
             open_url
         ])
         .run(tauri::generate_context!())

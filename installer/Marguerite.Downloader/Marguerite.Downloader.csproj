@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>MargueriteDownloader</AssemblyName>
+    <RootNamespace>MargueriteDownloader</RootNamespace>
+    <Version>0.2.17</Version>
+    <FileVersion>0.2.17.0</FileVersion>
+    <AssemblyVersion>0.2.17.0</AssemblyVersion>
+    <Product>Marguerite Downloader</Product>
+    <Company>Marguerite</Company>
+    <Description>Cinematic downloader for Marguerite: the film plays a full pass before the installer opens</Description>
+    <ApplicationIcon>..\Marguerite.Setup\Assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\Marguerite.Setup\Assets\brand-mark.png">
+      <Link>Assets\brand-mark.png</Link>
+    </Resource>
+    <Resource Include="..\Marguerite.Setup\Assets\poster-welcome.jpg">
+      <Link>Assets\poster-welcome.jpg</Link>
+    </Resource>
+    <EmbeddedResource Include="..\Marguerite.Setup\Assets\promo.mp4">
+      <Link>Assets\promo.mp4</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

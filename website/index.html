@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>只要做到极致 什么都能成功 — Marguerite 桌面 AI Agent</title>
-<meta name="description" content="Marguerite 把 Agent 运行时、三层记忆与幻觉护栏写进同一个 Rust 核心，编译成一个本地优先的桌面 AI 工作台。">
-<meta property="og:title" content="只要做到极致 什么都能成功">
-<meta property="og:description" content="Marguerite：极致精简的本地优先桌面 AI Agent 工作台。">
+<title>Marguerite — 本地优先的桌面 AI Agent 工作台</title>
+<meta name="description" content="Marguerite 把 Agent 运行时、分层记忆与幻觉护栏写进同一个 Rust 核心，编译成单文件的本地优先桌面工作台。下载视频下载器，片头播完一遍再进入安装界面。">
+<meta property="og:title" content="Marguerite — 本地优先的桌面 AI Agent 工作台">
+<meta property="og:description" content="下载器循环播放片头，播完一整遍才打开安装界面；内核、记忆与护栏都在本机。">
 <meta property="og:type" content="website">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -14,7 +14,6 @@
 
 <a class="skip" href="#main">跳到正文</a>
 
-<!-- 背景景深层：随鼠标轻微视差 -->
 <div class="aura" aria-hidden="true"></div>
 <div class="grain" aria-hidden="true"></div>
 
@@ -26,8 +25,8 @@
     </a>
     <nav class="nav__links" aria-label="主导航">
       <a href="#capabilities">核心能力</a>
-      <a href="#preview">界面预览</a>
-      <a href="#evidence">为什么极致</a>
+      <a href="#downloader">下载器</a>
+      <a href="#preview">界面</a>
       <a href="#download">下载</a>
     </nav>
     <a class="btn btn--solid nav__cta" href="#download">下载桌面端</a>
@@ -37,8 +36,8 @@
   </div>
   <nav class="nav__mobile" id="navMenu" aria-label="移动端导航" hidden>
     <a href="#capabilities">核心能力</a>
-    <a href="#preview">界面预览</a>
-    <a href="#evidence">为什么极致</a>
+    <a href="#downloader">下载器</a>
+    <a href="#preview">界面</a>
     <a href="#download">下载</a>
   </nav>
 </header>
@@ -48,34 +47,36 @@
   <!-- ============ HERO ============ -->
   <section class="hero" aria-labelledby="heroTitle">
     <div class="hero__inner">
-      <p class="hero__kicker rise d1">本地优先 · 桌面 AI Agent 工作台</p>
+      <p class="hero__kicker rise d1">本地优先 · 桌面 AI Agent 工作台 · 0.2.17</p>
 
       <h1 class="hero__title" id="heroTitle">
-        <span class="ln"><span class="ln__in">只要做到<b class="hl">极致</b></span></span>
-        <span class="ln"><span class="ln__in">什么都能成功</span></span>
+        <span class="ln"><span class="ln__in">让思考</span></span>
+        <span class="ln"><span class="ln__in">成为你的<b class="hl">工作台</b></span></span>
       </h1>
 
       <p class="hero__lede rise d2">
-        Marguerite 把 Agent 运行时、三层记忆与幻觉护栏写进同一个 Rust 核心，
-        编译成一个本地优先的可执行文件。内嵌网关只监听回环地址，不对外开任何一个端口。
+        Agent 运行时、分层记忆与幻觉护栏写进同一个 Rust 核心，编译成一个本地优先的可执行文件。
+        内嵌网关只监听回环地址，不对外开任何一个端口。
       </p>
 
       <div class="hero__actions rise d3">
-        <a class="btn btn--solid" href="#download">
+        <a class="btn btn--solid"
+           href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
+           rel="noopener">
           下载桌面端
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
         </a>
-        <a class="btn btn--ghost" href="#capabilities">
-          看核心能力
+        <a class="btn btn--ghost" href="#downloader">
+          先看下载器怎么工作
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
         </a>
       </div>
 
       <ul class="facts rise d4">
-        <li><b>0</b><span>外部开放端口</span></li>
+        <li><b>372<small>MB</small></b><span>离线可用安装包</span></li>
         <li><b>1</b><span>个可执行文件</span></li>
         <li><b>6</b><span>种界面语言</span></li>
-        <li><b>3</b><span>层本地记忆</span></li>
+        <li><b>0</b><span>外部开放端口</span></li>
       </ul>
     </div>
   </section>
@@ -95,7 +96,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
           </span>
           <h3 class="card__title">一个核心，两种外壳</h3>
-          <p class="card__body">Rust 内核同时产出库与二进制，CLI 与 Tauri 桌面共用同一引擎，编译进同一个可执行文件——桌面端不另起后端进程。</p>
+          <p class="card__body">Rust 内核同时产出库与二进制，CLI 与 Tauri 桌面共用同一引擎——桌面端不另起后端进程。</p>
         </article>
 
         <article class="card reveal-up">
@@ -103,15 +104,15 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
           </span>
           <h3 class="card__title">本地优先网关</h3>
-          <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code> 回环地址，不监听 <code>0.0.0.0</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
+          <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
         </article>
 
         <article class="card reveal-up">
           <span class="card__icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
           </span>
-          <h3 class="card__title">三层记忆</h3>
-          <p class="card__body">感知、短期、长期三层记忆。长期记忆用本地特征哈希向量化做余弦相似度检索，不依赖任何外部 embedding 服务。</p>
+          <h3 class="card__title">分层记忆</h3>
+          <p class="card__body">感知、短期、长期三层记忆。长期记忆用本地特征哈希向量化做余弦检索，不依赖外部 embedding 服务。</p>
         </article>
 
         <article class="card reveal-up">
@@ -119,47 +120,92 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
           </span>
           <h3 class="card__title">幻觉护栏</h3>
-          <p class="card__body">语法、语义、事实、契约四道闸依次过闸。不过闸就进修复循环：规则修复最多两次，仍不过再交给模型，改完重新过一遍护栏。</p>
+          <p class="card__body">语法、语义、事实、契约四道闸依次过闸。不过闸就进修复循环：规则修复最多两次，仍不过再交给模型。</p>
         </article>
       </div>
     </div>
   </section>
 
-  <!-- ============ PREVIEW / SCREENSHOTS ============ -->
-  <section class="band band--alt" id="preview" aria-labelledby="prevTitle">
+  <!-- ============ DOWNLOADER ============ -->
+  <section class="band band--alt" id="downloader" aria-labelledby="dlvTitle">
     <div class="wrap">
       <header class="sec-head reveal-up">
-        <p class="sec-index">界 面 预 览</p>
-        <h2 class="sec-title" id="prevTitle">一套设计，三种视口</h2>
-        <p class="sec-dek">桌面、平板、手机，同样的克制与景深——在任意屏幕上都站得住。</p>
+        <p class="sec-index">下 载 器</p>
+        <h2 class="sec-title" id="dlvTitle">片头播完一整遍，才打开安装界面</h2>
+        <p class="sec-dek">下载器不只是进度条。它把这支片子在你的屏幕上完整放一遍。</p>
+      </header>
+
+      <div class="cards">
+        <article class="card reveal-up">
+          <span class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3V9Z"/></svg>
+          </span>
+          <h3 class="card__title">循环播放，不抢戏</h3>
+          <p class="card__body">片子循环播放、默认静音；右下角可开声音。下载进度压在画面上层，不遮挡镜头。</p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l4 2"/></svg>
+          </span>
+          <h3 class="card__title">下载再快，也要等</h3>
+          <p class="card__body">即使第一遍还没放完就下载完了，也会等片头播完才继续——这是刻意的节奏，不是卡住。</p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+          </span>
+          <h3 class="card__title">只从发布仓库取货</h3>
+          <p class="card__body">下载器直连 GitHub Releases，读出该版本安装包与 SHA256，下载完先校验再交给安装界面。</p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h10M4 17h7"/></svg>
+          </span>
+          <h3 class="card__title">同一套内建在桌面端</h3>
+          <p class="card__body">桌面端「检查更新」里的下载也会走这个下载器，升级路径与首次安装保持同一套节奏。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PREVIEW ============ -->
+  <section class="band" id="preview" aria-labelledby="prevTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">界 面</p>
+        <h2 class="sec-title" id="prevTitle">从下载到完成，一条完整的场</h2>
+        <p class="sec-dek">下载器、安装器、工作台共用同一套取景与材质语言。</p>
       </header>
 
       <div class="shots">
         <figure class="shot shot--desktop reveal-up">
           <div class="shot__bar" aria-hidden="true"><span></span><span></span><span></span></div>
-          <img src="_shot-desktop-1440.png" alt="Marguerite 官网桌面端视图" loading="lazy" width="1440" height="900">
-          <figcaption>桌面 · 1440px</figcaption>
+          <img src="assets/downloader-waiting.png" alt="Marguerite 下载器：下载完成但片头仍在播放" loading="lazy" width="1040" height="640">
+          <figcaption>下载器 · 下载完成，等待片头播完</figcaption>
         </figure>
 
         <figure class="shot shot--tablet reveal-up">
-          <img src="_shot-tablet-768.png" alt="Marguerite 官网平板视图" loading="lazy" width="768" height="1000">
-          <figcaption>平板 · 768px</figcaption>
+          <img src="assets/setup-welcome.png" alt="Marguerite 安装器欢迎页" loading="lazy" width="1200" height="720">
+          <figcaption>安装器 · 欢迎</figcaption>
         </figure>
 
         <figure class="shot shot--mobile reveal-up">
-          <img src="_shot-mobile-375.png" alt="Marguerite 官网手机视图" loading="lazy" width="375" height="900">
-          <figcaption>手机 · 375px</figcaption>
+          <img src="assets/setup-finish.png" alt="Marguerite 安装器完成页" loading="lazy" width="1200" height="720">
+          <figcaption>安装器 · 完成</figcaption>
         </figure>
       </div>
     </div>
   </section>
 
   <!-- ============ EVIDENCE ============ -->
-  <section class="band" id="evidence" aria-labelledby="evTitle">
+  <section class="band band--alt" id="evidence" aria-labelledby="evTitle">
     <div class="wrap">
       <header class="sec-head reveal-up">
-        <p class="sec-index">为 什 么 极 致</p>
-        <h2 class="sec-title" id="evTitle">极致可被验证，不是形容词</h2>
+        <p class="sec-index">为 什 么 可 信</p>
+        <h2 class="sec-title" id="evTitle">可被验证，不是形容词</h2>
         <p class="sec-dek">提交前必须全绿的门禁，每一条都对应一句能在本机跑的命令。</p>
       </header>
 
@@ -167,7 +213,7 @@
         <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">构建警告</span><code class="stat__c">cargo build</code></div>
         <div class="stat reveal-up"><b class="stat__n">100<small>%</small></b><span class="stat__l">测试通过</span><code class="stat__c">cargo test</code></div>
         <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">clippy 警告</span><code class="stat__c">cargo clippy</code></div>
-        <div class="stat reveal-up"><b class="stat__n">&lt;50<small>ms</small></b><span class="stat__l">本地链路</span><code class="stat__c">不含 LLM 推理</code></div>
+        <div class="stat reveal-up"><b class="stat__n">SHA<small>256</small></b><span class="stat__l">安装包校验</span><code class="stat__c">下载器内建</code></div>
       </div>
     </div>
   </section>
@@ -175,20 +221,25 @@
   <!-- ============ DOWNLOAD / CTA ============ -->
   <section class="band band--cta" id="download" aria-labelledby="dlTitle">
     <div class="wrap cta">
-      <h2 class="cta__title reveal-up" id="dlTitle">把极致装进你的桌面</h2>
-      <p class="cta__dek reveal-up">Windows、macOS、Linux 一次构建，本地优先。</p>
+      <h2 class="cta__title reveal-up" id="dlTitle">先看一遍片头，再开始用</h2>
+      <p class="cta__dek reveal-up">Windows x64 · 约 372 MB · 内含离线 WebView2，断网也能装。</p>
       <div class="cta__actions reveal-up">
-        <a class="btn btn--solid btn--lg" href="#" aria-label="下载 Marguerite 桌面端安装包">
-          下载桌面端
+        <a class="btn btn--solid btn--lg"
+           href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
+           rel="noopener"
+           aria-label="下载 Marguerite 视频下载器">
+          下载视频下载器
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
         </a>
-        <a class="btn btn--ghost btn--lg" href="../docs/architecture.md">
-          读架构文档
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg>
+        <a class="btn btn--ghost btn--lg"
+           href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest"
+           target="_blank" rel="noopener noreferrer">
+          发布仓库与校验文件
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7"/><path d="M21 3 10 14"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
         </a>
       </div>
       <div class="build reveal-up">
-        <pre class="code"><code>cargo build --release -p marguerite-core</code></pre>
+        <pre class="code"><code>直接从源码构建：cargo build --release -p marguerite-core</code></pre>
       </div>
     </div>
   </section>
@@ -199,24 +250,23 @@
   <div class="wrap foot__grid">
     <div class="foot__brand">
       <p class="brand__name">MARGUERITE</p>
-      <p class="foot__tag">极致精简的本地优先桌面 AI Agent 工作台。</p>
+      <p class="foot__tag">本地优先的桌面 AI Agent 工作台。片头、安装、使用，共用同一套取景。</p>
     </div>
-    <nav class="foot__col" aria-label="文档">
-      <h2 class="foot__h">文档</h2>
+    <nav class="foot__col" aria-label="仓库">
+      <h2 class="foot__h">仓库</h2>
       <ul>
-        <li><a href="../docs/architecture.md">架构：分层、数据流与质量门禁</a></li>
-        <li><a href="../docs/skills.md">技能系统：YAML 格式与新增步骤</a></li>
-        <li><a href="../docs/mcp.md">MCP 集成：客户端、服务端、注册表</a></li>
-        <li><a href="../docs/memory.md">记忆系统：三层架构与检索策略</a></li>
+        <li><a href="https://github.com/KLJyouth1/Marguerite" target="_blank" rel="noopener noreferrer">源码 · Marguerite</a></li>
+        <li><a href="https://github.com/KLJyouth1/Marguerite-Releases" target="_blank" rel="noopener noreferrer">安装包 · Marguerite-Releases</a></li>
+        <li><a href="https://github.com/KLJyouth1/Marguerite/releases/latest" target="_blank" rel="noopener noreferrer">源码版本记录</a></li>
       </ul>
     </nav>
     <div class="foot__col">
       <h2 class="foot__h">运行信息</h2>
       <ul class="foot__plain">
-        <li>版本 <code>0.1.0</code></li>
+        <li>版本 <code>0.2.17</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>界面语言 6 种</li>
-        <li>内置技能 18 个</li>
+        <li>下载器默认静音</li>
       </ul>
     </div>
   </div>

@@ -417,6 +417,12 @@ export function createDesktopPlatform(): Platform {
         if (typeof api.relaunchToUpdate !== 'function') return desktopUpdateFallbackState(api)
         return normalizeDesktopUpdatePayload(api, await api.relaunchToUpdate())
       },
+      ...(typeof desktopApi.launchDownloader === 'function'
+        ? {
+            launchDownloader: (options?: { url?: string }) =>
+              requireDesktopApi().launchDownloader!(options),
+          }
+        : {}),
       async dismiss() {
         const api = requireDesktopApi()
         if (typeof api.dismissUpdate !== 'function') return desktopUpdateFallbackState(api)

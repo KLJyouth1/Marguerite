@@ -122,6 +122,16 @@ export function useDesktopUpdate() {
     if (state.value.errorCode) return t(updateErrorTranslationKey(state.value.errorCode))
     return state.value.error || t('updates.desktop.errorFallback')
   })
+  const canLaunchDownloader = computed(() => typeof platform.updates.launchDownloader === 'function')
+
+  async function launchDownloader(): Promise<DownloaderLaunchResult | null> {
+    if (!platform.updates.launchDownloader) return null
+    try {
+      return await platform.updates.launchDownloader()
+    } catch (err) {
+      return { ok: false, launched: false, code: 'BRIDGE', message: errorMessage(err) }
+    }
+  }
 
   return {
     state,
@@ -133,12 +143,14 @@ export function useDesktopUpdate() {
     localizedError,
     isNativeDesktopUpdate,
     isManagedDesktopUpdate,
+    canLaunchDownloader,
     init: initDesktopUpdate,
     refresh: refreshDesktopUpdate,
     check: () => runAction(() => platform.updates.check()),
     download: () => runAction(() => platform.updates.download()),
     relaunch: () => runAction(() => platform.updates.relaunch()),
     dismiss: () => runAction(() => platform.updates.dismiss()),
+    launchDownloader,
   }
 }
 

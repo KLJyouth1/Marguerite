@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useDesktopUpdate } from '@/composables/useDesktopUpdate'
@@ -65,6 +65,14 @@ const showDownload = computed(() => state.value.canCheck && state.value.installM
 ))
 const showRelaunch = computed(() => state.value.installMode === 'native' && status.value === 'downloaded')
 const showLater = computed(() => state.value.canCheck && (status.value === 'available' || status.value === 'downloaded' || status.value === 'error'))
+const canLaunchDownloader = computed(() => update.canLaunchDownloader.value)
+const downloaderNote = ref<'' | 'opened' | 'missing'>('')
+
+async function openDownloader() {
+  downloaderNote.value = ''
+  const result = await update.launchDownloader()
+  downloaderNote.value = result?.launched ? 'opened' : 'missing'
+}
 </script>
 
 <template>
@@ -102,6 +110,24 @@ const showLater = computed(() => state.value.canCheck && (status.value === 'avai
         <Icon name="refresh" :size="15" aria-hidden="true" />
         <span>{{ t('updates.desktop.check') }}</span>
       </button>
+      <button
+        v-if="canLaunchDownloader"
+        type="button"
+        class="btn btn--ghost"
+        data-testid="settings-update-downloader"
+        :disabled="busy"
+        @click="openDownloader"
+      >
+        <Icon name="download" :size="15" aria-hidden="true" />
+        <span>{{ t('updates.desktop.useDownloader') }}</span>
+      </button>
+      <span v-if="downloaderNote" class="settings-update__downloader-note">
+        {{
+          downloaderNote === 'opened'
+            ? t('updates.desktop.downloaderLaunched')
+            : t('updates.desktop.downloaderMissing')
+        }}
+      </span>
       <button
         v-if="showDownload"
         type="button"
@@ -171,5 +197,11 @@ const showLater = computed(() => state.value.canCheck && (status.value === 'avai
 
 .settings-update__actions {
   justify-content: flex-start;
+}
+
+.settings-update__downloader-note {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
 }
 </style>
