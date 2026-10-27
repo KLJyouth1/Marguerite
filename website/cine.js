@@ -234,19 +234,31 @@
       audio.loop = false;
       audio.currentTime = 0;
       audio.muted = false;
+      state.startedAt = performance.now();
       var promise = audio.play();
       if (promise && typeof promise.catch === 'function') {
         promise.catch(function () {
-          state.blocked = true;
-          if (hint) hint.hidden = false;
-          setSound(true, true);
+          // 被策略拦下或媒体还没就绪：先以静音起步（静音播放一定放行），
+          // 时钟仍锁在 audio.currentTime 上；用户点「声音」时再解除静音。
+          if (state.paused || !state.playing) return;
+          if (hint) hint.hidden = true;
+          audio.muted = true;
+          setSound(false, true);
+          var retry = audio.play();
+          if (retry && typeof retry.catch === 'function') {
+            retry.catch(function () {
+              // 连静音都起不来：退回墙钟，并在封面上如实说明
+              if (state.paused || !state.playing) return;
+              state.blocked = true;
+              if (hint) hint.hidden = false;
+            });
+          }
         });
       }
     } else {
       state.blocked = true;
     }
 
-    state.startedAt = performance.now();
     window.cancelAnimationFrame(state.raf);
     state.raf = window.requestAnimationFrame(tick);
   }
