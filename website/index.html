@@ -11,6 +11,7 @@
 <meta name="theme-color" content="#0d0d0f">
 <link rel="icon" href="assets/brand/logo-mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
+<script>document.documentElement.classList.add('js');</script>
 </head>
 <body id="top">
 
@@ -36,9 +37,11 @@
     </a>
     <nav class="nav__links" aria-label="主导航">
       <a href="#film">85 秒影片</a>
+      <a href="#entries">四入口</a>
       <a href="#shots">真实界面</a>
       <a href="#demo">操作演示</a>
       <a href="#compare">差异</a>
+      <a href="#trust">承诺</a>
       <a href="#faq">常见问题</a>
       <a href="#download">下载</a>
     </nav>
@@ -53,9 +56,11 @@
   </div>
   <nav class="nav__mobile" id="navMenu" aria-label="移动端导航" hidden>
     <a href="#film">85 秒影片</a>
+    <a href="#entries">四入口</a>
     <a href="#shots">真实界面</a>
     <a href="#demo">操作演示</a>
     <a href="#compare">差异</a>
+    <a href="#trust">承诺</a>
     <a href="#faq">常见问题</a>
     <a href="#download">下载</a>
   </nav>
@@ -66,7 +71,7 @@
   <!-- ================= HERO ================= -->
   <section class="hero" aria-labelledby="heroTitle">
     <div class="hero__inner">
-      <p class="hero__kicker rise d1">本地优先 · 桌面 AI Agent 工作台 · 0.2.17</p>
+      <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.17"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.17">本地优先 · 桌面 AI Agent 工作台 · 0.2.17</span><span class="hero__cmd-caret"></span></span></p>
 
       <h1 class="hero__title" id="heroTitle">
         <span class="ln"><span class="ln__in">让思考</span></span>
@@ -86,7 +91,7 @@
         <a class="btn btn--ghost"
            href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
            rel="noopener">
-          下载视频下载器
+          专用下载
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
         </a>
       </div>
@@ -115,6 +120,15 @@
     <div class="hero__visual" aria-hidden="true">
       <img src="assets/ui/chat.png" alt="" width="1440" height="900" loading="eager" decoding="async">
       <span class="hero__badge">真实界面 · 玛格丽特·星夜</span>
+      <div class="loopback">
+        <p class="loopback__hd"><span class="loopback__dot"></span>127.0.0.1:18790 · 回环监听</p>
+        <ul class="loopback__rows">
+          <li><span>GET /api/health</span><b>200</b><i>engine=rust</i></li>
+          <li><span>GET /control/</span><b>200</b><i>text/html</i></li>
+          <li><span>GET /api/&lt;未实现&gt;</span><b>501</b><i>not_implemented</i></li>
+          <li><span>LAN 192.168.* → 18790</span><b class="loopback__x">REFUSED</b><i>不对外</i></li>
+        </ul>
+      </div>
     </div>
   </section>
 
@@ -200,7 +214,7 @@
           <!-- ACT 4 · install like a film -->
           <div class="act act--install" data-act="install" data-start="57.56" data-end="70.42">
             <div class="install__pair">
-              <div class="shotframe shotframe--sm"><img class="shotframe__img" src="assets/downloader-waiting.png" alt="视频下载器：片头播放中，进度压在画面上" loading="lazy" decoding="async"></div>
+              <div class="shotframe shotframe--sm"><img class="shotframe__img" src="assets/downloader-waiting.png" alt="专用下载器：专用更专业" loading="lazy" decoding="async"></div>
               <div class="shotframe shotframe--sm"><img class="shotframe__img" src="assets/setup-welcome.png" alt="安装界面：欢迎页" loading="lazy" decoding="async"></div>
             </div>
             <div class="act__caption">
@@ -251,6 +265,97 @@
           打字与点击是演示节奏的重放，不会向任何服务器发送内容。
         </figcaption>
       </figure>
+    </div>
+  </section>
+
+  <!-- ================= ENTRIES · 单引擎四入口 ================= -->
+  <section class="band" id="entries" aria-labelledby="entriesTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">ONE ENGINE · FOUR ENTRIES</p>
+        <h2 class="sec-title" id="entriesTitle">一个引擎，四个入口</h2>
+        <p class="sec-dek">
+          命令行、终端工作台、桌面端、Web 控制台，跑的是同一个 Rust 核心。换界面不换引擎，
+          20 条 CLI 路由在哪一个入口里都是同一套语义。
+        </p>
+      </header>
+
+      <div class="entries__tabs reveal-up" role="tablist" aria-label="四个入口">
+        <button class="entries__tab is-active" type="button" role="tab" id="tab-cli" aria-controls="entry-cli" aria-selected="true"><i>00</i>CLI 命令行</button>
+        <button class="entries__tab" type="button" role="tab" id="tab-tui" aria-controls="entry-tui" aria-selected="false"><i>01</i>TUI 终端工作台</button>
+        <button class="entries__tab" type="button" role="tab" id="tab-gui" aria-controls="entry-gui" aria-selected="false"><i>02</i>桌面端</button>
+        <button class="entries__tab" type="button" role="tab" id="tab-web" aria-controls="entry-web" aria-selected="false"><i>03</i>Web 控制台</button>
+      </div>
+
+      <div class="entries__panels">
+        <div class="entries__panel is-active" id="entry-cli" role="tabpanel" aria-labelledby="tab-cli">
+          <div class="entries__copy">
+            <h3>二十条路由，一条命令面</h3>
+            <p>从 <code>doctor</code> 到 <code>export-diagnostics</code>，20 个子命令在 <code>argv.rs</code>、路由表与测试断言三处同步——帮助里列得到的，就一定跑得到。</p>
+            <div class="term">
+              <p class="term__line"><span class="term__ps1">$</span> marguerite-core <b>doctor</b></p>
+              <p class="term__line term__ok">[OK] gateway bind 127.0.0.1:18790</p>
+              <p class="term__line"><span class="term__ps1">$</span> marguerite-core <b>capabilities</b> --json</p>
+              <p class="term__line term__ok">{"ok":true,"data":{"routes":20,"engines":["rust","py"]}}</p>
+            </div>
+            <p class="entries__note">完整清单见仓库 <code>docs/cli-reference.md</code>。</p>
+          </div>
+          <div class="entries__aside">
+            <div class="term">
+              <p class="term__line"><span class="term__ps1">$</span> marguerite-core <b>--help</b></p>
+              <p class="term__line">doctor · model · mcp · skills · session</p>
+              <p class="term__line">exec · deploy · serve · sandbox · subagent</p>
+              <p class="term__line">team · browser · chat · gateway · goal</p>
+              <p class="term__line">capabilities · cache · dispatch · games</p>
+              <p class="term__line">export-diagnostics</p>
+              <p class="term__line term__ok">[OK] 20 个子命令，帮助 ↔ 路由表 ↔ 测试断言同源</p>
+            </div>
+            <p class="entries__note">帮助里列得到的，就一定跑得到——这条由 <code>program.rs</code> 的断言守着。</p>
+          </div>
+          <div class="marquee" aria-hidden="true">
+            <div class="marquee__track">
+              <span>doctor</span><span>model</span><span>mcp</span><span>skills</span><span>session</span><span>exec</span><span>deploy</span><span>serve</span><span>sandbox</span><span>subagent</span><span>team</span><span>browser</span><span>chat</span><span>gateway</span><span>goal</span><span>capabilities</span><span>cache</span><span>dispatch</span><span>games</span><span>export-diagnostics</span>
+              <span>doctor</span><span>model</span><span>mcp</span><span>skills</span><span>session</span><span>exec</span><span>deploy</span><span>serve</span><span>sandbox</span><span>subagent</span><span>team</span><span>browser</span><span>chat</span><span>gateway</span><span>goal</span><span>capabilities</span><span>cache</span><span>dispatch</span><span>games</span><span>export-diagnostics</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="entries__panel" id="entry-tui" role="tabpanel" aria-labelledby="tab-tui">
+          <div class="entries__copy">
+            <h3>终端里也有完整工作台</h3>
+            <p>ratatui 渲染的终端界面：侧栏文件树、Chat / Code / Terminal 三视图、右侧智能体状态与 token 计数。没有真终端也能复现——截图由 <code>core/examples/tui_frame.rs</code> 用 TestBackend 渲染真实一帧生成。</p>
+            <p class="entries__note">Windows 与 CI 都能跑出同一帧，宽度逐格校验。</p>
+          </div>
+          <figure class="entries__fig">
+            <img src="assets/ui/tui.png" alt="Marguerite TUI 终端工作台：侧栏文件树、Chat/Code/Terminal 三视图与右侧智能体状态栏" loading="lazy" decoding="async" width="2016" height="1368">
+            <figcaption>TUI 实录 · 2026-09-23 渲染帧（ratatui TestBackend）</figcaption>
+          </figure>
+        </div>
+
+        <div class="entries__panel" id="entry-gui" role="tabpanel" aria-labelledby="tab-gui">
+          <div class="entries__copy">
+            <h3>桌面端是一层壳，不是第二个产品</h3>
+            <p>Tauri 壳只负责开窗与加载回环网关地址，界面就是 Web 控制台本身。内核静态链接进同一个二进制——桌面端不另起后端进程。</p>
+            <p class="entries__note">安装包内含离线 WebView2，断网也能装。</p>
+          </div>
+          <figure class="entries__fig">
+            <img src="assets/ui/settings.png" alt="Marguerite 桌面端设置页：主题、语言与声音设置即时生效" loading="lazy" decoding="async" width="1440" height="900">
+            <figcaption>桌面端实录 · 设置页（玛格丽特·星夜主题）</figcaption>
+          </figure>
+        </div>
+
+        <div class="entries__panel" id="entry-web" role="tabpanel" aria-labelledby="tab-web">
+          <div class="entries__copy">
+            <h3>Web 控制台只在你自己的机器上</h3>
+            <p>Vue3 控制台由内嵌网关在 <code>127.0.0.1:18790/control/</code> 回环托管，不开放公网。六种界面语言、智能中枢与用量台账都在这一层。</p>
+            <p class="entries__note">前端只在 <code>webui/</code> 一处维护，桌面端与浏览器打开的是同一套界面。</p>
+          </div>
+          <figure class="entries__fig">
+            <img src="assets/ui/chat.png" alt="Marguerite Web 控制台：会话、工具回执与模型选择" loading="lazy" decoding="async" width="1440" height="900">
+            <figcaption>Web 控制台实录 · 会话页</figcaption>
+          </figure>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -437,6 +542,38 @@
     </div>
   </section>
 
+  <!-- ================= TRUST · 三条承诺 ================= -->
+  <section class="band band--alt" id="trust" aria-labelledby="trustTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">LOCAL FIRST · THREE PROMISES</p>
+        <h2 class="sec-title" id="trustTitle">本地优先，不是一句口号</h2>
+        <p class="sec-dek">三条都能在你自己的机器上当场验证，验证方式就写在卡片里。</p>
+      </header>
+
+      <div class="trust">
+        <article class="trust__card reveal-up">
+          <p class="trust__k">01 · 回环</p>
+          <h3 class="trust__t">网关只监听 127.0.0.1</h3>
+          <p class="trust__d">内嵌网关默认绑定 <code>127.0.0.1:18790</code>，同一局域网里的其他机器扫不到这个端口。你的代码不为了「检索」离开这台机器。</p>
+          <p class="trust__how">验证：另一台机器上 <code>telnet &lt;本机IP&gt; 18790</code>，连不上才对。</p>
+        </article>
+        <article class="trust__card reveal-up">
+          <p class="trust__k">02 · 离线</p>
+          <h3 class="trust__t">断网也能装、能跑</h3>
+          <p class="trust__d">安装包内含离线 WebView2，安装不需要联网。接本地模型时推理也完全离线；接云端提供方时才需要网络。</p>
+          <p class="trust__how">验证：拔掉网线装一遍，装完直接打开。</p>
+        </article>
+        <article class="trust__card reveal-up">
+          <p class="trust__k">03 · 可复核</p>
+          <h3 class="trust__t">每个数字都对应一条命令</h3>
+          <p class="trust__d">版本号 13 处同步、安装包 SHA256、25 项发版门禁——下面证据区的每个数字，都能在仓库里跑同一条命令复核。</p>
+          <p class="trust__how">验证：<code>bash scripts/verify.sh --clean --all</code>，全绿才算数。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= EVIDENCE ================= -->
   <section class="band band--alt" id="evidence" aria-labelledby="evTitle">
     <div class="wrap">
@@ -447,10 +584,25 @@
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">构建警告</span><code class="stat__c">cargo build</code></div>
-        <div class="stat reveal-up"><b class="stat__n">4100<small>+</small></b><span class="stat__l">测试通过</span><code class="stat__c">cargo test</code></div>
-        <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">clippy 警告</span><code class="stat__c">cargo clippy</code></div>
-        <div class="stat reveal-up"><b class="stat__n">SHA<small>256</small></b><span class="stat__l">安装包校验</span><code class="stat__c">下载器内建</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4162">4162</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4816">4816</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="25">25</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
+      </div>
+
+      <div class="gate reveal-up">
+        <div class="term term--gate">
+          <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
+          <p class="term__line term__ok">[PASS] core tests · 4162 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 4816 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
+          <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
+          <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
+          <p class="term__line term__ok">================ 25/25 全绿 · exit 0 ================</p>
+        </div>
+        <p class="gate__note">
+          基线为 2026-10-27 本树复测。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+        </p>
       </div>
     </div>
   </section>
@@ -477,7 +629,7 @@
 
         <details class="faq__item reveal-up">
           <summary>为什么下载前要先播一段片头？<span class="faq__mark" aria-hidden="true"></span></summary>
-          <div class="faq__body"><p>下载器把「下载 → 校验 → 安装」串成一段能看懂的流程：片头完整播过一遍才打开安装界面，避免安装包没下完就启动安装。安装包约 375 MB。</p></div>
+          <div class="faq__body"><p>下载器把「下载 → 校验 → 安装」串成一段能看懂的流程：专用更专业，避免安装包没下完就启动安装。安装包约 411 MB，内含离线 WebView2 与 Python 3.12。</p></div>
         </details>
 
         <details class="faq__item reveal-up">
@@ -503,18 +655,18 @@
     <div class="wrap">
       <div class="cta">
         <h2 class="cta__title reveal-up" id="dlTitle">先看一遍片头，再开始用</h2>
-        <p class="cta__dek reveal-up">Windows x64 · 约 375 MB · 内含离线 WebView2，断网也能装。</p>
+        <p class="cta__dek reveal-up">Windows x64 · 约 411 MB · 内含离线 WebView2 与 Python 3.12，断网也能装。</p>
       </div>
 
       <div class="dl">
         <article class="dl__card dl__card--primary reveal-up">
           <p class="dl__k">推荐路径</p>
-          <h3 class="dl__t">视频下载器</h3>
+          <h3 class="dl__t">专用下载器</h3>
           <p class="dl__d">先完整播一遍片头，再打开安装界面。单文件 exe，内建 SHA256 校验。</p>
           <p class="dl__m">MargueriteDownloader.exe · GitHub Releases</p>
           <a class="btn btn--solid"
              href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
-             rel="noopener" aria-label="下载 Marguerite 视频下载器">
+             rel="noopener" aria-label="下载 Marguerite 专用下载器">
             下载
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
           </a>
@@ -753,6 +905,7 @@
       <ul class="foot__plain">
         <li>版本 <code>0.2.17</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
+        <li>CLI 路由 20 条 · 四入口共用</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
         <li>界面语言 6 种</li>
       </ul>
@@ -765,11 +918,11 @@
 <div class="dock" data-dock>
   <div class="dock__meta">
     <b>Marguerite 0.2.17</b>
-    <span>Windows x64 · 约 375 MB</span>
+    <span>Windows x64 · 约 411 MB</span>
   </div>
   <a class="btn btn--solid"
      href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
-     rel="noopener" aria-label="下载 Marguerite 视频下载器">下载</a>
+     rel="noopener" aria-label="下载 Marguerite 专用下载器">专用下载</a>
 </div>
 
 <audio id="soundtrack" src="assets/music/focus-pulse.mp3" preload="auto" loop></audio>

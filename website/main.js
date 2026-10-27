@@ -262,4 +262,88 @@
       });
     }
   })();
+
+  /* ---- 首屏命令行打字（Qoder/CNB 式终端气质；降级时直接显示全文） ---- */
+  (function cmdline() {
+    var el = document.querySelector('[data-cmdline]');
+    if (!el) return;
+    var full = el.getAttribute('data-cmdline') || '';
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce || !full) return;
+    el.textContent = '';
+    var i = 0;
+    var timer = window.setInterval(function () {
+      i += 1;
+      el.textContent = full.slice(0, i);
+      if (i >= full.length) { window.clearInterval(timer); }
+    }, 52);
+  })();
+
+  /* ---- 四入口 Tab：编号切换（Trae 式），键盘左右可移焦 ---- */
+  (function entries() {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.entries__tab'));
+    if (!tabs.length) return;
+    function activate(tab) {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.classList.toggle('is-active', on);
+        t.setAttribute('aria-selected', String(on));
+        var panel = document.getElementById(t.getAttribute('aria-controls') || '');
+        if (panel) panel.classList.toggle('is-active', on);
+      });
+    }
+    tabs.forEach(function (tab, idx) {
+      tab.addEventListener('click', function () { activate(tab); });
+      tab.addEventListener('keydown', function (event) {
+        var delta = event.key === 'ArrowRight' ? 1 : (event.key === 'ArrowLeft' ? -1 : 0);
+        if (!delta) return;
+        event.preventDefault();
+        var next = tabs[(idx + delta + tabs.length) % tabs.length];
+        next.focus();
+        activate(next);
+      });
+    });
+  })();
+
+  /* ---- 证据数字滚动：进入视口才从 0 数到目标值 ---- */
+  (function counters() {
+    var nums = Array.prototype.slice.call(document.querySelectorAll('[data-count]'));
+    if (!nums.length) return;
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce || !('IntersectionObserver' in window)) return; // 降级：HTML 里已是终值
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        io.unobserve(entry.target);
+        var target = parseInt(entry.target.getAttribute('data-count'), 10) || 0;
+        var t0 = null;
+        var DUR = 900;
+        function step(ts) {
+          if (t0 === null) t0 = ts;
+          var p = Math.min(1, (ts - t0) / DUR);
+          var eased = 1 - Math.pow(1 - p, 3);
+          entry.target.textContent = String(Math.round(target * eased));
+          if (p < 1) window.requestAnimationFrame(step);
+        }
+        entry.target.textContent = '0';
+        window.requestAnimationFrame(step);
+      });
+    }, { threshold: 0.4 });
+    nums.forEach(function (n) { io.observe(n); });
+  })();
+
+  /* ---- 能力卡鼠标聚光：只写两个 CSS 变量，桌面细指针才启用 ---- */
+  (function spotlight() {
+    var fine = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!fine || reduce) return;
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+    cards.forEach(function (card) {
+      card.addEventListener('pointermove', function (event) {
+        var r = card.getBoundingClientRect();
+        card.style.setProperty('--mx', (event.clientX - r.left).toFixed(1) + 'px');
+        card.style.setProperty('--my', (event.clientY - r.top).toFixed(1) + 'px');
+      });
+    });
+  })();
 })();

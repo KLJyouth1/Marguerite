@@ -606,3 +606,136 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
 @keyframes heroShot{from{opacity:0;transform:translateY(-46%) rotate(-2deg) scale(.98);}to{opacity:1;transform:translateY(-50%) rotate(-2deg) scale(1);}}
 @media (max-width:1100px){.hero__visual{display:none;}}
 @media (prefers-reduced-motion:reduce){.hero__visual{opacity:1;animation:none;}}
+
+/* ============================================================================
+   2026-10-27 · 竞品借鉴轮
+   1) 首屏命令行 kicker（Qoder/CNB 的终端气质）+ 回环终端卡（卖点可视化）
+   2) 单引擎四入口：编号 Tab + 走马灯路由（Trae 编号 Tab / CNB 等宽气质）
+   3) 三条承诺信任区（Trae 隐私专区的位置感）
+   4) 证据区：门禁终端 + 数字滚动（GitHub/Codex 的证据式信任）
+   5) 能力卡 bento 不对称网格 + 鼠标聚光（GitHub bento / Linear 聚光）
+   颜色字面量仍只出现在 :root。
+   ========================================================================== */
+:root{
+  --term-bg:#0a0e13; --term-line:#1f2933;
+  --st-ok:#34d399; --st-warn:#fbbf24; --st-no:#f87171;
+}
+
+/* ---- 首屏命令行 ---- */
+.hero__kicker{font-family:var(--font-mono);font-size:.84rem;letter-spacing:0;text-transform:none;color:var(--text-2);}
+.hero__cmd{display:inline-flex;align-items:baseline;gap:.45rem;max-width:100%;}
+.hero__cmd-prompt{color:var(--accent);white-space:nowrap;}
+.hero__cmd-text{color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hero__cmd-caret{flex:none;width:8px;height:1.05em;transform:translateY(.16em);background:var(--accent);
+  animation:caretBlink 1s steps(1) infinite;}
+
+/* ---- 回环终端卡：叠在首屏预览右下 ---- */
+.loopback{position:absolute;right:12px;bottom:12px;z-index:2;width:min(300px,72%);
+  padding:.7rem .8rem .75rem;border:1px solid var(--term-line);border-radius:12px;
+  background:rgba(10,14,19,.86);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  box-shadow:0 22px 50px -26px rgba(0,0,0,.95);}
+.loopback__hd{display:flex;align-items:center;gap:.45rem;margin:0 0 .5rem;
+  font-family:var(--font-mono);font-size:.66rem;letter-spacing:.08em;color:var(--text-2);}
+.loopback__dot{width:7px;height:7px;border-radius:50%;background:var(--st-ok);
+  box-shadow:0 0 0 3px rgba(52,211,153,.16);animation:pulse 3.2s ease-in-out infinite;}
+.loopback__rows{display:grid;gap:.3rem;margin:0;}
+.loopback__rows li{display:grid;grid-template-columns:1fr auto auto;gap:.5rem;align-items:baseline;
+  font-family:var(--font-mono);font-size:.64rem;line-height:1.5;color:var(--text-3);}
+.loopback__rows li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.loopback__rows b{font-weight:700;color:var(--st-ok);}
+.loopback__rows b.loopback__x{color:var(--st-no);}
+.loopback__rows i{font-style:normal;color:var(--text-3);opacity:.8;}
+
+/* ---- 四入口：编号 Tab + 面板 ---- */
+.entries__tabs{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1.4rem;}
+.entries__tab{display:inline-flex;align-items:center;gap:.55rem;min-height:42px;padding:.5rem 1rem;
+  background:transparent;border:1px solid var(--border);border-radius:11px;color:var(--text-2);
+  font-family:inherit;font-size:.9rem;font-weight:600;cursor:pointer;
+  transition:color var(--t) var(--ease),border-color var(--t) var(--ease),background-color var(--t) var(--ease);}
+.entries__tab i{font-style:normal;font-family:var(--font-mono);font-size:.72rem;color:var(--text-3);letter-spacing:.08em;}
+.entries__tab:hover{color:var(--text);border-color:var(--border-2);}
+.entries__tab.is-active{color:var(--text);border-color:rgba(45,212,191,.4);background:var(--accent-faint);}
+.entries__tab.is-active i{color:var(--accent);}
+.entries__panel{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:1.6rem;align-items:start;}
+.entries__panel[hidden]{display:none;}
+.js .entries__panel:not(.is-active){display:none;}
+@media (prefers-reduced-motion:no-preference){
+  .entries__panel.is-active{animation:panelIn .45s var(--ease) both;}
+}
+@keyframes panelIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+.entries__copy h3{font-size:clamp(1.3rem,1rem+1.2vw,1.8rem);letter-spacing:-.015em;margin-bottom:.7rem;}
+.entries__copy p{font-size:.96rem;line-height:1.75;color:var(--text-2);margin-bottom:.8rem;}
+.entries__note{font-size:.8rem;color:var(--text-3);}
+.entries__aside{min-width:0;}
+.entries__aside .term{margin-top:.2rem;}
+.entries__fig{margin:0;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:var(--surface);}
+.entries__fig img{display:block;width:100%;height:auto;}
+.entries__fig figcaption{padding:.65rem .9rem;border-top:1px solid var(--border);font-size:.78rem;color:var(--text-3);}
+
+/* ---- 终端块（CLI 演示 / 门禁日志共用） ---- */
+.term{margin:.2rem 0 1rem;padding:.9rem 1rem;border:1px solid var(--term-line);border-radius:12px;
+  background:var(--term-bg);font-family:var(--font-mono);font-size:.8rem;line-height:1.85;overflow-x:auto;}
+.term__line{margin:0;white-space:pre;color:var(--text-2);}
+.term__ps1{color:var(--accent);}
+.term__line b{font-weight:700;color:var(--text);}
+.term__ok{color:var(--st-ok);}
+.term--gate{font-size:.82rem;line-height:2;padding:1.1rem 1.2rem;}
+
+/* ---- 路由走马灯 ---- */
+.marquee{position:relative;overflow:hidden;border-block:1px solid var(--border);
+  padding:.65rem 0;grid-column:1/-1;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent);
+  mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent);}
+.marquee__track{display:flex;gap:1.6rem;width:max-content;}
+.marquee span{font-family:var(--font-mono);font-size:.8rem;color:var(--text-3);white-space:nowrap;}
+@media (prefers-reduced-motion:no-preference){
+  .marquee__track{animation:marquee 36s linear infinite;}
+  .marquee:hover .marquee__track{animation-play-state:paused;}
+}
+@keyframes marquee{to{transform:translateX(-50%);}}
+
+/* ---- 三条承诺 ---- */
+.trust{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.2rem;}
+.trust__card{position:relative;padding:1.6rem 1.5rem;border:1px solid var(--border);border-radius:var(--r-lg);
+  background:linear-gradient(180deg,var(--surface),var(--bg));
+  transition:transform var(--t) var(--ease),border-color var(--t) var(--ease);}
+.trust__card:hover{transform:translateY(-3px);border-color:var(--border-2);}
+.trust__k{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.2em;color:var(--accent);margin:0 0 .8rem;}
+.trust__t{font-size:1.15rem;font-weight:700;letter-spacing:-.01em;margin:0 0 .6rem;}
+.trust__d{font-size:.92rem;line-height:1.75;color:var(--text-2);margin:0 0 .9rem;}
+.trust__how{font-size:.78rem;line-height:1.7;color:var(--text-3);margin:0;
+  padding-top:.7rem;border-top:1px dashed var(--border);}
+
+/* ---- 证据区：门禁终端 ---- */
+.gate{margin-top:1.6rem;}
+.gate__note{margin:.8rem 0 0;font-size:.8rem;line-height:1.7;color:var(--text-3);}
+
+/* ---- 能力卡：bento 不对称 + 鼠标聚光 ---- */
+.cards{grid-template-columns:repeat(6,minmax(0,1fr));}
+.cards .card:nth-child(1){grid-column:span 3;}
+.cards .card:nth-child(2){grid-column:span 3;}
+.cards .card:nth-child(3){grid-column:span 2;}
+.cards .card:nth-child(4){grid-column:span 4;}
+.card::before{content:"";position:absolute;inset:0;border-radius:var(--r-lg);pointer-events:none;opacity:0;
+  background:radial-gradient(220px circle at var(--mx,50%) var(--my,50%),var(--accent-soft),transparent 65%);
+  transition:opacity var(--t) var(--ease);}
+.card:hover::before{opacity:1;}
+
+/* ---- 新段落的响应式 ---- */
+@media (max-width:1023px){
+  .entries__panel{grid-template-columns:minmax(0,1fr);}
+  .trust{grid-template-columns:minmax(0,1fr);}
+  .cards{grid-template-columns:minmax(0,1fr);}
+  .cards .card:nth-child(n){grid-column:auto;}
+}
+@media (max-width:640px){
+  .entries__tabs{gap:.4rem;}
+  .entries__tab{padding:.45rem .8rem;font-size:.84rem;}
+  .term{font-size:.72rem;}
+}
+@media (prefers-reduced-motion:reduce){
+  .hero__cmd-caret{animation:none;}
+  .marquee__track{animation:none;transform:none;}
+  .loopback__dot{animation:none;}
+  .entries__panel.is-active{animation:none;}
+}
