@@ -251,6 +251,8 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
 .act{position:absolute;inset:0;opacity:0;pointer-events:none;
   transition:opacity .55s var(--ease);}
 .act.is-active{opacity:1;}
+/* .act 整层不接收鼠标（否则会挡住舞台点击）；但当前幕里的 CTA 必须真的能点 */
+.act.is-active a,.act.is-active button{pointer-events:auto;cursor:pointer;}
 .act__caption{position:absolute;left:clamp(1.1rem,4vw,3.2rem);bottom:clamp(3.2rem,6.5vw,4.6rem);max-width:56%;}
 /* 字幕底板：截图里的正文太密，英文大字必须有一块稳定底色 */
 .act__caption:not(.act__caption--center){padding:1rem 1.2rem 1.1rem;border-radius:16px;
@@ -342,7 +344,14 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
 .player__bar span{position:absolute;inset:0 auto 0 0;width:0;background:var(--accent);}
 .player__meta{display:flex;gap:.8rem;font-family:var(--font-mono);font-size:.66rem;letter-spacing:.08em;color:var(--text-3);white-space:nowrap;}
 
-/* cover */
+/* 暂停态：轻压一层亮度，右上角给一枚状态胶囊（居中会压住幕内标题） */
+.paused-badge{position:absolute;right:1rem;top:1rem;z-index:5;
+  margin:0;padding:.55rem 1rem;border-radius:999px;background:rgba(4,7,11,.86);
+  border:1px solid var(--border-2);color:var(--text);font-size:.82rem;letter-spacing:.04em;
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);pointer-events:none;}
+.paused-badge[hidden]{display:none;}
+.player[data-state="paused"] .act{filter:brightness(.88);}
+
 /* cover：中心压暗，别让首幕巨字透上来和封面文案打架 */
 .player__cover{position:absolute;inset:0;display:grid;place-items:center;cursor:pointer;
   background:radial-gradient(60% 62% at 50% 46%,rgba(8,12,18,.94) 0%,rgba(5,8,13,.9) 56%,rgba(4,6,10,.72) 100%);

@@ -26,6 +26,7 @@
   var nameEl = player.querySelector('[data-act-name]');
   var soundBtn = document.getElementById('soundToggle');
   var soundLabel = soundBtn ? soundBtn.querySelector('[data-sound-label]') : null;
+  var pausedBadge = player.querySelector('[data-paused-badge]');
 
   var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
   var acts = Array.prototype.slice.call(stage.querySelectorAll('.act')).map(function (el) {
@@ -69,6 +70,9 @@
         node.removeAttribute('id');
       });
     }
+    // 只借画面：克隆体里的文案与按钮会和 act 自己的字幕重复
+    var copy = clone.querySelector('.scene__copy');
+    if (copy && copy.parentNode) copy.parentNode.removeChild(copy);
     brandSlot.appendChild(clone);
   }
   var brandCloneFlower = brandSlot ? brandSlot.querySelector('.flower') : null;
@@ -76,9 +80,11 @@
   /* ---------- 状态 ---------- */
   var state = {
     playing: false,
+    paused: false,
     ended: false,
     blocked: false,
     startedAt: 0,
+    frozenAt: 0,
     raf: 0,
     lastAct: null,
     lastBeat: -1,
@@ -94,6 +100,8 @@
   }
 
   function now() {
+    // 暂停时把时钟钉在冻结的那一帧，否则会退回墙钟继续前进
+    if (state.paused) return state.frozenAt;
     if (!state.blocked && audio && audio.readyState >= 2 && !audio.paused) {
       return audio.currentTime;
     }
@@ -207,6 +215,8 @@
   function start() {
     if (reduceMQ.matches) return;
     state.playing = true;
+    state.paused = false;
+    if (pausedBadge) pausedBadge.hidden = true;
     state.ended = false;
     state.blocked = false;
     state.lastAct = null;
@@ -243,6 +253,8 @@
 
   function finish() {
     state.playing = false;
+    state.paused = false;
+    if (pausedBadge) pausedBadge.hidden = true;
     state.ended = true;
     window.cancelAnimationFrame(state.raf);
     if (audio) {
@@ -261,11 +273,37 @@
 
   function stop() {
     state.playing = false;
+    state.paused = false;
+    if (pausedBadge) pausedBadge.hidden = true;
     window.cancelAnimationFrame(state.raf);
     if (audio) audio.pause();
     player.setAttribute('data-state', 'idle');
     cover.hidden = false;
     stage.querySelectorAll('.act').forEach(function (el) { el.classList.remove('is-active', 'is-live'); });
+  }
+
+  /* 暂停 / 继续：时钟冻在当前的音频时间点，恢复时不跳帧 */
+  function togglePause() {
+    if (!state.playing) return;
+    if (state.paused) {
+      state.paused = false;
+      state.startedAt = performance.now() - state.frozenAt * 1000;
+      if (audio && !state.blocked) {
+        var promise = audio.play();
+        if (promise && promise.catch) promise.catch(function () {});
+      }
+      player.setAttribute('data-state', 'playing');
+      if (pausedBadge) pausedBadge.hidden = true;
+      window.cancelAnimationFrame(state.raf);
+      state.raf = window.requestAnimationFrame(tick);
+    } else {
+      state.frozenAt = now();
+      state.paused = true;
+      window.cancelAnimationFrame(state.raf);
+      if (audio) audio.pause();
+      player.setAttribute('data-state', 'paused');
+      if (pausedBadge) pausedBadge.hidden = false;
+    }
   }
 
   if (cover) {
@@ -284,10 +322,22 @@
   stage.addEventListener('keydown', function (event) {
     if (event.key === ' ' || event.key === 'Enter') {
       event.preventDefault();
-      if (state.playing) stop(); else start();
+      if (state.playing) togglePause(); else start();
     } else if (event.key === 'Escape') {
       stop();
     }
+  });
+
+  // 点画面暂停 / 继续；品牌幕里的 CTA 是链接，别拦它
+  stage.addEventListener('click', function (event) {
+    if (!state.playing) return;
+    if (event.target.closest && event.target.closest('a, button')) return;
+    togglePause();
+  });
+
+  // 最后一幕的 CTA 会把用户带走：顺手收掉短片与声音
+  Array.prototype.forEach.call(stage.querySelectorAll('.act--brand a'), function (link) {
+    link.addEventListener('click', function () { stop(); });
   });
 
   /* ---------- 声音（独立于短片，可当环境音循环） ---------- */
@@ -300,6 +350,7 @@
     if (soundLabel) soundLabel.textContent = on ? '声音开' : '声音关';
     if (!audio) return;
     audio.muted = !on;
+    if (on && state.paused) return;   // 画面暂停时只切静音，不让音频偷偷往前跑
     if (on) {
       if (!state.playing) { audio.loop = true; if (audio.currentTime > 84.5) audio.currentTime = 0; }
       var promise = audio.play();
