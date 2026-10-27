@@ -52,14 +52,16 @@ const SLOGAN = '让思考 成为你的工作台';
         ask: !!document.querySelector('[data-ask]'),
         faq: document.querySelectorAll('#faq details').length,
         dl: document.querySelectorAll('.dl__card').length,
+        bar: !!document.querySelector('[data-scrollbar]'),
+        dock: !!document.querySelector('[data-dock]'),
       };
     });
 
     const structureOk = m.player && m.acts === 6 && m.demo && m.compare && m.scene && m.bpm === 56 &&
-      m.notice && m.ask && m.faq === 6 && m.dl === 3;
+      m.notice && m.ask && m.faq === 6 && m.dl === 3 && m.bar && m.dock;
     if (!structureOk) {
       allPass = false;
-      errors.push(s.name + ' structure: ' + JSON.stringify({ player: m.player, acts: m.acts, demo: m.demo, compare: m.compare, scene: m.scene, bpm: m.bpm, notice: m.notice, ask: m.ask, faq: m.faq, dl: m.dl }));
+      errors.push(s.name + ' structure: ' + JSON.stringify({ player: m.player, acts: m.acts, demo: m.demo, compare: m.compare, scene: m.scene, bpm: m.bpm, notice: m.notice, ask: m.ask, faq: m.faq, dl: m.dl, bar: m.bar, dock: m.dock }));
     }
 
     const sloganOk = m.text === SLOGAN;

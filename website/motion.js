@@ -35,11 +35,18 @@
     }
   }
 
-  /* 2) 吸顶导航（滚动后加毛玻璃）+ 3) 鼠标视差，共用一个滚动/鼠标监听，rAF 节流 */
+  /* 2) 吸顶导航 + 阅读进度 + 当前章节高亮，共用一个滚动监听，rAF 节流 */
   var nav = doc.getElementById('nav');
   var aura = doc.querySelector('.aura');
   var heroInner = doc.querySelector('.hero__inner');
   var heroKicker = doc.querySelector('.hero__kicker');
+  var barFill = doc.querySelector('[data-scrollbar]');
+  var currentables = [];
+  Array.prototype.forEach.call(doc.querySelectorAll('.nav__links a'), function (link) {
+    var id = (link.getAttribute('href') || '').replace('#', '');
+    var sec = id ? doc.getElementById(id) : null;
+    if (sec) currentables.push({ link: link, el: sec });
+  });
 
   var ticking = false;
   function onScroll() {
@@ -48,10 +55,23 @@
     requestAnimationFrame(function () {
       var y = window.pageYOffset || root.scrollTop || 0;
       if (nav) { if (y > 8) nav.classList.add('is-stuck'); else nav.classList.remove('is-stuck'); }
+      if (barFill) {
+        var max = Math.max(1, (doc.documentElement.scrollHeight || 0) - window.innerHeight);
+        barFill.style.transform = 'scaleX(' + Math.min(1, y / max).toFixed(4) + ')';
+      }
+      // 以「最后一个越过导航下沿的章节」作为当前位置
+      var current = null;
+      for (var i = 0; i < currentables.length; i++) {
+        if (currentables[i].el.getBoundingClientRect().top <= 140) current = currentables[i];
+      }
+      for (var k = 0; k < currentables.length; k++) {
+        currentables[k].link.classList.toggle('is-current', y > 40 && currentables[k] === current);
+      }
       ticking = false;
     });
   }
   window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll, { passive: true });
   onScroll();
 
   /* 鼠标视差：仅桌面、pointer:fine、且未开启 reduced-motion */

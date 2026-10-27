@@ -1,7 +1,7 @@
 /* ============================================================================
    Marguerite 官网 · 渐进增强脚本
-   本站在禁用 JS 时功能完整。本文件只补四件事：移动端菜单、命令复制、
-   顶部公告条的关闭记忆、首屏提问带进下面的真实演示。
+   本站在禁用 JS 时功能完整。本文件只补五件事：移动端菜单、命令复制、
+   公告条的关闭记忆、窄屏常驻下载条、首屏提问带进下面的真实演示。
    复制做三段降级：Clipboard API → execCommand → 明确报失败（绝不静默吞错）。
    ========================================================================== */
 (function () {
@@ -110,6 +110,38 @@
         try { window.localStorage.setItem(KEY, 'closed'); } catch (err) {}
       });
     }
+  })();
+
+  /* ---- 窄屏常驻下载条：过首屏出现；遇到播放器/演示/下载/页脚就收起，别压住这些区的按钮 ---- */
+  (function dock() {
+    var el = document.querySelector('[data-dock]');
+    if (!el) return;
+    var mq = window.matchMedia('(max-width:1023px)');
+    var zones = ['film', 'demo', 'download'].map(function (id) { return document.getElementById(id); });
+    var foot = document.querySelector('.foot');
+    if (foot) zones.push(foot);
+    zones = zones.filter(Boolean);
+    var pending = false;
+    function update() {
+      pending = false;
+      if (!mq.matches) { el.classList.remove('is-on'); return; }
+      var hero = document.querySelector('.hero');
+      var passedHero = window.pageYOffset > (hero ? hero.offsetHeight * 0.9 : 600);
+      var vh = window.innerHeight;
+      var blocked = zones.some(function (z) {
+        var r = z.getBoundingClientRect();
+        return r.top < vh * 0.82 && r.bottom > vh * 0.55;
+      });
+      el.classList.toggle('is-on', passedHero && !blocked);
+    }
+    function onScroll() {
+      if (pending) return;
+      pending = true;
+      window.requestAnimationFrame(update);
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll, { passive: true });
+    update();
   })();
 
   /* ---- 首屏提问：把这句话带进下面的真实演示输入框并跑一次 ---- */

@@ -16,6 +16,8 @@
 
 <a class="skip" href="#main">跳到正文</a>
 
+<div class="scrollbar" aria-hidden="true"><span data-scrollbar></span></div>
+
 <div class="notice" data-notice>
   <p class="notice__text"><span class="notice__tag">0.2.17</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
   <button class="notice__close" type="button" data-notice-close aria-label="关闭公告">
@@ -355,33 +357,33 @@
         </div>
         <div class="cmp__row" role="row">
           <span role="cell">推理位置</span>
-          <span role="cell" class="cmp__us">本机单进程（Rust 内核 + 内嵌网关）</span>
-          <span role="cell">云端容器</span>
-          <span role="cell">云端接口</span>
+          <span role="cell" class="cmp__us" data-col="Marguerite">本机单进程（Rust 内核 + 内嵌网关）</span>
+          <span role="cell" data-col="云端 IDE">云端容器</span>
+          <span role="cell" data-col="纯聊天">云端接口</span>
         </div>
         <div class="cmp__row" role="row">
           <span role="cell">断网可用</span>
-          <span role="cell" class="cmp__us">是：安装包含离线 WebView2，本地模型可离线推理</span>
-          <span role="cell">否</span>
-          <span role="cell">否</span>
+          <span role="cell" class="cmp__us" data-col="Marguerite">是：安装包含离线 WebView2，本地模型可离线推理</span>
+          <span role="cell" data-col="云端 IDE">否</span>
+          <span role="cell" data-col="纯聊天">否</span>
         </div>
         <div class="cmp__row" role="row">
           <span role="cell">过程可见</span>
-          <span role="cell" class="cmp__us">工具回执 + 思考区 + 完成门禁 + 可回放台账</span>
-          <span role="cell">平台日志，随会话消失</span>
-          <span role="cell">只有最终回答</span>
+          <span role="cell" class="cmp__us" data-col="Marguerite">工具回执 + 思考区 + 完成门禁 + 可回放台账</span>
+          <span role="cell" data-col="云端 IDE">平台日志，随会话消失</span>
+          <span role="cell" data-col="纯聊天">只有最终回答</span>
         </div>
         <div class="cmp__row" role="row">
           <span role="cell">扩展方式</span>
-          <span role="cell" class="cmp__us">插件 / MCP / 技能三类，可热启停，红线拦截</span>
-          <span role="cell">平台插件市场</span>
-          <span role="cell">无</span>
+          <span role="cell" class="cmp__us" data-col="Marguerite">插件 / MCP / 技能三类，可热启停，红线拦截</span>
+          <span role="cell" data-col="云端 IDE">平台插件市场</span>
+          <span role="cell" data-col="纯聊天">无</span>
         </div>
         <div class="cmp__row" role="row">
           <span role="cell">可复核</span>
-          <span role="cell" class="cmp__us">版本号 13 处同步 + 安装包 SHA256 + 门禁命令可复跑</span>
-          <span role="cell">以平台版本为准</span>
-          <span role="cell">不可复核</span>
+          <span role="cell" class="cmp__us" data-col="Marguerite">版本号 13 处同步 + 安装包 SHA256 + 门禁命令可复跑</span>
+          <span role="cell" data-col="云端 IDE">以平台版本为准</span>
+          <span role="cell" data-col="纯聊天">不可复核</span>
         </div>
       </div>
       <p class="cmp__note">
@@ -758,6 +760,17 @@
   </div>
   <p class="foot__end">本站为中文版本。语言切换在桌面端设置内。所有数字均对应仓库内可复现的命令与门禁定义；界面截图为 2026-10-27 实机录制。</p>
 </footer>
+
+<!-- 窄屏常驻下载条：过了首屏才出现，到下载区自动收起 -->
+<div class="dock" data-dock>
+  <div class="dock__meta">
+    <b>Marguerite 0.2.17</b>
+    <span>Windows x64 · 约 372 MB</span>
+  </div>
+  <a class="btn btn--solid"
+     href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
+     rel="noopener" aria-label="下载 Marguerite 视频下载器">下载</a>
+</div>
 
 <audio id="soundtrack" src="assets/music/focus-pulse.mp3" preload="auto" loop></audio>
 
