@@ -1,0 +1,48 @@
+name: Deploy website
+
+# 官网源码在 website/，随 master 一起版本化；这里只做一件事：
+# 把 website/ 原样作为 Pages 产物发布，避免再维护第二份副本（gh-pages 分支）。
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'website/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # 站点无构建步骤（纯静态 + 相对路径资源）。upload-pages-artifact 会以
+      # website/ 为产物根目录，index.html 直接在根上，因此 / 即首页。
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
