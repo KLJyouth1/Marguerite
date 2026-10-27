@@ -95,4 +95,101 @@
 
   var blocks = document.querySelectorAll('pre.code');
   for (var i = 0; i < blocks.length; i++) attach(blocks[i], i);
+
+  /* ---- 操作演示：真实输入 + 工具回执 + 流式生成 ---- */
+  (function demo() {
+    var input = document.querySelector('[data-demo-input]');
+    var send = document.querySelector('[data-demo-send]');
+    var thread = document.querySelector('[data-demo-thread]');
+    var empty = document.querySelector('[data-demo-empty]');
+    var exampleBtn = document.querySelector('[data-demo-example]');
+    if (!input || !send || !thread) return;
+
+    var EXAMPLE = '把这次排查的结论整理成一页纸：根因、证据链、影响面、下一步。';
+    var EXAMPLE_SHORT = '只回答一句：这次排查最该先修什么？';
+    var ANSWER = [
+      '结论：这次排查没有形成可交付的结论。',
+      '子专家没有返回对项目本身的实质分析：其中一个执行失败，另外两个只停留在查看结构阶段。',
+      '',
+      '下一步（按顺序）：',
+      '1. 先把会话绑定到真实项目目录，让工具读到实际文件；',
+      '2. 按「依赖 → 配置 → 代码质量」三段重跑，每段都要留下可复核的证据行；',
+      '3. 仍然拿不到结论时，把失败的那一条单独复现，不要整轮重来。'
+    ].join('\n');
+    var ANSWER_SHORT = '先修「会话没有绑定真实项目目录」——这是这次排查拿不到结论的唯一根因。';
+    var busy = false;
+    var timer = null;
+
+    function append(className, text) {
+      var el = document.createElement('div');
+      el.className = className;
+      if (text) el.textContent = text;
+      thread.appendChild(el);
+      thread.scrollTop = thread.scrollHeight;
+      return el;
+    }
+
+    function stream(el, text, done) {
+      var i = 0;
+      var caret = document.createElement('span');
+      caret.className = 'caret';
+      caret.setAttribute('aria-hidden', 'true');
+      el.appendChild(caret);
+      timer = window.setInterval(function () {
+        i += 1;
+        el.textContent = text.slice(0, i);
+        el.appendChild(caret);
+        thread.scrollTop = thread.scrollHeight;
+        if (i >= text.length) {
+          window.clearInterval(timer);
+          timer = null;
+          caret.remove();
+          busy = false;
+          send.disabled = false;
+          send.textContent = '发送';
+          if (done) done();
+        }
+      }, 78);
+    }
+
+    function run() {
+      if (busy) return;
+      var prompt = (input.value || '').trim() || EXAMPLE;
+      input.value = prompt;
+      if (empty && empty.parentNode) empty.remove();
+
+      busy = true;
+      send.disabled = true;
+      send.textContent = '生成中';
+
+      append('demo__msg-u', prompt);
+      input.value = '';
+
+      window.setTimeout(function () {
+        var tool = append('demo__tool');
+        tool.textContent = 'web_search · 检索 4 条来源 · 2.1s · ok';
+        window.requestAnimationFrame(function () { tool.classList.add('in'); });
+
+        window.setTimeout(function () {
+          var answer = append('demo__msg-a');
+          var text = prompt.length <= 18 ? ANSWER_SHORT : ANSWER;
+          stream(answer, text);
+        }, 720);
+      }, 520);
+    }
+
+    send.addEventListener('click', run);
+    input.addEventListener('keydown', function (event) {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        run();
+      }
+    });
+    if (exampleBtn) {
+      exampleBtn.addEventListener('click', function () {
+        input.value = input.value.trim() === EXAMPLE ? EXAMPLE_SHORT : EXAMPLE;
+        input.focus();
+      });
+    }
+  })();
 })();

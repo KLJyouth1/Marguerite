@@ -4,10 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Marguerite — 本地优先的桌面 AI Agent 工作台</title>
-<meta name="description" content="Marguerite 把 Agent 运行时、分层记忆与幻觉护栏写进同一个 Rust 核心，编译成单文件的本地优先桌面工作台。下载视频下载器，片头播完一遍再进入安装界面。">
+<meta name="description" content="Marguerite 把 Agent 运行时、分层记忆与幻觉护栏写进同一个 Rust 核心。85 秒卡点短片、真实界面实录与可验证的交付证据，都在这一页。">
 <meta property="og:title" content="Marguerite — 本地优先的桌面 AI Agent 工作台">
-<meta property="og:description" content="下载器循环播放片头，播完一整遍才打开安装界面；内核、记忆与护栏都在本机。">
+<meta property="og:description" content="跟着鼓点看 85 秒：真实界面、真实操作、可验证的本地优先。">
 <meta property="og:type" content="website">
+<meta name="theme-color" content="#0d0d0f">
+<link rel="icon" href="assets/brand/logo-mark.png" type="image/png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body id="top">
@@ -20,31 +22,37 @@
 <header class="nav" id="nav">
   <div class="nav__inner">
     <a class="brand" href="#top" aria-label="Marguerite 首页">
-      <svg class="brand__mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+      <img class="brand__pic" src="assets/brand/logo-mark.png" alt="" width="24" height="24" loading="eager" decoding="async">
       <span class="brand__name">MARGUERITE</span>
     </a>
     <nav class="nav__links" aria-label="主导航">
-      <a href="#capabilities">核心能力</a>
-      <a href="#downloader">下载器</a>
-      <a href="#preview">界面</a>
+      <a href="#film">85 秒影片</a>
+      <a href="#shots">真实界面</a>
+      <a href="#demo">操作演示</a>
+      <a href="#compare">差异</a>
       <a href="#download">下载</a>
     </nav>
+    <button class="sound" id="soundToggle" type="button" aria-pressed="false" aria-label="开启背景音乐 focus-pulse">
+      <span class="sound__bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="sound__label" data-sound-label>声音关</span>
+    </button>
     <a class="btn btn--solid nav__cta" href="#download">下载桌面端</a>
     <button class="nav__toggle" id="navToggle" aria-label="打开菜单" aria-expanded="false" aria-controls="navMenu">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
     </button>
   </div>
   <nav class="nav__mobile" id="navMenu" aria-label="移动端导航" hidden>
-    <a href="#capabilities">核心能力</a>
-    <a href="#downloader">下载器</a>
-    <a href="#preview">界面</a>
+    <a href="#film">85 秒影片</a>
+    <a href="#shots">真实界面</a>
+    <a href="#demo">操作演示</a>
+    <a href="#compare">差异</a>
     <a href="#download">下载</a>
   </nav>
 </header>
 
 <main id="main">
 
-  <!-- ============ HERO ============ -->
+  <!-- ================= HERO ================= -->
   <section class="hero" aria-labelledby="heroTitle">
     <div class="hero__inner">
       <p class="hero__kicker rise d1">本地优先 · 桌面 AI Agent 工作台 · 0.2.17</p>
@@ -56,68 +64,346 @@
 
       <p class="hero__lede rise d2">
         Agent 运行时、分层记忆与幻觉护栏写进同一个 Rust 核心，编译成一个本地优先的可执行文件。
-        内嵌网关只监听回环地址，不对外开任何一个端口。
+        内嵌网关只监听回环地址。往下是 85 秒——跟着鼓点走的那种。
       </p>
 
       <div class="hero__actions rise d3">
-        <a class="btn btn--solid"
+        <a class="btn btn--solid" href="#film" data-start-film>
+          观看 85 秒 · 卡点版
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m7 4 13 8-13 8V4Z"/></svg>
+        </a>
+        <a class="btn btn--ghost"
            href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
            rel="noopener">
-          下载桌面端
+          下载视频下载器
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-        </a>
-        <a class="btn btn--ghost" href="#downloader">
-          先看下载器怎么工作
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
         </a>
       </div>
 
       <ul class="facts rise d4">
-        <li><b>372<small>MB</small></b><span>离线可用安装包</span></li>
+        <li><b>85<small>s</small></b><span>卡点短片 · 56 BPM</span></li>
         <li><b>1</b><span>个可执行文件</span></li>
-        <li><b>6</b><span>种界面语言</span></li>
         <li><b>0</b><span>外部开放端口</span></li>
+        <li><b>6</b><span>种界面语言</span></li>
       </ul>
+    </div>
+
+    <div class="hero__visual" aria-hidden="true">
+      <img src="assets/ui/chat.png" alt="" width="1440" height="900" loading="eager" decoding="async">
+      <span class="hero__badge">真实界面 · 玛格丽特·星夜</span>
     </div>
   </section>
 
-  <!-- ============ CAPABILITIES ============ -->
+  <!-- ================= FILM ================= -->
+  <section class="band band--film" id="film" aria-labelledby="filmTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">THE FILM · 85 SECONDS</p>
+        <h2 class="sec-title" id="filmTitle">鼓点落下的地方，画面才切</h2>
+        <p class="sec-dek">
+          背景音乐是工作台内置的 <code>focus-pulse.mp3</code>。拍点由脚本分析音频得出（56 BPM，相位 0.778s），
+          每一幕的切换都对齐到真实拍点，而不是“大概每 12 秒换一张”。
+        </p>
+      </header>
+
+      <figure class="player" id="player" data-state="idle">
+        <div class="player__stage" id="playerStage" tabindex="0" role="region" aria-label="Marguerite 85 秒卡点短片">
+
+          <!-- ACT 0 · hook -->
+          <div class="act act--hook" data-act="hook" data-start="0" data-end="6.13">
+            <div class="hook__mark">
+              <img src="assets/brand/logo-mark.png" alt="" width="76" height="76" loading="lazy" decoding="async">
+            </div>
+            <p class="act__eyebrow">MARGUERITE · 0.2.17</p>
+            <h3 class="act__big">A DESK THAT<br>THINKS WITH YOU</h3>
+            <p class="act__sub">本地优先的桌面 Agent 工作台</p>
+          </div>
+
+          <!-- ACT 1 · real chat + typing -->
+          <div class="act act--chat" data-act="chat" data-start="6.13" data-end="27.56">
+            <div class="shotframe" data-zoom="in">
+              <img class="shotframe__img" src="assets/ui/chat.png" alt="Marguerite 聊天界面实录：真实会话、工具回执与模型选择" loading="lazy" decoding="async">
+            </div>
+            <div class="typer" aria-hidden="true">
+              <span class="typer__label">输入</span>
+              <p class="typer__text" data-typer></p>
+              <span class="typer__caret"></span>
+            </div>
+            <div class="act__caption">
+              <p class="act__en">REAL WORK,<br>NOT A CHAT BUBBLE</p>
+              <p class="act__zh">真实会话 · 工具回执 · 过程可见</p>
+            </div>
+          </div>
+
+          <!-- ACT 2 · settings + click -->
+          <div class="act act--settings" data-act="settings" data-start="27.56" data-end="40.42">
+            <div class="shotframe" data-zoom="out">
+              <img class="shotframe__img" src="assets/ui/settings.png" alt="Marguerite 设置页实录：主题、语言与声音设置" loading="lazy" decoding="async">
+            </div>
+            <span class="cursor" data-cursor aria-hidden="true"></span>
+            <span class="ripple" data-ripple aria-hidden="true"></span>
+            <div class="act__caption">
+              <p class="act__en">MAKE IT<br>YOURS</p>
+              <p class="act__zh">主题 · 壁纸 · 桌宠 · 六种语言</p>
+            </div>
+          </div>
+
+          <!-- ACT 3 · why different -->
+          <div class="act act--diff" data-act="diff" data-start="40.42" data-end="57.56">
+            <div class="diff__bg" aria-hidden="true"><img src="assets/ui/wallpaper.png" alt="" loading="lazy" decoding="async"></div>
+            <div class="diff__grid">
+              <div class="diff__cell">
+                <p class="diff__k">01</p>
+                <p class="diff__t">LOCAL<br>FIRST</p>
+                <p class="diff__d">只监听 <code>127.0.0.1:18790</code></p>
+              </div>
+              <div class="diff__cell">
+                <p class="diff__k">02</p>
+                <p class="diff__t">SHOWS<br>ITS WORK</p>
+                <p class="diff__d">工具回执 · 完成门禁 · 台账可回放</p>
+              </div>
+              <div class="diff__cell">
+                <p class="diff__k">03</p>
+                <p class="diff__t">ONE<br>BINARY</p>
+                <p class="diff__d">Rust 内核，桌面端不另起后端</p>
+              </div>
+            </div>
+            <div class="act__caption">
+              <p class="act__en">NOT ANOTHER<br>CLOUD TAB</p>
+              <p class="act__zh">不是又一个云端标签页</p>
+            </div>
+          </div>
+
+          <!-- ACT 4 · install like a film -->
+          <div class="act act--install" data-act="install" data-start="57.56" data-end="70.42">
+            <div class="install__pair">
+              <div class="shotframe shotframe--sm"><img class="shotframe__img" src="assets/downloader-waiting.png" alt="视频下载器：片头播放中，进度压在画面上" loading="lazy" decoding="async"></div>
+              <div class="shotframe shotframe--sm"><img class="shotframe__img" src="assets/setup-welcome.png" alt="安装界面：欢迎页" loading="lazy" decoding="async"></div>
+            </div>
+            <div class="act__caption">
+              <p class="act__en">INSTALL LIKE<br>A FILM</p>
+              <p class="act__zh">片头播完一整遍，才打开安装界面</p>
+            </div>
+          </div>
+
+          <!-- ACT 5 · brand closing (scene cloned from #brandScene by cine.js) -->
+          <div class="act act--brand" data-act="brand" data-start="70.42" data-end="85">
+            <div class="act__scene" data-brand-slot aria-hidden="true"></div>
+            <div class="act__caption act__caption--center">
+              <p class="act__en">MARGUERITE</p>
+              <p class="act__zh">山顶补给站，有人守着</p>
+              <a class="btn btn--solid btn--sm" href="#download">下载桌面端</a>
+            </div>
+          </div>
+
+          <!-- chrome -->
+          <div class="player__chrome" aria-hidden="true">
+            <div class="beats" data-beats><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="player__bar"><span data-progress></span></div>
+            <div class="player__meta">
+              <span data-clock>00:00</span>
+              <span data-act-name>待播放</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="player__cover" data-cover>
+          <div class="cover__inner">
+            <span class="cover__play" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z"/></svg>
+            </span>
+            <p class="cover__title">播放 85 秒 · 卡点版</p>
+            <p class="cover__note">音乐：focus-pulse.mp3（56 BPM）。画面为真实界面实录，交互按演示节奏重放。</p>
+            <p class="cover__hint" data-audio-hint hidden>浏览器拦了自动播放，点这里开始并开启声音。</p>
+          </div>
+        </div>
+
+        <div class="player__fallback" data-fallback hidden>
+          <p>你的系统开启了「减少动态效果」，短片已换成静帧序列。</p>
+        </div>
+        <figcaption class="player__cap">
+          界面为 2026-10-27 实机截图（玛格丽特·星夜主题 + 星夜壁纸 + 桌宠在位）。
+          打字与点击是演示节奏的重放，不会向任何服务器发送内容。
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ================= SHOTS ================= -->
+  <section class="band band--alt" id="shots" aria-labelledby="shotsTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">REAL INTERFACE</p>
+        <h2 class="sec-title" id="shotsTitle">不是渲染图，是实录</h2>
+        <p class="sec-dek">聊天与设置都在「玛格丽特·星夜」主题、星夜壁纸、桌宠在位的前提下截取。滚动时镜头缓慢推近，细节留在原处。</p>
+      </header>
+
+      <div class="shots shots--wide">
+        <figure class="shot shot--desktop zoom-shot reveal-up">
+          <div class="shot__bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img src="assets/ui/chat.png" alt="Marguerite 聊天界面：工具回执、思考过程与模型选择" loading="lazy" width="1440" height="900">
+          <figcaption>聊天 · 工具回执与过程可见</figcaption>
+        </figure>
+
+        <figure class="shot shot--desktop zoom-shot reveal-up">
+          <div class="shot__bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img src="assets/ui/settings.png" alt="Marguerite 设置页：主题、语言与声音" loading="lazy" width="1440" height="900">
+          <figcaption>设置 · 主题与语言即时生效</figcaption>
+        </figure>
+
+        <figure class="shot shot--half zoom-shot reveal-up">
+          <img src="assets/ui/wallpaper.png" alt="壁纸中心：六款预设与遮罩强度" loading="lazy" width="1440" height="900">
+          <figcaption>壁纸中心 · 六款预设与可读性遮罩</figcaption>
+        </figure>
+
+        <figure class="shot shot--half zoom-shot reveal-up">
+          <img src="assets/ui/pet.png" alt="桌宠页：可切换的立体桌宠" loading="lazy" width="1440" height="900">
+          <figcaption>桌宠 · 独立皮肤与整卡拖动</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DEMO ================= -->
+  <section class="band" id="demo" aria-labelledby="demoTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">OPERATION DEMO</p>
+        <h2 class="sec-title" id="demoTitle">打字、点击、生成，一气呵成</h2>
+        <p class="sec-dek">下面这块是真的输入框：你可以自己打字，也可以点「示例」。发送后按真实节奏流式生成，并先落一条工具回执。</p>
+      </header>
+
+      <div class="demo">
+        <div class="demo__window reveal-up">
+          <div class="demo__topbar">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="demo__path">marguerite / chat</span>
+            <span class="demo__mode">标准方案</span>
+          </div>
+
+          <div class="demo__thread" data-demo-thread aria-live="polite">
+            <p class="demo__empty" data-demo-empty>还没有消息。写一句，然后按发送。</p>
+          </div>
+
+          <div class="demo__composer">
+            <label class="sr-only" for="demoInput">演示输入框</label>
+            <textarea id="demoInput" data-demo-input rows="2" spellcheck="false"
+              placeholder="把这次排查的结论整理成一页纸：根因、证据链、影响面、下一步。"></textarea>
+            <div class="demo__row">
+              <div class="demo__chips" aria-hidden="true">
+                <span class="chip">标准方案</span>
+                <span class="chip chip--ghost">deepseek</span>
+                <span class="chip chip--ghost">8</span>
+              </div>
+              <button class="btn btn--solid btn--sm" type="button" data-demo-send>发送</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="demo__side">
+          <ol class="demo__steps">
+            <li class="reveal-up"><b>01 · 真实输入</b><span>原生 textarea，可输入、可换行、Ctrl+Enter 发送。</span></li>
+            <li class="reveal-up"><b>02 · 工具先行</b><span>先落一条工具回执（搜索 4 条来源 · 2.1s），再给出结论。</span></li>
+            <li class="reveal-up"><b>03 · 流式生成</b><span>按 12 字/秒流式写入，块状光标跟随。</span></li>
+            <li class="reveal-up"><b>04 · 诚实边界</b><span>本演示在浏览器内运行，不联网、不发送内容；真实产品里的结果来自你自己的模型与工具。</span></li>
+          </ol>
+          <p class="demo__foot">想换一句？直接改上面的输入框，或按 <kbd>示例</kbd>。</p>
+          <button class="btn btn--ghost btn--sm" type="button" data-demo-example>示例：再给一版更短的</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= COMPARE ================= -->
+  <section class="band band--alt" id="compare" aria-labelledby="cmpTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">WHY DIFFERENT</p>
+        <h2 class="sec-title" id="cmpTitle">三种形态，三种代价</h2>
+        <p class="sec-dek">不比参数，只比「东西在哪里跑、过程能不能看见、结果能不能复核」。</p>
+      </header>
+
+      <div class="cmp reveal-up" role="table" aria-label="形态对比">
+        <div class="cmp__head" role="row">
+          <span role="columnheader">维度</span>
+          <span role="columnheader" class="cmp__us">Marguerite</span>
+          <span role="columnheader">云端 IDE 智能体</span>
+          <span role="columnheader">纯聊天助手</span>
+        </div>
+        <div class="cmp__row" role="row">
+          <span role="cell">推理位置</span>
+          <span role="cell" class="cmp__us">本机单进程（Rust 内核 + 内嵌网关）</span>
+          <span role="cell">云端容器</span>
+          <span role="cell">云端接口</span>
+        </div>
+        <div class="cmp__row" role="row">
+          <span role="cell">断网可用</span>
+          <span role="cell" class="cmp__us">是：安装包含离线 WebView2，本地模型可离线推理</span>
+          <span role="cell">否</span>
+          <span role="cell">否</span>
+        </div>
+        <div class="cmp__row" role="row">
+          <span role="cell">过程可见</span>
+          <span role="cell" class="cmp__us">工具回执 + 思考区 + 完成门禁 + 可回放台账</span>
+          <span role="cell">平台日志，随会话消失</span>
+          <span role="cell">只有最终回答</span>
+        </div>
+        <div class="cmp__row" role="row">
+          <span role="cell">扩展方式</span>
+          <span role="cell" class="cmp__us">插件 / MCP / 技能三类，可热启停，红线拦截</span>
+          <span role="cell">平台插件市场</span>
+          <span role="cell">无</span>
+        </div>
+        <div class="cmp__row" role="row">
+          <span role="cell">可复核</span>
+          <span role="cell" class="cmp__us">版本号 13 处同步 + 安装包 SHA256 + 门禁命令可复跑</span>
+          <span role="cell">以平台版本为准</span>
+          <span role="cell">不可复核</span>
+        </div>
+      </div>
+      <p class="cmp__note">
+        对比仅描述产品形态差异，不含对任何第三方产品的评测或评分。Marguerite 一列的每条都对应仓库里可复跑的命令或可在界面中看到的面。
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= CAPABILITIES ================= -->
   <section class="band" id="capabilities" aria-labelledby="capTitle">
     <div class="wrap">
       <header class="sec-head reveal-up">
-        <p class="sec-index">产 品 能 力</p>
+        <p class="sec-index">CAPABILITIES</p>
         <h2 class="sec-title" id="capTitle">一个核心，四种硬功夫</h2>
         <p class="sec-dek">不是功能清单，是写进代码、能在你自己机器上验证的事实。</p>
       </header>
 
       <div class="cards">
         <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
           </span>
           <h3 class="card__title">一个核心，两种外壳</h3>
           <p class="card__body">Rust 内核同时产出库与二进制，CLI 与 Tauri 桌面共用同一引擎——桌面端不另起后端进程。</p>
         </article>
 
         <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
           </span>
           <h3 class="card__title">本地优先网关</h3>
           <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
         </article>
 
         <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
           </span>
           <h3 class="card__title">分层记忆</h3>
           <p class="card__body">感知、短期、长期三层记忆。长期记忆用本地特征哈希向量化做余弦检索，不依赖外部 embedding 服务。</p>
         </article>
 
         <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
           </span>
           <h3 class="card__title">幻觉护栏</h3>
           <p class="card__body">语法、语义、事实、契约四道闸依次过闸。不过闸就进修复循环：规则修复最多两次，仍不过再交给模型。</p>
@@ -126,99 +412,25 @@
     </div>
   </section>
 
-  <!-- ============ DOWNLOADER ============ -->
-  <section class="band band--alt" id="downloader" aria-labelledby="dlvTitle">
-    <div class="wrap">
-      <header class="sec-head reveal-up">
-        <p class="sec-index">下 载 器</p>
-        <h2 class="sec-title" id="dlvTitle">片头播完一整遍，才打开安装界面</h2>
-        <p class="sec-dek">下载器不只是进度条。它把这支片子在你的屏幕上完整放一遍。</p>
-      </header>
-
-      <div class="cards">
-        <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3V9Z"/></svg>
-          </span>
-          <h3 class="card__title">循环播放，不抢戏</h3>
-          <p class="card__body">片子循环播放、默认静音；右下角可开声音。下载进度压在画面上层，不遮挡镜头。</p>
-        </article>
-
-        <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l4 2"/></svg>
-          </span>
-          <h3 class="card__title">下载再快，也要等</h3>
-          <p class="card__body">即使第一遍还没放完就下载完了，也会等片头播完才继续——这是刻意的节奏，不是卡住。</p>
-        </article>
-
-        <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
-          </span>
-          <h3 class="card__title">只从发布仓库取货</h3>
-          <p class="card__body">下载器直连 GitHub Releases，读出该版本安装包与 SHA256，下载完先校验再交给安装界面。</p>
-        </article>
-
-        <article class="card reveal-up">
-          <span class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h10M4 17h7"/></svg>
-          </span>
-          <h3 class="card__title">同一套内建在桌面端</h3>
-          <p class="card__body">桌面端「检查更新」里的下载也会走这个下载器，升级路径与首次安装保持同一套节奏。</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ PREVIEW ============ -->
-  <section class="band" id="preview" aria-labelledby="prevTitle">
-    <div class="wrap">
-      <header class="sec-head reveal-up">
-        <p class="sec-index">界 面</p>
-        <h2 class="sec-title" id="prevTitle">从下载到完成，一条完整的场</h2>
-        <p class="sec-dek">下载器、安装器、工作台共用同一套取景与材质语言。</p>
-      </header>
-
-      <div class="shots">
-        <figure class="shot shot--desktop reveal-up">
-          <div class="shot__bar" aria-hidden="true"><span></span><span></span><span></span></div>
-          <img src="assets/downloader-waiting.png" alt="Marguerite 下载器：下载完成但片头仍在播放" loading="lazy" width="1040" height="640">
-          <figcaption>下载器 · 下载完成，等待片头播完</figcaption>
-        </figure>
-
-        <figure class="shot shot--tablet reveal-up">
-          <img src="assets/setup-welcome.png" alt="Marguerite 安装器欢迎页" loading="lazy" width="1200" height="720">
-          <figcaption>安装器 · 欢迎</figcaption>
-        </figure>
-
-        <figure class="shot shot--mobile reveal-up">
-          <img src="assets/setup-finish.png" alt="Marguerite 安装器完成页" loading="lazy" width="1200" height="720">
-          <figcaption>安装器 · 完成</figcaption>
-        </figure>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ EVIDENCE ============ -->
+  <!-- ================= EVIDENCE ================= -->
   <section class="band band--alt" id="evidence" aria-labelledby="evTitle">
     <div class="wrap">
       <header class="sec-head reveal-up">
-        <p class="sec-index">为 什 么 可 信</p>
+        <p class="sec-index">EVIDENCE</p>
         <h2 class="sec-title" id="evTitle">可被验证，不是形容词</h2>
         <p class="sec-dek">提交前必须全绿的门禁，每一条都对应一句能在本机跑的命令。</p>
       </header>
 
       <div class="stats">
         <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">构建警告</span><code class="stat__c">cargo build</code></div>
-        <div class="stat reveal-up"><b class="stat__n">100<small>%</small></b><span class="stat__l">测试通过</span><code class="stat__c">cargo test</code></div>
+        <div class="stat reveal-up"><b class="stat__n">4100<small>+</small></b><span class="stat__l">测试通过</span><code class="stat__c">cargo test</code></div>
         <div class="stat reveal-up"><b class="stat__n">0</b><span class="stat__l">clippy 警告</span><code class="stat__c">cargo clippy</code></div>
         <div class="stat reveal-up"><b class="stat__n">SHA<small>256</small></b><span class="stat__l">安装包校验</span><code class="stat__c">下载器内建</code></div>
       </div>
     </div>
   </section>
 
-  <!-- ============ DOWNLOAD / CTA ============ -->
+  <!-- ================= DOWNLOAD ================= -->
   <section class="band band--cta" id="download" aria-labelledby="dlTitle">
     <div class="wrap cta">
       <h2 class="cta__title reveal-up" id="dlTitle">先看一遍片头，再开始用</h2>
@@ -226,8 +438,7 @@
       <div class="cta__actions reveal-up">
         <a class="btn btn--solid btn--lg"
            href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
-           rel="noopener"
-           aria-label="下载 Marguerite 视频下载器">
+           rel="noopener" aria-label="下载 Marguerite 视频下载器">
           下载视频下载器
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
         </a>
@@ -240,6 +451,189 @@
       </div>
       <div class="build reveal-up">
         <pre class="code"><code>直接从源码构建：cargo build --release -p marguerite-core</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= BRAND CLOSING ================= -->
+  <section class="band band--brand" id="brand" aria-labelledby="brandTitle">
+    <div class="scene scene--section" id="brandScene">
+      <svg class="scene__svg" viewBox="0 0 1600 760" role="img" aria-labelledby="sceneTitle sceneDesc" preserveAspectRatio="xMidYMid slice">
+        <title id="sceneTitle">山顶补给站与菊花绽放</title>
+        <desc id="sceneDesc">夜色山脊上有一座亮着灯的小补给站，一位披斗篷的守护者提着灯站在旁边；画面上方是一朵盛开的玛格丽特菊花。</desc>
+        <defs>
+          <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#070B12"/>
+            <stop offset=".52" stop-color="#0B1520"/>
+            <stop offset="1" stop-color="#0E1B26"/>
+          </linearGradient>
+          <radialGradient id="moon" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#EAF6FF" stop-opacity=".92"/>
+            <stop offset=".42" stop-color="#A9D3F2" stop-opacity=".22"/>
+            <stop offset="1" stop-color="#A9D3F2" stop-opacity="0"/>
+          </radialGradient>
+          <linearGradient id="ridge1" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#12202C"/><stop offset="1" stop-color="#0A1219"/>
+          </linearGradient>
+          <linearGradient id="ridge2" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#0C1620"/><stop offset="1" stop-color="#060B10"/>
+          </linearGradient>
+          <linearGradient id="glowWindow" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#FFD9A0"/><stop offset="1" stop-color="#D9A45B"/>
+          </linearGradient>
+          <radialGradient id="lanternGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#FFD9A0" stop-opacity=".85"/>
+            <stop offset="1" stop-color="#D9A45B" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="flowerGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#A9D3F2" stop-opacity=".28"/>
+            <stop offset="1" stop-color="#A9D3F2" stop-opacity="0"/>
+          </radialGradient>
+          <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="18"/>
+          </filter>
+          <path id="petal" d="M0 0 C 23 -32 24 -80 0 -114 C -24 -80 -23 -32 0 0 Z"/>
+        </defs>
+
+        <rect width="1600" height="760" fill="url(#sky)"/>
+        <circle cx="1230" cy="150" r="290" fill="url(#moon)"/>
+
+        <!-- stars: a handful, deliberately not a field -->
+        <g fill="#CFE6F7">
+          <circle cx="182" cy="96" r="1.6" opacity=".75"/>
+          <circle cx="268" cy="150" r="1.1" opacity=".55"/>
+          <circle cx="96" cy="196" r="1.2" opacity=".45"/>
+          <circle cx="646" cy="88" r="1.4" opacity=".6"/>
+          <circle cx="742" cy="142" r="1" opacity=".4"/>
+          <circle cx="880" cy="76" r="1.5" opacity=".55"/>
+          <circle cx="1440" cy="112" r="1.3" opacity=".5"/>
+          <circle cx="1512" cy="210" r="1" opacity=".35"/>
+        </g>
+
+        <!-- faint ridges -->
+        <path d="M0 470 L210 392 L360 432 L520 360 L700 448 L860 386 L1010 440 L1180 372 L1340 428 L1500 366 L1600 402 L1600 760 L0 760 Z" fill="url(#ridge1)" opacity=".55"/>
+        <path d="M0 540 L180 486 L330 520 L500 452 L660 528 L830 470 L980 524 L1150 468 L1310 520 L1470 474 L1600 508 L1600 760 L0 760 Z" fill="url(#ridge2)" opacity=".8"/>
+
+        <!-- foreground ridge -->
+        <path d="M0 640 L240 604 L420 632 L620 586 L820 620 L1010 578 L1200 612 L1390 570 L1600 604 L1600 760 L0 760 Z" fill="#04070B"/>
+
+        <!-- supply station -->
+        <g transform="translate(1062 476)" class="station">
+          <path d="M-84 78 L-84 16 L0 -36 L84 16 L84 78 Z" fill="#04070B"/>
+          <path d="M-84 16 L0 -36 L84 16" fill="none" stroke="#2A3B4A" stroke-width="2" opacity=".7"/>
+          <rect x="-26" y="22" width="52" height="42" rx="3" fill="url(#glowWindow)"/>
+          <rect x="-26" y="22" width="52" height="42" rx="3" fill="none" stroke="#0A1118" stroke-width="3"/>
+          <path d="M0 22 V64 M-26 43 H26" stroke="#0A1118" stroke-width="2.4" opacity=".8"/>
+          <rect x="-26" y="22" width="52" height="42" rx="3" fill="url(#glowWindow)" opacity=".22" filter="url(#soft)"/>
+          <rect x="46" y="-2" width="6" height="56" fill="#04070B"/>
+          <circle cx="49" cy="-10" r="4" fill="#FFD9A0"/>
+          <circle cx="49" cy="-10" r="15" fill="url(#lanternGlow)" opacity=".5"/>
+          <ellipse cx="0" cy="78" rx="120" ry="16" fill="url(#lanternGlow)" opacity=".22"/>
+        </g>
+
+        <!-- guardian silhouette: hooded cloak, staff, hand lantern -->
+        <g transform="translate(1228 510) scale(1.15)" class="guardian">
+          <ellipse cx="0" cy="2" rx="28" ry="4" fill="#020407" opacity=".8"/>
+          <!-- legs -->
+          <path d="M-8 -18 L-11 0 L-1 0 L3 -18 Z" fill="#020407"/>
+          <path d="M8 -18 L12 0 L1 0 L-3 -18 Z" fill="#020407"/>
+          <!-- cloak -->
+          <path d="M0 -16 C -20 -18 -27 -40 -26 -64 C -25 -88 -18 -108 -8 -114 L8 -114 C 18 -108 25 -88 26 -64 C 27 -40 20 -18 0 -16 Z" fill="#020407"/>
+          <!-- head + hood -->
+          <circle cx="0" cy="-126" r="10.5" fill="#020407"/>
+          <path d="M-12 -120 C -13 -134 -6 -142 0 -142 C 6 -142 13 -134 12 -120 C 6 -116 -6 -116 -12 -120 Z" fill="#020407"/>
+          <!-- rim light (moon on the right) -->
+          <path d="M15 -110 C 22 -96 24 -76 21 -52" stroke="#A9D3F2" stroke-width="1.4" opacity=".3" fill="none"/>
+          <path d="M9 -134 C 13 -131 15 -127 16 -123" stroke="#A9D3F2" stroke-width="1" opacity=".35" fill="none"/>
+          <!-- arm holding the lantern -->
+          <path d="M11 -92 C 19 -86 23 -80 23 -72" stroke="#020407" stroke-width="8" stroke-linecap="round" fill="none"/>
+          <!-- staff -->
+          <line x1="-24" y1="-150" x2="-22" y2="-2" stroke="#020407" stroke-width="3"/>
+          <circle cx="-24" cy="-152" r="2.4" fill="#A9D3F2" opacity=".55"/>
+          <!-- lantern -->
+          <line x1="23" y1="-72" x2="23" y2="-64" stroke="#020407" stroke-width="1.3"/>
+          <rect x="18" y="-64" width="10" height="13" rx="2" fill="#0B0F15" stroke="#020407" stroke-width="1.2"/>
+          <rect x="19.5" y="-62" width="7" height="9" rx="1" fill="#FFD9A0"/>
+          <circle cx="23" cy="-58" r="22" fill="url(#lanternGlow)" opacity=".6"/>
+        </g>
+
+        <!-- chrysanthemum: three offset rings, wide petals -->
+        <g class="flower" transform="translate(372 196) scale(.94)">
+          <circle r="240" fill="url(#flowerGlow)"/>
+          <g class="petals petals--outer">
+            <g transform="translate(0 -14)"><use href="#petal" class="petal" style="--a:0;--i:0"/></g>
+            <g transform="translate(0 -14) rotate(15)"><use href="#petal" class="petal" style="--a:0;--i:1"/></g>
+            <g transform="translate(0 -14) rotate(30)"><use href="#petal" class="petal" style="--a:0;--i:2"/></g>
+            <g transform="translate(0 -14) rotate(45)"><use href="#petal" class="petal" style="--a:0;--i:3"/></g>
+            <g transform="translate(0 -14) rotate(60)"><use href="#petal" class="petal" style="--a:0;--i:4"/></g>
+            <g transform="translate(0 -14) rotate(75)"><use href="#petal" class="petal" style="--a:0;--i:5"/></g>
+            <g transform="translate(0 -14) rotate(90)"><use href="#petal" class="petal" style="--a:0;--i:6"/></g>
+            <g transform="translate(0 -14) rotate(105)"><use href="#petal" class="petal" style="--a:0;--i:7"/></g>
+            <g transform="translate(0 -14) rotate(120)"><use href="#petal" class="petal" style="--a:0;--i:8"/></g>
+            <g transform="translate(0 -14) rotate(135)"><use href="#petal" class="petal" style="--a:0;--i:9"/></g>
+            <g transform="translate(0 -14) rotate(150)"><use href="#petal" class="petal" style="--a:0;--i:10"/></g>
+            <g transform="translate(0 -14) rotate(165)"><use href="#petal" class="petal" style="--a:0;--i:11"/></g>
+            <g transform="translate(0 -14) rotate(180)"><use href="#petal" class="petal" style="--a:0;--i:12"/></g>
+            <g transform="translate(0 -14) rotate(195)"><use href="#petal" class="petal" style="--a:0;--i:13"/></g>
+            <g transform="translate(0 -14) rotate(210)"><use href="#petal" class="petal" style="--a:0;--i:14"/></g>
+            <g transform="translate(0 -14) rotate(225)"><use href="#petal" class="petal" style="--a:0;--i:15"/></g>
+            <g transform="translate(0 -14) rotate(240)"><use href="#petal" class="petal" style="--a:0;--i:16"/></g>
+            <g transform="translate(0 -14) rotate(255)"><use href="#petal" class="petal" style="--a:0;--i:17"/></g>
+            <g transform="translate(0 -14) rotate(270)"><use href="#petal" class="petal" style="--a:0;--i:18"/></g>
+            <g transform="translate(0 -14) rotate(285)"><use href="#petal" class="petal" style="--a:0;--i:19"/></g>
+            <g transform="translate(0 -14) rotate(300)"><use href="#petal" class="petal" style="--a:0;--i:20"/></g>
+            <g transform="translate(0 -14) rotate(315)"><use href="#petal" class="petal" style="--a:0;--i:21"/></g>
+            <g transform="translate(0 -14) rotate(330)"><use href="#petal" class="petal" style="--a:0;--i:22"/></g>
+            <g transform="translate(0 -14) rotate(345)"><use href="#petal" class="petal" style="--a:0;--i:23"/></g>
+          </g>
+          <g class="petals petals--mid">
+            <g transform="translate(0 -10) scale(.78) rotate(8)"><use href="#petal" class="petal" style="--a:0;--i:2"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(28)"><use href="#petal" class="petal" style="--a:0;--i:3"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(48)"><use href="#petal" class="petal" style="--a:0;--i:4"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(68)"><use href="#petal" class="petal" style="--a:0;--i:5"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(88)"><use href="#petal" class="petal" style="--a:0;--i:6"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(108)"><use href="#petal" class="petal" style="--a:0;--i:7"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(128)"><use href="#petal" class="petal" style="--a:0;--i:8"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(148)"><use href="#petal" class="petal" style="--a:0;--i:9"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(168)"><use href="#petal" class="petal" style="--a:0;--i:10"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(188)"><use href="#petal" class="petal" style="--a:0;--i:11"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(208)"><use href="#petal" class="petal" style="--a:0;--i:12"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(228)"><use href="#petal" class="petal" style="--a:0;--i:13"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(248)"><use href="#petal" class="petal" style="--a:0;--i:14"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(268)"><use href="#petal" class="petal" style="--a:0;--i:15"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(288)"><use href="#petal" class="petal" style="--a:0;--i:16"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(308)"><use href="#petal" class="petal" style="--a:0;--i:17"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(328)"><use href="#petal" class="petal" style="--a:0;--i:18"/></g>
+            <g transform="translate(0 -10) scale(.78) rotate(348)"><use href="#petal" class="petal" style="--a:0;--i:19"/></g>
+          </g>
+          <g class="petals petals--inner">
+            <g transform="translate(0 -6) scale(.52) rotate(20)"><use href="#petal" class="petal" style="--a:0;--i:5"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(50)"><use href="#petal" class="petal" style="--a:0;--i:6"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(80)"><use href="#petal" class="petal" style="--a:0;--i:7"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(110)"><use href="#petal" class="petal" style="--a:0;--i:8"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(140)"><use href="#petal" class="petal" style="--a:0;--i:9"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(170)"><use href="#petal" class="petal" style="--a:0;--i:10"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(200)"><use href="#petal" class="petal" style="--a:0;--i:11"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(230)"><use href="#petal" class="petal" style="--a:0;--i:12"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(260)"><use href="#petal" class="petal" style="--a:0;--i:13"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(290)"><use href="#petal" class="petal" style="--a:0;--i:14"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(320)"><use href="#petal" class="petal" style="--a:0;--i:15"/></g>
+            <g transform="translate(0 -6) scale(.52) rotate(350)"><use href="#petal" class="petal" style="--a:0;--i:16"/></g>
+          </g>
+          <circle class="flower__core" r="22" fill="#E8D9B8"/>
+          <circle class="flower__core" r="13" fill="#D9A45B" opacity=".95"/>
+          <circle class="flower__core" r="5" fill="#F3EEE6" opacity=".9"/>
+        </g>
+      </svg>
+
+      <div class="scene__copy">
+        <img class="scene__mark" src="assets/brand/logo-mark.png" alt="" width="54" height="54" loading="lazy" decoding="async">
+        <h2 class="scene__title" id="brandTitle">MARGUERITE</h2>
+        <p class="scene__tag">山顶补给站，有人守着。灯亮着，你就知道还能再来一次。</p>
+        <div class="scene__actions">
+          <a class="btn btn--solid" href="#download">下载桌面端</a>
+          <a class="btn btn--ghost" href="https://github.com/KLJyouth1/Marguerite" target="_blank" rel="noopener noreferrer">查看源码</a>
+        </div>
       </div>
     </div>
   </section>
@@ -265,15 +659,19 @@
       <ul class="foot__plain">
         <li>版本 <code>0.2.17</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
+        <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
         <li>界面语言 6 种</li>
-        <li>下载器默认静音</li>
       </ul>
     </div>
   </div>
-  <p class="foot__end">本站为中文版本。语言切换在桌面端设置内。所有性能数字均对应仓库内可复现的命令与门禁定义。</p>
+  <p class="foot__end">本站为中文版本。语言切换在桌面端设置内。所有数字均对应仓库内可复现的命令与门禁定义；界面截图为 2026-10-27 实机录制。</p>
 </footer>
+
+<audio id="soundtrack" src="assets/music/focus-pulse.mp3" preload="metadata" loop></audio>
 
 <script src="motion.js" defer></script>
 <script src="main.js" defer></script>
+<script src="beat-map.js" defer></script>
+<script src="cine.js" defer></script>
 </body>
 </html>

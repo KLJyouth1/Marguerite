@@ -74,6 +74,34 @@
     }, { passive: true });
   }
 
+  /* 4) 真实界面滚动漫推：视口内从 1.06 收到 1.0（只改 transform） */
+  if (motionOn()) {
+    var zooms = Array.prototype.slice.call(doc.querySelectorAll('.zoom-shot img'));
+    if (zooms.length) {
+      var zoomTicking = false;
+      var updateZooms = function () {
+        zoomTicking = false;
+        var vh = window.innerHeight || 1;
+        zooms.forEach(function (img) {
+          var rect = img.getBoundingClientRect();
+          if (rect.bottom < -80 || rect.top > vh + 80) return;
+          var progress = (vh - rect.top) / (vh + rect.height);
+          var clamped = Math.max(0, Math.min(1, progress));
+          var scale = 1.06 - clamped * 0.06;
+          img.style.setProperty('--z', scale.toFixed(4));
+        });
+      };
+      var onZoomScroll = function () {
+        if (zoomTicking) return;
+        zoomTicking = true;
+        window.requestAnimationFrame(updateZooms);
+      };
+      window.addEventListener('scroll', onZoomScroll, { passive: true });
+      window.addEventListener('resize', onZoomScroll, { passive: true });
+      updateZooms();
+    }
+  }
+
   /* 动态监听 reduced-motion 切换：降级时撤掉 JS 揭示态与毛玻璃 */
   if ('addEventListener' in reduceMQ) {
     reduceMQ.addEventListener('change', function () {
