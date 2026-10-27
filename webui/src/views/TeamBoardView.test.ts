@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const rpcMock = vi.hoisted(() => ({
   call: null as unknown as ReturnType<typeof vi.fn>,
   methods: null as unknown as { value: string[] },
+  handlers: {} as Record<string, (payload?: unknown, meta?: unknown) => void>,
 }))
 
 vi.mock('@/stores/rpc', async () => {
@@ -14,10 +15,16 @@ vi.mock('@/stores/rpc', async () => {
   const call = vi.fn()
   rpcMock.call = call as unknown as ReturnType<typeof vi.fn>
   rpcMock.methods = methods as unknown as { value: string[] }
+  rpcMock.handlers = {}
   return {
     useRpcStore: () => ({
       call,
-      on: vi.fn(() => () => {}),
+      on: (event: string, handler: (payload?: unknown, meta?: unknown) => void) => {
+        rpcMock.handlers[event] = handler
+        return () => {
+          delete rpcMock.handlers[event]
+        }
+      },
       supportsMethod: (method: string) => methods.value.includes(method),
     }),
   }
@@ -34,6 +41,22 @@ const messages: Record<string, string> = {
   'team.board.status.finished': '已完成',
   'team.board.status.failed': '失败',
   'usageLogs.metrics.tokens': 'Token',
+  // 以下全部是**既有**字典键（本次零新增），这里只给出中文取值用于断言。
+  'console.channels.notReported': '未报告',
+  'chat.thinking': '思考中',
+  'harness.runs.started': '开始时间',
+  'harness.runs.duration': '耗时',
+  'chat.orchestration.runMemberThinking': '成员思考',
+  'chat.orchestration.runMemberOutcome': '结果',
+  'chat.orchestration.runMemberNoTools': '尚未调用工具',
+  'chat.orchestration.runSynthesizing': '总编排正在综合成员结论',
+  'chat.orchestration.memberCount': '{n} 成员',
+  'chat.orchestration.formTeam': '团队',
+  'chat.orchestration.formSwarm': '蜂群',
+  'chat.orchestration.runFilesMore': '另有 {n} 个未列出',
+  'cronSkills.list.metaLastRun': '上次运行',
+  'chat.activityDurationSeconds': '{seconds} 秒',
+  'chat.activityDurationMinutes': '{minutes} 分 {seconds} 秒',
 }
 
 vi.mock('vue-i18n', async (importOriginal) => {
@@ -42,7 +65,16 @@ vi.mock('vue-i18n', async (importOriginal) => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => messages[key] ?? key,
+      t: (key: string, named?: Record<string, unknown>) => {
+        const raw = messages[key] ?? key
+        if (!named) return raw
+        // tsconfig 的 lib 是 ES2020，`String.replaceAll` 属 ES2021 —— 用 split/join
+        // 等价实现占位符替换，避免为了一个测试把整个项目的 lib 抬到 ES2021。
+        return Object.entries(named).reduce(
+          (text, [name, value]) => text.split(`{${name}}`).join(String(value)),
+          raw,
+        )
+      },
       locale: vueRef('zh-Hans'),
     }),
   }
@@ -76,6 +108,15 @@ async function mountBoard(): Promise<HTMLElement> {
   return el
 }
 
+/** 走真实链路：WS 帧 → rpc.on('session.event.progress') → 看板动向表。 */
+function fireFrame(payload: Record<string, unknown>): void {
+  rpcMock.handlers['session.event.progress']?.(payload)
+}
+
+function orchestration(overrides: Record<string, unknown> = {}) {
+  return { kind: 'orchestration', runId: 'run-1', ...overrides }
+}
+
 function member(overrides: Record<string, unknown> = {}) {
   return {
     id: 'lead-1',
@@ -100,6 +141,10 @@ beforeEach(() => {
     ok: true,
     session: 'agent:main:webchat:test',
     updatedAt: Date.now(),
+    runId: 'run-1',
+    form: 'team',
+    memberLimit: 512,
+    dropped: 0,
     members: [
       member(),
       member({
@@ -201,6 +246,25 @@ describe('TeamBoardView honest empty states', () => {
     expect(el.querySelector('.team-board__note')).toBeNull()
   })
 
+  it('passes the backend reason for the empty board through verbatim', async () => {
+    // 这条正是「团队看板看着什么也没有」的真实原因之一：单选直答不产生编排运行记录
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: null,
+      form: null,
+      members: [],
+      note: '当前没有团队编排运行记录（单选直答或尚未派活）',
+    })
+
+    const el = await mountBoard()
+
+    expect(cards(el)).toHaveLength(0)
+    expect(el.querySelector('[data-testid="board-empty-note"]')?.textContent?.trim()).toBe(
+      '当前没有团队编排运行记录（单选直答或尚未派活）',
+    )
+  })
+
   it('shows an explicit note and no cards when team.members is not supported', async () => {
     rpcMock.methods.value = []
 
@@ -222,5 +286,212 @@ describe('TeamBoardView honest empty states', () => {
     expect(cards(el)).toHaveLength(0)
     expect(el.textContent).toContain('当前会话没有团队任务')
     expect(el.textContent).toContain('团队状态读取失败：gateway offline')
+  })
+})
+
+describe('TeamBoardView per-member activity (event stream)', () => {
+  it('shows 未报告 on every activity row when no orchestration frame was observed', async () => {
+    const el = await mountBoard()
+    const first = cards(el)[0]
+
+    expect(first.dataset.live).toBe('false')
+    expect(first.querySelector('.member-activity')).not.toBeNull()
+
+    const rowText = (testid: string) =>
+      first.querySelector<HTMLElement>(`[data-testid="${testid}"] dd`)?.textContent?.trim() ?? ''
+
+    // 后端在事件流里发了、但看板没观察到 → 只能是空态，不能是 0 / 猜测。
+    expect(rowText('member-thinking')).toBe('未报告')
+    expect(rowText('member-outcome')).toBe('未报告')
+    expect(rowText('member-started')).toBe('未报告')
+    expect(rowText('member-duration')).toBe('未报告')
+    // 没观察到起点时不能替成员断言「尚未调用工具」
+    expect(rowText('member-tool')).toBe('未报告')
+    expect(first.textContent).not.toContain('尚未调用工具')
+    expect(first.textContent).not.toContain('0 秒')
+    // 页脚的真实计数仍在（快照里的 toolCalls）
+    expect(first.textContent).toContain('12')
+  })
+
+  it('renders thinking / last tool / outcome / duration from the frame payload', async () => {
+    const el = await mountBoard()
+    fireFrame(orchestration({ phase: 'member_started', memberId: 'sub-1', roleLabel: '编码' }))
+    fireFrame(orchestration({ phase: 'member_thinking', memberId: 'sub-1', round: 2, thinking: '先补断言再改样式' }))
+    fireFrame(orchestration({ phase: 'tool_call', memberId: 'sub-1', tool: 'shell' }))
+    fireFrame(orchestration({ phase: 'tool_result', memberId: 'sub-1', tool: 'shell', ok: true, elapsedMs: 4_812 }))
+    fireFrame(
+      orchestration({
+        phase: 'member_completed',
+        memberId: 'sub-1',
+        ok: true,
+        elapsedMs: 90_500,
+        summary: '改了 3 个断言',
+      }),
+    )
+    await flush()
+
+    const card = cards(el).find((item) => item.dataset.memberId === 'sub-1')!
+    expect(card.dataset.live).toBe('true')
+    expect(card.textContent).toContain('先补断言再改样式')
+    expect(card.textContent).toContain('shell')
+    expect(card.textContent).toContain('改了 3 个断言')
+    expect(card.textContent).toContain('1 分 31 秒')
+    // 终态帧压过快照的 running
+    expect(card.dataset.status).toBe('finished')
+    expect(card.querySelector('[data-testid="member-tool"] .member-activity__tool-mark')?.textContent).toBe('✓')
+  })
+
+  it('reports a pending tool call without dressing it up as success', async () => {
+    const el = await mountBoard()
+    fireFrame(orchestration({ phase: 'member_started', memberId: 'sub-1' }))
+    fireFrame(orchestration({ phase: 'tool_call', memberId: 'sub-1', tool: 'read_file' }))
+    await flush()
+
+    const card = cards(el).find((item) => item.dataset.memberId === 'sub-1')!
+    const toolRow = card.querySelector<HTMLElement>('[data-testid="member-tool"]')
+    expect(toolRow).not.toBeNull()
+    expect(toolRow?.textContent).toContain('read_file')
+    // 没有 tool_result 之前不显示成功/失败标记
+    expect(toolRow?.querySelector('.member-activity__tool-mark')).toBeNull()
+    expect(toolRow?.querySelector<HTMLElement>('.member-activity__tool')?.getAttribute('data-tool-state')).toBe('pending')
+    expect(card.querySelector('[data-testid="member-outcome"]')?.textContent).toContain('未报告')
+  })
+
+  it('turns the badge into 思考中 only for a real member_thinking frame', async () => {
+    const el = await mountBoard()
+    fireFrame(orchestration({ phase: 'member_started', memberId: 'sub-1' }))
+    fireFrame(orchestration({ phase: 'member_thinking', memberId: 'sub-1', round: 1, thinking: '在想' }))
+    await flush()
+
+    const card = cards(el).find((item) => item.dataset.memberId === 'sub-1')!
+    // 快照里这位是 finished —— 比快照新的观察才生效，故 finished 不被降级
+    expect(card.dataset.status).toBe('finished')
+    expect(card.textContent).toContain('在想')
+
+    fireFrame(orchestration({ phase: 'member_started', memberId: 'lead-1' }))
+    fireFrame(orchestration({ phase: 'member_thinking', memberId: 'lead-1', round: 1, thinking: '在拆任务' }))
+    await flush()
+    const lead = cards(el).find((item) => item.dataset.memberId === 'lead-1')!
+    expect(lead.dataset.status).toBe('thinking')
+    expect(lead.querySelector('.team-card__status')?.className).toBe('team-card__status team-status--thinking')
+    expect(lead.querySelector('.team-card__status')?.textContent?.trim()).toBe('思考中')
+  })
+
+  it('collects the gateway-only run_failed frame that never reaches team.members', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now(),
+      runId: 'run-9',
+      form: 'team',
+      members: [
+        {
+          id: 'lead:run-9',
+          label: '总编排',
+          role: 'lead',
+          kind: 'lead',
+          status: 'running',
+          currentStep: null,
+          toolCalls: 0,
+          lastActivityMs: Date.now(),
+          tokensUsed: null,
+        },
+      ],
+    })
+    const el = await mountBoard()
+    const lead = cards(el).find((item) => item.dataset.memberId === 'lead:run-9')!
+    expect(lead.dataset.status).toBe('running')
+
+    // 后端这条是直接 bus.publish 的（core/src/gateway/team.rs），投影里永远没有
+    fireFrame({ kind: 'orchestration', phase: 'run_failed', runId: 'run-9', ok: false, error: '已取消' })
+    await flush()
+
+    expect(lead.dataset.status).toBe('failed')
+    expect(lead.querySelector('.team-card__status')?.textContent?.trim()).toBe('失败')
+    expect(lead.querySelector('[data-testid="member-error"]')?.textContent?.trim()).toBe('已取消')
+  })
+
+  it('shows the synthesizing hint only when lead_synthesizing was observed', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now(),
+      runId: 'run-9',
+      form: 'team',
+      members: [
+        { id: 'lead:run-9', label: '总编排', role: 'lead', kind: 'lead', status: 'running', currentStep: null, toolCalls: 0, lastActivityMs: Date.now(), tokensUsed: null },
+      ],
+    })
+    const el = await mountBoard()
+    expect(el.querySelector('[data-testid="member-synthesizing"]')).toBeNull()
+
+    fireFrame(orchestration({ runId: 'run-9', phase: 'member_started', memberId: 'sub-9' }))
+    fireFrame(orchestration({ runId: 'run-9', phase: 'lead_synthesizing', memberId: '' }))
+    await flush()
+    expect(el.querySelector('[data-testid="member-synthesizing"]')?.textContent?.trim()).toBe(
+      '总编排正在综合成员结论',
+    )
+  })
+})
+
+describe('TeamBoardView run bar', () => {
+  it('names the run and keeps the synthesized lead out of the member count', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now(),
+      runId: 'run-42',
+      form: 'swarm',
+      memberLimit: 512,
+      dropped: 0,
+      members: [
+        { id: 'lead:run-42', label: '总编排', role: 'lead', kind: 'lead', status: 'running', currentStep: null, toolCalls: 0, lastActivityMs: null, tokensUsed: null },
+        { id: 's-1', label: 'One', role: '编码', kind: 'subagent', status: 'running', currentStep: 'a', toolCalls: 1, lastActivityMs: null, tokensUsed: null },
+        { id: 's-2', label: 'Two', role: '评审', kind: 'subagent', status: 'finished', currentStep: 'b', toolCalls: 2, lastActivityMs: null, tokensUsed: null },
+      ],
+    })
+
+    const el = await mountBoard()
+
+    expect(cards(el)).toHaveLength(3)
+    const bar = el.querySelector<HTMLElement>('[data-testid="team-run-bar"]')
+    expect(bar).not.toBeNull()
+    expect(bar?.textContent).toContain('蜂群')
+    expect(bar?.textContent).toContain('#run-42')
+    // 3 张卡但 2 名成员：lead 行是后端合成的，不计入成员数
+    expect(el.querySelector('[data-testid="team-run-bar-members"]')?.textContent).toContain('2 成员')
+    expect(cards(el)[0].querySelector('[data-testid="member-run-label"]')?.textContent?.trim()).toBe('蜂群 · #run-42')
+  })
+
+  it('says so when members were dropped or the snapshot came off disk', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now() - 40_000,
+      runId: 'run-77',
+      form: 'team',
+      memberLimit: 512,
+      dropped: 37,
+      fromDisk: true,
+      note: '当前没有团队编排运行记录（单选直答或尚未派活）',
+      members: [{ id: 'lead:run-77', label: '总编排', role: 'lead', kind: 'lead', status: 'running', currentStep: null, toolCalls: 0, lastActivityMs: null, tokensUsed: null }],
+    })
+
+    const el = await mountBoard()
+
+    expect(el.querySelector('[data-testid="team-run-bar-dropped"]')?.textContent).toContain('另有 37 个未列出')
+    expect(el.querySelector('[data-testid="team-run-bar-dropped"]')?.getAttribute('title')).toBe('0/512')
+    expect(el.querySelector('[data-testid="team-run-bar-from-disk"]')?.textContent?.trim()).toBe('上次运行')
+    expect(el.querySelector('[data-testid="team-run-bar-note"]')?.textContent).toContain(
+      '当前没有团队编排运行记录（单选直答或尚未派活）',
+    )
+  })
+
+  it('renders no run bar at all for the empty board', async () => {
+    rpcMock.call.mockResolvedValue({ ok: true, session: 's', updatedAt: Date.now(), members: [] })
+    const el = await mountBoard()
+
+    expect(el.querySelector('[data-testid="team-run-bar"]')).toBeNull()
+    expect(el.querySelector('[data-testid="team-run-bar-dropped"]')).toBeNull()
   })
 })
