@@ -63,8 +63,15 @@ pub async fn check_model_api_async(config: &Config, probe: AuthProbeTier) -> Doc
     let base_url = config.model.base_url.trim();
     let api_key = config.model.api_key.as_str();
 
-    // 1) 未配置密钥：引导配置，不判 FAIL。
-    if api_key.is_empty() {
+    // 1) 未配置密钥：**本地/回环端点豁免**，其余引导配置（不判 FAIL）。
+    //
+    // 缺陷背景（2026-10-21 实测）：这里曾无条件把「无密钥」判成 DEGRADED，
+    // 于是 Ollama 本地模型（`http://localhost:11434`，本来就不需要密钥）在诊断里
+    // 永远是「未配置密钥」，设置页据此显示「需要配置 / 请设置模型提供商」，
+    // 用户反复去配服务商却怎么都消不掉 —— 正是「越改问题越多」的来源之一。
+    // 判据统一走 `byok::is_keyless_endpoint`（与 api_key_gate 同源）。
+    let keyless = crate::model::byok::is_keyless_endpoint(provider, base_url);
+    if api_key.is_empty() && !keyless {
         return DoctorItem {
             id: "model_api".to_string(),
             label: "模型 API 连通".to_string(),
@@ -109,8 +116,26 @@ pub async fn check_model_api_async(config: &Config, probe: AuthProbeTier) -> Doc
                 id: "model_api".to_string(),
                 label: "模型 API 连通".to_string(),
                 status: Status::Ok,
+                detail: if keyless {
+                    format!(
+                        "provider={provider} 本地端点 TCP 可达 {host}:{port}（本地推理免密钥，无需配置 API Key）"
+                    )
+                } else {
+                    format!(
+                        "provider={provider} TCP 可达 {host}:{port}（key 已配置，未校验密钥真伪；可用 doctor --probe / 诊断面板深检）"
+                    )
+                },
+                fix_hint: String::new(),
+            },
+            // 本地/回环端点没有「密钥真伪」可校验：深度检查对它应直接通过，
+            // 否则用户点「运行深度检查」永远得到「未探测（未配置密钥）」→ 降级。
+            // （实测 2026-10-21：ollama 用户看到的就是这一条。）
+            AuthProbeTier::On if keyless => DoctorItem {
+                id: "model_api".to_string(),
+                label: "模型 API 连通".to_string(),
+                status: Status::Ok,
                 detail: format!(
-                    "provider={provider} TCP 可达 {host}:{port}（key 已配置，未校验密钥真伪；可用 doctor --probe / 诊断面板深检）"
+                    "provider={provider} 本地端点 TCP 可达 {host}:{port}（本地推理免密钥，无需深度校验）"
                 ),
                 fix_hint: String::new(),
             },

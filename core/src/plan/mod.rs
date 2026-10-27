@@ -1074,7 +1074,7 @@ fn decompose(prompt: &str) -> Decomposition {
         // 供 WebUI 计划卡直接可视化；无依赖步骤自动并行。
         let mut role_to_idx: HashMap<&str, usize> = HashMap::new();
         for (i, s) in a.subtasks.iter().enumerate() {
-            role_to_idx.entry(s.role).or_insert(i);
+            role_to_idx.entry(s.role.as_str()).or_insert(i);
         }
         for (i, s) in a.subtasks.iter().enumerate() {
             let deps: Vec<Value> = s
@@ -1093,8 +1093,8 @@ fn decompose(prompt: &str) -> Decomposition {
                 // 徽标用 `step_role_badge` 做展示层本地化，机器 role 保持不变。
                 "title": format!(
                     "[{}] {}",
-                    step_role_badge(s.role),
-                    if s.task.trim().is_empty() { s.role } else { s.task.as_str() }
+                    step_role_badge(&s.role),
+                    if s.task.trim().is_empty() { s.role.as_str() } else { s.task.as_str() }
                 ),
                 "details": s.task,
                 "deps": deps,
@@ -1729,7 +1729,7 @@ mod tests {
         let c = crate::orchestration::deliverable::detect(COMPOSITE)
             .expect("复合交付任务应识别出交付物契约");
         let specs = crate::orchestration::deliverable::contract_to_specs(&c);
-        let roles: Vec<&str> = specs.iter().map(|s| s.role).collect();
+        let roles: Vec<&str> = specs.iter().map(|s| s.role.as_str()).collect();
         assert_eq!(
             roles,
             vec!["检索", "HTML", "PPT"],

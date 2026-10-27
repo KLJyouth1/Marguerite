@@ -20,24 +20,32 @@
     <section class="brain-hero" :class="`brain-hero--${moodClass}`">
       <div class="brain-hero__phi">
         <div class="brain-hero__phi-label">自我存在感 Φ</div>
-        <div class="brain-hero__phi-val">{{ phi.toFixed(3) }}</div>
-        <div class="brain-hero__phi-track"><div class="brain-hero__phi-fill" :style="{ width: `${Math.min(100, phi * 100)}%` }" /></div>
+        <!-- 无快照时不留 0.000 假读数：那会被读成「Φ 真的是 0」 -->
+        <div class="brain-hero__phi-val">{{ hasSnapshot ? phi.toFixed(3) : '—' }}</div>
+        <div class="brain-hero__phi-track">
+          <div class="brain-hero__phi-fill" :style="{ width: hasSnapshot ? `${Math.min(100, phi * 100)}%` : '0%' }" />
+        </div>
       </div>
       <div class="brain-hero__meta">
         <div class="brain-hero__mood">
           <span class="brain-hero__mood-dot" :class="`mood-dot--${moodClass}`" />
-          主导情绪：{{ dominantMood }}
+          主导情绪：{{ hasSnapshot ? dominantMood : '—' }}
         </div>
-        <div class="brain-hero__stat">相位节律：{{ circadian }}</div>
-        <div class="brain-hero__stat">PSI 循环：{{ cycleCount }} 次 · 已学习 {{ learnedCount }} 条</div>
-        <div class="brain-hero__stat">因果推理边：{{ causalEdges }} 条</div>
+        <div class="brain-hero__stat">相位节律：{{ hasSnapshot ? circadian : '—' }}</div>
+        <div class="brain-hero__stat">
+          循环 / 学习：{{ hasSnapshot ? `${cycleCount} 次 · ${learnedCount} 条` : '—' }}
+        </div>
+        <div class="brain-hero__stat">因果推理边：{{ hasSnapshot ? causalEdges : '—' }}</div>
       </div>
     </section>
+
+    <p v-if="statusNotice" class="brain-notice brain-notice--warn">{{ statusNotice }}</p>
 
     <!-- 八维情感 -->
     <section class="brain-card">
       <h2 class="brain-card__title">八维实时情感</h2>
-      <div class="brain-bars">
+      <p v-if="!hasSnapshot" class="brain-assets-note">无引擎快照，情感维度不展示（而非按 50% 默认值填充）。</p>
+      <div v-else class="brain-bars">
         <div v-for="d in dims" :key="d.key" class="brain-bar">
           <span class="brain-bar__label">{{ d.emoji }} {{ d.label }}</span>
           <div class="brain-bar__track">
@@ -131,35 +139,59 @@ const moodClass = computed(() => {
 })
 
 const assets = ref<{ label: string; count: number }[]>([])
+/** 数据可用性 + 探测失败原因：空面板必须说清「为什么空」，绝不显示成 0 值事实。 */
+const hasSnapshot = ref(false)
+const statusNotice = ref('')
 
 async function refresh(): Promise<void> {
-  try {
-    if (rpc.state !== 'connected') return
-    if (!rpc.supportsMethod('brain.status')) return
-    const res = await rpc.call<{ ok?: boolean; brain?: BrainSnapshot }>('brain.status', {})
-    brain.value = res?.brain ?? null
-  } catch {
-    /* 引擎未就绪时静默 */
+  statusNotice.value = ''
+  if (rpc.state !== 'connected') {
+    // 未连接时不再静默：否则面板会拿默认值（Φ=0.000、情感 50%）当真实读数展示。
+    statusNotice.value = '网关未连接，暂无法读取大脑状态'
+    hasSnapshot.value = false
+  } else if (!rpc.supportsMethod('brain.status')) {
+    statusNotice.value = '本部署未提供 brain.status（PSI 引擎未装入）'
+    hasSnapshot.value = false
+  } else {
+    try {
+      const res = await rpc.call<{ ok?: boolean; brain?: BrainSnapshot }>('brain.status', {})
+      brain.value = res?.brain ?? null
+      hasSnapshot.value = brain.value !== null
+      if (!hasSnapshot.value) {
+        statusNotice.value = 'brain.status 已响应但未返回引擎快照'
+      }
+    } catch (e) {
+      // 此前这里是静默 catch：引擎报错时面板照旧显示 0 值/50% 默认态，
+      // 而文件头又写着「绝无模拟」——自相矛盾。现在如实报错。
+      statusNotice.value = `读取大脑状态失败：${e instanceof Error ? e.message : String(e)}`
+      hasSnapshot.value = false
+    }
   }
   await loadAssets()
 }
 
 async function loadAssets(): Promise<void> {
   const next: { label: string; count: number }[] = []
+  let failed = 0
   try {
     if (rpc.supportsMethod('pages.list')) {
       const p = await rpc.call<{ pages?: unknown[] }>('pages.list', {})
       next.push({ label: '知识页', count: p?.pages?.length ?? 0 })
     }
-  } catch { /* ignore */ }
+  } catch { failed += 1 }
   try {
     if (rpc.supportsMethod('kb.graph.view')) {
       const g = await rpc.call<{ entity_count?: number; edge_count?: number }>('kb.graph.view', {})
       next.push({ label: '图谱实体', count: g?.entity_count ?? 0 })
       next.push({ label: '图谱关系', count: g?.edge_count ?? 0 })
     }
-  } catch { /* ignore */ }
+  } catch { failed += 1 }
   assets.value = next
+  if (failed > 0) {
+    // 静默失败的后果是「资产面板少几格，用户以为是 0」→ 如实标注探测失败项数。
+    const note = `有 ${failed} 项资产探测失败（对应格子不展示，勿当 0 计数）`
+    statusNotice.value = statusNotice.value ? `${statusNotice.value}；${note}` : note
+  }
 }
 
 async function runPsiCycle(): Promise<void> {
@@ -379,5 +411,14 @@ onUnmounted(() => {
 .brain-notice {
   font-size: 12.5px;
   color: var(--accent);
+}
+/* 状态/探测失败提示：用警示色，避免和「操作成功」提示（accent）混淆 */
+.brain-notice--warn {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn, var(--accent)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, var(--accent)) 32%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--warn, var(--accent));
 }
 </style>

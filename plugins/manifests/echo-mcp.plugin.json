@@ -1,0 +1,16 @@
+{
+  "name": "echo-mcp",
+  "version": "0.1.0",
+  "description": "Marguerite 动态加载示例插件：纯 Python 标准库 MCP server（echo 工具）",
+  "author": "marguerite",
+  "mcp": {
+    "command": "python",
+    "args": ["server.py"],
+    "cwd": "../examples/echo-mcp",
+    "timeoutMs": 8000
+  },
+  "skills": [
+    { "name": "echo" }
+  ],
+  "permissions": []
+}

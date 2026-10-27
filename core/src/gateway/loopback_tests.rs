@@ -291,5 +291,76 @@ async fn rate_limit_exceeded_returns_json_rpc_error() {
 }
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 会话推理等级（`session.thinking.*`）—— 输入框推理等级拖动条的服务端真源
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 三条契约一次验完：未设定返回 `null`（调用方据此保留本地默认，不能当 off）、
+/// 设定后可读回、非法档位**响亮拒绝**（成本治理不允许 typo 静默升级）。
+#[test]
+fn session_thinking_get_set_roundtrip_and_rejects_unknown_effort() {
+    let bus = Arc::new(EventBus::default());
+    let ctx = ctx_with_bus(bus);
+    let key = format!("loopback.thinking.{}", uuid::Uuid::new_v4());
+
+    let fresh = dispatch_sync(&ctx, "session.thinking.get", &json!({ "sessionKey": key }))
+        .expect("get 应可调用");
+    assert!(
+        fresh["effort"].is_null(),
+        "从未设定过档位时必须回 null（前端据此保留本地默认值，不能当 off）: {fresh}"
+    );
+
+    let set = dispatch_sync(
+        &ctx,
+        "session.thinking.set",
+        &json!({ "sessionKey": key, "effort": "deep" }),
+    )
+    .expect("set 应成功");
+    assert_eq!(set["effort"], "deep", "{set}");
+    assert_eq!(
+        set["reasoningEffort"], "medium",
+        "deep 必须映射到请求体 medium，否则档位到不了模型: {set}"
+    );
+
+    let read_back = dispatch_sync(&ctx, "session.thinking.get", &json!({ "sessionKey": key }))
+        .expect("get 应可调用");
+    assert_eq!(read_back["effort"], "deep", "落盘后必须读回同一档位: {read_back}");
+
+    // 别名 + 大小写/空白宽容（与 chat.send 的 effort 解析同源）
+    let alias = dispatch_sync(
+        &ctx,
+        "session.thinking.set",
+        &json!({ "sessionKey": key, "effort": " HIGH " }),
+    )
+    .expect("别名 high 应被接受");
+    assert_eq!(alias["effort"], "max", "high 是 max 的别名: {alias}");
+
+    // off = 不注入 reasoning_effort（模型侧确实关闭思考）
+    let off = dispatch_sync(
+        &ctx,
+        "session.thinking.set",
+        &json!({ "sessionKey": key, "effort": "off" }),
+    )
+    .expect("off 应被接受");
+    assert!(
+        off["reasoningEffort"].is_null(),
+        "off 不得向请求体注入 reasoning_effort: {off}"
+    );
+
+    // typo 必须报错，而不是静默取保守默认（Deep）
+    let bad = dispatch_sync(
+        &ctx,
+        "session.thinking.set",
+        &json!({ "sessionKey": key, "effort": "higg" }),
+    )
+    .expect_err("未知档位必须被拒绝");
+    assert_eq!(bad.code, "INVALID_REQUEST", "{bad:?}");
+
+    // 缺 sessionKey 也必须拒绝：否则会写出 `thinking/.json` 这种垃圾文件
+    let no_key = dispatch_sync(&ctx, "session.thinking.get", &json!({}))
+        .expect_err("缺 sessionKey 必须被拒绝");
+    assert_eq!(no_key.code, "INVALID_REQUEST", "{no_key:?}");
+}
+
 #[path = "loopback_event_tests.rs"]
 mod event_tests;

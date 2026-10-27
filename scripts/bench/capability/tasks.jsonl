@@ -1,0 +1,60 @@
+{"id":"file-01","prompt":"Read README.md and summarize the installation steps for a new contributor.","expected_family":"file","allowed_tools":["read_file"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-02","prompt":"Add proper error handling to the main function in src/main.rs.","expected_family":"file","allowed_tools":["str_replace_editor","apply_patch"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-03","prompt":"List the subdirectories under webui/src.","expected_family":"file","allowed_tools":["list_dir"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-04","prompt":"Set the default gateway port to 18790 in config.yaml.","expected_family":"file","allowed_tools":["write_file"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-05","prompt":"Rename the old helper in src/utils.py and update every call site.","expected_family":"file","allowed_tools":["str_replace_editor","grep"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-06","prompt":"Apply the patch in fixes/parser.patch to the working tree.","expected_family":"file","allowed_tools":["apply_patch"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-07","prompt":"Refactor the duplicated request-building code in the agent module.","expected_family":"file","allowed_tools":["str_replace_editor","grep"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-08","prompt":"Search the codebase for where MAX_INITIAL_TOOLS is defined.","expected_family":"file","allowed_tools":["grep"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-09","prompt":"Show me the smoke-test section of docs/development.md.","expected_family":"file","allowed_tools":["read_file"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"file-10","prompt":"List every file in the e2e fixtures directory.","expected_family":"file","allowed_tools":["list_dir"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"shell-01","prompt":"Run the full test suite and report any failures.","expected_family":"shell","allowed_tools":["shell_exec","code_exec"],"forbidden_tools":[]}
+{"id":"shell-02","prompt":"Build the Rust workspace in release mode.","expected_family":"shell","allowed_tools":["shell_exec","code_exec"],"forbidden_tools":[]}
+{"id":"shell-03","prompt":"Show me the last five commits with git log.","expected_family":"shell","allowed_tools":["shell_exec","code_exec"],"forbidden_tools":[]}
+{"id":"shell-04","prompt":"Install the npm dependencies and then run the production build.","expected_family":"shell","allowed_tools":["shell_exec","code_exec"],"forbidden_tools":[]}
+{"id":"shell-05","prompt":"Print the current working directory.","expected_family":"shell","allowed_tools":["shell_exec","code_exec"],"forbidden_tools":[]}
+{"id":"browser-01","prompt":"Log in to the admin console and open the settings page.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-02","prompt":"Fill in the checkout form on this page and submit it.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-03","prompt":"Open this article and extract its title and main text.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-04","prompt":"Open the GitHub page for this project and tell me the latest release.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-05","prompt":"Click the order details link and read the shipping status.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-06","prompt":"Search for flights to Tokyo on this travel website.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-07","prompt":"Sign in to the website with the username and password I gave you.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-08","prompt":"Change the shipping address in the form to our office address.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-09","prompt":"Reload the page and check whether the console shows any errors.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"browser-10","prompt":"Export the table on this page as a CSV file.","expected_family":"browser","allowed_tools":["browser"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-01","prompt":"Open Notepad and click the Save button.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-02","prompt":"In Calculator, click the multiply button.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-03","prompt":"Maximize this window by clicking its maximize button.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-04","prompt":"Click OK in the dialog that just appeared.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-05","prompt":"Type my email address into the input field and press Enter.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-06","prompt":"Open the system settings menu and find the Bluetooth toggle.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-07","prompt":"Open WeChat and click the settings button in its window.","expected_family":"desktop.uia","allowed_tools":["desktop_launch","desktop_action"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-08","prompt":"Drag the character across the game map with the mouse.","expected_family":"desktop.pixel","allowed_tools":["computer_use"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-09","prompt":"Take a screenshot to see what is currently on screen.","expected_family":"desktop.pixel","allowed_tools":["computer_use"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"desktop-10","prompt":"Drag the shape on the canvas to the target position.","expected_family":"desktop.pixel","allowed_tools":["computer_use"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"memory-01","prompt":"Remember that I prefer short answers written in English.","expected_family":"memory","allowed_tools":["memory_save"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"memory-02","prompt":"What was the deployment plan we agreed on last time?","expected_family":"memory","allowed_tools":["memory_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"memory-03","prompt":"Save this convention to memory: run the tests before every commit.","expected_family":"memory","allowed_tools":["memory_save"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"memory-04","prompt":"What preferences have you stored about me?","expected_family":"memory","allowed_tools":["memory_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"memory-05","prompt":"Recall my preferred editor from our previous sessions.","expected_family":"memory","allowed_tools":["memory_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"kb-01","prompt":"Search the knowledge base for our deployment standard.","expected_family":"kb","allowed_tools":["kb_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"kb-02","prompt":"Ingest this PDF into the knowledge base.","expected_family":"kb","allowed_tools":["kb_ingest"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"kb-03","prompt":"Look up the permission request process in the employee handbook.","expected_family":"kb","allowed_tools":["kb_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"kb-04","prompt":"Does the document library contain the API style guide?","expected_family":"kb","allowed_tools":["kb_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"kb-05","prompt":"Find design notes about caching in the knowledge base.","expected_family":"kb","allowed_tools":["kb_search"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"skill-01","prompt":"Follow the existing release skill to publish this build.","expected_family":"skill","allowed_tools":["list_skills","use_skill"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"skill-02","prompt":"Is there a skill with security audit best practices?","expected_family":"skill","allowed_tools":["search_skills","list_skills"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"skill-03","prompt":"List the skills you currently have available.","expected_family":"skill","allowed_tools":["list_skills"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"skill-04","prompt":"Which skill should I use for a code review?","expected_family":"skill","allowed_tools":["search_skills","list_skills"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"skill-05","prompt":"Use the code review skill on the current diff.","expected_family":"skill","allowed_tools":["use_skill"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"mcp-01","prompt":"Use the connected MCP server to list the open issues on GitHub.","expected_family":"mcp","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"mcp-02","prompt":"Pull my assigned tickets from the Jira MCP server.","expected_family":"mcp","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"mcp-03","prompt":"List the pages in the Notion workspace through MCP.","expected_family":"mcp","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"mcp-04","prompt":"Run a read-only query through the database MCP server.","expected_family":"mcp","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"mcp-05","prompt":"Send a message to the team channel with the Slack MCP tool.","expected_family":"mcp","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"cron-01","prompt":"Remind me to drink water every day at 9am.","expected_family":"cron","allowed_tools":["automation"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"cron-02","prompt":"Generate the weekly report automatically every Monday.","expected_family":"cron","allowed_tools":["automation"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"cron-03","prompt":"Add a recurring job that syncs the mirror every hour.","expected_family":"cron","allowed_tools":["automation"],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"team-01","prompt":"Have multiple experts review this design in parallel.","expected_family":"team","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}
+{"id":"team-02","prompt":"Split this task across the team members.","expected_family":"team","allowed_tools":[],"forbidden_tools":["shell_exec","code_exec"]}

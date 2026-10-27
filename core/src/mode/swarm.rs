@@ -1,23 +1,24 @@
-//! 蜂群控制：**数量上限设置**（用户可配置，持久化 `<data_dir>/swarm_config.json`）。
+//! 蜂群控制：**数量设置**（用户可配置，持久化 `<data_dir>/swarm_config.json`）。
 //!
 //! 供智能体 / 智能体团队 / 专家团队在 Bloom / OmniTranscend 模式下启动蜂群时读取：
-//! 分片数（并行攻坚方向）与子专家数（每方向专家席位）均有界钳制，防「上千 subagent」失控。
+//! 分片数（并行攻坚方向）与子专家数（每方向专家席位）**完全由用户配置 / 模式规格决定**，
+//! 执行侧不再设硬上限 —— 用户选多少就跑多少（只保留「至少 1」的健全性检查，
+//! 防误传 0 / 负数让整支蜂群空转）。
+//!
+//! 诚实边界：不设硬上限意味着「把配置写成 500」会真的尝试拉起 500 个席位。
+//! 这是用户显式选择的规模，运行期仍受子代理并发闸门（`SubAgentConfig::max_concurrent`）
+//! 与真实资源约束；但**不再静默截断**用户的规模选择。
 
 use serde::{Deserialize, Serialize};
 
 /// 蜂群配置（0 表示用内置默认值）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct SwarmConfig {
-    /// 蜂群分片数量上限（0 = 默认 11 / OmniTranscend 13）
+    /// 蜂群分片数量（0 = 默认 11 / OmniTranscend 13）
     pub max_swarm_shards: usize,
-    /// 子专家数量上限（0 = 默认 5）
+    /// 子专家数量（0 = 默认 5）
     pub max_sub_experts: usize,
 }
-
-/// 分片数量上限的硬边界（防误配）。
-pub const MAX_SHARDS_CAP: usize = 200;
-/// 子专家数量上限的硬边界。
-pub const MAX_SUB_EXPERTS_CAP: usize = 50;
 
 fn path() -> std::path::PathBuf {
     crate::persistence::config::Config::data_dir().join("swarm_config.json")
@@ -45,24 +46,25 @@ pub fn save_to(cfg: &SwarmConfig, p: &std::path::Path) -> Result<(), String> {
     std::fs::rename(&tmp, p).map_err(|e| format!("原子替换失败: {e}"))
 }
 
-/// 生效的蜂群分片上限（用户配置优先，钳制 1..=200）。
-pub fn effective_shards(default_shards: usize) -> usize {
-    let cfg = load();
-    if cfg.max_swarm_shards == 0 {
-        default_shards.clamp(1, MAX_SHARDS_CAP)
+/// 规模判定（纯函数）：0 = 未配置 → 用模式规格默认值；其余原样保留。
+///
+/// 唯一的健全性检查是「≥ 1」：0 会让整支蜂群空转，负数在 `usize` 上不可表达。
+fn resolve(configured: usize, default_value: usize) -> usize {
+    if configured == 0 {
+        default_value.max(1)
     } else {
-        cfg.max_swarm_shards.clamp(1, MAX_SHARDS_CAP)
+        configured.max(1)
     }
 }
 
-/// 生效的子专家上限（用户配置优先，钳制 1..=50）。
+/// 生效的蜂群分片数（用户配置优先；只做 ≥1 的健全性检查）。
+pub fn effective_shards(default_shards: usize) -> usize {
+    resolve(load().max_swarm_shards, default_shards)
+}
+
+/// 生效的子专家数（用户配置优先；只做 ≥1 的健全性检查）。
 pub fn effective_sub_experts(default_sub_experts: usize) -> usize {
-    let cfg = load();
-    if cfg.max_sub_experts == 0 {
-        default_sub_experts.clamp(1, MAX_SUB_EXPERTS_CAP)
-    } else {
-        cfg.max_sub_experts.clamp(1, MAX_SUB_EXPERTS_CAP)
-    }
+    resolve(load().max_sub_experts, default_sub_experts)
 }
 
 #[cfg(test)]
@@ -86,23 +88,26 @@ mod tests {
         assert_eq!(effective_sub_experts(5), 5);
     }
 
+    /// 用户配置的规模必须原样生效：不再有 200 / 50 的硬上限。
     #[test]
-    fn override_and_clamp() {
+    fn override_is_not_clamped() {
         let p = temp_path();
-        let mut cfg = SwarmConfig {
+        let cfg = SwarmConfig {
             max_swarm_shards: 40,
             ..Default::default()
         };
         save_to(&cfg, &p).unwrap();
         assert_eq!(load_from(&p).max_swarm_shards, 40);
-        cfg.max_swarm_shards = 9999;
-        cfg.max_sub_experts = 3;
-        assert_eq!(
-            cfg.max_swarm_shards.clamp(1, MAX_SHARDS_CAP),
-            MAX_SHARDS_CAP,
-            "超上限钳制"
-        );
-        assert_eq!(cfg.max_sub_experts.clamp(1, MAX_SUB_EXPERTS_CAP), 3);
+        // 健全性：只把「未配置 / 0」收敛为 1，其余按用户所选原样返回。
+        assert_eq!(resolve(9999, 11), 9999, "超出旧硬上限也必须保留");
+        assert_eq!(resolve(300, 5), 300, "超出旧硬上限也必须保留");
+    }
+
+    /// 0 是「未配置」哨兵值，不得让蜂群规模变成 0（空转）。
+    #[test]
+    fn zero_configured_falls_back_to_sane_minimum() {
+        assert_eq!(resolve(0, 0), 1);
+        assert_eq!(resolve(0, 13), 13);
     }
 
     #[test]

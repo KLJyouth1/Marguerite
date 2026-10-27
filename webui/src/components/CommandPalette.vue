@@ -51,7 +51,7 @@
         role="listbox"
         :aria-label="t('shared.cmdp.resultsLabel')"
       >
-        <p v-if="flatItems.length === 0 && !searching" class="cmdp-empty">
+        <p v-if="flatItems.length === 0 && !showSearching" class="cmdp-empty">
           {{ query.trim() ? t('shared.cmdp.noMatches') : t('shared.cmdp.recentsEmpty') }}
         </p>
         <template v-for="group in groups" :key="group.label">
@@ -79,7 +79,7 @@
             </button>
           </template>
         </template>
-        <p v-if="searching" class="cmdp-searching" aria-live="polite">{{ t('shared.cmdp.searching') }}</p>
+        <p v-if="showSearching" class="cmdp-searching" aria-live="polite">{{ t('shared.cmdp.searching') }}</p>
       </div>
     </section>
   </div>
@@ -93,10 +93,20 @@ import { useRouter } from 'vue-router'
 import Icon from './Icon.vue'
 import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useBgm } from '@/composables/useBgm'
-import { getWorkNavigationSection } from '@/router/nav'
+import { getGroupedNavigation, getWorkNavigationSection } from '@/router/nav'
 import { useRpcStore } from '@/stores/rpc'
 import { useActiveMode, switchActiveMode } from '@/composables/useActiveMode'
+import { useFreshTaskDraft } from '@/composables/useFreshTaskDraft'
+import { sortWorkspacesByRecent, useProjectWorkspaces } from '@/composables/useProjectWorkspaces'
+import { useToasts } from '@/composables/useToasts'
+import {
+  EXPERT_TEAMS,
+  loadStoredOrchestration,
+  persistOrchestration,
+} from '@/composables/chat/orchestration'
 import { requestTaskWorkbenchOpen } from '@/workbench/taskItems'
+import { requestTerminalWorkbenchOpen } from '@/workbench/terminalItems'
+import { requestBrowserWorkbenchOpen } from '@/workbench/browserItems'
 import { highlightFtsSnippet } from '@/utils/searchSnippet'
 import type { SidebarSection } from '@/composables/useSessions'
 import type { IconName } from '@/utils/icons'
@@ -125,6 +135,9 @@ const { t } = useI18n()
 const router = useRouter()
 const rpcStore = useRpcStore()
 const { enabled: bgmEnabled, setEnabled: setBgmEnabled } = useBgm()
+const { pushToast } = useToasts()
+const projectWorkspaces = useProjectWorkspaces()
+const freshTaskDraft = useFreshTaskDraft()
 
 const dialogRef = ref<HTMLElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
@@ -141,7 +154,7 @@ useDialogA11y(dialogRef, open, () => close())
 // Command source — data-driven from the existing nav helpers plus a small set
 // of actions. Each entry carries optional keywords for the substring filter.
 // ---------------------------------------------------------------------------
-type Run = () => void
+type Run = () => void | Promise<void>
 interface Command {
   id: string
   title: string
@@ -156,16 +169,31 @@ interface Command {
   run: Run
 }
 
-// Stable group order for the rendered palette. Conversation groups sort below
-// the static nav/action groups so "go to page" stays the top, instant result.
-const GROUP_ORDER = ['Recents', 'Work', 'Observe', 'Actions', 'Modes', 'Conversations', 'Messages'] as const
+// Stable group order for the rendered palette. Live switch targets (workspace /
+// model / team / agent) sort above the static nav groups so "switch this now"
+// beats "go to a page" once the query matches one. Conversation groups sort
+// below the static nav/action groups so "go to page" stays the top, instant
+// result.
+const GROUP_ORDER = [
+  'Recents', 'Workspaces', 'Models', 'Teams', 'Agents',
+  'Work', 'Operate', 'Observe', 'Settings', 'Extras', 'Actions', 'Modes',
+  'Conversations', 'Messages',
+] as const
 
 // Display label for a group id. Nav bands resolve through the same nav.* keys
 // the sidebar uses, so the palette and the rail always agree per locale.
 const GROUP_LABEL_KEYS: Record<string, string> = {
   Recents: 'shared.cmdp.groupRecents',
+  Workspaces: 'shared.cmdp.groupWorkspaces',
+  Models: 'shared.cmdp.groupModels',
+  Teams: 'shared.cmdp.groupTeams',
+  Agents: 'shared.cmdp.groupAgents',
   Work: 'shared.cmdp.groupWork',
+  // 与侧栏折叠组同名（nav.ts 的 GROUP_TITLES），三档分组在面板与侧栏必须一致。
+  Operate: 'nav.groupOperate',
   Observe: 'nav.groupMonitor',
+  Settings: 'nav.groupSettings',
+  Extras: 'nav.groupExtras',
   Actions: 'shared.cmdp.groupActions',
   Modes: 'shared.cmdp.groupModes',
   Conversations: 'shared.cmdp.groupConversations',
@@ -173,7 +201,12 @@ const GROUP_LABEL_KEYS: Record<string, string> = {
 }
 function groupLabel(label: string): string {
   const key = GROUP_LABEL_KEYS[label]
-  return key ? t(key) : label
+  if (!key) return label
+  const translated = t(key)
+  // vue-i18n renders the raw key when a locale is missing it (a half-shipped
+  // translation would otherwise put `shared.cmdp.groupModes` on screen). The
+  // group id is the stable, human-readable fallback.
+  return translated === key ? label : translated
 }
 
 function navTo(path: string): Run {
@@ -231,6 +264,29 @@ const allCommands = computed<Command[]>(() => {
       group: item.group,
       run: navTo(item.path),
     })
+  }
+
+  // 二级分组目的地（引擎健康 / 编辑器 / 终端 / 浏览器驾驶舱 / 应用自控 / 专家中心…）。
+  //
+  // 这些页面只在侧栏折叠组里，此前命令面板只索引 Work 主 rail + /logs ⇒ 用户按
+  // Ctrl+K 搜「应用自控」「浏览器」全部「无匹配项」，页面等于不可达。这里按侧栏
+  // 同一份 `getGroupedNavigation()` 补齐，标题/图标与侧栏逐字一致；按 id 去重，
+  // 避免 /logs 这类既在 demoted 又进分组的条目出现两次。
+  const known = new Set(out.map(command => command.id))
+  for (const group of getGroupedNavigation()) {
+    for (const item of group.items) {
+      const id = `nav:${item.path}`
+      if (known.has(id)) continue
+      known.add(id)
+      out.push({
+        id,
+        title: item.title,
+        icon: item.icon,
+        keywords: `${item.title} ${item.path}`.toLowerCase(),
+        group: group.id,
+        run: navTo(item.path),
+      })
+    }
   }
 
   // The Channels hub entry opens the workspace; this separate action lands in
@@ -297,6 +353,29 @@ const allCommands = computed<Command[]>(() => {
         requestTaskWorkbenchOpen()
       },
     },
+    // 侧栏面板的冷启动入口：工作台在没有任何标签时是**不挂载**的（标题栏的「+」
+    // 也就点不到）。调色板这两条会先建出一个面板项，把工作台挂起来，
+    // 之后标题栏的「+」就能继续加编辑器/浏览器。
+    {
+      id: 'action:open-workbench-terminal',
+      title: t('workbench.panels.terminal'),
+      icon: 'terminal',
+      keywords: 'terminal shell console workbench panel 终端 沙箱 工作台',
+      group: 'Actions',
+      run: () => {
+        requestTerminalWorkbenchOpen('')
+      },
+    },
+    {
+      id: 'action:open-workbench-browser',
+      title: t('workbench.panels.browser'),
+      icon: 'languages',
+      keywords: 'browser web preview workbench panel 浏览器 内置 预览',
+      group: 'Actions',
+      run: () => {
+        requestBrowserWorkbenchOpen('https://example.com')
+      },
+    },
   )
 
   // Modes: switch the runtime mode from anywhere (upgrade-masterplan §6 阶段 D).
@@ -335,13 +414,322 @@ const allCommands = computed<Command[]>(() => {
   return out
 })
 
+// ---------------------------------------------------------------------------
+// Live switch providers — workspace / model / team / agent.
+//
+// Loaded lazily when the palette opens (never at boot) and only for methods the
+// connected gateway declares; a failed load degrades to "no results" for that
+// group instead of blocking the rest of the palette.
+//
+// Why the palette owns the switching itself instead of emitting to App: these
+// are the same state transitions the sidebar / model picker / composer already
+// perform, and each one has an existing owner we reuse — `workspaces.open` +
+// `useProjectWorkspaces`, `onboarding.llmProfile.activate` (the model picker's
+// activation path), `persistOrchestration` (the composer's team selection),
+// and the shared `freshTaskDraft` signal + `?agent=` draft route.
+// ---------------------------------------------------------------------------
+interface PaletteModelRow {
+  provider: string
+  model: string
+  label: string
+  /** models.json profile id (Rust profile rows only); catalog rows have none. */
+  profileId: string
+  active: boolean
+}
+
+interface ModelsListResponse {
+  models?: Array<Record<string, unknown>>
+  profiles?: Array<Record<string, unknown>>
+  current?: { provider?: unknown; model?: unknown } | null
+}
+
+interface ConfigSnapshot {
+  llm?: { provider?: unknown; model?: unknown } | null
+  llm_profile_rows?: Array<Record<string, unknown>>
+}
+
+interface TeamCompositionRow {
+  id?: unknown
+  name?: unknown
+  label?: unknown
+  goal?: unknown
+}
+
+interface AgentListResponse {
+  agents?: Array<{ id?: unknown; name?: unknown; description?: unknown }>
+}
+
+function supports(method: string): boolean {
+  return typeof rpcStore.supportsMethod === 'function' && rpcStore.supportsMethod(method)
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function str(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+async function selectWorkspace(workspace: { id: string; name: string; path: string }): Promise<void> {
+  try {
+    // `workspaces.open` is the shared "open this project" path (idempotent for
+    // an already-registered folder; W8.1 refreshes its last_opened_at).
+    if (rpcStore.canChooseProject) await projectWorkspaces.openWorkspace(workspace.path)
+    freshTaskDraft.requestFreshTask('main', workspace.id)
+    await router.push({ path: '/chat/new', query: { agent: 'main', project: workspace.id } })
+  } catch (err) {
+    pushToast(t('shared.cmdp.workspaceSwitchFailed', { error: errorText(err) }), { tone: 'danger' })
+  }
+}
+
+async function loadWorkspaceCommands(): Promise<Command[]> {
+  // Listing must gate on the *open* capability, not just on `workspaces.list`:
+  // a gateway that can list but cannot open would otherwise render switch rows
+  // whose action silently does nothing. `canChooseProject` = owner + list + open.
+  if (!rpcStore.canChooseProject || !supports('workspaces.list')) return []
+  try {
+    const list = await projectWorkspaces.loadWorkspaces()
+    // W8.4: the palette is a "switch to a recent project" affordance, so cap the
+    // group at the 5 most recent (pinned first) — the full-management list lives
+    // in the project picker dialog. `sortWorkspacesByRecent` applies the same
+    // rule as the backend and keeps old gateways (no `lastOpenedAt`) stable.
+    return sortWorkspacesByRecent(list).slice(0, 5).map(workspace => ({
+      id: `workspace:${workspace.id}`,
+      title: workspace.name,
+      icon: 'folder' as IconName,
+      keywords: `${workspace.name} ${workspace.path} ws workspace workspaces 工作区 空间`.toLowerCase(),
+      group: 'Workspaces',
+      subtitle: workspace.path,
+      run: () => selectWorkspace(workspace),
+    }))
+  } catch (err) {
+    console.warn('[CommandPalette] workspaces.list failed:', errorText(err))
+    return []
+  }
+}
+
+async function activateModel(row: PaletteModelRow): Promise<void> {
+  if (row.active) return
+  try {
+    // Same activation RPC the chat model picker uses; it writes models.json and
+    // mirrors config.yaml, then publishes `models.changed` app-wide.
+    await rpcStore.call('onboarding.llmProfile.activate', {
+      ...(row.profileId ? { profileId: row.profileId } : {}),
+      providerId: row.provider,
+      model: row.model,
+    })
+  } catch (err) {
+    pushToast(t('shared.cmdp.modelSwitchFailed', { error: errorText(err) }), { tone: 'danger' })
+  }
+}
+
+function modelRowFromEntry(raw: Record<string, unknown>): PaletteModelRow | null {
+  const provider = str(raw.provider)
+  const model = str(raw.model) || str(raw.id) || str(raw.name)
+  if (!provider || !model) return null
+  return {
+    provider,
+    model,
+    // Rust profile rows carry `kind`; provider catalog rows (pyengine) do not.
+    profileId: typeof raw.kind === 'string' ? str(raw.id) : '',
+    label: str(raw.label) || str(raw.name) || model,
+    active: raw.active === true,
+  }
+}
+
+async function loadModelCommands(): Promise<Command[]> {
+  const rows = new Map<string, PaletteModelRow>()
+  let currentProvider = ''
+  let currentModel = ''
+
+  // Profile rows first: they carry the unambiguous profileId that activation
+  // needs when one provider owns several archives.
+  if (supports('config.get')) {
+    try {
+      const cfg = await rpcStore.call<ConfigSnapshot>('config.get')
+      currentProvider = str(cfg?.llm?.provider)
+      currentModel = str(cfg?.llm?.model)
+      for (const raw of cfg?.llm_profile_rows || []) {
+        const row = modelRowFromEntry(raw)
+        if (row) rows.set(`${row.provider}:${row.model}`, row)
+      }
+    } catch (err) {
+      console.warn('[CommandPalette] config.get failed:', errorText(err))
+    }
+  }
+
+  // `models.list` also works offline (Rust fallback) and adds provider catalog
+  // entries the profile list may not include yet.
+  if (supports('models.list')) {
+    try {
+      const res = await rpcStore.call<ModelsListResponse>('models.list', {})
+      currentProvider = str(res?.current?.provider) || currentProvider
+      currentModel = str(res?.current?.model) || currentModel
+      const list = Array.isArray(res?.models)
+        ? res.models
+        : (Array.isArray(res?.profiles) ? res.profiles : [])
+      for (const raw of list) {
+        const row = modelRowFromEntry(raw)
+        if (row && !rows.has(`${row.provider}:${row.model}`)) {
+          rows.set(`${row.provider}:${row.model}`, row)
+        }
+      }
+    } catch (err) {
+      console.warn('[CommandPalette] models.list failed:', errorText(err))
+    }
+  }
+
+  for (const row of rows.values()) {
+    if (!row.active && row.provider === currentProvider && row.model === currentModel) {
+      row.active = true
+    }
+  }
+
+  return [...rows.values()].map(row => ({
+    id: `model:${row.provider}:${row.model}`,
+    title: row.label,
+    icon: 'model' as IconName,
+    keywords: `${row.label} ${row.provider} ${row.model} model models 模型`.toLowerCase(),
+    group: 'Models',
+    subtitle: row.active
+      ? `${row.provider} · ${row.model} — ${t('shared.cmdp.modelActive')}`
+      : `${row.provider} · ${row.model}`,
+    run: () => activateModel(row),
+  }))
+}
+
+function selectTeam(id: string, label: string): void {
+  try {
+    const stored = loadStoredOrchestration()
+    const teams = stored.teams.includes(id) ? stored.teams : [...stored.teams, id].slice(0, 8)
+    // Same rule the composer applies: expert teams switch the form to `expert`,
+    // custom compositions to `team`.
+    const form = EXPERT_TEAMS.some(team => team.id === id) ? 'expert' : 'team'
+    persistOrchestration({ ...stored, teams, form, confirmed: false })
+    freshTaskDraft.requestFreshTask('main')
+    void router.push({ path: '/chat/new', query: { agent: 'main' } })
+    pushToast(t('shared.cmdp.teamSelected', { name: label }), { tone: 'ok' })
+  } catch (err) {
+    pushToast(t('shared.cmdp.teamSelectFailed', { error: errorText(err) }), { tone: 'danger' })
+  }
+}
+
+async function loadTeamCommands(): Promise<Command[]> {
+  const out: Command[] = []
+  const seen = new Set<string>()
+  if (supports('team.compositions.list')) {
+    try {
+      const res = await rpcStore.call<{ items?: TeamCompositionRow[]; compositions?: TeamCompositionRow[] }>(
+        'team.compositions.list',
+        {},
+      )
+      const list = Array.isArray(res?.items)
+        ? res.items
+        : (Array.isArray(res?.compositions) ? res.compositions : [])
+      for (const raw of list) {
+        const id = str(raw.id) || str(raw.name)
+        const label = str(raw.label) || str(raw.name) || id
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+        out.push({
+          id: `team:${id}`,
+          title: label,
+          icon: 'boxes' as IconName,
+          keywords: `${label} ${id} ${str(raw.goal)} team teams 团队 专家团`.toLowerCase(),
+          group: 'Teams',
+          subtitle: str(raw.goal) || id,
+          run: () => selectTeam(id, label),
+        })
+      }
+    } catch (err) {
+      console.warn('[CommandPalette] team.compositions.list failed:', errorText(err))
+    }
+  }
+  // The built-in expert catalogue is a static registry (same list the composer
+  // renders), so those teams stay switchable even when compositions fail.
+  for (const team of EXPERT_TEAMS) {
+    if (seen.has(team.id)) continue
+    seen.add(team.id)
+    out.push({
+      id: `team:${team.id}`,
+      title: team.label,
+      icon: 'boxes' as IconName,
+      keywords: `${team.label} ${team.id} team teams 团队 专家团`.toLowerCase(),
+      group: 'Teams',
+      subtitle: team.id,
+      run: () => selectTeam(team.id, team.label),
+    })
+  }
+  return out
+}
+
+function selectAgent(id: string): void {
+  // Reuses the existing agent-chat entry (`/chat/new?agent=…`) plus the shared
+  // fresh-task signal so clicking twice on the same draft still starts over.
+  freshTaskDraft.requestFreshTask(id)
+  void router.push({ path: '/chat/new', query: { agent: id } })
+}
+
+async function loadAgentCommands(): Promise<Command[]> {
+  if (!supports('agents.list')) return []
+  try {
+    const res = await rpcStore.call<AgentListResponse>('agents.list', {})
+    return (res?.agents || [])
+      .map(raw => ({
+        id: str(raw.id),
+        name: str(raw.name) || str(raw.id),
+        description: str(raw.description),
+      }))
+      .filter(agent => Boolean(agent.id))
+      .map(agent => ({
+        id: `agent:${agent.id}`,
+        title: agent.name,
+        icon: 'agents' as IconName,
+        keywords: `${agent.name} ${agent.id} agent agents 智能体 代理 专家`.toLowerCase(),
+        group: 'Agents',
+        subtitle: agent.description || agent.id,
+        run: () => selectAgent(agent.id),
+      }))
+  } catch (err) {
+    console.warn('[CommandPalette] agents.list failed:', errorText(err))
+    return []
+  }
+}
+
+const dynamicCommands = ref<Command[]>([])
+const paletteLoading = ref(false)
+let dynamicLoadToken = 0
+
+async function loadDynamicSources(): Promise<void> {
+  const token = ++dynamicLoadToken
+  paletteLoading.value = true
+  try {
+    const [workspaces, models, teams, agents] = await Promise.all([
+      loadWorkspaceCommands(),
+      loadModelCommands(),
+      loadTeamCommands(),
+      loadAgentCommands(),
+    ])
+    if (token !== dynamicLoadToken) return
+    dynamicCommands.value = [...workspaces, ...models, ...teams, ...agents]
+  } finally {
+    if (token === dynamicLoadToken) paletteLoading.value = false
+  }
+}
+
 // Case-insensitive substring filter on title + keywords. Only consulted for a
 // non-empty query: the untyped palette lists recent tasks instead (see
 // visibleCommands), so destinations surface by name rather than by default.
+const searchableCommands = computed<Command[]>(() => [
+  ...allCommands.value,
+  ...dynamicCommands.value,
+])
+
 const filtered = computed<Command[]>(() => {
   const q = query.value.trim().toLowerCase()
   if (!q) return []
-  return allCommands.value.filter(
+  return searchableCommands.value.filter(
     (cmd) => cmd.title.toLowerCase().includes(q) || cmd.keywords.includes(q),
   )
 })
@@ -353,6 +741,13 @@ const filtered = computed<Command[]>(() => {
 const sessionHits = ref<SessionSearchHit[]>([])
 const messageHits = ref<MessageSearchHit[]>([])
 const searching = ref(false)
+// One "loading" line covers both providers: transcript search and the live
+// switch lists (workspace/model/team/agent) load asynchronously after open.
+// The untyped resting state must not read "Searching tasks…" while it is just
+// prefetching, so the provider flag only counts once a query exists.
+const showSearching = computed(
+  () => searching.value || (paletteLoading.value && query.value.trim().length > 0),
+)
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 // Monotonic token so a slow response from an earlier keystroke can't overwrite
 // the results of a later one.
@@ -493,17 +888,29 @@ const activeId = computed(() => {
 
 // Reset query + selection whenever the palette opens; clear any conversation
 // results and cancel in-flight searches on close so the next open starts clean.
+// `immediate` covers the already-open mount (App renders it with v-if inside)
+// so the live switch providers load on the very first paint too.
 watch(open, (isOpen) => {
   if (isOpen) {
     query.value = ''
     activeIndex.value = 0
     clearResults()
+    void loadDynamicSources()
   } else {
     if (debounceTimer) clearTimeout(debounceTimer)
     searchToken++
     clearResults()
   }
-})
+}, { immediate: true })
+
+// Capabilities and the method table arrive with the WS handshake: a palette
+// opened during "connecting" would otherwise stay empty until reopened.
+watch(
+  () => rpcStore.state,
+  (state) => {
+    if (state === 'connected' && open.value) void loadDynamicSources()
+  },
+)
 
 // Clamp the active index whenever the visible set shrinks under the cursor
 // (filter narrowing or async results arriving/clearing).
@@ -549,7 +956,11 @@ function onInputKeydown(e: KeyboardEvent) {
 
 function runItem(item: Command) {
   close()
-  item.run()
+  // Live switches are async (RPC + navigation); never let a rejection escape
+  // as an unhandled rejection — each action surfaces its own toast on failure.
+  void Promise.resolve(item.run()).catch((err) => {
+    console.warn('[CommandPalette] command failed:', item.id, err)
+  })
 }
 
 function close() {

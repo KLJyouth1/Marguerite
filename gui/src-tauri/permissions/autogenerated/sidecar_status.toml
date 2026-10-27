@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sidecar-status"
+description = "Enables the sidecar_status command without any pre-configured scope."
+commands.allow = ["sidecar_status"]
+
+[[permission]]
+identifier = "deny-sidecar-status"
+description = "Denies the sidecar_status command without any pre-configured scope."
+commands.deny = ["sidecar_status"]

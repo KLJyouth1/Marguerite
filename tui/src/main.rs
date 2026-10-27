@@ -25,7 +25,11 @@ fn main() -> Result<()> {
         std::process::exit(0);
     }
 
-    let config = Config::load().unwrap_or_default();
+    // 会话入口叠加「用户选择的模型」（`models.json` active 档案，`model use` 写的就是它）：
+    // 执行侧只认 `config.model.*`，不叠加则「切换了模型、TUI 里仍走旧 provider」。
+    let config = marguerite_core::model::selector::apply_effective_model(
+        &Config::load().unwrap_or_default(),
+    );
     if std::env::var("MARGUERITE_LEGACY_UI").is_ok() {
         let mut app = App::with_config(config);
         app.run()

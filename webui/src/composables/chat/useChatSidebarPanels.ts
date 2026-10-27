@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 
 import type { ChatMessage, ChatToolCall } from '@/types/chat'
 import type { ArtifactPayload } from '@/types/rpc'
@@ -7,16 +7,14 @@ import type { RsArtifact } from '@/components/chat/RightSidebar.vue'
 /**
  * 右侧侧栏面板状态（从 ChatView 分治迁出）。
  *
- * 承载聊天页右侧边栏的全部面板态：用量/缓存计量条轮询、文件变更抽屉、
+ * 承载聊天页右侧边栏的全部面板态：文件变更抽屉、
  * 侧栏开关持久化、任务轴（实时工具调用 + 历史时间线折叠）、文件更改列表、
  * 产物索引（stale/live 追踪 + artifact.updated 防抖重拉）与系统打开回退。
  * 视图侧只负责把 chatStream / 产物索引 / 打开动作等依赖注入进来。
+ *
+ * 底部用量计量条**不在这里**：它已改成 ChatView 按会话消息里的真实 usage 求和
+ * （`utils/chat/sessionUsage.ts`），不再轮询 usage.status / cache.status。
  */
-
-/** 用量计量条（usage.status 快照，camelCase/snake_case 双容） */
-interface UsageStrip { total_tokens?: number; totalTokens?: number; runs?: number; sessions?: number }
-/** 缓存计量条（cache.status 快照） */
-interface CacheStrip { ok?: boolean; server_cache_hit_rate?: number; saved_prompt_tokens?: number; prefix_hits?: number; client_hit_rate?: number }
 
 /** 任务轴行（实时工具调用与历史时间线的统一投影） */
 export interface SidebarTask {
@@ -25,6 +23,120 @@ export interface SidebarTask {
   status: 'running' | 'done' | 'error' | 'pending'
   tools?: string[]
   duration?: string
+  /** 行类型：右侧栏据此换图标、并把空 title 本地化成「思考 / 执行总结」 */
+  kind?: 'tool' | 'thinking' | 'summary' | 'step'
+  /** 入参（命令行 / 文件路径 / JSON） */
+  input?: string
+  /** 出参（命令输出 / 文件内容 / 工具结果） */
+  output?: string
+  /** 稳定 key（避免流式追加时整列重排闪烁） */
+  id?: string
+}
+
+/** 单条运行记录的正文长度上限（超出截断并标 `…`） */
+const RUN_TEXT_LIMIT = 4000
+
+function clipRunText(value: unknown): string {
+  const text = typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
+  return text.length > RUN_TEXT_LIMIT ? `${text.slice(0, RUN_TEXT_LIMIT)}\n…` : text
+}
+
+export interface SidebarTaskBuildInput {
+  /** 当前轮的真实思考正文（可为空） */
+  thinking: string
+  streamToolCalls: ChatToolCall[]
+  messages: ChatMessage[]
+  streaming: boolean
+}
+
+/**
+ * 运行流投影：思考 → 实时工具 → 历史步骤/工具 → 本轮总结。
+ *
+ * 抽成纯函数是为了能单测「顺序、kind、入参出参、总结抑制」这些契约，
+ * 而不必去 mount 整个 ChatView。
+ */
+export function buildSidebarTasks(input: SidebarTaskBuildInput): SidebarTask[] {
+  const tasks: SidebarTask[] = []
+  const { thinking, streamToolCalls, messages, streaming } = input
+
+  // 1) 实时思考：后台仍在跑时状态为 running，结束后保留全文供回看
+  if (thinking.trim()) {
+    tasks.push({
+      id: 'thinking:live',
+      kind: 'thinking',
+      title: '',
+      status: streaming ? 'running' : 'done',
+      output: clipRunText(thinking),
+    })
+  }
+
+  // 2) 实时工具调用（in-flight）：这是"命令行正在跑"的直接证据
+  for (const tc of streamToolCalls) {
+    tasks.push({
+      id: `tool:${tc.toolId}`,
+      kind: 'tool',
+      title: tc.displayName || tc.name,
+      status: tc.isRunning ? 'running' : (tc.isError ? 'error' : 'done'),
+      tools: [tc.name],
+      input: clipRunText(tc.inputRaw || tc.inputPreview || ''),
+      output: clipRunText(tc.result || tc.resultPreview || ''),
+    })
+  }
+
+  // 3) 已落库的历史：思考 / 时间线 / 工具调用
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    if (msg.reasoning?.text) {
+      tasks.push({
+        id: `thinking:${msg.turnId || msg.ts}`,
+        kind: 'thinking',
+        title: '',
+        status: 'done',
+        output: clipRunText(String(msg.reasoning.text)),
+      })
+    }
+    if (msg.timeline) {
+      for (const seg of msg.timeline) {
+        const s = seg as Record<string, unknown>
+        tasks.push({
+          kind: 'step',
+          title: String(s.label || s.kind || s.text || '步骤'),
+          detail: s.detail ? String(s.detail) : undefined,
+          status: String(s.status || 'done') as SidebarTask['status'],
+          duration: s.duration ? String(s.duration) : undefined,
+        })
+      }
+    }
+    if (msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        const toolName = String(tc.name || tc.tool_name || tc.tool || 'tool')
+        tasks.push({
+          kind: 'tool',
+          title: toolName,
+          status: tc.error ? 'error' : (tc.result ? 'done' : 'running'),
+          tools: [toolName],
+          input: clipRunText(tc.input ?? ''),
+          output: clipRunText(tc.error ? tc.error : (tc.result ?? '')),
+        })
+      }
+    }
+  }
+
+  // 4) 本轮总结：最后一条 assistant 正文（流式期间不作为"总结"出现）
+  if (!streaming) {
+    const last = [...messages].reverse().find(m => m.role === 'assistant' && String(m.text || '').trim())
+    if (last) {
+      tasks.push({
+        id: `summary:${last.turnId || last.ts}`,
+        kind: 'summary',
+        title: '',
+        status: 'done',
+        output: clipRunText(String(last.text)),
+      })
+    }
+  }
+
+  return tasks
 }
 
 /** 文件更改行（workspace.file_changes.list 归一化） */
@@ -57,6 +169,8 @@ export interface ChatSidebarPanelsDeps {
   messages: Ref<ChatMessage[]>
   /** 实时编排工具调用流（in-flight 工具调用驱动任务轴 running 态） */
   streamToolCalls: Ref<ChatToolCall[]>
+  /** 实时思考正文（session.event.thinking 累积；空串表示本轮没思考） */
+  thinking?: Ref<string>
   /** 产物索引（会话级持久索引，stale 判定的对照面） */
   sessionArtifacts: Ref<ArtifactPayload[]>
   loadSessionArtifacts: () => Promise<unknown>
@@ -81,35 +195,6 @@ function findSessionArtifact(artifacts: ArtifactPayload[], a: RsArtifact): RsArt
 export function useChatSidebarPanels(deps: ChatSidebarPanelsDeps) {
   const { rpc, sessionKey, messages, streamToolCalls, sessionArtifacts } = deps
 
-  // ── 计量条：本会话 token / 缓存命中（usage.status + cache.status，每 12s 刷新）──
-  const usageStrip = ref<UsageStrip | null>(null)
-  const cacheStrip = ref<CacheStrip | null>(null)
-  let usageTimer: ReturnType<typeof setInterval> | null = null
-  async function refreshUsageStrip() {
-    // ⚠️ 没有会话键时**不能**问 `usage.status`：网关把空 `sessionKey` 当成一次合法
-    // 过滤，于是返回 `session = ''`（无归属事件）那一桶 —— 真机实测是 6930 轮 /
-    // 680677 token，前端却按「本会话」渲染给用户（全新会话不可能有 6930 轮）。
-    if (!sessionKey.value) {
-      usageStrip.value = null
-    } else {
-      try {
-        const u = await rpc.call<UsageStrip>('usage.status', { sessionKey: sessionKey.value })
-        usageStrip.value = u ?? null
-      } catch { /* 静默 */ }
-    }
-    try {
-      const c = await rpc.call<CacheStrip>('cache.status', {})
-      cacheStrip.value = c ?? null
-    } catch { /* 静默 */ }
-  }
-  onMounted(() => {
-    void refreshUsageStrip()
-    usageTimer = setInterval(() => void refreshUsageStrip(), 12000)
-  })
-  onUnmounted(() => {
-    if (usageTimer) clearInterval(usageTimer)
-  })
-
   // ── 文件更改抽屉 ──
   const fileChangesOpen = ref(false)
   const fileChangesVisible = computed(() => rpc.supportsMethod('workspace.file_changes.list'))
@@ -121,48 +206,35 @@ export function useChatSidebarPanels(deps: ChatSidebarPanelsDeps) {
     try { localStorage.setItem(RIGHT_SIDEBAR_OPEN_KEY, open ? '1' : '0') } catch { /* ignore */ }
   })
 
-  // ── 任务轴：实时工具调用流 + 历史消息时间线/工具调用的统一投影 ──
-  const sidebarTasks = computed((): SidebarTask[] => {
-    const tasks: SidebarTask[] = []
-    // Feed the live orchestrator step stream (in-flight tool calls) so the task
-    // axis reflects real-time execution, not just committed history.
-    for (const tc of streamToolCalls.value) {
-      tasks.push({
-        title: `调用工具：${tc.displayName || tc.name}`,
-        status: (tc.isRunning ? 'running' : (tc.isError ? 'error' : 'done')) as SidebarTask['status'],
-        tools: [tc.name],
-      })
-    }
-    for (const msg of messages.value) {
-      if (msg.role !== 'assistant') continue
-      if (msg.reasoning?.text) {
-        tasks.push({ title: '深度思考', status: 'done' as const, detail: String(msg.reasoning.text).slice(0, 100) })
-      }
-      if (msg.timeline) {
-        for (const seg of msg.timeline) {
-          const s = seg as Record<string, unknown>
-          tasks.push({
-            title: String(s.label || s.kind || s.text || '步骤'),
-            detail: s.detail ? String(s.detail) : undefined,
-            status: String(s.status || 'done') as SidebarTask['status'],
-            duration: s.duration ? String(s.duration) : undefined,
-          })
-        }
-      }
-      if (msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          const toolName = String(tc.name || tc.tool_name || tc.tool || 'tool')
-          tasks.push({
-            title: `调用工具：${toolName}`,
-            detail: typeof tc.input === 'object' ? JSON.stringify(tc.input).slice(0, 120) : String(tc.input || ''),
-            status: (tc.error ? 'error' : (tc.result ? 'done' : 'running')) as SidebarTask['status'],
-            tools: [toolName],
-          })
-        }
-      }
-    }
-    return tasks
-  })
+  // ── 任务轴：实时工具调用流 + 思考正文 + 历史时间线 + 本轮总结 ──
+  // 侧栏这一列是用户"看见智能体在干什么"的唯一常驻入口，所以每行都带
+  // 可展开的入参/出参：命令与输出、文件路径与内容摘录、工具结果、思考正文。
+  //
+  // 思考正文的"锁存"：`thinkingContent` 在 turn 结束时会被清空（用于收起计时器），
+  // 但用户需要在下班之后仍能回看"它刚才想了什么"。这里保留最后一次非空内容，
+  // 切会话时清掉，避免串味。
+  const lastThinking = ref('')
+  watch(
+    () => deps.thinking?.value || '',
+    (text) => {
+      if (text.trim()) lastThinking.value = text
+    },
+  )
+  // 新一轮开始即清空：否则模型这一轮没思考时，面板会拿上一轮的思考冒充本轮。
+  watch(
+    () => deps.isStreaming.value,
+    (running, wasRunning) => {
+      if (running && !wasRunning) lastThinking.value = ''
+    },
+  )
+  watch(() => deps.sessionKey.value, () => { lastThinking.value = '' })
+
+  const sidebarTasks = computed((): SidebarTask[] => buildSidebarTasks({
+    thinking: String(deps.thinking?.value || '').trim() || lastThinking.value,
+    streamToolCalls: streamToolCalls.value,
+    messages: messages.value,
+    streaming: deps.isStreaming.value === true,
+  }))
 
   // ── 文件更改列表（侧栏打开时拉取）──
   const sidebarChanges = ref<SidebarFileChange[]>([])
@@ -269,8 +341,6 @@ export function useChatSidebarPanels(deps: ChatSidebarPanelsDeps) {
   }
 
   return {
-    usageStrip,
-    cacheStrip,
     fileChangesOpen,
     fileChangesVisible,
     rightSidebarOpen,

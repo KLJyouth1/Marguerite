@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(global_registry().pending().len(), 1);
         assert_eq!(
             global_registry().resolve(&gid, EscalationResolution::Abort),
-            EscalationAck::Resolved(event, EscalationResolution::Abort)
+            EscalationAck::Resolved(Box::new(event), EscalationResolution::Abort)
         );
         assert!(global_registry().is_empty());
         reset_global();

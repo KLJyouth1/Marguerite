@@ -57,10 +57,10 @@ function buildQuery(params: Record<string, string | number | undefined>): string
   return qs.length > 0 ? `?${qs}` : '';
 }
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(url, {
       method: init?.method ?? 'GET',
       headers: {
         'Content-Type': 'application/json',
@@ -73,7 +73,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw err;
     }
-    throw new ApiError(0, `Network error reaching backend at ${API_BASE}${path}`);
+    throw new ApiError(0, `Network error reaching backend at ${url}`);
   }
 
   const isJson = response.headers.get('content-type')?.includes('application/json');
@@ -90,6 +90,22 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return payload as T;
+}
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(`${API_BASE}${path}`, init);
+}
+
+/**
+ * Endpoints outside the `/api` prefix (health, harness capabilities) resolve
+ * against the server origin. `http()` concatenates strings, so the previous
+ * `'../health'` produced `/api../health` — a 404 that made the Overview page
+ * report the backend as unreachable.
+ */
+async function httpRoot<T>(path: string, init?: RequestInit): Promise<T> {
+  const base = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+  const origin = new URL(API_BASE, base).origin;
+  return request<T>(`${origin}${path}`, init);
 }
 
 function enc(id: string): string {
@@ -191,12 +207,10 @@ export const api = {
     http<ResearchResult>('/research', { method: 'POST', body: JSON.stringify({ query }) }),
 
   /* ---------- Service introspection (overview dashboard) ----------
-     NOTE: /harness/capabilities and the health endpoint live OUTSIDE the
-     /api prefix on the backend, so they are addressed relative to API_BASE's
-     parent directory. */
-  getHealth: (): Promise<HealthStatus> => http<HealthStatus>('../health'),
+     /api/health lives under the API prefix; /harness/capabilities does not. */
+  getHealth: (): Promise<HealthStatus> => http<HealthStatus>('/health'),
 
-  getCapabilities: (): Promise<CapabilitiesInfo> => http<CapabilitiesInfo>('../harness/capabilities'),
+  getCapabilities: (): Promise<CapabilitiesInfo> => httpRoot<CapabilitiesInfo>('/harness/capabilities'),
 
   /* ---------- Agent loop / TTC / LLMLab (UPGRADE_PLAN_V2 pillars) ---------- */
   runAgent: (task: string, maxRounds = 8, maxRepairs = 3): Promise<AgentRunResult> =>

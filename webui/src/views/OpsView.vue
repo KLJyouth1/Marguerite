@@ -2,12 +2,12 @@
   <div class="control-stage ops-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">Ops 运维</h1>
-        <p class="control-stage__subtitle">只读运维面板：已配置 Ops 主机 / 主机状态 / 文件列表 / 日志尾部 / 进程检查</p>
+        <h1 class="control-stage__title">{{ t('ops.title') }}</h1>
+        <p class="control-stage__subtitle">{{ t('ops.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
         <button class="btn btn--ghost" :disabled="busy" @click="loadAll">
-          <Icon name="refresh" :size="16" /><span>刷新</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('ops.refresh') }}</span>
         </button>
         <button class="btn btn--ghost" :disabled="busy" @click="exportDiagnostics">
           <Icon name="copy" :size="16" /><span>{{ t('setup.ops.exportDiagnostics') }}</span>
@@ -15,12 +15,12 @@
       </div>
     </header>
 
-    <section v-if="error" class="ops-error">{{ error }}</section>
+    <ErrorState v-if="error" :message="error" :on-retry="loadAll" />
 
     <!-- 主机列表 -->
     <section class="ops-card">
-      <div class="ops-card__title">Ops 主机（ops.list_hosts）</div>
-      <div v-if="!hosts.length" class="ops-note">未配置 Ops 主机</div>
+      <div class="ops-card__title">{{ t('ops.hostsTitle') }}</div>
+      <div v-if="!hosts.length" class="ops-note">{{ t('ops.noHosts') }}</div>
       <div v-else class="ops-hosts">
         <button
           v-for="h in hosts"
@@ -37,13 +37,13 @@
 
     <!-- 主机状态 -->
     <section class="ops-card">
-      <div class="ops-card__title">主机状态（ops.status）</div>
-      <div v-if="!selectedHost" class="ops-note">请先选择一台 Ops 主机</div>
+      <div class="ops-card__title">{{ t('ops.statusTitle') }}</div>
+      <div v-if="!selectedHost" class="ops-note">{{ t('ops.selectHost') }}</div>
       <template v-else>
-        <div v-if="!status" class="ops-note">尚未拉取状态，点击「刷新」或选中主机更新</div>
+        <div v-if="!status" class="ops-note">{{ t('ops.noStatus') }}</div>
         <div v-else class="ops-status">
           <span class="ops-badge" :class="status.online ? 'ops-badge--online' : 'ops-badge--offline'">
-            {{ status.online ? '在线' : '离线' }}
+            {{ status.online ? t('ops.online') : t('ops.offline') }}
           </span>
           <code class="ops-mono">{{ status.detail }}</code>
         </div>
@@ -60,15 +60,15 @@
 
     <!-- 文件列表 -->
     <section class="ops-card">
-      <div class="ops-card__title">文件列表（ops.list_files）</div>
+      <div class="ops-card__title">{{ t('ops.filesTitle') }}</div>
       <div class="ops-form">
-        <input v-model="filesPath" class="ops-input" placeholder="路径（如 /home）" :disabled="!selectedHost" />
-        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !filesPath" @click="loadFiles">列出</button>
+        <input v-model="filesPath" class="ops-input" :placeholder="t('ops.pathPlaceholder')" :disabled="!selectedHost" />
+        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !filesPath" @click="loadFiles">{{ t('ops.listBtn') }}</button>
       </div>
       <div v-if="filesError" class="ops-note">{{ filesError }}</div>
-      <div v-else-if="!files.length" class="ops-note">无文件条目</div>
+      <div v-else-if="!files.length" class="ops-note">{{ t('ops.noFiles') }}</div>
       <table v-else class="ops-table">
-        <thead><tr><th>路径</th><th class="ops-table__size">大小</th></tr></thead>
+        <thead><tr><th>{{ t('ops.colPath') }}</th><th class="ops-table__size">{{ t('ops.colSize') }}</th></tr></thead>
         <tbody>
           <tr v-for="f in files" :key="f.path">
             <td><code class="ops-mono">{{ f.path }}</code></td>
@@ -80,21 +80,21 @@
 
     <!-- 日志尾部 -->
     <section class="ops-card">
-      <div class="ops-card__title">日志尾部（ops.tail_logs）</div>
+      <div class="ops-card__title">{{ t('ops.logsTitle') }}</div>
       <div class="ops-form">
-        <input v-model="logsPath" class="ops-input" placeholder="路径（日志文件）" :disabled="!selectedHost" />
-        <input v-model.number="logsMaxLines" class="ops-input ops-input--sm" type="number" placeholder="行数（默认 200）" :disabled="!selectedHost" />
-        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !logsPath" @click="loadLogs">查看日志</button>
+        <input v-model="logsPath" class="ops-input" :placeholder="t('ops.logsPathPlaceholder')" :disabled="!selectedHost" />
+        <input v-model.number="logsMaxLines" class="ops-input ops-input--sm" type="number" :placeholder="t('ops.logsLinesPlaceholder')" :disabled="!selectedHost" />
+        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !logsPath" @click="loadLogs">{{ t('ops.viewLogsBtn') }}</button>
       </div>
       <pre v-if="logs" class="ops-pre">{{ logs }}</pre>
     </section>
 
     <!-- 进程检查 -->
     <section class="ops-card">
-      <div class="ops-card__title">进程检查（ops.inspect_process）</div>
+      <div class="ops-card__title">{{ t('ops.processTitle') }}</div>
       <div class="ops-form">
-        <input v-model="processName" class="ops-input" placeholder="进程名（如 python）" :disabled="!selectedHost" />
-        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !processName" @click="loadProcess">检查进程</button>
+        <input v-model="processName" class="ops-input" :placeholder="t('ops.processPlaceholder')" :disabled="!selectedHost" />
+        <button class="btn btn--sm btn--primary" :disabled="busy || !selectedHost || !processName" @click="loadProcess">{{ t('ops.inspectBtn') }}</button>
       </div>
       <pre v-if="process" class="ops-pre">{{ process }}</pre>
     </section>
@@ -107,6 +107,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { copyTextWithFallback } from '@/utils/browser'
 import { useToasts } from '@/composables/useToasts'
+import ErrorState from '@/components/ErrorState.vue'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 
@@ -238,7 +239,6 @@ onMounted(loadAll)
 
 <style scoped>
 .ops-stage { padding: 24px 28px; max-width: 1100px; margin: 0 auto; }
-.ops-error { margin: 16px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
 .ops-card { margin-top: 16px; padding: 14px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); }
 .ops-card__title { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
 .ops-note { margin-top: 8px; font-size: 12px; color: var(--text-dim); }

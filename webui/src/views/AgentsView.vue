@@ -102,6 +102,8 @@
                 @click="openDrawer('view', a.id || a.name || '')"
               >{{ a.id || a.name || '—' }}</button>
               <span :class="['chip', isAgentBuiltin(a) ? 'chip-ok' : 'chip-info']">{{ a.type || (a.isBuiltin ? t('console.agents.builtin') : t('console.agents.custom')) }}</span>
+              <!-- 主智能体标识：默认会话 agent:main:* 的应答者，用户需要一眼认出它是谁 -->
+              <span v-if="a.id === 'main'" class="chip chip-info">{{ t('chat.mainAgent') }}</span>
             </div>
             <div class="ag-card__actions">
               <button class="ag-iconbtn" :title="t('console.agents.openChat')" @click.stop="openChat(a.id)">

@@ -2,15 +2,14 @@
   <div class="control-stage graph-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">关系图谱</h1>
+        <h1 class="control-stage__title">{{ t('graph.title') }}</h1>
         <p class="control-stage__subtitle">
-          KB 2.0 知识图谱 · 实体-关系可视化（离线启发式抽取，零 NLP 依赖）
-          <template v-if="graph"> · {{ graph.entity_count }} 实体 / {{ graph.edge_count }} 关系</template>
+          {{ t('graph.subtitle') }}<span v-if="graph">{{ t('graph.subtitleCount', { entities: graph.entity_count, relations: graph.edge_count }) }}</span>
         </p>
       </div>
       <div class="control-stage__actions">
         <button class="btn btn--ghost" @click="load">
-          <Icon name="refresh" :size="16" /><span>刷新</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('graph.refresh') }}</span>
         </button>
       </div>
     </header>
@@ -19,10 +18,10 @@
 
     <!-- 灌入知识条目（同步进 BM25 检索 + 关系图谱） -->
     <section class="graph-ingest">
-      <input v-model="seedTitle" class="graph-input" placeholder="标题（doc_id）" />
-      <textarea v-model="seedText" class="graph-textarea" placeholder="正文（实体用大写开头或引号，如：Rust and Kubernetes are used for cloud native systems. Rust uses ownership.）"></textarea>
+      <input v-model="seedTitle" class="graph-input" :placeholder="t('graph.seedTitlePlaceholder')" />
+      <textarea v-model="seedText" class="graph-textarea" :placeholder="t('graph.seedTextPlaceholder')"></textarea>
       <button class="btn btn--primary" :disabled="!seedTitle.trim() || !seedText.trim() || ingesting" @click="ingest">
-        <Icon name="plus" :size="16" /><span>{{ ingesting ? '灌入中…' : '添加知识条目' }}</span>
+        <Icon name="plus" :size="16" /><span>{{ ingesting ? t('graph.ingesting') : t('graph.addEntry') }}</span>
       </button>
     </section>
 
@@ -55,40 +54,40 @@
       </svg>
     </section>
     <section v-else class="graph-empty">
-      图谱为空 — 先在上方添加知识条目，或到「知识库」检索页灌入文档后刷新
+      {{ t('graph.empty') }}
     </section>
 
     <!-- 选中实体详情 -->
     <section v-if="selected" class="graph-detail">
       <div class="graph-detail__name">{{ selected }}</div>
-      <div class="graph-detail__hint">{{ related.length > 0 ? `直接关联（${related.length}）：` : '无直接关联实体' }}</div>
+      <div class="graph-detail__hint">{{ related.length > 0 ? t('graph.relatedCount', { count: related.length }) : t('graph.noRelated') }}</div>
       <div class="graph-detail__tags">
         <span v-for="r in related" :key="r" class="graph-detail__tag" @click="pick(r)">{{ r }}</span>
       </div>
-      <div class="graph-detail__legend">图例：共现 灰 · 是 蓝 · 使用 绿 · 实现 橙 · 提供 青</div>
+      <div class="graph-detail__legend">{{ t('graph.legend') }}</div>
     </section>
 
     <!-- 项目级关系图谱（一项目一图） -->
     <section class="graph-project">
-      <div class="graph-project__title">项目级关系图谱（一项目一图）</div>
-      <p class="graph-project__hint">每个项目文件夹只有一份图谱：离线静态分析（模块 / 依赖 / 主题），供智能体理解、识别、剖析项目；重复分析覆盖同项目旧图。</p>
+      <div class="graph-project__title">{{ t('graph.project.title') }}</div>
+      <p class="graph-project__hint">{{ t('graph.project.hint') }}</p>
       <div class="graph-project__row">
-        <input v-model="projectPath" class="graph-input graph-project__input" placeholder="项目文件夹绝对路径（例如 /path/to/your/project）" @keyup.enter="analyzeProject" />
-        <button class="btn btn--primary" :disabled="busy || !projectPath.trim()" @click="analyzeProject">分析</button>
-        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="saveProjectGraph">保存项目图谱</button>
-        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="deleteCurrentProjectGraph">删除项目图谱</button>
+        <input v-model="projectPath" class="graph-input graph-project__input" :placeholder="t('graph.project.pathPlaceholder')" @keyup.enter="analyzeProject" />
+        <button class="btn btn--primary" :disabled="busy || !projectPath.trim()" @click="analyzeProject">{{ t('graph.project.analyze') }}</button>
+        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="saveProjectGraph">{{ t('graph.project.save') }}</button>
+        <button class="btn btn--ghost" :disabled="busy || !projectGraph" @click="deleteCurrentProjectGraph">{{ t('graph.project.delete') }}</button>
       </div>
       <div v-if="projectNote" class="graph-project__note">{{ projectNote }}</div>
       <div v-if="projectGraph" class="graph-project__graph">
         <div class="graph-project__cols">
           <div class="graph-project__col">
-            <div class="graph-project__sub">节点（{{ projectGraph.nodes.length }}）</div>
+            <div class="graph-project__sub">{{ t('graph.project.nodesTitle', { count: projectGraph.nodes.length }) }}</div>
             <div class="graph-project__pills">
               <span v-for="n in projectGraph.nodes" :key="n.id" class="graph-project__pill" :data-kind="n.kind" :title="n.id">{{ n.label || n.id }}</span>
             </div>
           </div>
           <div class="graph-project__col">
-            <div class="graph-project__sub">关系（{{ projectGraph.edges.length }}）</div>
+            <div class="graph-project__sub">{{ t('graph.project.edgesTitle', { count: projectGraph.edges.length }) }}</div>
             <ul class="graph-project__edges">
               <li v-for="(e, i) in projectGraph.edges" :key="i"><code>{{ e.from }}</code><span class="graph-project__ekind">{{ e.kind }}</span><code>{{ e.to }}</code></li>
             </ul>
@@ -96,13 +95,13 @@
         </div>
       </div>
       <div class="graph-project__saved">
-        <div v-if="savedProjects.length" class="graph-project__saved-title">已保存的项目图谱（{{ savedProjects.length }}）</div>
-        <div v-else class="graph-project__saved-empty">暂无已保存的项目图谱 — 分析后点「保存项目图谱」落盘（每项目唯一）</div>
+        <div v-if="savedProjects.length" class="graph-project__saved-title">{{ t('graph.project.savedTitle', { count: savedProjects.length }) }}</div>
+        <div v-else class="graph-project__saved-empty">{{ t('graph.project.savedEmpty') }}</div>
         <div v-for="s in savedProjects" :key="s.key" class="graph-project__saved-row">
           <code class="graph-project__saved-path" :title="s.project">{{ s.project }}</code>
-          <span class="graph-project__saved-meta">{{ s.nodes }} 节点 / {{ s.edges }} 边</span>
-          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="loadProjectGraph(s.project)">加载</button>
-          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="removeProjectGraph(s.project)">删除</button>
+          <span class="graph-project__saved-meta">{{ t('graph.project.savedMeta', { nodes: s.nodes, edges: s.edges }) }}</span>
+          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="loadProjectGraph(s.project)">{{ t('graph.project.load') }}</button>
+          <button class="btn btn--sm btn--ghost" :disabled="busy" @click="removeProjectGraph(s.project)">{{ t('common.delete') }}</button>
         </div>
       </div>
     </section>
@@ -111,9 +110,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 
+const { t } = useI18n()
 const rpc = useRpcStore()
 
 interface GraphNode { id: string; degree: number }
@@ -164,7 +165,7 @@ async function load() {
   try {
     graph.value = await rpc.call<GraphView>('kb.graph.view')
   } catch (e) {
-    error.value = `加载失败: ${e instanceof Error ? e.message : String(e)}`
+    error.value = t('graph.loadFailed', { error: e instanceof Error ? e.message : String(e) })
   }
 }
 
@@ -178,7 +179,7 @@ async function ingest() {
     seedText.value = ''
     await load()
   } catch (e) {
-    error.value = `灌入失败: ${e instanceof Error ? e.message : String(e)}`
+    error.value = t('graph.ingestFailed', { error: e instanceof Error ? e.message : String(e) })
   } finally {
     ingesting.value = false
   }
@@ -223,10 +224,10 @@ async function analyzeProject() {
   try {
     const r = await rpc.call<ProjectGraphPayload>('graph.project.analyze', { project: p, maxFiles: 200 })
     if (r.ok === false) {
-      projectNote.value = r.error ?? '分析失败'
+      projectNote.value = r.error ?? t('graph.project.analyzeFailed')
     } else {
       projectGraph.value = r
-      projectNote.value = r.summary ?? `分析完成：${r.nodes.length} 节点 / ${r.edges.length} 边（尚未保存）`
+      projectNote.value = r.summary ?? t('graph.project.analyzeDone', { nodes: r.nodes.length, edges: r.edges.length })
     }
   } catch (e) {
     projectNote.value = e instanceof Error ? e.message : String(e)
@@ -239,7 +240,7 @@ async function saveProjectGraph() {
   busy.value = true
   try {
     const r = await rpc.call<{ ok: boolean; error?: string }>('graph.project.save', { project: g.project, nodes: g.nodes, edges: g.edges })
-    projectNote.value = r.ok ? '已保存（一项目一图：同项目旧图已覆盖）' : (r.error ?? '保存失败')
+    projectNote.value = r.ok ? t('graph.project.saved') : (r.error ?? t('graph.project.saveFailed'))
     if (r.ok) await loadSavedProjects()
   } catch (e) {
     projectNote.value = e instanceof Error ? e.message : String(e)
@@ -251,7 +252,7 @@ async function loadProjectGraph(project: string) {
   projectPath.value = project
   try {
     const r = await rpc.call<ProjectGraphPayload>('graph.project.view', { project })
-    if (r.ok === false) { projectNote.value = r.error ?? '加载失败' } else { projectGraph.value = r; projectNote.value = '已加载该项目的唯一图谱' }
+    if (r.ok === false) { projectNote.value = r.error ?? t('graph.project.loadFailed') } else { projectGraph.value = r; projectNote.value = t('graph.project.loaded') }
   } catch (e) { projectNote.value = e instanceof Error ? e.message : String(e) } finally { busy.value = false }
 }
 
@@ -264,7 +265,7 @@ async function removeProjectGraph(project: string) {
   busy.value = true
   try {
     const r = await rpc.call<{ ok: boolean; error?: string }>('graph.project.delete', { project })
-    projectNote.value = r.ok ? '项目图谱已删除' : (r.error ?? '删除失败')
+    projectNote.value = r.ok ? t('graph.project.deleted') : (r.error ?? t('graph.project.deleteFailed'))
     if (r.ok && projectGraph.value?.project === project) projectGraph.value = null
     await loadSavedProjects()
   } catch (e) { projectNote.value = e instanceof Error ? e.message : String(e) } finally { busy.value = false }

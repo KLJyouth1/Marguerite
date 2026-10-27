@@ -1,7 +1,11 @@
 <script setup lang="ts">
-// P0-2「当前在和谁对话」：会话命中专家人格（agent:{agentId}:...）时，在会话头部
-// 显示「当前专家：{name}」徽章；非专家会话不渲染。点击跳 /agents（既有路由，
+// P0-2「当前在和谁对话」：会话命中智能体人格（agent:{agentId}:...）时，在会话头部
+// 显示当前身份徽章；非智能体会话不渲染。点击跳 /agents（既有路由，
 // 不新增选择器，避免与 /agents 页双头管理人格）。
+//
+// 2026-10-18：主智能体（`main`）此前也被套上「当前专家」——它不是专家，是
+// 默认应答者（严工）。文案按 `agentId === 'main'` 分叉到 `chat.persona.currentMain`，
+// 与 Expert Center 的「主智能体」口径一致。
 //
 // 数据来源：router_decision 载荷的 persona，经 useChatRouteFeedback 的共享
 // activePersona 单例下发（同一事件管道内读写，不会分叉）。
@@ -15,9 +19,12 @@ const { t } = useI18n()
 const router = useRouter()
 const { activePersona } = useChatRouteFeedback()
 
-const label = computed(() =>
-  activePersona.value ? t('chat.persona.current', { name: activePersona.value.name }) : '',
-)
+const label = computed(() => {
+  const persona = activePersona.value
+  if (!persona) return ''
+  const key = persona.agentId === 'main' ? 'chat.persona.currentMain' : 'chat.persona.current'
+  return t(key, { name: persona.name })
+})
 const tooltip = computed(() => {
   const persona = activePersona.value
   if (!persona) return ''

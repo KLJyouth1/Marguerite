@@ -55,6 +55,15 @@
       <button
         type="button"
         class="hub-row__delete"
+        :aria-label="t('sessions.io.exportOne')"
+        :title="t('sessions.io.exportOne')"
+        @click="emit('export', entry.item)"
+      >
+        <Icon name="download" :size="14" />
+      </button>
+      <button
+        type="button"
+        class="hub-row__delete"
         :aria-label="rowAccessibleName('delete', entry)"
         @click="emit('remove', entry.item)"
       >
@@ -83,6 +92,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: [item: SessionItem]
   remove: [item: SessionItem]
+  export: [item: SessionItem]
 }>()
 
 const HUB_ROW_STATUS_CLASSES = {

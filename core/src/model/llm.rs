@@ -115,6 +115,14 @@ pub struct LLMConfig {
     /// 上下文窗口（1M 长任务模式用；供压缩/压缩率决策参考）
     #[serde(default = "default_context_window")]
     pub context_window: u32,
+    /// 请求协议：`chat`（Chat Completions，默认）或 `responses`（Responses API）。
+    ///
+    /// 与 Codex 的 `wire_api` 同语义。**缺省必须是 `Chat`**：全部内置档案与本地
+    /// 端点（Ollama / vLLM / LM Studio）只有 `/chat/completions`，默认值一变就会
+    /// 让存量用户全部 404。`#[serde(default)]` 保证旧 `models.json` / `config.yaml`
+    /// 缺字段时行为与改动前逐字节一致。
+    #[serde(default)]
+    pub wire_api: crate::model::wire::WireApi,
 }
 
 fn default_context_window() -> u32 {
@@ -137,8 +145,14 @@ fn default_temperature() -> f32 {
     0.7
 }
 
+/// provider 读超时的默认值。
+///
+/// 旧默认 60s 是 `read_timeout`（连续 60s 没有任何字节才判死）——对长思考模型
+/// 偏紧：模型在 reasoning 阶段可能长时间不吐 token，60s 就被判超时，用户看到的是
+/// 「请求超时」而不是慢。这里跟自适应预算的 Standard 档对齐（180s）；
+/// 用户显式配置 `model.timeout_secs` 时仍以配置为准。
 pub(crate) fn default_timeout_secs() -> u64 {
-    60
+    crate::agent::budget_policy::resolve("[[budget:standard]]", 1, 0).llm_read_timeout_secs
 }
 
 impl Default for LLMConfig {
@@ -153,6 +167,7 @@ impl Default for LLMConfig {
             timeout_secs: default_timeout_secs(),
             thinking: crate::model::thinking::ThinkingEffort::Off,
             context_window: default_context_window(),
+            wire_api: crate::model::wire::WireApi::default(),
         }
     }
 }
@@ -183,6 +198,8 @@ impl LLMConfig {
             },
             thinking: crate::model::thinking::ThinkingEffort::Max,
             context_window: 256 * 1024,
+            // 协议来自 `config.yaml` 的 `[model] wire_api`；缺省 Chat。
+            wire_api: m.wire_api,
         }
     }
 
@@ -220,6 +237,9 @@ impl LLMConfig {
             },
             thinking: crate::model::thinking::ThinkingEffort::Off,
             context_window: default_context_window(),
+            // 副模型没有独立的协议字段，继承主模型：副模型通常是同一家的另一个
+            // 型号，协议一致；刻意不猜"副模型走别的协议"（那需要独立配置项）。
+            wire_api: m.wire_api,
         })
     }
 }
@@ -391,13 +411,20 @@ pub struct LLMChunk {
     pub finish_reason: Option<String>,
     /// 本块携带（或流末一次性给出）的工具调用；流式场景下在流末完整给出
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// P2-9：流末（或本块）一次性给出的 token 用量，供 turn 预算熔断记账。
+    pub usage: Option<TokenUsage>,
 }
 
 /// 流式接收器
 pub type StreamReceiver = mpsc::Receiver<Result<LLMChunk>>;
 
 /// 重试配置
-const MAX_RETRIES: u32 = 3;
+///
+/// 次数不再写死：取自适应预算的 Standard 档（3 次，与历史行为一致），
+/// `MARGUERITE_LLM_MAX_RETRIES` 可覆盖，硬上限受 `budget_policy::MAX_RETRIES` 约束。
+fn max_retries() -> u32 {
+    crate::agent::budget_policy::default_max_retries()
+}
 const BASE_DELAY_MS: u64 = 1000;
 
 /// 判断错误是否可重试
@@ -506,6 +533,29 @@ fn build_shared_client(config: &LLMConfig) -> reqwest::Client {
     built
 }
 
+/// 归一化 `base_url` 并拼接 chat/completions 路径（纯函数，便于表驱动单测）。
+///
+/// 旧 `chat_url` 恒拼 `{base}/v1/chat/completions`，于是 base 若已含 `/v1`（Ollama
+/// 默认 `http://localhost:11434/v1`、OpenRouter `https://openrouter.ai/api/v1`）会拼出
+/// `/v1/v1/...` 或 `/api/v1/v1/...` 的 404 —— 用户选中本地模型后真实发对话 404 即此因。
+///
+/// 规则：先 trim 空白与末尾 `/`；base 已以 `/v1` 结尾（含 `/api/v1`，它同样以 `/v1`
+/// 结尾）时直接追加 chat 路径，否则补 `/v1`。Anthropic 走 `/messages`，OpenAI 兼容走
+/// `/chat/completions`。
+pub fn build_chat_url(base_url: &str, is_anthropic: bool) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let suffix = if is_anthropic {
+        "messages"
+    } else {
+        "chat/completions"
+    };
+    if base.ends_with("/v1") {
+        format!("{base}/{suffix}")
+    } else {
+        format!("{base}/v1/{suffix}")
+    }
+}
+
 impl LLMClient {
     /// 创建新的 LLM 客户端
     pub fn new(config: LLMConfig) -> Self {
@@ -597,15 +647,19 @@ impl LLMClient {
         matches!(self.config.provider, LLMProvider::Anthropic)
     }
 
-    /// 构建请求 URL
+    /// 构建请求 URL（委托给纯函数 [`build_chat_url`]，便于表驱动单测）。
+    ///
+    /// 按 `wire_api` 分派：
+    /// - `Chat`（默认）→ `/chat/completions`（Anthropic 走 `/messages`），**行为与引入该字段前逐字节一致**；
+    /// - `Responses` → `/v1/responses`。
     fn chat_url(&self) -> String {
-        if self.is_anthropic() {
-            format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
-        } else {
-            format!(
-                "{}/v1/chat/completions",
-                self.config.base_url.trim_end_matches('/')
-            )
+        match self.config.wire_api {
+            crate::model::wire::WireApi::Chat => {
+                build_chat_url(&self.config.base_url, self.is_anthropic())
+            }
+            crate::model::wire::WireApi::Responses => {
+                crate::model::wire::responses_url(&self.config.base_url)
+            }
         }
     }
 
@@ -762,12 +816,20 @@ impl LLMClient {
         out
     }
 
-    /// 将 Message 转为 Anthropic Messages API 形态：返回 (system, messages)。
+    /// 将 Message 转为 Anthropic Messages API 形态：返回 (system blocks, messages)。
     ///
-    /// - System 独立出顶层 `system` 字段；
+    /// - System 独立出顶层 `system` 字段，且**返回 block 数组**：多条 System 用 `\n`
+    ///   合并为**一个** text block（多个 block 会改变语义，也浪费断点配额）；
+    /// - W5.4：该 block 挂 `cache_control: {"type":"ephemeral"}` —— Anthropic 的前缀
+    ///   缓存是**显式断点**，没有它 system 前缀结构性不可缓存；
     /// - 工具回路中的 Assistant + Tool 段按 Anthropic 的 `tool_use` / `tool_result`
-    ///   content blocks 合成（内部 Message 不存 tool_calls，按连续 Tool 段反向合成）。
-    fn messages_to_anthropic(&self, messages: &[Message]) -> (String, Vec<serde_json::Value>) {
+    ///   content blocks 合成（内部 Message 不存 tool_calls，按连续 Tool 段反向合成）；
+    /// - 最后一条 user 消息的 content 改为 block 数组并挂断点（第 3 个断点；上限 4）。
+    ///   断点**只**落在最后一条 user 上，绝不放在 history 中间。
+    fn messages_to_anthropic(
+        &self,
+        messages: &[Message],
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
         let mut system = String::new();
         let mut out: Vec<serde_json::Value> = Vec::with_capacity(messages.len() + 4);
         let mut i = 0;
@@ -865,7 +927,42 @@ impl LLMClient {
                 }
             }
         }
-        (system, out)
+        // W5.4 断点 3：最后一条 user 消息。Anthropic 最多 4 个断点，此处只用 3 个
+        // （system / 最后一个 tool / 最后一条 user），且断点永远在**最后一条 user**，
+        // 不放 history 中间 —— 中途断点会让后续 token 无法复用前面的缓存。
+        if let Some(last_user) = out.iter_mut().rev().find(|m| m["role"] == "user") {
+            if let Some(text) = last_user["content"].as_str() {
+                let text = text.to_string();
+                last_user["content"] = serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" },
+                }]);
+            } else if let Some(blocks) = last_user["content"].as_array_mut() {
+                // 工具回路里最后一条 user 是 tool_result block 数组：断点挂在最后一个
+                // text block；若整段没有 text block（纯 tool_result），则挂在末块
+                // （Anthropic 允许在 tool_result 上放断点，覆盖到该工具结果为止）。
+                if let Some(last_text) = blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|block| block["type"] == "text")
+                {
+                    last_text["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                } else if let Some(last_block) = blocks.last_mut() {
+                    last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                }
+            }
+        }
+        let system_blocks = if system.is_empty() {
+            Vec::new()
+        } else {
+            vec![serde_json::json!({
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" },
+            })]
+        };
+        (system_blocks, out)
     }
 
     /// 构建请求体（统一入口：是否流式 + 是否带工具定义）
@@ -875,8 +972,64 @@ impl LLMClient {
         stream: bool,
         tools: Option<&[ToolDef]>,
     ) -> serde_json::Value {
+        // Responses 协议：字段名与结构都与 Chat Completions 不同（不是别名）。
+        // 先于 anthropic 分支判断：二者互斥，且 `validate()` 已在 URL 构建处拒绝
+        // anthropic+responses 的组合（此处仍按 responses 处理，避免静默走错协议）。
+        if matches!(self.config.wire_api, crate::model::wire::WireApi::Responses) {
+            let (instructions, input) = self.messages_to_responses_input(messages);
+            let mut body = serde_json::json!({
+                "model": self.config.model,
+                "input": input,
+                // 上限字段名不同：Chat 用 max_tokens，Responses 用 max_output_tokens
+                "max_output_tokens": self.config.max_tokens,
+                "temperature": self.config.temperature,
+                "stream": stream,
+            });
+            if !instructions.is_empty() {
+                body["instructions"] = serde_json::Value::String(instructions);
+            }
+            // 思考档位：Responses 用 `reasoning.effort`（Chat 用顶层 reasoning_effort）
+            // 本轮显式档位（UI 滑块）必须覆盖客户端配置：否则 `with_adaptive_profile`
+            // 会把用户选的 deep 按任务分类改回 off，请求体里永远没有该字段。
+            let effective = crate::model::thinking::current_turn_effort()
+                .unwrap_or(self.config.thinking);
+            if let Some(effort) = effective.reasoning_effort() {
+                let supported = crate::model::thinking::supports_reasoning_effort(&self.config.model);
+                if supported {
+                    body["reasoning"] = serde_json::json!({ "effort": effort });
+                }
+                note_effort_wire(
+                    &self.config.model,
+                    effective,
+                    supported,
+                    "reasoning.effort",
+                    supported.then_some(effort),
+                );
+            }
+            if let Some(tools) = tools {
+                if !tools.is_empty() {
+                    // Responses 的工具是**扁平**结构（name 在顶层），
+                    // 与 Chat 的 `{"type":"function","function":{...}}` 不同。
+                    body["tools"] = serde_json::json!(tools
+                        .iter()
+                        .map(|t| serde_json::json!({
+                            "type": "function",
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }))
+                        .collect::<Vec<_>>());
+                }
+            }
+            return body;
+        }
         if self.is_anthropic() {
-            let (system, api_messages) = self.messages_to_anthropic(messages);
+            let (system_blocks, api_messages) = self.messages_to_anthropic(messages);
+            // W5.4：Anthropic 的前缀缓存是**显式断点**（cache_control），不是自动的。
+            // 旧实现 system 是纯字符串、tools 无断点 → 结构性不可用（命中恒 0）。
+            // 三个断点：system / 最后一个 tool / 最后一条 user（Anthropic 上限 4）。
+            // system 与最后一条 user 的断点由 `messages_to_anthropic` 负责，
+            // 这里只补 tools 上的那个。
             let mut body = serde_json::json!({
                 "model": self.config.model,
                 "messages": api_messages,
@@ -884,19 +1037,26 @@ impl LLMClient {
                 "temperature": self.config.temperature,
                 "stream": stream,
             });
-            if !system.is_empty() {
-                body["system"] = serde_json::Value::String(system);
+            if !system_blocks.is_empty() {
+                body["system"] = serde_json::Value::Array(system_blocks);
             }
             if let Some(tools) = tools {
                 if !tools.is_empty() {
-                    body["tools"] = serde_json::json!(tools
+                    let mut api_tools: Vec<serde_json::Value> = tools
                         .iter()
-                        .map(|t| serde_json::json!({
-                            "name": t.name,
-                            "description": t.description,
-                            "input_schema": t.parameters,
-                        }))
-                        .collect::<Vec<_>>());
+                        .map(|t| {
+                            serde_json::json!({
+                                "name": t.name,
+                                "description": t.description,
+                                "input_schema": t.parameters,
+                            })
+                        })
+                        .collect();
+                    // 断点覆盖到最后一个工具：Anthropic 会缓存到该位置为止的全部前缀。
+                    if let Some(last) = api_tools.last_mut() {
+                        last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                    body["tools"] = serde_json::json!(api_tools);
                 }
             }
             return body;
@@ -914,10 +1074,25 @@ impl LLMClient {
         }
         // DeepSeek-V4-Pro 极限思考：思考档位开启且模型支持时注入 reasoning_effort
         // （与 mode/spec.rs 语义一致：low/medium/high）。不认识/不支持时仅本地 max_tokens 自适应，安全降级。
-        if let Some(effort) = self.config.thinking.reasoning_effort() {
-            if crate::model::thinking::supports_reasoning_effort(&self.config.model) {
+        // 本轮显式档位（UI 滑块）优先于客户端/自适应配置：所有请求路径最终都汇聚到
+        // 这里，因此这是「档位一定生效」的唯一可靠单点（工具回路、纯文本、子代理同源）。
+        let effective_thinking = crate::model::thinking::current_turn_effort()
+            .unwrap_or(self.config.thinking);
+        if let Some(effort) = effective_thinking.reasoning_effort() {
+            let supported = crate::model::thinking::supports_reasoning_effort(&self.config.model);
+            if supported {
                 body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
             }
+            note_effort_wire(
+                &self.config.model,
+                effective_thinking,
+                supported,
+                "reasoning_effort",
+                supported.then_some(effort),
+            );
+        } else {
+            // Off 档：也必须留痕，否则「档位没效果」和「档位本来就是关」无法区分。
+            note_effort_wire(&self.config.model, effective_thinking, true, "-", None);
         }
         if let Some(tools) = tools {
             if !tools.is_empty() {
@@ -937,6 +1112,73 @@ impl LLMClient {
         body
     }
 
+    /// 将内部 [`Message`] 映射为 Responses API 的 `input` 数组 + `instructions`。
+    ///
+    /// 与 `messages_to_api` 的关键差异（不是"换个字段名"那么简单）：
+    ///
+    /// | 内部 | Chat Completions | Responses |
+    /// |---|---|---|
+    /// | `System` | `messages[role=system]` | 顶层 `instructions` 字符串（多条按 `\n\n` 合并） |
+    /// | `User` | `content: string` | `content: [{type:"input_text", text}]` |
+    /// | `Assistant` | `content: string` | `content: [{type:"output_text", text}]` |
+    /// | `Tool` | `role=tool` + 前置 assistant.tool_calls | `function_call` + `function_call_output` **成对** item |
+    ///
+    /// 内部 `Message::Tool` 不保存 `call_id`，因此这里**合成**稳定的
+    /// `call_<序号>` 并把 `function_call` 与 `function_call_output` 配对写入 ——
+    /// 与 `messages_to_api` 合成 assistant tool_calls 的做法同源。缺任一半都会
+    /// 被服务端拒绝（"No tool call found for function call output"）。
+    fn messages_to_responses_input(
+        &self,
+        messages: &[Message],
+    ) -> (String, Vec<serde_json::Value>) {
+        let mut instructions: Vec<String> = Vec::new();
+        let mut input: Vec<serde_json::Value> = Vec::with_capacity(messages.len() + 4);
+        let mut call_seq: u64 = 0;
+        for m in messages {
+            match m {
+                Message::System { content, .. } => {
+                    if !content.trim().is_empty() {
+                        instructions.push(content.clone());
+                    }
+                }
+                Message::User { content, .. } => {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": content }]
+                    }));
+                }
+                Message::Assistant { content, .. } => {
+                    // 空正文不写 item：Responses 对空 output_text 会报错，
+                    // 而工具回路里的空 assistant 是正常的（只有 thinking）。
+                    if !content.trim().is_empty() {
+                        input.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": content }]
+                        }));
+                    }
+                }
+                Message::Tool {
+                    name, input: args, output, ..
+                } => {
+                    call_seq += 1;
+                    let call_id = format!("call_{call_seq}");
+                    input.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": args,
+                    }));
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    }));
+                }
+            }
+        }
+        (instructions.join("\n\n"), input)
+    }
+
     /// 构建请求体（非流式，无工具）
     fn build_request_body(&self, messages: &[Message]) -> serde_json::Value {
         self.build_body(messages, false, None)
@@ -948,8 +1190,31 @@ impl LLMClient {
     }
 
     /// 按提供商解析非流式响应（Anthropic content blocks 形态 vs OpenAI/DeepSeek choices 形态）。
+    ///
+    /// # 为什么按**响应体形态**分派，而不是只按请求协议
+    ///
+    /// 线上实证（2026-10-21，api.apigoto.com）：同一个 `/v1/responses` 端点，
+    /// 流式返回真 Responses（`object:"response"`），**非流式却返回 Chat Completions**
+    /// （`object:"chat.completion"` + `choices[]`）——它只实现了一半，非流式走了
+    /// chat 兼容层。
+    ///
+    /// 旧实现只认 `output[]`，遇到这种响应会产出**空 content + 全零 usage**，
+    /// 且不报错：用户看到"模型什么都没说"，用量台账记 0。这是最坏的失败形态——
+    /// 看起来成功，实际什么都没拿到。
+    ///
+    /// 判据：先看响应体有没有 `choices[]`（chat 形态）/ `output[]`（Responses 形态），
+    /// 再决定解析器。请求协议是我们发的，响应形态是上游决定的，两者可能不一致。
     fn parse_response(&self, text: String) -> Result<LLMResponse> {
-        if self.is_anthropic() {
+        if matches!(self.config.wire_api, crate::model::wire::WireApi::Responses) {
+            // 兼容层探测：只认结构特征，不猜。
+            let looks_like_chat = serde_json::from_str::<serde_json::Value>(&text)
+                .map(|v| v.get("choices").and_then(|c| c.as_array()).is_some())
+                .unwrap_or(false);
+            if looks_like_chat {
+                return parse_chat_response(text, &self.config.model);
+            }
+            parse_responses_response(text, &self.config.model)
+        } else if self.is_anthropic() {
             parse_anthropic_response(text, &self.config.model)
         } else {
             parse_chat_response(text, &self.config.model)
@@ -968,7 +1233,8 @@ impl LLMClient {
         );
 
         let mut last_error = None;
-        for attempt in 0..MAX_RETRIES {
+        let attempts = max_retries();
+        for attempt in 0..attempts {
             if attempt > 0 {
                 let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -1309,7 +1575,16 @@ impl LLMClient {
         let client = self.client.clone();
         let model = self.config.model.clone();
         let anthropic = self.is_anthropic();
+        // Responses 的流事件名与 Chat 完全不同，必须走独立解析器。
+        let responses = matches!(
+            self.config.wire_api,
+            crate::model::wire::WireApi::Responses
+        );
         let cache = self.cache.clone();
+        // task-local 不跨 `tokio::spawn`：在 spawn 之前把本 turn 的用量归属取出来
+        // 带进生产者任务，否则流式用量的 session 恒为空（真机缺陷：按会话统计全错）。
+        let usage_session = crate::usage::current_session();
+        let usage_run = crate::usage::current_run();
 
         tokio::spawn(async move {
             let response = match client.post(&url).headers(headers).json(&body).send().await {
@@ -1364,12 +1639,15 @@ impl LLMClient {
                                             thinking: None,
                                             finish_reason: Some("stop".to_string()),
                                             tool_calls: None,
+                                            usage: None,
                                         }))
                                         .await;
                                     return;
                                 }
 
-                                let parsed_result = if anthropic {
+                                let parsed_result = if responses {
+                                    parse_responses_stream_chunk(data, &model)
+                                } else if anthropic {
                                     parse_anthropic_stream_chunk(data, &model)
                                 } else {
                                     parse_stream_chunk(data, &model)
@@ -1390,14 +1668,25 @@ impl LLMClient {
                                         //    记，正是本次缺陷的教训）。
                                         if !usage_recorded {
                                             if let Some(u) = parsed.usage.clone() {
-                                                crate::usage::record(&model, &u);
+                                                crate::usage::record_attributed(
+                                                    usage_run.as_deref(),
+                                                    usage_session.as_deref().unwrap_or_default(),
+                                                    &model,
+                                                    &u,
+                                                );
                                                 // 进程级前缀缓存追踪 + 实例级服务端缓存计量，
                                                 // 与非流式路径对齐（修复前流式路径永不调用，
                                                 // cache.status.server_calls 恒为 0）。
                                                 crate::cache::report_prefix_cache_usage(
-                                                    u.prompt_tokens as u64,
+                                                    crate::cache::total_input_tokens(
+                                                        u.prompt_tokens as u64,
+                                                        u.cache_read_input_tokens as u64,
+                                                        u.cache_creation_input_tokens as u64,
+                                                        anthropic,
+                                                    ),
                                                     u.cache_read_input_tokens as u64,
                                                     u.cache_creation_input_tokens as u64,
+                                                    crate::cache::min_cache_tokens(anthropic),
                                                 );
                                                 if let Some(c) = &cache {
                                                     c.record_server_cache(
@@ -1419,6 +1708,7 @@ impl LLMClient {
                                             thinking: parsed.thinking,
                                             finish_reason: parsed.finish_reason,
                                             tool_calls: None,
+                                            usage: parsed.usage.clone(),
                                         };
                                         if tx.send(Ok(chunk)).await.is_err() {
                                             return;
@@ -1459,7 +1749,8 @@ impl LLMClient {
         let body = self.build_body(messages, false, Some(tools));
 
         let mut last_error = None;
-        for attempt in 0..MAX_RETRIES {
+        let attempts = max_retries();
+        for attempt in 0..attempts {
             if attempt > 0 {
                 let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -1550,7 +1841,16 @@ impl LLMClient {
         let client = self.client.clone();
         let model = self.config.model.clone();
         let anthropic = self.is_anthropic();
+        // Responses 的流事件名与 Chat 完全不同，必须走独立解析器。
+        let responses = matches!(
+            self.config.wire_api,
+            crate::model::wire::WireApi::Responses
+        );
         let cache = self.cache.clone();
+        // task-local 不跨 `tokio::spawn`：在 spawn 之前把本 turn 的用量归属取出来
+        // 带进生产者任务，否则流式用量的 session 恒为空（真机缺陷：按会话统计全错）。
+        let usage_session = crate::usage::current_session();
+        let usage_run = crate::usage::current_run();
 
         tokio::spawn(async move {
             let response = match client.post(&url).headers(headers).json(&body).send().await {
@@ -1613,6 +1913,7 @@ impl LLMClient {
                                                     thinking: None,
                                                     finish_reason: Some("tool_calls".to_string()),
                                                     tool_calls: Some(calls),
+                                                    usage: None,
                                                 }))
                                                 .await;
                                         }
@@ -1623,12 +1924,15 @@ impl LLMClient {
                                             thinking: None,
                                             finish_reason: Some("stop".to_string()),
                                             tool_calls: None,
+                                            usage: None,
                                         }))
                                         .await;
                                     return;
                                 }
 
-                                let parsed_result = if anthropic {
+                                let parsed_result = if responses {
+                                    parse_responses_stream_chunk(data, &model)
+                                } else if anthropic {
                                     parse_anthropic_stream_chunk(data, &model)
                                 } else {
                                     parse_stream_chunk(data, &model)
@@ -1640,11 +1944,22 @@ impl LLMClient {
                                         // usage 的 chunk 立即落账，布尔旗标防重复回显导致多记。
                                         if !usage_recorded {
                                             if let Some(u) = parsed.usage.clone() {
-                                                crate::usage::record(&model, &u);
+                                                crate::usage::record_attributed(
+                                                    usage_run.as_deref(),
+                                                    usage_session.as_deref().unwrap_or_default(),
+                                                    &model,
+                                                    &u,
+                                                );
                                                 crate::cache::report_prefix_cache_usage(
-                                                    u.prompt_tokens as u64,
+                                                    crate::cache::total_input_tokens(
+                                                        u.prompt_tokens as u64,
+                                                        u.cache_read_input_tokens as u64,
+                                                        u.cache_creation_input_tokens as u64,
+                                                        anthropic,
+                                                    ),
                                                     u.cache_read_input_tokens as u64,
                                                     u.cache_creation_input_tokens as u64,
+                                                    crate::cache::min_cache_tokens(anthropic),
                                                 );
                                                 if let Some(c) = &cache {
                                                     c.record_server_cache(
@@ -1681,6 +1996,7 @@ impl LLMClient {
                                                             "tool_calls".to_string(),
                                                         ),
                                                         tool_calls: Some(calls),
+                                                        usage: None,
                                                     }))
                                                     .await;
                                             }
@@ -1690,6 +2006,7 @@ impl LLMClient {
                                             thinking: parsed.thinking,
                                             finish_reason: parsed.finish_reason,
                                             tool_calls: None,
+                                            usage: parsed.usage.clone(),
                                         };
                                         if tx.send(Ok(chunk)).await.is_err() {
                                             return;
@@ -1709,6 +2026,140 @@ impl LLMClient {
                             .await;
                         return;
                     }
+                }
+            }
+
+            // 非 SSE 提供方兜底：部分兼容端点忽略 `stream: true`，一次性返回整份 JSON。
+            // 此前这类响应被逐行扫描后直接丢弃（剩余 buffer 从未消费），表现为
+            // 「模型明明答了，客户端却拿到空文本」，从而把整个回合误判为空回复。
+            // 这里在流末识别「整份 JSON」并翻译成与流式同形的 chunk 序列。
+            let leftover = buffer.trim().to_string();
+            if leftover.is_empty() {
+                return;
+            }
+            if leftover.starts_with('{') {
+                let parsed = if responses {
+                    parse_responses_response(leftover, &model)
+                } else if anthropic {
+                    parse_anthropic_response(leftover, &model)
+                } else {
+                    parse_chat_response(leftover, &model)
+                };
+                match parsed {
+                    Ok(resp) => {
+                        if let Some(thought) = resp.thinking.filter(|t| !t.trim().is_empty()) {
+                            let _ = tx
+                                .send(Ok(LLMChunk {
+                                    content: None,
+                                    thinking: Some(thought),
+                                    finish_reason: None,
+                                    tool_calls: None,
+                                    usage: None,
+                                }))
+                                .await;
+                        }
+                        if !resp.content.is_empty() {
+                            let _ = tx
+                                .send(Ok(LLMChunk {
+                                    content: Some(resp.content),
+                                    thinking: None,
+                                    finish_reason: None,
+                                    tool_calls: None,
+                                    usage: None,
+                                }))
+                                .await;
+                        }
+                        if !resp.tool_calls.is_empty() {
+                            let _ = tx
+                                .send(Ok(LLMChunk {
+                                    content: None,
+                                    thinking: None,
+                                    finish_reason: Some("tool_calls".to_string()),
+                                    tool_calls: Some(resp.tool_calls),
+                                    usage: None,
+                                }))
+                                .await;
+                        }
+                        // 用量记账：`parse_chat_response` 已上报前缀缓存，这里只补
+                        // 「按会话/运行归属」的用量，避免缓存命中被重复计入。
+                        if !usage_recorded {
+                            crate::usage::record_attributed(
+                                usage_run.as_deref(),
+                                usage_session.as_deref().unwrap_or_default(),
+                                &model,
+                                &resp.usage,
+                            );
+                        }
+                        let _ = tx
+                            .send(Ok(LLMChunk {
+                                content: None,
+                                thinking: None,
+                                finish_reason: Some("stop".to_string()),
+                                tool_calls: None,
+                                usage: Some(resp.usage),
+                            }))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(provider_network_error(format!(
+                                "Response was neither SSE nor a parseable completion body: {e}"
+                            ))))
+                            .await;
+                    }
+                }
+                return;
+            }
+            // 半行 SSE：流末最后一条 `data:` 行没有换行结尾时也要消费；
+            // 解析失败只可能是截断片段，静默丢弃（已流出的正文不受影响）。
+            if let Some(data) = leftover.strip_prefix("data: ") {
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    return;
+                }
+                let parsed = if responses {
+                    parse_responses_stream_chunk(data, &model)
+                } else if anthropic {
+                    parse_anthropic_stream_chunk(data, &model)
+                } else {
+                    parse_stream_chunk(data, &model)
+                };
+                if let Ok(parsed) = parsed {
+                    for tc in parsed.tool_calls {
+                        accumulate_tool_call(&mut tool_accum, tc);
+                    }
+                    if !tool_accum.is_empty() {
+                        let calls: Vec<ToolCall> = tool_accum
+                            .drain(..)
+                            .filter_map(|p| {
+                                p.name.map(|name| ToolCall {
+                                    id: p.id,
+                                    name,
+                                    arguments: p.arguments,
+                                })
+                            })
+                            .collect();
+                        if !calls.is_empty() {
+                            let _ = tx
+                                .send(Ok(LLMChunk {
+                                    content: None,
+                                    thinking: None,
+                                    finish_reason: Some("tool_calls".to_string()),
+                                    tool_calls: Some(calls),
+                                    usage: None,
+                                }))
+                                .await;
+                        }
+                    }
+                    let _ = tx
+                        .send(Ok(LLMChunk {
+                            content: parsed.content,
+                            thinking: parsed.thinking,
+                            finish_reason: parsed.finish_reason,
+                            tool_calls: None,
+                            usage: parsed.usage,
+                        }))
+                        .await;
                 }
             }
         });
@@ -1732,6 +2183,79 @@ fn model_family(model: &str) -> f64 {
         0.95
     } else {
         1.0
+    }
+}
+
+/// 最近若干次请求的思考参数环形缓冲（最新在尾部）。
+///
+/// 为什么不是单槽：同一回合里除了主回复，还可能有预热/摘要/经验抽取等辅助请求，
+/// 它们会覆盖单槽快照 —— 单槽观测会把「主请求已注入档位」误读成「档位没生效」。
+fn effort_wire_ring() -> &'static std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>
+{
+    const MAX: usize = 8;
+    static RING: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    RING.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(MAX)))
+}
+
+/// 记录本次请求的思考参数（供 `model.effort.last` 查询）。
+///
+/// 这是「推理档位到底有没有发出去」的唯一可自查证据：模型名是否在支持名单、
+/// 实际注入到哪个 wire 字段、值是什么、以及**构造请求时是否处在回合档位作用域内**
+/// （`turnScoped`）。此前不支持时**静默跳过**，用户切档完全无反馈 ——
+/// 体验上就是「档位是个玩具」。
+fn note_effort_wire(
+    model: &str,
+    effort: crate::model::thinking::ThinkingEffort,
+    supported: bool,
+    field: &'static str,
+    value: Option<&'static str>,
+) {
+    // 作用域内 = 请求体确实是由「本轮」构造的；作用域外只能说明这是后台/辅助请求。
+    let scoped = crate::model::thinking::current_turn_effort();
+    let payload = serde_json::json!({
+        "available": true,
+        "model": model,
+        "effort": effort.as_key(),
+        "supported": supported,
+        "injected": value.is_some(),
+        "field": field,
+        "value": value,
+        "turnScoped": scoped.is_some(),
+        "scopedEffort": scoped.map(|e| e.as_key()),
+        "at_ms": crate::cache::now_ms(),
+        "reason": if value.is_some() {
+            "已注入请求体"
+        } else if !supported {
+            "该模型不在思考参数支持名单：档位不会影响请求体，只会改变本地思考提示词"
+        } else {
+            "档位为 off：按设计不注入思考参数"
+        },
+    });
+    let mut ring = effort_wire_ring()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if ring.len() >= 8 {
+        ring.pop_front();
+    }
+    ring.push_back(payload);
+}
+
+/// `model.effort.last`：最近一次请求实际发出的思考参数（附最近 8 次历史）。
+pub fn last_effort_wire() -> serde_json::Value {
+    let ring = effort_wire_ring()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match ring.back() {
+        Some(last) => {
+            let mut out = last.clone();
+            out["recent"] = serde_json::Value::Array(ring.iter().cloned().collect());
+            out
+        }
+        None => serde_json::json!({
+            "available": false,
+            "reason": "本进程还没有发出过模型请求",
+        }),
     }
 }
 
@@ -1832,9 +2356,15 @@ fn parse_anthropic_response(response_text: String, model: &str) -> Result<LLMRes
 
     let usage = response.usage.map_or(TokenUsage::default(), |u| {
         crate::cache::report_prefix_cache_usage(
-            u.input_tokens as u64,
+            crate::cache::total_input_tokens(
+                u.input_tokens as u64,
+                u.cache_read as u64,
+                u.cache_creation as u64,
+                true,
+            ),
             u.cache_read as u64,
             u.cache_creation as u64,
+            crate::cache::min_cache_tokens(true),
         );
         TokenUsage {
             prompt_tokens: u.input_tokens,
@@ -1945,9 +2475,15 @@ fn parse_chat_response(response_text: String, model: &str) -> Result<LLMResponse
                 + u.prompt_tokens_details.map_or(0, |d| d.cached_tokens);
             let cache_creation = u.cache_creation_input_tokens;
             crate::cache::report_prefix_cache_usage(
-                u.prompt_tokens as u64,
+                crate::cache::total_input_tokens(
+                    u.prompt_tokens as u64,
+                    cache_read as u64,
+                    cache_creation as u64,
+                    false,
+                ),
                 cache_read as u64,
                 cache_creation as u64,
+                crate::cache::min_cache_tokens(false),
             );
             TokenUsage {
                 prompt_tokens: u.prompt_tokens,
@@ -2029,6 +2565,269 @@ fn accumulate_tool_call(accum: &mut Vec<PartialToolCall>, delta: RawToolCallDelt
             slot.arguments.push_str(&args);
         }
     }
+}
+
+/// 解析 Responses API 的 `usage` 对象。
+///
+/// 字段名与 Chat Completions 完全不同：`input_tokens` / `output_tokens`，
+/// 而不是 `prompt_tokens` / `completion_tokens`。缓存命中在
+/// `input_tokens_details.cached_tokens`。
+///
+/// 为什么单独写而不复用 `stream_usage_to_token_usage`：后者按 Chat 字段名反序列化，
+/// 对 Responses 载荷会得到**全零**——用量台账会静默记 0，是典型的"看起来正常其实错"。
+fn responses_usage_to_token_usage(u: &serde_json::Value) -> Option<TokenUsage> {
+    let prompt = u.get("input_tokens").and_then(|v| v.as_u64())? as u32;
+    let completion = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let total = u
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(prompt + completion);
+    if total == 0 {
+        return None;
+    }
+    let cache_read = u
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: 0,
+    })
+}
+
+/// 解析 Responses API 的非流式响应体。
+///
+/// 与 Chat 的结构差异：没有 `choices[]`，而是 `output[]` 数组；
+/// 文本在 `output[].content[].text`（`type=output_text`），
+/// 工具调用是独立的 `output[]` item（`type=function_call`）。
+fn parse_responses_response(text: String, model: &str) -> Result<LLMResponse> {
+    let v: serde_json::Value =
+        serde_json::from_str(&text).context("Failed to parse Responses payload")?;
+
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
+            .unwrap_or("Responses API returned an error");
+        return Err(anyhow!("{msg}"));
+    }
+
+    let mut content = String::new();
+    let mut thinking = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+    for item in v.get("output").and_then(|o| o.as_array()).cloned().unwrap_or_default() {
+        match item.get("type").and_then(|t| t.as_str()) {
+            Some("message") => {
+                for part in item
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("output_text") => {
+                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                content.push_str(t);
+                            }
+                        }
+                        // 拒答不是空答复：原样带回，让上层能看到"模型拒绝"而不是空白
+                        Some("refusal") => {
+                            if let Some(r) = part.get("refusal").and_then(|r| r.as_str()) {
+                                content.push_str(r);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("function_call") => {
+                if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                    tool_calls.push(ToolCall {
+                        id: item
+                            .get("call_id")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string()),
+                        name: name.to_string(),
+                        arguments: item
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("{}")
+                            .to_string(),
+                    });
+                }
+            }
+            Some("reasoning") => {
+                for part in item
+                    .get("summary")
+                    .and_then(|s| s.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                        thinking.push_str(t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 便捷字段：部分实现只在顶层给 `output_text`，output[] 里没有 message item。
+    if content.is_empty() {
+        if let Some(t) = v.get("output_text").and_then(|t| t.as_str()) {
+            content.push_str(t);
+        }
+    }
+
+    let usage = v
+        .get("usage")
+        .and_then(responses_usage_to_token_usage)
+        .unwrap_or_default();
+
+    Ok(LLMResponse {
+        content,
+        thinking: if thinking.is_empty() {
+            None
+        } else {
+            Some(thinking)
+        },
+        model: model.to_string(),
+        usage,
+        tool_calls,
+    })
+}
+
+/// 解析 Responses API 的流式事件（SSE data 行的 JSON）。
+///
+/// 事件名是**扁平字符串**（`response.output_text.delta`），不是 Chat 的 `choices[].delta`。
+/// 映射到与 Chat 相同的 [`ParsedChunk`]，从而复用既有的累积/记账逻辑：
+///
+/// | Responses 事件 | ParsedChunk |
+/// |---|---|
+/// | `response.output_text.delta` | `content` |
+/// | `response.reasoning_summary_text.delta` | `thinking` |
+/// | `response.output_item.added`（function_call） | `tool_calls`（起始：id + name） |
+/// | `response.function_call_arguments.delta` | `tool_calls`（参数增量） |
+/// | `response.completed` | `finish_reason` + `usage` |
+/// | `response.failed` / `error` | `Err`（保留原始 message） |
+///
+/// 未知事件一律忽略：协议在演进，新增事件类型不该让整条流失败。
+fn parse_responses_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk> {
+    let v: serde_json::Value = serde_json::from_str(data)
+        .context("Failed to parse Responses stream event")?;
+
+    // 兼容层探测（线上实证：apigoto 的非流式走 chat 兼容层，流式是真 Responses；
+    // 但某天某端点可能把流式也降级）。若 chunk 带 `choices[]`，它是 Chat 形态的
+    // 流分片 —— 交给 chat 解析器，而不是被当成"未知事件"静默丢掉。
+    // 丢掉的后果是：整条流解析出零内容，前端显示"思考完但没回答"，且不报错。
+    if v.get("choices").and_then(|c| c.as_array()).is_some() {
+        return parse_stream_chunk(data, _model);
+    }
+
+    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let mut out = ParsedChunk {
+        content: None,
+        thinking: None,
+        finish_reason: None,
+        tool_calls: Vec::new(),
+        usage: None,
+    };
+
+    match event_type {
+        "response.output_text.delta" => {
+            out.content = v
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            out.thinking = v
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
+        }
+        "response.output_item.added" => {
+            let item = v.get("item");
+            let is_call = item
+                .and_then(|i| i.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("function_call");
+            if is_call {
+                let item = item.expect("checked above");
+                // `output_index` 是 Responses 的稳定序号，正好当累积 index 用
+                let index = v
+                    .get("output_index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0) as usize;
+                out.tool_calls.push(RawToolCallDelta {
+                    index: Some(index),
+                    // call_id 用于后续 function_call_output 配对，必须带下去
+                    id: item
+                        .get("call_id")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string()),
+                    function: Some(RawFunctionDelta {
+                        name: item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string()),
+                        arguments: None,
+                    }),
+                });
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let index = v
+                .get("output_index")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as usize;
+            let delta = v
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.tool_calls.push(RawToolCallDelta {
+                index: Some(index),
+                id: None,
+                function: Some(RawFunctionDelta {
+                    name: None,
+                    arguments: Some(delta),
+                }),
+            });
+        }
+        "response.completed" => {
+            out.finish_reason = Some("stop".to_string());
+            if let Some(usage) = v
+                .get("response")
+                .and_then(|r| r.get("usage"))
+                .and_then(responses_usage_to_token_usage)
+            {
+                out.usage = Some(usage);
+            }
+        }
+        "response.failed" => {
+            let msg = v
+                .pointer("/response/error/message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Responses API reported a failed response");
+            return Err(anyhow!("{msg}"));
+        }
+        "error" => {
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Responses API stream error");
+            return Err(anyhow!("{msg}"));
+        }
+        _ => {}
+    }
+    Ok(out)
 }
 
 /// 解析 Anthropic Messages API 流式事件（SSE data 行的 JSON）。
@@ -2264,6 +3063,10 @@ fn parse_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk> {
 }
 
 #[cfg(test)]
+#[path = "wire_api_tests.rs"]
+mod wire_api_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::Message;
@@ -2301,6 +3104,10 @@ mod tests {
     }
 
     /// 同 `(base_url, timeout_secs)` 必须**复用**同一 client（连接池语义不变）。
+    ///
+    /// 断言只统计**本用例专属 base_url** 的条目数，而不是全局 `len()`：
+    /// 池是进程级共享的，并行跑其他用例时会在两次读数之间插入无关条目，
+    /// 旧写法会把「别人入池」误判成「本键重复入池」（已实测偶发假失败）。
     #[test]
     fn shared_client_reuses_same_key() {
         let c = LLMConfig {
@@ -2308,11 +3115,45 @@ mod tests {
             timeout_secs: 42,
             ..LLMConfig::default()
         };
+        let prefix = format!("{}|", c.base_url);
+        let count_for_this_key = || {
+            shared_client_cache()
+                .read()
+                .expect("readable")
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+        };
         let _ = build_shared_client(&c);
-        let before = shared_client_cache().read().expect("readable").len();
+        assert_eq!(count_for_this_key(), 1, "首次构建应恰好入池一条");
         let _ = build_shared_client(&c);
-        let after = shared_client_cache().read().expect("readable").len();
-        assert_eq!(before, after, "同键不应新增池条目");
+        assert_eq!(count_for_this_key(), 1, "同键不应重复入池");
+    }
+
+    /// 回归：base_url 已含 `/v1` 时不得再拼出 `/v1/v1/...`（Ollama / OpenRouter 404 根因）。
+    #[test]
+    fn build_chat_url_normalizes_existing_version_prefix() {
+        let cases: &[(&str, bool, &str)] = &[
+            // (base_url, is_anthropic, expected)
+            ("http://localhost:11434", false, "http://localhost:11434/v1/chat/completions"),
+            ("http://localhost:11434/", false, "http://localhost:11434/v1/chat/completions"),
+            // 已带 /v1：不得双写
+            ("http://localhost:11434/v1", false, "http://localhost:11434/v1/chat/completions"),
+            ("http://localhost:11434/v1/", false, "http://localhost:11434/v1/chat/completions"),
+            // /api/v1（OpenRouter）：同样以 /v1 结尾，直接追加
+            ("https://openrouter.ai/api/v1", false, "https://openrouter.ai/api/v1/chat/completions"),
+            // OpenAI 标准端点
+            ("https://api.openai.com/v1", false, "https://api.openai.com/v1/chat/completions"),
+            // Anthropic：不带 /v1 的根地址补 /v1/messages
+            ("https://api.anthropic.com", true, "https://api.anthropic.com/v1/messages"),
+            ("https://api.anthropic.com/", true, "https://api.anthropic.com/v1/messages"),
+            ("https://api.anthropic.com/v1", true, "https://api.anthropic.com/v1/messages"),
+            // 空白容错
+            ("  http://localhost:11434/v1  ", false, "http://localhost:11434/v1/chat/completions"),
+        ];
+        for (base, is_anthropic, want) in cases {
+            assert_eq!(build_chat_url(base, *is_anthropic), *want, "base={base}");
+        }
     }
 
     #[test]
@@ -2813,7 +3654,12 @@ mod tests {
         ];
         let body = client.build_body(&messages, false, Some(&sample_tool_defs()));
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
-        assert_eq!(body["system"], "be helpful");
+        // W5.4：system 改为带 cache_control 的 block 数组（Anthropic 前缀缓存是显式断点）。
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "be helpful");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        let tools = body["tools"].as_array().expect("tools");
+        assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hi");
         assert_eq!(body["messages"][1]["role"], "assistant");
@@ -2824,6 +3670,152 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "echo");
         assert!(body.get("stream_options").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_anthropic_last_user_message_gets_a_cache_breakpoint() {
+        let client = LLMClient::new(LLMConfig {
+            provider: LLMProvider::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com".into(),
+            ..Default::default()
+        });
+        let messages = vec![
+            Message::System {
+                content: "be helpful".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::User {
+                content: "first".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::Assistant {
+                content: "answer".into(),
+                timestamp: chrono::Utc::now(),
+                thinking: None,
+            },
+            Message::User {
+                content: "second".into(),
+                timestamp: chrono::Utc::now(),
+            },
+        ];
+        let body = client.build_body(&messages, false, None);
+        // 只有最后一条 user 被改成 block array 并带断点；更早的 user 保持字符串。
+        assert_eq!(body["messages"][0]["content"], "first");
+        assert_eq!(body["messages"][2]["content"][0]["type"], "text");
+        assert_eq!(body["messages"][2]["content"][0]["text"], "second");
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_system_messages_merge_into_one_cached_block() {
+        let client = LLMClient::new(LLMConfig {
+            provider: LLMProvider::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com".into(),
+            ..Default::default()
+        });
+        let messages = vec![
+            Message::System {
+                content: "first".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::System {
+                content: "second".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::User {
+                content: "hi".into(),
+                timestamp: chrono::Utc::now(),
+            },
+        ];
+        let (system, api_messages) = client.messages_to_anthropic(&messages);
+        // W5.4：多个 System 合并为**一个** text block，断点就挂在这个 block 上。
+        assert_eq!(system.len(), 1, "多个 System 必须合并成一个 text block");
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], "first\nsecond");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(api_messages.len(), 1);
+        assert!(
+            api_messages[0]["content"].is_array(),
+            "最后一条 user 必须转成 block 数组"
+        );
+        assert_eq!(
+            api_messages[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_body_has_exactly_three_breakpoints_and_none_mid_history() {
+        let client = LLMClient::new(LLMConfig {
+            provider: LLMProvider::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com".into(),
+            ..Default::default()
+        });
+        let messages = vec![
+            Message::System {
+                content: "stable".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::User {
+                content: "first".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::Assistant {
+                content: "answer".into(),
+                timestamp: chrono::Utc::now(),
+                thinking: None,
+            },
+            Message::User {
+                content: "second".into(),
+                timestamp: chrono::Utc::now(),
+            },
+        ];
+        let body = client.build_body(&messages, false, Some(&sample_tool_defs()));
+        // 断点恰好 3 个：system + 最后一个 tool + 最后一条 user（Anthropic 上限 4）。
+        assert_eq!(
+            body.to_string().matches("\"cache_control\"").count(),
+            3,
+            "断点数量必须是 3，且不重复注入：{body}"
+        );
+        // 更早的 user 保持字符串 —— 断点不在 history 中间。
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][2]["content"].is_array());
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_non_anthropic_bodies_never_contain_cache_control() {
+        // OpenAI / DeepSeek 是**自动**前缀缓存：注入非标准字段会被 400 或静默忽略。
+        let messages = vec![
+            Message::System {
+                content: "stable".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            Message::User {
+                content: "hi".into(),
+                timestamp: chrono::Utc::now(),
+            },
+        ];
+        for provider in [LLMProvider::OpenAI, LLMProvider::DeepSeek] {
+            let client = LLMClient::new(LLMConfig {
+                provider: provider.clone(),
+                ..Default::default()
+            });
+            let body = client.build_body(&messages, false, Some(&sample_tool_defs()));
+            assert!(
+                !body.to_string().contains("cache_control"),
+                "{provider:?} 的请求体不应含 cache_control：{body}"
+            );
+        }
     }
 
     #[test]
@@ -2892,6 +3884,28 @@ mod tests {
     fn token_estimate_mixed_text() {
         // "Hi 你好" → ascii 3*0.25=0.75 + CJK 2*1.3=2.6 = 3.35 → ceil 4
         assert_eq!(token_estimate("Hi 你好", 1.0), 4);
+    }
+
+    #[test]
+    fn effort_wire_snapshot_distinguishes_unsupported_and_off() {
+        use crate::model::thinking::ThinkingEffort;
+        // 模型不在支持名单：必须记录「未注入 + 原因」，而不是静默跳过
+        note_effort_wire("gpt-5-mini", ThinkingEffort::Deep, false, "reasoning_effort", None);
+        let snap = last_effort_wire();
+        assert_eq!(snap["injected"], serde_json::json!(false));
+        assert_eq!(snap["supported"], serde_json::json!(false));
+        assert_eq!(snap["effort"], serde_json::json!("deep"));
+        assert!(
+            snap["reason"].as_str().unwrap_or_default().contains("支持名单"),
+            "必须说明为何没注入：{snap}"
+        );
+
+        // 支持名单内：记录真实注入的字段与值
+        note_effort_wire("deepseek-v4-pro", ThinkingEffort::Max, true, "reasoning_effort", Some("high"));
+        let snap = last_effort_wire();
+        assert_eq!(snap["injected"], serde_json::json!(true));
+        assert_eq!(snap["value"], serde_json::json!("high"));
+        assert_eq!(snap["field"], serde_json::json!("reasoning_effort"));
     }
 
     #[test]
@@ -3032,6 +4046,46 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "echo");
         assert_eq!(calls[0].arguments, "{\"message\":\"hi\"}");
+    }
+
+    /// 非 SSE 提供方（忽略 `stream: true`，一次性返回整份 JSON）：流式客户端
+    /// 必须把整份响应翻译成 chunk，而不是静默返回空文本。
+    ///
+    /// 真机缺陷：这类提供方下 `run_tool_loop_stream` 收到的是空流，界面上
+    /// 「模型明明答了却什么都没有」，回合被误判为空回复。
+    #[tokio::test]
+    async fn stream_with_tools_parses_non_sse_completion_body() {
+        let body = r#"{"choices":[{"message":{"content":"答案正文","reasoning_content":"先想再答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#;
+        let url = mock_server(vec![(200, body.to_string())]).await;
+        let config = LLMConfig {
+            base_url: url,
+            api_key: "k".to_string(),
+            timeout_secs: 5,
+            ..Default::default()
+        };
+        let client = LLMClient::new(config);
+        let mut rx = client
+            .chat_stream_with_tools(&user_msg("hi"), &sample_tool_defs())
+            .await
+            .unwrap();
+        let mut content = String::new();
+        let mut thinking = String::new();
+        let mut stopped = false;
+        while let Some(item) = rx.recv().await {
+            let chunk = item.expect("非 SSE 兜底不应产生错误帧");
+            if let Some(t) = chunk.thinking {
+                thinking.push_str(&t);
+            }
+            if let Some(c) = chunk.content {
+                content.push_str(&c);
+            }
+            if chunk.finish_reason.as_deref() == Some("stop") {
+                stopped = true;
+            }
+        }
+        assert_eq!(thinking, "先想再答");
+        assert_eq!(content, "答案正文");
+        assert!(stopped, "非 SSE 兜底必须给出终止帧");
     }
 
     /* ── T7：流式 usage 落账端到端（台账行数断言） ───────────────────────── */

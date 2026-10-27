@@ -1,0 +1,383 @@
+/* 玛格丽特 · 星夜 —— 全局世界层（激活本主题时懒加载）。
+ *
+ * 五个层次，全部由令牌驱动、全部在 `prefers-reduced-motion` 下退化为静态：
+ *   1) 排版：衬线展示字 + CJK 舒展行距 + 字距；
+ *   2) 留白：控制台/卡片/列表的呼吸感（只加间距，不改结构）；
+ *   3) 形状：圆润化 + 月光内描边 + 玻璃质感；
+ *   4) 天象：极光带、雪脊剪影、星尘（画布层另有 `MargueriteSky.vue`）；
+ *   5) 微动效：主按钮的月光扫过、卡片悬浮、雏菊母题。
+ *
+ * 色彩一律引用语义令牌（`--accent` / `--accent-secondary` / `--text` …），
+ * 不写死色值，避免主题换色时出现“孤儿色”。
+ */
+
+/* ── 0. 层级：画布星空在最底，应用内容整体抬到它上面 ───────────────── */
+[data-theme="marguerite-night"] #app {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 1. 排版 ─────────────────────────────────────────────────────────── */
+[data-theme="marguerite-night"] h1,
+[data-theme="marguerite-night"] h2,
+[data-theme="marguerite-night"] h3,
+[data-theme="marguerite-night"] .control-stage__title,
+[data-theme="marguerite-night"] .view-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: 0.015em;
+  color: var(--text);
+  text-shadow: 0 0 22px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 标题下的“星线”：一条从主色淡出的细线，替代生硬的整条分隔线 */
+[data-theme="marguerite-night"] .control-stage__header {
+  position: relative;
+  padding-bottom: 14px;
+}
+[data-theme="marguerite-night"] .control-stage__header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: min(320px, 42%);
+  height: 1px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 60%, transparent) 0%,
+    color-mix(in srgb, var(--accent-secondary) 34%, transparent) 45%,
+    transparent 100%);
+}
+
+/* 正文：中文行距放大到 1.78，字距 0.01em；英文用 0.2px 的轻微 tracking */
+[data-theme="marguerite-night"] p,
+[data-theme="marguerite-night"] li,
+[data-theme="marguerite-night"] .msg-ai-text,
+[data-theme="marguerite-night"] .inspect-msg__text,
+[data-theme="marguerite-night"] .control-section__desc {
+  line-height: 1.78;
+  letter-spacing: 0.01em;
+}
+
+[data-theme="marguerite-night"] .control-section__desc,
+[data-theme="marguerite-night"] .control-row__desc {
+  color: var(--text-muted);
+}
+
+/* 数字与代码保持等宽，避免衬线数字在表格里跳动 */
+[data-theme="marguerite-night"] code,
+[data-theme="marguerite-night"] pre,
+[data-theme="marguerite-night"] .mono,
+[data-theme="marguerite-night"] table td,
+[data-theme="marguerite-night"] table th {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 2. 留白与节奏 ─────────────────────────────────────────────────── */
+[data-theme="marguerite-night"] .control-stage {
+  padding: 28px 32px 40px;
+}
+[data-theme="marguerite-night"] .control-stage__subtitle {
+  margin-top: 6px;
+  max-width: 78ch;
+}
+[data-theme="marguerite-night"] .control-section + .control-section {
+  margin-top: 20px;
+}
+[data-theme="marguerite-night"] .control-section {
+  padding: 18px 20px;
+}
+[data-theme="marguerite-night"] .control-row + .control-row {
+  margin-top: 12px;
+}
+[data-theme="marguerite-night"] .msg-ai,
+[data-theme="marguerite-night"] .msg-user {
+  margin-block: 14px;
+}
+
+/* ── 3. 形状：圆润化 + 月光描边 + 玻璃 ─────────────────────────────── */
+[data-theme="marguerite-night"] .card,
+[data-theme="marguerite-night"] .control-card,
+[data-theme="marguerite-night"] .control-section,
+[data-theme="marguerite-night"] .settings-card {
+  border-radius: var(--radius-card);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bg-surface-2) 72%, transparent) 0%,
+      color-mix(in srgb, var(--card) 92%, transparent) 100%);
+  border: 1px solid var(--hairline);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent),
+    0 18px 36px -24px var(--shadow-color);
+  transition: border-color var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-enter) var(--ease-standard),
+    transform var(--dur-enter) var(--ease-standard);
+}
+[data-theme="marguerite-night"] .card:hover,
+[data-theme="marguerite-night"] .control-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--hairline));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
+    0 22px 44px -26px var(--shadow-color),
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
+  transform: translateY(-1px);
+}
+
+[data-theme="marguerite-night"] .btn,
+[data-theme="marguerite-night"] .control-segmented,
+[data-theme="marguerite-night"] input,
+[data-theme="marguerite-night"] select,
+[data-theme="marguerite-night"] textarea {
+  border-radius: var(--radius-control);
+}
+
+/* 主按钮：月光内缘 + 悬停时一道缓慢扫过的光（不是渐变闪白） */
+[data-theme="marguerite-night"] .btn--primary,
+[data-theme="marguerite-night"] .sidebar-new-session {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background-image: linear-gradient(135deg,
+    var(--accent) 0%,
+    color-mix(in srgb, var(--accent) 62%, var(--accent-secondary)) 100%);
+  color: var(--accent-foreground);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 42%, transparent),
+    0 10px 24px -14px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+[data-theme="marguerite-night"] .btn--primary::after,
+[data-theme="marguerite-night"] .sidebar-new-session::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(105deg,
+    transparent 35%,
+    color-mix(in srgb, var(--text) 34%, transparent) 50%,
+    transparent 65%);
+  transform: translateX(-120%);
+  transition: transform var(--dur-slow) var(--ease-out);
+  pointer-events: none;
+}
+[data-theme="marguerite-night"] .btn--primary:hover::after,
+[data-theme="marguerite-night"] .sidebar-new-session:hover::after {
+  transform: translateX(120%);
+}
+
+/* ── 4. 天象：极光带 ───────────────────────────────────────────────── */
+[data-theme="marguerite-night"] body::before {
+  content: '';
+  position: fixed;
+  inset: -20% -10%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image:
+    radial-gradient(52% 38% at 18% 16%,
+      color-mix(in srgb, var(--accent-secondary) 26%, transparent) 0%,
+      transparent 68%),
+    radial-gradient(46% 34% at 78% 24%,
+      color-mix(in srgb, var(--queued) 24%, transparent) 0%,
+      transparent 70%),
+    radial-gradient(60% 42% at 52% 88%,
+      color-mix(in srgb, var(--accent) 18%, transparent) 0%,
+      transparent 72%);
+  filter: blur(12px) saturate(112%);
+  animation: marguerite-aurora 46s ease-in-out infinite alternate;
+}
+
+/* 雪脊剪影：玛格丽特补给站脚下的罗莎峰（多边形为原创绘制） */
+[data-theme="marguerite-night"] body::after {
+  content: '';
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22vh;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  background:
+    linear-gradient(180deg,
+      transparent 0%,
+      color-mix(in srgb, var(--bg) 42%, transparent) 46%,
+      color-mix(in srgb, var(--bg) 92%, var(--ink-abyss)) 100%);
+  clip-path: polygon(
+    0% 100%, 0% 62%, 8% 54%, 14% 60%, 22% 40%, 30% 52%, 38% 44%,
+    46% 56%, 54% 38%, 62% 50%, 70% 42%, 78% 54%, 86% 46%, 94% 56%, 100% 48%,
+    100% 100%);
+}
+
+@keyframes marguerite-aurora {
+  0%   { transform: translate3d(-1.5%, -1%, 0) scale(1.02) rotate(-0.6deg); }
+  50%  { transform: translate3d(1.2%, 1.4%, 0) scale(1.06) rotate(0.8deg); }
+  100% { transform: translate3d(-0.6%, 0.6%, 0) scale(1.03) rotate(-0.3deg); }
+}
+
+/* ── 5. 雏菊母题 ───────────────────────────────────────────────────── */
+/* 章节标题前的小雏菊（内联 SVG，原创绘制；用 mask 让颜色跟随主色） */
+[data-theme="marguerite-night"] .control-section__title {
+  position: relative;
+  padding-left: 22px;
+}
+[data-theme="marguerite-night"] .control-section__title::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translateY(-50%);
+  background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='%23000'%3E%3Cellipse cx='12' cy='4.6' rx='2.5' ry='4.2'/%3E%3Cellipse cx='12' cy='19.4' rx='2.5' ry='4.2'/%3E%3Cellipse cx='4.6' cy='12' rx='4.2' ry='2.5'/%3E%3Cellipse cx='19.4' cy='12' rx='4.2' ry='2.5'/%3E%3Cellipse cx='6.9' cy='6.9' rx='3.4' ry='2.1' transform='rotate(-45 6.9 6.9)'/%3E%3Cellipse cx='17.1' cy='17.1' rx='3.4' ry='2.1' transform='rotate(-45 17.1 17.1)'/%3E%3Cellipse cx='17.1' cy='6.9' rx='3.4' ry='2.1' transform='rotate(45 17.1 6.9)'/%3E%3Cellipse cx='6.9' cy='17.1' rx='3.4' ry='2.1' transform='rotate(45 6.9 17.1)'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='3.1' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='%23000'%3E%3Cellipse cx='12' cy='4.6' rx='2.5' ry='4.2'/%3E%3Cellipse cx='12' cy='19.4' rx='2.5' ry='4.2'/%3E%3Cellipse cx='4.6' cy='12' rx='4.2' ry='2.5'/%3E%3Cellipse cx='19.4' cy='12' rx='4.2' ry='2.5'/%3E%3Cellipse cx='6.9' cy='6.9' rx='3.4' ry='2.1' transform='rotate(-45 6.9 6.9)'/%3E%3Cellipse cx='17.1' cy='17.1' rx='3.4' ry='2.1' transform='rotate(-45 17.1 17.1)'/%3E%3Cellipse cx='17.1' cy='6.9' rx='3.4' ry='2.1' transform='rotate(45 17.1 6.9)'/%3E%3Cellipse cx='6.9' cy='17.1' rx='3.4' ry='2.1' transform='rotate(45 6.9 17.1)'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='3.1' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.9;
+}
+
+/* 侧栏：深空渐变 + 底部一条“地平线”光 */
+[data-theme="marguerite-night"] .sidebar {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bg-surface) 96%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 92%, transparent) 100%);
+  border-right-color: color-mix(in srgb, var(--accent) 14%, var(--hairline));
+}
+
+/* 激活项左侧的月光点（比整块高亮更克制） */
+[data-theme="marguerite-night"] .sidebar-item.is-active {
+  position: relative;
+}
+[data-theme="marguerite-night"] .sidebar-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  background: var(--accent-secondary);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-secondary) 70%, transparent);
+}
+
+/* 聊天气泡：暗夜纸张的层次（AI 用极淡的面，用户用主色 12%） */
+[data-theme="marguerite-night"] .msg-ai .msg-bubble {
+  background: color-mix(in srgb, var(--bg-surface-2) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, var(--hairline));
+  border-radius: var(--radius-card);
+}
+[data-theme="marguerite-night"] .msg-user .msg-bubble {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-radius: var(--radius-card);
+}
+
+/* 桌宠舞台：夜空舞台而不是白底 */
+[data-theme="marguerite-night"] .pet3d-stage {
+  background:
+    radial-gradient(60% 52% at 50% 32%,
+      color-mix(in srgb, var(--accent-secondary) 16%, transparent) 0%,
+      transparent 66%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bg-surface-2) 84%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 96%, var(--ink-abyss)) 100%);
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--hairline));
+}
+
+/* 滚动条与选区 */
+[data-theme="marguerite-night"] ::selection {
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+  color: var(--text);
+}
+[data-theme="marguerite-night"] * {
+  scrollbar-color: color-mix(in srgb, var(--accent) 42%, var(--bg-hover)) transparent;
+}
+
+/* ── 6. 动效降级 ───────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="marguerite-night"] body::before {
+    animation: none;
+    transform: none;
+  }
+  [data-theme="marguerite-night"] .btn--primary::after,
+  [data-theme="marguerite-night"] .sidebar-new-session::after {
+    display: none;
+  }
+  [data-theme="marguerite-night"] .card,
+  [data-theme="marguerite-night"] .control-card,
+  [data-theme="marguerite-night"] .control-section {
+    transition: none;
+  }
+  [data-theme="marguerite-night"] .card:hover,
+  [data-theme="marguerite-night"] .control-card:hover {
+    transform: none;
+  }
+}
+
+/* ── 7. 三维山脊接管背景时的外壳（雪脊 + 补给站 + 结组登山队 + 云海 + 日出） ──
+ *
+ * 前提：`RidgeScene` 挂载后会写 `html[data-ridge="1"]`。此时背景不再是 CSS 剪影，
+ * 而是一块实时的 3D 画面，所以：
+ *   · 中间层（.main/.chat/.chat-body）必须让开，否则 3D 画面"画了但看不见"；
+ *   · 面板改成**压暗的玻璃**（84% 夜色 + 20px 模糊）：既让山脊与云海透上来，
+ *     又保证白字对比度仍 ≥4.5:1（最坏情况是雪面从面板背后透出）；
+ *   · CSS 版雪脊剪影（body::after）退场，极光（body::before）减淡到 35%，
+ *     避免和 3D 的晨曦抢同一个焦点。
+ */
+html[data-ridge="1"][data-theme="marguerite-night"] .main,
+html[data-ridge="1"][data-theme="marguerite-night"] .main--chat,
+html[data-ridge="1"][data-theme="marguerite-night"] .chat,
+html[data-ridge="1"][data-theme="marguerite-night"] .chat-body {
+  background: transparent !important;
+}
+
+html[data-ridge="1"][data-theme="marguerite-night"] body::after {
+  display: none;
+}
+
+html[data-ridge="1"][data-theme="marguerite-night"] body::before {
+  opacity: 0.35;
+}
+
+[data-theme="marguerite-night"] .content,
+[data-theme="marguerite-night"] .content--chat {
+  /* 46%–70% 渐变 + 6px 模糊：3D 山脊是这一版的主题本体，模糊一旦上到 20px
+     就只剩一片灰雾（实测 84% / 22px 时山脊、补给站、登山队全部糊掉，等于白做）；
+     上下各压深一些，保证顶部消息与底部输入区的白字稳定。
+     2026-10-24：用户反馈「磨砂太高、看不清背景」——背景视频（粒子雏菊）在
+     这一层之上还有一层播放态 scrim，两层叠加等于把画面糊死。这里把底色
+     从 62/52/56/70% 降到 52/42/46/60%、模糊 6px→3px，山脊与 MV 重新透出来；
+     白字仍落在 var(--bg) 52% 以上的深底上，对比度不受影响。 */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg) 52%, transparent) 0%,
+    color-mix(in srgb, var(--bg) 42%, transparent) 42%,
+    color-mix(in srgb, var(--bg) 46%, transparent) 70%,
+    color-mix(in srgb, var(--bg) 60%, transparent) 100%
+  );
+  -webkit-backdrop-filter: blur(3px) saturate(112%);
+  backdrop-filter: blur(3px) saturate(112%);
+}
+
+[data-theme="marguerite-night"] .sidebar {
+  background: color-mix(in srgb, var(--bg) 56%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  backdrop-filter: blur(10px) saturate(120%);
+}
+
+[data-theme="marguerite-night"] .topbar--chat {
+  background: color-mix(in srgb, var(--bg) 54%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  backdrop-filter: blur(10px) saturate(120%);
+}
+
+/* 聊天输入区：比面板更实一点，长句输入时字要稳。
+   选择器必须带上 `#app .chat .chat-composer--floating`：
+   组件内 `.chat-composer--floating .chat-input-panel`（16px 模糊）在 Vite 里
+   注入更晚，`apple-modern.css` 又用 `#app .chat …` 的 id 权重压住底色；
+   只写 `[data-theme] .chat-input-panel` 实测仍是 16px 模糊 + 72% 底色。 */
+[data-theme="marguerite-night"] .chat-input-panel,
+[data-theme="marguerite-night"] #app .chat .chat-composer--floating .chat-input-panel {
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  backdrop-filter: blur(10px) saturate(120%);
+}

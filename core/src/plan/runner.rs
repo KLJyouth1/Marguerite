@@ -22,6 +22,7 @@ use crate::events::{Envelope, EventBus, EventType};
 use crate::gateway::mode_route::mode_route;
 use crate::goal::runner_guard::{GoalGuardDecision, GoalRunnerGuard};
 use crate::governance::completion_gate::{CompletionGate, RealShellRunner, ShellRunner};
+use crate::guard::gateway::RiskLevel;
 use crate::mode::ModeKind;
 use crate::model::router::Complexity;
 use crate::orchestration::deliverable;
@@ -35,8 +36,11 @@ fn analyzer() -> &'static Orchestrator {
     R.get_or_init(|| Orchestrator::new(Config::default()))
 }
 
-/// 子步骤瞬时失败的最大重试次数（v9 完成性补强：商业级任务对瞬时错误有界重试）。
-const STEP_MAX_RETRIES: usize = 3;
+/// 子步骤瞬时失败的最大重试次数：交给自适应预算（Standard 档 3 次，与历史一致），
+/// 不再全局写死；任务越重允许更多次（Complex 4 / Deep 5），仍受硬护栏 5 次约束。
+fn plan_step_retries(goal: &str) -> usize {
+    crate::agent::budget_policy::resolve(goal, 1, 0).max_retries as usize
+}
 
 /// 单步执行的**总**墙钟预算（秒）：覆盖所有重试 + 退避的总耗时上限，而非每次重试
 /// 各自计时。任何 LLM/工具调用若在此预算内仍无法返回，视为「远端无响应」并终止
@@ -44,21 +48,23 @@ const STEP_MAX_RETRIES: usize = 3;
 /// 根因——无界挂起）。采用「总预算递减」而非「每次重试独立超时」，避免重试次数
 /// 放大等待时长。
 ///
-/// v3.2：可配置（`plan.step_timeout_secs`），默认从 30s 提升到 **120s**。
-/// 实测 DeepSeek v4 真实推理 + 工具回路单步常超 30s（尤其复杂拆解步骤），
-/// 旧默认导致复杂任务第一步即失败（`plan_runner` 错误），整个自动拆解闭环报废。
-fn step_total_timeout() -> u64 {
+/// 2026-10-24：默认值不再写死 120s，而是按整体目标走 `budget_policy`
+/// （Simple 120s / Standard 300s / Complex 600s / Deep 900s）。显式配置
+/// `plan.step_timeout_secs > 0` 仍然优先——那是用户/运维的明确选择。
+fn plan_step_budget(goal: &str) -> u64 {
     let configured = cached_plan_config()
         .map(|c| c.plan.step_timeout_secs)
         .unwrap_or(0);
     if configured > 0 {
         configured
     } else {
-        STEP_TOTAL_TIMEOUT_DEFAULT
+        crate::agent::budget_policy::resolve(goal, 1, 0)
+            .step_timeout
+            .as_secs()
     }
 }
 
-/// 进程级 `Config` 缓存（P2-12）：`step_total_timeout()` 每步都会调用，
+/// 进程级 `Config` 缓存（P2-12）：`plan_step_budget()` 每步都会调用，
 /// 而 `Config::load()` 每次都要解析配置文件——旧实现还**静默**把解析失败
 /// 回落成 0（→ 默认 120s），既不提示也无从排查。现首次 load 后冻结（进程是
 /// 长驻网关，配置热变更另有通道），解析失败只 `warn!` 一次并缓存「无配置」标记。
@@ -91,9 +97,6 @@ fn cached_plan_config() -> Option<&'static Config> {
         })
         .as_ref()
 }
-
-/// 默认单步总预算（秒）。`plan.step_timeout_secs=0` 时生效。
-const STEP_TOTAL_TIMEOUT_DEFAULT: u64 = 120;
 
 /// N2：计划步骤 dispatch 期间挂上 `SESSION`（产物归属）与 `RUN_ID`（成本归因）
 /// 两个 task-local。
@@ -253,6 +256,39 @@ pub fn required_artifacts_for(prompt: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 对产物文件跑「否定式硬约束」检查（R68）。
+///
+/// 返回 `(违规清单, 实际检查到的文件数)`。文件数为 0 表示「没有可读文本产物」，
+/// 调用方据此如实提示「未能对账」，而不是默认「已核对通过」。
+///
+/// **只查产物，不查聊天正文**：模型常在总结里复述「不要用占位符」，把正文纳入检查
+/// 会产生稳定的假阳性 —— 那比不检查更糟（用户会学会忽略这个告警）。
+fn check_hard_constraints(
+    prompt: &str,
+    required: &[String],
+    workspace: &std::path::Path,
+) -> (Vec<crate::governance::HardConstraintViolation>, usize) {
+    let wish = crate::governance::WishParser::parse(prompt);
+    if wish.constraints.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let mut checked = 0usize;
+    let mut violations = Vec::new();
+    for f in required {
+        let path = workspace.join(f);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue; // 二进制/不可读 → 跳过（不做假核对）
+        };
+        checked += 1;
+        violations.extend(crate::governance::HardConstraintChecker::check_all(
+            &wish.constraints,
+            &text,
+            None,
+        ));
+    }
+    (violations, checked)
+}
+
 /// 从步骤标题里提取**产物目标路径**（形如 `output.html` / `presentation.pptx` /
 /// `report.docx`）。
 ///
@@ -326,26 +362,90 @@ impl LedgerTap {
         let mut rx = bus.subscribe(&format!("{session}.*"));
         let sess = session.to_string();
         let handle = tokio::spawn(async move {
+            // 工具入参缓存：ToolCall 带 input、ToolResult 不带，按 call_id 配对后再落盘。
+            let mut pending_inputs: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             while let Some(env) = rx.recv().await {
                 let payload = &env.payload;
+                // 记账口径保持原样（ToolResult 只认 `result`），但**落盘**要更宽容：
+                // 部分工具（web_search 等）只在 `summary` 里给结果，按 `result` 取会整条丢掉。
+                let persist_body = ["result", "output", "summary"].iter().find_map(|k| {
+                    payload
+                        .get(*k)
+                        .filter(|v| !v.is_null())
+                        .map(|v| match v.as_str() {
+                            Some(s) => s.to_string(),
+                            None => v.to_string(),
+                        })
+                        .filter(|s| !s.trim().is_empty())
+                });
                 let value = match env.r#type {
                     EventType::ToolCall => payload.get("input"),
                     EventType::ToolResult => payload.get("result"),
                     _ => None,
                 };
-                let Some(v) = value else { continue };
-                if v.is_null() {
-                    continue;
-                }
-                let body = match v.as_str() {
-                    Some(s) => s.to_string(),
-                    None => v.to_string(),
-                };
                 let tool = payload
                     .get("name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("tool");
-                crate::context::session::record_tool_output(&sess, tool, &body);
+                let call_id = ["id", "tool_use_id"]
+                    .iter()
+                    .find_map(|k| payload.get(*k).and_then(|v| v.as_str()))
+                    .filter(|s| !s.trim().is_empty());
+                let body = value.and_then(|v| {
+                    if v.is_null() {
+                        return None;
+                    }
+                    Some(match v.as_str() {
+                        Some(s) => s.to_string(),
+                        None => v.to_string(),
+                    })
+                });
+                // 计划路径的 ToolResult 与引擎侧共用同一 `id` 幂等键：若某步已由
+                // `Message::Tool` 入上下文处（引擎）记过，这里不再重复计数。
+                match env.r#type {
+                    EventType::ToolCall => {
+                        let Some(text) = body else { continue };
+                        // 入参与引擎侧共用 slot=in 幂等键（谁先记谁生效，不重复计数）。
+                        crate::context::session::record_tool_input_event_fallback(
+                            &sess, call_id, tool, &text,
+                        );
+                        if let Some(id) = call_id {
+                            pending_inputs.insert(id.to_string(), text.clone());
+                        }
+                        pending_inputs.insert(tool.to_string(), text);
+                    }
+                    EventType::ToolResult => {
+                        if let Some(text) = body.as_deref() {
+                            crate::context::session::record_tool_output_event_fallback(
+                                &sess, call_id, tool, text,
+                            );
+                        }
+                        // 复盘证据：计划路径不经过网关私总线桥，工具行只能在这里落盘。
+                        let Some(evidence) = persist_body.or(body) else { continue };
+                        let input = call_id
+                            .and_then(|id| pending_inputs.remove(id))
+                            .or_else(|| pending_inputs.remove(tool))
+                            .unwrap_or_default();
+                        let elapsed_ms = payload
+                            .get("elapsed_ms")
+                            .or_else(|| payload.get("elapsedMs"))
+                            .and_then(|v| v.as_u64());
+                        let ok = payload
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .or_else(|| {
+                                payload
+                                    .get("is_error")
+                                    .and_then(|v| v.as_bool())
+                                    .map(|is_err| !is_err)
+                            });
+                        crate::persistence::session::append_tool_activity(
+                            &sess, call_id, tool, &input, &evidence, elapsed_ms, ok,
+                        );
+                    }
+                    _ => {}
+                }
             }
         });
         Self(handle)
@@ -377,9 +477,14 @@ pub async fn run_autonomous(
     // Bloom→DualLeader / Omni→Cluster。修复「计划路径完全无视运行时模式、五档事件流相同」。
     let route = mode_route(mode);
     let step_shape = route.bias_strategy(AgentMode::Solo);
-    // 完成门禁核验用的工作区根：与各子步骤编排器（default_workspace）**同一**根目录，
-    // 否则「文件真实落盘却核验不到」会误判为缺失。
-    let workspace = crate::orchestration::default_workspace_root();
+    // 工作区根：会话已绑定项目目录时用它，未绑定才回落默认根（应用数据目录 / cwd）。
+    // 子步骤编排器与完成门禁必须用**同一个**根 —— 早先两者都硬编码默认根，于是项目会话
+    // 的产物被写到应用数据目录，而模型在系统提示里也被告知「未绑定项目目录」。
+    // 绑定来源取台账（`bind_session_project` 由 chat.send 的 workspaceId 写入），
+    // 与网关 `resolve_session_project` 的持久化层是同一份事实。
+    let workspace = crate::context::session::session_project(&session)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::orchestration::default_workspace_root);
     let gate = CompletionGate::new();
     let shell: Arc<dyn ShellRunner> = Arc::new(RealShellRunner);
     let max_steps = config.plan.max_steps.max(1);
@@ -404,6 +509,103 @@ pub async fn run_autonomous(
         }
     }
     publish_plan(&bus, &session, EventType::PlanRevision, revision_payload);
+
+    // 1.5) 计划审批闸门（可选：`plan.require_approval`）
+    //
+    // 历史缺陷：`plan::approval::PlanApproval` 这个状态机**零调用点** —— 模块文档写着
+    // 「Plan-mode 审批闭环」，而执行链路上根本没有任何审批：`plan.auto_decompose`
+    // 默认 true ⇒ 复杂任务自动拆解后**直接**跑满 `max_steps` 步。这里把状态机接到真实
+    // 决策点：开启闸门时先抬升一次审批，**未批准绝不启动运行实例**（fail-closed）。
+    //
+    // 复用既有裁决面（`approval_registry` + 控制台 2s 轮询的 `/api/approvals`）：
+    // 控制台的审批卡片因此**无需任何新 UI** 就能裁决计划审批；TUI 靠 Approval 事件。
+    if config.plan.require_approval {
+        let mut plan_approval = plan::approval::PlanApproval::new();
+        plan_approval.submit()?;
+        let gate = Arc::new(crate::guard::gateway::ApprovalGate::default());
+        let reason = format!(
+            "计划已拆解为 {} 步（最大自主执行 {} 步），需你确认后才开始执行",
+            rev["steps"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            max_steps
+        );
+        let Some(pending) = gate.request("plan.run", rev.to_string(), RiskLevel::High) else {
+            return Err(anyhow::anyhow!(
+                "已有其它待裁决的审批，计划未执行（fail-closed）：{reason}"
+            ));
+        };
+        crate::guard::approval_registry::global_registry().register(gate.clone(), &pending);
+        publish_plan(
+            &bus,
+            &session,
+            EventType::Approval,
+            json!({
+                "id": pending.id,
+                "approval_id": pending.id,
+                "tool": "plan.run",
+                "tool_name": "plan.run",
+                "risk": "high",
+                "reason": reason,
+                "session_key": session,
+                "key": session,
+                "args": rev.to_string(),
+                "intent": {
+                    "kind": "execute",
+                    "scope": format!("将按计划自主执行最多 {} 步（每步都会真实调用模型与工具）", max_steps),
+                    "side_effects": ["产生真实模型调用与工具执行，消耗预算"],
+                },
+                "source": "plan.runner",
+            }),
+        );
+        // 等待裁决（与 chain::executor / agent::tool_cycle 同一模式：50ms 轮询 + 超时 fail-closed）
+        let outcome = loop {
+            match gate.outcome(&pending.id) {
+                crate::guard::gateway::ApprovalOutcome::Pending => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+                other => break other,
+            }
+        };
+        crate::guard::approval_registry::global_registry().unregister(&pending.id);
+        match outcome {
+            crate::guard::gateway::ApprovalOutcome::Approved => {
+                let _ = plan_approval.approve();
+                publish_plan(
+                    &bus,
+                    &session,
+                    EventType::PlanRevision,
+                    json!({ "plan_approval": "approved", "settled": true }),
+                );
+            }
+            other => {
+                let why = match other {
+                    crate::guard::gateway::ApprovalOutcome::Timeout => "审批超时",
+                    _ => "审批被拒绝",
+                };
+                let _ = plan_approval.reject(why);
+                publish_plan(
+                    &bus,
+                    &session,
+                    EventType::PlanRevision,
+                    json!({ "plan_approval": "rejected", "settled": true, "why": why }),
+                );
+                publish_plan(
+                    &bus,
+                    &session,
+                    EventType::Error,
+                    json!({
+                        "message": format!("{why}：计划已生成但未执行，可在计划页显式启动"),
+                        "code": "PLAN_APPROVAL_REJECTED",
+                    }),
+                );
+                return Err(anyhow::anyhow!(
+                    "{why}：计划未执行（fail-closed）。计划已保留，可在计划页显式启动。"
+                ));
+            }
+        }
+    }
 
     // 2) 启动运行实例
     let revision_id = rev["revisionId"].as_str().unwrap_or("").to_string();
@@ -485,8 +687,12 @@ pub async fn run_autonomous(
             "【计划子步骤 {sid}｜{title}】\n整体目标：{prompt}\n\n请完成上述子步骤，输出有依据的结论；不要展开其他子步骤。"
         );
 
-        let mut orch =
-            Orchestrator::new_with_credentials_and_cache(config.clone(), None, cache.clone());
+        let mut orch = Orchestrator::new_with_workspace_credentials_cache(
+            config.clone(),
+            workspace.clone(),
+            None,
+            cache.clone(),
+        );
         orch.set_event_bus(bus.clone(), session.clone());
         // 模式偏置（MSC-2/Gap2）：子步骤编排器的运行时模式 = 当前模式，使 mode_route 分派
         // 真实生效（Ensemble → 多 Agent 强编排；Bloom/Omni → 并行编排入口）。
@@ -535,17 +741,18 @@ pub async fn run_autonomous(
         }
         // 步骤执行 + 瞬时失败退避重试（v 完成性补强）：
         // 治理门/宪法/反思门禁的拒绝是确定性裁决，绝不重试（重试无意义且烧额度）；
-        // 网络/超时/5xx 等瞬时错误退避重试至 STEP_MAX_RETRIES 次。
-        // 每一步包裹**总**墙钟预算（`STEP_TOTAL_TIMEOUT`）：用单调递减的剩余时间包装
+        // 网络/超时/5xx 等瞬时错误按自适应预算退避重试（Standard 3 次，Deep 5 次）。
+        // 每一步包裹**总**墙钟预算（按整体目标分档）：用单调递减的剩余时间包装
         // 单次 dispatch，任何单步 LLM/工具调用若无限挂起（连接停滞、远端无响应），
         // 预算耗尽即判定为可重试瞬时错误并终止本步，绝不让一个卡死的子步骤拖垮整个
         // 计划闭环（对应「任务执行效果垃圾」的真实根因——无界挂起）。
         let mut last_err: Option<anyhow::Error> = None;
         let mut step_outcome = None;
-        let step_budget = step_total_timeout();
+        let step_budget = plan_step_budget(&prompt);
+        let step_retries = plan_step_retries(&prompt);
         let step_deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(step_budget);
-        for attempt in 0..STEP_MAX_RETRIES {
+        for attempt in 0..step_retries {
             let remaining = step_deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 last_err = Some(anyhow::anyhow!(
@@ -573,7 +780,7 @@ pub async fn run_autonomous(
                 }
                 Ok(Err(e)) => {
                     let msg = e.to_string();
-                    if !is_retryable_step_error(&e) || attempt + 1 >= STEP_MAX_RETRIES {
+                    if !is_retryable_step_error(&e) || attempt + 1 >= step_retries {
                         last_err = Some(e);
                         break;
                     }
@@ -591,7 +798,7 @@ pub async fn run_autonomous(
                         session = %session, run_id = %run_id, attempt = attempt + 1,
                         "步骤执行墙钟超时，退避重试"
                     );
-                    if attempt + 1 >= STEP_MAX_RETRIES {
+                    if attempt + 1 >= step_retries {
                         last_err = Some(anyhow::anyhow!(msg));
                         break;
                     }
@@ -636,7 +843,7 @@ pub async fn run_autonomous(
                     break;
                 }
                 lead_replies.push(reply.clone());
-                crate::context::session::record_turn(&session, "assistant", &reply);
+                crate::gateway::chat::record_turn_persisted(&session, "assistant", &reply);
                 crate::memory::behavior::record_behavior(
                     &session,
                     "plan_step_done",
@@ -774,6 +981,36 @@ pub async fn run_autonomous(
         let required = required_artifacts_for(&prompt);
         let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
         let mut verdict = gate.evaluate(&prompt, &lead_reply, &required_refs, &workspace, &shell, None);
+        // ── 硬约束对账（R68）──
+        // 用户说「不要用占位符 / 不要省略任何条目 / 不要缩写号」时，这些要求此前只作为
+        // 提示词文本存在 —— 模型遵守与否**没人核对**，正是 R64 里「产物全是占位符」的根因。
+        // 这里把它变成可判定检查：从同一句 prompt 重新解析约束（与注入同源，不会漂移），
+        // 然后**只查产物文件**（不查聊天正文：正文里常复述「不要占位符」，查正文必误报）。
+        // 没有可读产物时如实说明「未能对账」，不假装已核对。
+        if verdict.allowed {
+            let (violations, checked_files) = check_hard_constraints(&prompt, &required, &workspace);
+            if !violations.is_empty() {
+                verdict.allowed = false;
+                verdict
+                    .blocked_by
+                    .push(crate::governance::completion_gate::BlockReason::MissingArtifact);
+                for v in &violations {
+                    verdict.warnings.push(format!(
+                        "产物违反硬约束「{}」：{}（文件已生成，需修掉后再交付）",
+                        v.raw, v.detail
+                    ));
+                }
+            } else if checked_files == 0 && !crate::governance::WishParser::parse(&prompt)
+                .constraints
+                .is_empty()
+            {
+                verdict.warnings.push(
+                    "硬约束已登记，但没有可读的文本产物可供对账（二进制/未声明产物），\
+                     请人工确认产物是否违反上述约束"
+                        .to_string(),
+                );
+            }
+        }
         // 可选 LLM 验收（opt-in，默认关闭；fail-open）：确定性门禁放行之后，再由 LLM 复核
         // 「结果是否真的满足任务」。未启用 / 无 key / 调用失败 → 完全不影响本裁决。
         if verdict.allowed {
@@ -974,7 +1211,7 @@ pub async fn run_plan_revision_steps(
             Ok(outcome) => {
                 let reply = outcome.lead_reply;
                 lead_replies.push(reply.clone());
-                crate::context::session::record_turn(&session, "assistant", &reply);
+                crate::gateway::chat::record_turn_persisted(&session, "assistant", &reply);
                 crate::memory::behavior::record_behavior(
                     &session,
                     "plan_step_done",
@@ -1111,17 +1348,18 @@ fn spawn_step(
         orch.set_event_bus(bus, session);
         // 计划并行子步骤：编排决策由方案卡一次性呈现，子步骤不再复述决策（A2/A3）。
         orch.set_plan_step(true);
-        // 单步**总**墙钟预算（与串行 runner 同一口径 `plan.step_timeout_secs`）：
+        // 单步**总**墙钟预算（与串行 runner 同一口径：显式配置 > 自适应分档）：
         // 并行批此前完全没有超时保护——一个卡死的子步骤会永久占住并发额度，
         // 使整批永远收不了口（`join_next` 永不返回），前端进度条就此凝固。
         // 串行路径早已有这层保护，这里补齐对称性。
-        let budget = step_total_timeout();
+        let budget = plan_step_budget(&title_ctx);
+        let retries = plan_step_retries(&title_ctx);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(budget);
         let t0 = std::time::Instant::now();
         let mut attempts = 0usize;
         let mut timed_out = false;
         let mut last_err = String::new();
-        for attempt in 0..STEP_MAX_RETRIES {
+        for attempt in 0..retries {
             attempts = attempt + 1;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -1151,14 +1389,14 @@ fn spawn_step(
                 Ok(Err(e)) => {
                     last_err = e.to_string();
                     // 治理门/宪法/反思门禁是确定性裁决 → 绝不重试（重试无意义且烧额度）。
-                    if !is_retryable_step_error(&e) || attempts >= STEP_MAX_RETRIES {
+                    if !is_retryable_step_error(&e) || attempts >= retries {
                         break;
                     }
                 }
                 Err(_elapsed) => {
                     timed_out = true;
                     last_err = format!("子步骤 {sid} 执行超出总预算 {budget}s，疑似远端无响应");
-                    if attempts >= STEP_MAX_RETRIES {
+                    if attempts >= retries {
                         break;
                     }
                 }
@@ -1852,6 +2090,139 @@ mod tests {
         assert!(err.to_string().contains("仅用于复杂/项目型任务"));
     }
 
+    /// 计划审批闸门（`plan.require_approval`）：把 `PlanApproval` 状态机从
+    /// 「零调用点」接成**真实决策点**的守卫。
+    ///
+    /// 背景（实测）：`plan::approval` 模块文档写着「审批闭环」，但全仓无人调用它；
+    /// `plan_auto_decompose` 默认 true ⇒ 复杂任务拆解后**直接**跑满 max_steps 步。
+    /// 下面两条用例分别钉住「拒绝 → 绝不启动运行」与「批准 → 真的启动运行」。
+    mod plan_approval_gate {
+        use super::*;
+
+        /// 复杂/项目型任务（与 `should_auto_decompose` 用例同一句，保证 `qualifies` 通过）。
+        const COMPLEX: &str = "请用 Rust 实现一个完整的 HTTP 服务器，包含路由、中间件、静态文件、TLS 与压力测试，并撰写架构文档与性能报告。";
+
+        fn gated_cfg() -> Config {
+            let mut cfg = Config::default();
+            cfg.plan.require_approval = true;
+            cfg
+        }
+
+        /// 等出现「plan.run」挂起审批后按 `approve` 裁决；最多等 5s。
+        async fn judge_plan_approval(approve: bool) -> bool {
+            use crate::guard::approval_registry::global_registry;
+            for _ in 0..500 {
+                let target = global_registry()
+                    .pending_snapshots()
+                    .into_iter()
+                    .find(|p| p.tool == "plan.run");
+                if let Some(p) = target {
+                    let _ = global_registry().decide(&p.id, approve);
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        }
+
+        /// 拒绝：**绝不**进入第 2 步（启动运行实例），并如实给出错误帧与错误码。
+        #[tokio::test]
+        async fn rejected_plan_never_starts_a_run() {
+            let bus = Arc::new(EventBus::default());
+            let mut rx = bus.subscribe("**");
+            let judge = tokio::spawn(judge_plan_approval(false));
+            let res = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                run_autonomous(
+                    gated_cfg(),
+                    COMPLEX.to_string(),
+                    "ws.plan-gate-deny".to_string(),
+                    bus.clone(),
+                    String::new(),
+                    None,
+                    ModeKind::Agent,
+                ),
+            )
+            .await
+            .expect("审批应在超时内完成（拒绝路径不应卡住）");
+            assert!(judge.await.unwrap_or(false), "裁决方应真的命中计划审批");
+
+            let err = res.expect_err("拒绝后必须 fail-closed（不得返回成功）");
+            assert!(
+                err.to_string().contains("计划未执行"),
+                "错误必须明确说明未执行: {err}"
+            );
+
+            let mut kinds: Vec<(EventType, Value)> = Vec::new();
+            while let Ok(env) = rx.try_recv() {
+                kinds.push((env.r#type, env.payload));
+            }
+            assert!(
+                !kinds.iter().any(|(t, _)| *t == EventType::PlanRun),
+                "被拒绝的计划**绝不能**启动运行实例（PlanRun 事件不得出现）: {:?}",
+                kinds.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+            );
+            assert!(
+                kinds.iter().any(|(t, p)| *t == EventType::PlanRevision
+                    && p["plan_approval"] == "rejected",
+                ),
+                "必须发布 rejected 结论（前端据此把卡片标成已拒绝）: {kinds:?}"
+            );
+            assert!(
+                kinds.iter().any(|(t, p)| *t == EventType::Error
+                    && p["code"] == "PLAN_APPROVAL_REJECTED"),
+                "必须发带稳定错误码的错误帧: {kinds:?}"
+            );
+        }
+
+        /// 批准：闸门放行后**必须**进入第 2 步（启动运行实例）。
+        #[tokio::test]
+        async fn approved_plan_starts_the_run() {
+            let bus = Arc::new(EventBus::default());
+            let mut rx = bus.subscribe("**");
+            let judge = tokio::spawn(judge_plan_approval(true));
+            // 只等「运行已启动」这一事实；后续离线执行（无 Key）会失败/重试，不关心终态。
+            // 上限 8s：PlanRun 事件在批准后 1s 内必然发布，无需陪跑整个离线重试序列。
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                run_autonomous(
+                    gated_cfg(),
+                    COMPLEX.to_string(),
+                    "ws.plan-gate-allow".to_string(),
+                    bus.clone(),
+                    String::new(),
+                    None,
+                    ModeKind::Agent,
+                ),
+            )
+            .await;
+            assert!(judge.await.unwrap_or(false), "裁决方应真的命中计划审批");
+
+            let mut kinds: Vec<(EventType, Value)> = Vec::new();
+            while let Ok(env) = rx.try_recv() {
+                kinds.push((env.r#type, env.payload));
+            }
+            assert!(
+                kinds.iter().any(|(t, _)| *t == EventType::PlanRun),
+                "批准后必须启动运行实例: {:?}",
+                kinds.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+            );
+            assert!(
+                kinds.iter().any(|(t, _)| *t == EventType::Approval),
+                "审批请求必须经事件流下发（TUI 内联审批框依赖它）: {kinds:?}"
+            );
+        }
+
+        /// 默认关闭：不开闸门时行为与旧版一致（不产生 plan.run 审批）。
+        #[test]
+        fn approval_gate_is_off_by_default() {
+            assert!(
+                !Config::default().plan.require_approval,
+                "默认必须关闭：自动拆解后直接执行是长续航主张，不得静默改成等待批准"
+            );
+        }
+    }
+
     #[test]
     fn retryable_error_classification_is_honest() {
         // 瞬时错误可重试（无 provider 归类时按 Unknown 放行）
@@ -1898,22 +2269,26 @@ mod tests {
         );
     }
 
-    /// P2-12：`step_total_timeout` 的配置读取走进程级缓存——第二次调用不得再
+    /// P2-12：`plan_step_budget` 的配置读取走进程级缓存——第二次调用不得再
     /// `Config::load()`（旧实现每步都解析配置文件）。
     #[test]
-    fn step_total_timeout_reads_config_through_process_cache() {
+    fn step_budget_reads_config_through_process_cache() {
         use std::sync::atomic::Ordering;
-        let _ = step_total_timeout();
+        let _ = plan_step_budget("编译整个项目");
         let after_first = PLAN_CONFIG_LOADS.load(Ordering::Relaxed);
-        let _ = step_total_timeout();
+        let _ = plan_step_budget("编译整个项目");
         let after_second = PLAN_CONFIG_LOADS.load(Ordering::Relaxed);
         assert_eq!(
             after_second, after_first,
-            "第二次 step_total_timeout 不得再次 Config::load()（缓存未生效）"
+            "第二次 plan_step_budget 不得再次 Config::load()（缓存未生效）"
         );
-        // 返回值必须落在合法域内（配置 > 0 用配置，否则默认 120）。
-        let t = step_total_timeout();
-        assert!(t > 0, "step_total_timeout 必须为正的墙钟预算");
+        // 返回值必须落在合法域内（显式配置优先，否则按任务档位）。
+        let t = plan_step_budget("编译整个项目");
+        assert!(t > 0, "plan_step_budget 必须为正的墙钟预算");
+        assert!(
+            t <= crate::agent::budget_policy::MAX_STEP_SECS,
+            "step 预算不得超过硬护栏：{t}"
+        );
     }
 
     /// N2 行为终点：计划步骤 dispatch 的作用域必须把产物登记到**本次会话**。
@@ -2064,6 +2439,40 @@ mod tests {
         out.extend_from_slice(&cd_start.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // comment len
         out
+    }
+
+    /// R68：硬约束必须真的对产物做检查，且**只查产物不查正文**（正文复述会误报）。
+    #[test]
+    fn hard_constraints_are_checked_against_artifacts_only() {
+        // 用 uuid 隔离临时目录：测试并行跑，共享目录会互相删文件（本用例第一版就这么翻的车）。
+        let ws = std::env::temp_dir().join(format!("marg_hc_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let prompt = "做个分子网站，不要用占位符";
+        // 1) 产物含占位符 → 必须报违规
+        std::fs::write(ws.join("output.html"), "<div>TODO: 待补充</div>").unwrap();
+        let (v, checked) = check_hard_constraints(prompt, &["output.html".to_string()], &ws);
+        assert_eq!(checked, 1);
+        assert_eq!(v.len(), 1, "占位符必须被抓到");
+        assert!(v[0].raw.contains("占位符"));
+
+        // 2) 干净产物 → 无违规
+        std::fs::write(ws.join("output.html"), "<div>完整内容，没有待补标记</div>").unwrap();
+        let (v, checked) = check_hard_constraints(prompt, &["output.html".to_string()], &ws);
+        assert_eq!(checked, 1);
+        assert!(v.is_empty(), "干净产物不得误报：{v:?}");
+
+        // 3) 没有产物可读 → checked=0（调用方据此提示「未能对账」，不假装通过）
+        let (v, checked) = check_hard_constraints(prompt, &["missing.html".to_string()], &ws);
+        assert_eq!(checked, 0);
+        assert!(v.is_empty());
+
+        // 4) 没有约束的 prompt → 不检查（checked=0）
+        let (_, checked) = check_hard_constraints("做个网站", &["output.html".to_string()], &ws);
+        assert_eq!(checked, 0);
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Gap1：基准句解析出契约声明的必需产物（HTML + PPT）。

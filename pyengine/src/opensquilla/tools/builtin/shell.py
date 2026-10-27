@@ -5505,13 +5505,60 @@ def _endgame_git_freeze_shell_block(
     return None
 
 
-def _resolve_exec_timeout(timeout: float | int | None) -> float:
-    if timeout is None:
+_LONG_COMMAND_HINTS = (
+    "cargo build",
+    "cargo test",
+    "cargo clippy",
+    "npm install",
+    "npm ci",
+    "npm run build",
+    "npm run test",
+    "pnpm install",
+    "pnpm build",
+    "yarn install",
+    "yarn build",
+    "pip install",
+    "uv sync",
+    "poetry install",
+    "pytest",
+    "vitest",
+    "jest",
+    "cmake",
+    "make ",
+    "docker build",
+    "docker compose build",
+    "dotnet build",
+    "gradle",
+    "mvn ",
+    "go build",
+    "go test",
+    "playwright",
+    "cypress",
+)
+
+
+def _infer_exec_timeout(command: str | None) -> float:
+    """按命令特征推断默认预算。
+
+    模型没显式给 `timeout` 时，旧实现一律 60s —— 一次 `cargo test` 或
+    `npm install` 必然被掐死，用户看到的就是「工具超时」。只放宽**有明确
+    长任务特征**的命令，其它仍保持 60s，避免把普通命令的等待窗口放大。
+    """
+    if not command:
         return _DEFAULT_EXEC_TIMEOUT
+    lowered = command.lower()
+    if any(hint in lowered for hint in _LONG_COMMAND_HINTS):
+        return _MAX_EXEC_TIMEOUT
+    return _DEFAULT_EXEC_TIMEOUT
+
+
+def _resolve_exec_timeout(timeout: float | int | None, command: str | None = None) -> float:
+    if timeout is None:
+        return _infer_exec_timeout(command)
     try:
         value = float(timeout)
     except (TypeError, ValueError):
-        return _DEFAULT_EXEC_TIMEOUT
+        return _infer_exec_timeout(command)
     return max(0.01, min(value, _MAX_EXEC_TIMEOUT))
 
 
@@ -6266,7 +6313,7 @@ async def _run_full_host_shell_command(
         cwd=_effective_workdir(workdir),
         env=merged_env,
         stdin_bytes=stdin.encode("utf-8") if stdin is not None else None,
-        effective_timeout=_resolve_exec_timeout(timeout),
+        effective_timeout=_resolve_exec_timeout(timeout, command),
     )
 
 
@@ -6560,7 +6607,7 @@ async def exec_command(
     apply_utf8_child_env(merged_env)
     _append_windows_app_alias_path(merged_env, runtime=runtime)
     merged_env = _dedupe_windows_env_keys(merged_env)
-    effective_timeout = _resolve_exec_timeout(timeout)
+    effective_timeout = _resolve_exec_timeout(timeout, command)
     stdin_bytes = stdin.encode("utf-8") if stdin is not None else None
     mutation_before = snapshot_current_workspace_mutations()
     source_mutation_signal = (

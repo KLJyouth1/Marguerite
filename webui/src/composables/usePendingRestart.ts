@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { notifyReadFailure } from '@/utils/readFailureNotice'
 
 // Channel mutations (upsert / enable / disable / remove) only take effect
 // after a gateway restart — the RPCs say so via `restartRequired: true`, but
@@ -38,12 +39,18 @@ function loadStored(): PendingRestartEntry[] {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
+    if (!Array.isArray(parsed)) {
+      notifyReadFailure('pending-restart', 'shared.storage.pendingRestartReadFailed')
+      return []
+    }
     return parsed.filter(
       (entry): entry is PendingRestartEntry =>
         !!entry && typeof entry === 'object' && typeof entry.channel === 'string',
     )
   } catch {
+    // 待重启清单读不出来 = 用户以为「改完就好了」，实际还差一次重启。
+    // 这是可恢复的（清掉坏键即可），会经 toast 明确告知一次。
+    notifyReadFailure('pending-restart', 'shared.storage.pendingRestartReadFailed')
     return []
   }
 }

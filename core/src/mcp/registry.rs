@@ -350,7 +350,11 @@ impl ToolRegistry {
     ///
     /// 本地工具通过 `execute_local_tool` 直接调用；此处仅枚举元数据，不触发执行。
     pub fn describe_local_tools(&self) -> Vec<(String, String, serde_json::Value)> {
-        self.local_tools
+        // 稳定性优先：`local_tools` 是 HashMap，迭代顺序每个进程随机。工具列表既会
+        // 写进 system 的「本轮可调用工具」段，也决定 provider 的 tools 数组顺序；
+        // 顺序不稳定会让前缀缓存在重启后整段失效。按名字排序是确定性的。
+        let mut items: Vec<(String, String, serde_json::Value)> = self
+            .local_tools
             .iter()
             .map(|(name, tool)| {
                 (
@@ -359,7 +363,9 @@ impl ToolRegistry {
                     tool.input_schema(),
                 )
             })
-            .collect()
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
     }
 
     /// 返回已接入 MCP 客户端的工具描述（名称、描述、输入 schema），
@@ -393,6 +399,9 @@ impl ToolRegistry {
                 shadowed.push(name);
             }
         }
+        // MCP 工具顺序取决于客户端/缓存顺序：统一按名字排序，保证同一工具集在
+        // 任意进程启动后都产出逐字节一致的工具列表（前缀缓存的前提）。
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
         (merged, shadowed)
     }
 

@@ -217,13 +217,19 @@ fn resolve_resource(name: &str) -> Option<PathBuf> {
             if cand.is_dir() {
                 return Some(cand);
             }
-            // 打包后 modes 可能在 `<app>/resources/modes`（gui 打包布局）
-            if name == "modes" {
-                for rel in ["resources/modes", "modes"] {
-                    let c = dir.join(rel);
-                    if c.is_dir() {
-                        return Some(c);
-                    }
+            // 打包布局：`tauri.conf.json` 的 bundle.resources 把 `resources/docs`
+            // 映射到 `<app>/resources/docs`（而 `webui`/`skills` 在 `<app>/webui`、
+            // `<app>/skills`）。此前只对 `modes` 做了 resources/ 兜底，
+            // 于是 `docs` 明明装着却报「缺失资源: docs」→ **阻塞就绪**（实测 2026-10-21）。
+            // 现在对所有资源名统一兜底，布局差异不再影响判定。
+            for rel in ["resources", ""] {
+                let c = if rel.is_empty() {
+                    dir.join(name)
+                } else {
+                    dir.join(rel).join(name)
+                };
+                if c.is_dir() {
+                    return Some(c);
                 }
             }
         }

@@ -21,6 +21,7 @@ pub mod dsh_bridge;
 pub mod eval;
 pub mod evolve;
 pub mod hooks;
+pub mod ledger;
 pub mod meta;
 pub mod registry;
 pub mod routing;
@@ -45,14 +46,21 @@ pub use dsh_bridge::{
     install_usage_hook, install_usage_hook_with_projection, DshPetBridge, DshRouterBridge,
     PetState, RouterProfile, RouterProfileStore, UsageAggregator, UsageRecord,
 };
-pub use eval::{eval_suite, levenshtein, similarity, summarize, EvalEntry, EvalSummary, EvalTask};
+pub use eval::{
+    acceleration_report, eval_suite, levenshtein, similarity, summarize, AccelerationReport,
+    EvalEntry, EvalSummary, EvalTask,
+};
 pub use evolve::{EvolutionRecord, EvolutionRunner};
 pub use hooks::{HookContext, HookDecision, HookFn, HookOutcome, HookPhase, HookRunner};
+pub use ledger::{
+    global as global_ledger, HarnessLedger, ItemRecord, ItemRow, LedgerStatus, ReplayDigest,
+    RunRow,
+};
 pub use meta::{
-    diagnose, evaluate_candidate, extract_signals, observe_recent, plan_improvement, ChangeTarget,
-    Diagnosis, EvalOutcome, FailureSignal, ImprovementPlan, MetaAgent, MetaCycleReport, MetaLedger,
-    MetaPolicy, PromotionCriteria, PromotionVerdict, RiskLevel, RolloutStage, RootCause,
-    SignalKind, VersionSnapshot,
+    diagnose, evaluate_candidate, extract_signals, observe_recent, plan_improvement,
+    task_level_gate, ChangeTarget, Diagnosis, EvalOutcome, FailureSignal, ImprovementPlan,
+    MetaAgent, MetaCycleReport, MetaLedger, MetaPolicy, PromotionCriteria, PromotionVerdict,
+    RiskLevel, RolloutStage, RootCause, SignalKind, TaskOutcome, VersionSnapshot,
 };
 pub use registry::{CapabilityInfo, CapabilityRegistry, Maturity, NativeCapability};
 pub use routing::{HarnessRouter, RoutingPolicy};
@@ -86,7 +94,10 @@ impl Default for HarnessConfig {
             max_concurrent: 5,
             budget_per_subagent: 32_000,
             policy: RoutingPolicy::Balanced,
-            subagent_timeout: Duration::from_secs(120),
+            // 与自适应预算同源（Standard 档 30 分钟）：120s 会把「实现 + 验证」
+            // 这类常规子任务截断成超时；显式配置 `subagent_timeout` 时仍以配置为准。
+            subagent_timeout: crate::agent::budget_policy::resolve("[[budget:standard]]", 1, 0)
+                .run_timeout,
         }
     }
 }
@@ -236,11 +247,55 @@ impl Harness {
         let model = self.router.resolve(&intent, complexity.clone());
 
         // 3) 预算 + 并发 + 转录
+        //
+        // 台账（best-effort，故障不影响执行）：
+        // - run_id 必须在启动前生成（子代理 id 由 manager 在 run 内部才分配），
+        //   用 `uuid-起始毫秒` 保证唯一；
+        // - `session_id` 留空 —— Harness 层没有会话上下文，不编造一个假会话键。
+        let started_ms = chrono::Utc::now().timestamp_millis();
+        let run_id = format!("{}-{}", uuid::Uuid::new_v4().simple(), started_ms);
+        let policy = self.router.policy().as_str().to_string();
+        let ledger = ledger::global();
+        if let Some(l) = ledger {
+            let _ = l.record_run_start(&run_id, "", &run_id, task, &model, &policy);
+        }
+
         let spec = IsolatedSpec::new(task, role)
             .with_context(format!("routed_model={model}"))
             .with_routing(intent, complexity)
             .with_timeout(self.subagent_timeout);
-        let outcome = self.subagents.run(spec).await?;
+        let outcome = match self.subagents.run(spec).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                if let Some(l) = ledger {
+                    let _ = l.record_run_finish(
+                        &run_id,
+                        "failed",
+                        0,
+                        0,
+                        &model,
+                        Some("HARNESS_RUN_ERROR"),
+                    );
+                }
+                return Err(e);
+            }
+        };
+        if let Some(l) = ledger {
+            let status = if outcome.ok { "ok" } else { "failed" };
+            let code = if outcome.ok {
+                None
+            } else {
+                Some("HARNESS_RUN_FAILED")
+            };
+            let _ = l.record_run_finish(
+                &run_id,
+                status,
+                outcome.prompt_tokens,
+                outcome.output_tokens,
+                &model,
+                code,
+            );
+        }
 
         // 4) 后置钩子（观测阶段，故障不掩盖主结果）
         let post = HookContext::new(HookPhase::PostSubagent, self.workspace.clone())

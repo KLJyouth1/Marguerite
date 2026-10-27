@@ -1092,10 +1092,11 @@ function onSelectRow(row: SidebarConversationItem) {
               <span
                 v-if="row.runStatus === 'running'"
                 class="sidebar-run-indicator"
-                title="任务运行中"
+                :title="t('shared.sidebar.taskRunning')"
+                :aria-label="t('shared.sidebar.taskRunning')"
               >
                 <span class="sidebar-run-dot" />
-                <span class="sidebar-run-text">运行中</span>
+                <span class="sidebar-run-text">{{ t('shared.sidebar.taskRunning') }}</span>
               </span>
               <span
                 v-else-if="row.updatedAt"

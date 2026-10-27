@@ -621,10 +621,6 @@ test.describe('Settings modal', () => {
     await railTab(page, 'Capabilities').click()
     await expect(dialog(page).getByRole('heading', { name: 'Web search' })).toBeVisible()
 
-    // Open the advanced search disclosure so its toggles render.
-    const advanced = dialog(page).getByText('Advanced search options')
-    if (await advanced.count()) await advanced.click()
-
     const checkboxes = dialog(page).locator('input[type="checkbox"]')
     const total = await checkboxes.count()
     expect(total).toBeGreaterThan(0)

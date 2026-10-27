@@ -177,9 +177,29 @@
       </section>
       <footer class="sk-detail__foot">
         <small v-if="skill.file_path" class="sk-dim sk-detail__path">{{ skill.file_path }}</small>
-        <button v-if="skill.layer === 'managed'" class="btn btn--sm" :disabled="uninstallingName === skill.name" @click="emit('uninstall', skill.name)">
-          {{ uninstallingName === skill.name ? t('cronSkills.skillDetail.removing') : t('cronSkills.skillDetail.remove') }}
-        </button>
+        <div class="sk-detail__foot-actions">
+          <ControlSwitch
+            v-if="skill.origin !== 'plugin'"
+            :checked="skill.enabled !== false"
+            :busy="togglingName === skill.name"
+            :label="t('skills.manage.enableLabel')"
+            :caption="t('skills.manage.enableHint')"
+            @change="value => emit('toggle', skill!.name, value)"
+          />
+          <button
+            v-if="skill.kind === 'yaml' && skill.origin !== 'plugin'"
+            class="btn btn--sm btn--ghost"
+            @click="emit('edit', skill)"
+          >{{ t('skills.manage.edit') }}</button>
+          <button
+            v-if="skill.file_path && skill.origin !== 'plugin'"
+            class="btn btn--sm"
+            :disabled="uninstallingName === skill.name"
+            @click="emit('uninstall', skill.name)"
+          >
+            {{ uninstallingName === skill.name ? t('cronSkills.skillDetail.removing') : t('cronSkills.skillDetail.remove') }}
+          </button>
+        </div>
       </footer>
     </div>
 
@@ -191,6 +211,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import ControlSwitch from '@/components/ControlSwitch.vue'
 import ProposalDetailPanel from '@/components/skills/ProposalDetailPanel.vue'
 import type { Proposal, Skill } from '@/types/skills'
 import {
@@ -215,12 +236,15 @@ const props = defineProps<{
   installFeedback: string
   installingDepsId: string | null
   uninstallingName: string | null
+  togglingName?: string | null
 }>()
 
 const emit = defineEmits<{
   close: []
   installDeps: [name: string, installId: string]
   uninstall: [name: string]
+  toggle: [name: string, enabled: boolean]
+  edit: [skill: Skill]
 }>()
 
 const dialogRef = ref<HTMLDialogElement | null>(null)

@@ -40,7 +40,18 @@ const READ_METHODS: &[&str] = &[
     "doctor.status",
     "config.get",
 ];
-const DEVELOPER_METHODS: &[&str] = &["dev.intent.classify"];
+const DEVELOPER_METHODS: &[&str] = &[
+    "dev.intent.classify",
+    // 记忆治理写入口（本地 owner 恒通过；登记后未授权角色会被明确拒绝）
+    "memory.save",
+    "memory.delete",
+    "memory.validate",
+    // 知识库写入口
+    "kb.ingest",
+    "kb.ingest_file",
+    "kb.delete",
+    "kb.update",
+];
 const DEVELOPER_PREFIXES: &[&str] = &["dev.", "ops.host.", "ops.log."];
 const ADMIN_METHODS: &[&str] = &[
     "ops.file.write",
@@ -94,5 +105,31 @@ mod tests {
             Some(Requirement::Admin)
         );
         assert!(requirement_for("ops.process.kill.extra").is_none());
+    }
+
+    /// 记忆/知识库写入口必须登记，且 Developer 及以上才放行（Guest 被拒）。
+    #[test]
+    fn memory_and_kb_writes_require_developer() {
+        for method in [
+            "memory.save",
+            "memory.delete",
+            "memory.validate",
+            "kb.ingest",
+            "kb.ingest_file",
+            "kb.delete",
+            "kb.update",
+        ] {
+            assert_eq!(
+                requirement_for(method),
+                Some(Requirement::Developer),
+                "{method} 必须登记"
+            );
+            assert!(Policy.check(method, Role::Developer).is_ok(), "{method}");
+            assert!(Policy.check(method, Role::Admin).is_ok(), "{method}");
+            assert!(
+                Policy.check(method, Role::Guest).is_err(),
+                "{method} 不得放行 Guest"
+            );
+        }
     }
 }

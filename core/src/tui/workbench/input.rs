@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use crate::tui::workbench::command;
-use crate::tui::workbench::state::{FileRef, UiEffect, WorkbenchState};
+use crate::tui::workbench::state::{ChatMessage, ChatRole, FileRef, UiEffect, WorkbenchState};
 
 /// 输入协议处理器
 pub struct Composer;
@@ -27,6 +27,13 @@ impl Composer {
         // 普通消息：解析 @file 引用 → 注入内容/构建上下文变量
         let refs = resolve_refs(&text);
         state.composer.references = refs;
+        // 把用户这句话记进对话流：此前 `submit` 只返回 `SubmitPrompt` 副作用、
+        // **从不入列**，于是 TUI 的对话视图只有 AI 一侧，用户看不到自己说过什么，
+        // 也读不出上下文（长会话尤其明显）。`!cmd` / `/cmd` 属命令通道，不入对话流。
+        state.chat.messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: text.clone(),
+        });
         vec![UiEffect::SubmitPrompt(text)]
     }
 
@@ -139,6 +146,32 @@ mod tests {
             [UiEffect::SubmitPrompt(t)] => assert_eq!(t, "解释这段代码"),
             _ => panic!("应为 SubmitPrompt"),
         }
+    }
+
+    /// 普通输入必须进入对话流（此前只返回副作用、从不入列 → 用户看不到自己说的话）。
+    #[test]
+    fn test_submit_plain_records_user_message_in_chat() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        s.composer.buffer = "帮我重构这个模块".into();
+        let _ = Composer::submit(&mut s);
+        assert_eq!(s.chat.messages.len(), 1, "用户消息必须入列");
+        assert_eq!(s.chat.messages[0].role, ChatRole::User);
+        assert_eq!(s.chat.messages[0].content, "帮我重构这个模块");
+    }
+
+    /// 命令通道（`!cmd` / `/cmd`）不得混进对话流。
+    #[test]
+    fn test_submit_commands_do_not_pollute_chat_history() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        s.composer.buffer = "!ls -la".into();
+        let _ = Composer::submit(&mut s);
+        s.composer.buffer = "/mode yolo".into();
+        let _ = Composer::submit(&mut s);
+        assert!(
+            s.chat.messages.is_empty(),
+            "沙箱命令与斜杠命令是控制通道，不是对话内容: {:?}",
+            s.chat.messages
+        );
     }
 
     #[test]

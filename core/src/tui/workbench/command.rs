@@ -310,6 +310,11 @@ pub fn dispatch_collab(_state: &mut WorkbenchState, args: &str) -> Vec<UiEffect>
 /// - `add --id <id> --base-url <url> --model <name> [--provider <p>] [--label <l>] [--api-key <k>] [--kind <custom|cloud|local>]`  新增自定义 API 接入点
 /// - `remove <id>`         删除档案
 /// - `list`（默认）        列出全部档案
+/// - `deploy <id> [--activate]`         部署本地模型目录项（P2·A）
+/// - `ollama deploy <tag> [--activate]` 部署真实存在的 Ollama tag（P2·A）
+/// - `activate <profile_id>`            按档案 id 激活（P2·A）
+/// - `routing [get|set <mode>]`         查看 / 设置路由模式（P2·A）
+/// - `system`                           查看主机真实系统规格（P2·A）
 pub fn dispatch_model(state: &mut WorkbenchState, args: &str) -> Vec<UiEffect> {
     let args = args.trim();
     let (sub, rest) = match args.split_once(' ') {
@@ -317,7 +322,15 @@ pub fn dispatch_model(state: &mut WorkbenchState, args: &str) -> Vec<UiEffect> {
         None => (args, ""),
     };
     match sub {
-        "" | "list" => vec![UiEffect::ModelAction(ModelOp::List)],
+        "" | "list" => {
+            // `/model` 直接开面板：用户要的是"看见并切换"，不是回显 20 行文本。
+            state.rail_tab = RailTab::Models;
+            state.refresh_model_panel();
+            vec![
+                UiEffect::SwitchRailTab(RailTab::Models),
+                UiEffect::ModelAction(ModelOp::List),
+            ]
+        }
         "use" => {
             if rest.is_empty() {
                 vec![UiEffect::Render]
@@ -337,7 +350,7 @@ pub fn dispatch_model(state: &mut WorkbenchState, args: &str) -> Vec<UiEffect> {
         "add" => {
             let flags = parse_flags(rest);
             match profile_from_flags(&flags) {
-                Ok(p) => vec![UiEffect::ModelAction(ModelOp::Add(p))],
+                Ok(p) => vec![UiEffect::ModelAction(ModelOp::Add(Box::new(p)))],
                 Err(e) => {
                     state.chat.messages.push(ChatMessage {
                         role: ChatRole::System,
@@ -356,6 +369,72 @@ pub fn dispatch_model(state: &mut WorkbenchState, args: &str) -> Vec<UiEffect> {
                 vec![UiEffect::ModelAction(ModelOp::Remove(rest.to_string()))]
             }
         }
+        // P2·A：`deploy <id> [--activate]`
+        "deploy" => {
+            let mut toks = rest.split_whitespace();
+            let id = toks.next().unwrap_or("").to_string();
+            if id.is_empty() {
+                state.chat.messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: "用法：/model deploy <id> [--activate]".into(),
+                });
+                return vec![UiEffect::Render];
+            }
+            let activate = toks.any(|t| t == "--activate");
+            vec![UiEffect::ModelAction(ModelOp::Deploy(id, activate))]
+        }
+        // P2·A：`ollama deploy <tag> [--activate]`
+        "ollama" => {
+            let mut toks = rest.split_whitespace();
+            if toks.next().unwrap_or("") != "deploy" {
+                state.chat.messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: "用法：/model ollama deploy <tag> [--activate]".into(),
+                });
+                return vec![UiEffect::Render];
+            }
+            let tag = toks.next().unwrap_or("").to_string();
+            if tag.is_empty() {
+                state.chat.messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: "用法：/model ollama deploy <tag> [--activate]".into(),
+                });
+                return vec![UiEffect::Render];
+            }
+            let activate = toks.any(|t| t == "--activate");
+            vec![UiEffect::ModelAction(ModelOp::OllamaDeploy(tag, activate))]
+        }
+        // P2·A：`activate <profile_id>`
+        "activate" => {
+            let id = rest.trim().to_string();
+            if id.is_empty() {
+                state.chat.messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: "用法：/model activate <profile_id>".into(),
+                });
+                return vec![UiEffect::Render];
+            }
+            vec![UiEffect::ModelAction(ModelOp::Activate(id))]
+        }
+        // P2·A：`routing [get|set <mode>]`
+        "routing" => {
+            let mut toks = rest.split_whitespace();
+            let action = toks.next().unwrap_or("get");
+            let mode = match action {
+                "get" => None,
+                "set" => Some(toks.next().unwrap_or("").to_string()),
+                other => {
+                    state.chat.messages.push(ChatMessage {
+                        role: ChatRole::System,
+                        content: format!("未知 routing 动作: {other}（应为 get 或 set <mode>）"),
+                    });
+                    return vec![UiEffect::Render];
+                }
+            };
+            vec![UiEffect::ModelAction(ModelOp::Routing(mode))]
+        }
+        // P2·A：`system`
+        "system" => vec![UiEffect::ModelAction(ModelOp::System)],
         _ => vec![UiEffect::Render],
     }
 }
@@ -490,17 +569,22 @@ mod tests {
 
     #[test]
     fn test_dispatch_model_list() {
+        // 契约（2026-10-21 变更）：`/model` 不再只回显十几行文本，而是**先打开模型面板**
+        // 再列档案。因此必须是"切面板 + 列档案"两个副作用，顺序固定（切页在前）。
         let mut s = WorkbenchState::new("s1".into(), "m".into());
         let eff = dispatch(&mut s, "/model");
-        assert!(matches!(
-            eff.as_slice(),
-            [UiEffect::ModelAction(ModelOp::List)]
-        ));
-        let eff = dispatch(&mut s, "/models list");
-        assert!(matches!(
-            eff.as_slice(),
-            [UiEffect::ModelAction(ModelOp::List)]
-        ));
+        assert!(
+            matches!(eff.as_slice(), [UiEffect::SwitchRailTab(RailTab::Models), UiEffect::ModelAction(ModelOp::List)]),
+            "/model 应先切到模型面板再列档案，实际: {eff:?}"
+        );
+        assert_eq!(s.rail_tab, RailTab::Models, "面板打开后状态必须同步");
+
+        let mut s2 = WorkbenchState::new("s2".into(), "m".into());
+        let eff = dispatch(&mut s2, "/models list");
+        assert!(
+            matches!(eff.as_slice(), [UiEffect::SwitchRailTab(RailTab::Models), UiEffect::ModelAction(ModelOp::List)]),
+            "/models list 与 /model 同义，实际: {eff:?}"
+        );
     }
 
     #[test]
@@ -561,6 +645,89 @@ mod tests {
         let mut s = WorkbenchState::new("s1".into(), "m".into());
         let eff = dispatch(&mut s, "/model bogus");
         assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+    }
+
+    // P2·A：deploy / ollama deploy / activate / routing / system 子命令分发
+    #[test]
+    fn test_dispatch_model_deploy() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/model deploy qwen3.8-27b --activate");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Deploy(id, true))] if id == "qwen3.8-27b"
+        ));
+        let eff = dispatch(&mut s, "/model deploy qwen3.8-27b");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Deploy(id, false))] if id == "qwen3.8-27b"
+        ));
+        // 缺 id：回显用法，不产生副作用
+        let eff = dispatch(&mut s, "/model deploy");
+        assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+    }
+
+    #[test]
+    fn test_dispatch_model_ollama_deploy() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/model ollama deploy qwen3:8b --activate");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::OllamaDeploy(tag, true))] if tag == "qwen3:8b"
+        ));
+        let eff = dispatch(&mut s, "/model ollama deploy qwen3:8b");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::OllamaDeploy(tag, false))] if tag == "qwen3:8b"
+        ));
+        // 缺 tag / 非 deploy 动作：回显用法
+        let eff = dispatch(&mut s, "/model ollama");
+        assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+        let eff = dispatch(&mut s, "/model ollama pull qwen3:8b");
+        assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+    }
+
+    #[test]
+    fn test_dispatch_model_activate() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/model activate local-qwen3.8-27b");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Activate(id))] if id == "local-qwen3.8-27b"
+        ));
+        let eff = dispatch(&mut s, "/model activate");
+        assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+    }
+
+    #[test]
+    fn test_dispatch_model_routing() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/model routing");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Routing(None))]
+        ));
+        let eff = dispatch(&mut s, "/model routing get");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Routing(None))]
+        ));
+        let eff = dispatch(&mut s, "/model routing set omni");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::Routing(Some(m)))] if m == "omni"
+        ));
+        let eff = dispatch(&mut s, "/model routing bogus");
+        assert!(eff.iter().any(|e| matches!(e, UiEffect::Render)));
+    }
+
+    #[test]
+    fn test_dispatch_model_system() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        let eff = dispatch(&mut s, "/model system");
+        assert!(matches!(
+            eff.as_slice(),
+            [UiEffect::ModelAction(ModelOp::System)]
+        ));
     }
 
     #[test]

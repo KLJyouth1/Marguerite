@@ -183,7 +183,7 @@ pub(crate) fn mode_stage(params: &Value) -> Value {
     })
 }
 
-/// `mode.swarm.get`：蜂群数量上限。
+/// `mode.swarm.get`：蜂群规模设置（用户所选即生效，不再有硬上限）。
 pub(crate) fn mode_swarm_get() -> Value {
     let cfg = crate::mode::swarm::load();
     let runtime = crate::mode::runtime_mode();
@@ -197,23 +197,24 @@ pub(crate) fn mode_swarm_get() -> Value {
         "configuredSubExperts": if cfg.max_sub_experts == 0 { serde_json::Value::Null } else { json!(cfg.max_sub_experts) },
         "effectiveShards": crate::mode::swarm::effective_shards(default_shards),
         "effectiveSubExperts": crate::mode::swarm::effective_sub_experts(5),
-        "maxShardsCap": crate::mode::swarm::MAX_SHARDS_CAP,
-        "maxSubExpertsCap": crate::mode::swarm::MAX_SUB_EXPERTS_CAP,
+        // 显式声明「无硬上限」：此前这里回 200 / 50，前端据此把输入框钉死在旧上限。
+        "maxShardsCap": serde_json::Value::Null,
+        "maxSubExpertsCap": serde_json::Value::Null,
     })
 }
 
-/// `mode.swarm.set`：设置蜂群数量上限。
+/// `mode.swarm.set`：设置蜂群规模（0 = 未配置；其余按用户所选原样保存）。
 pub(crate) fn mode_swarm_set(params: &Value) -> Value {
     let mut cfg = crate::mode::swarm::load();
     if let Some(v) = params.get("maxSwarmShards").and_then(Value::as_u64) {
-        cfg.max_swarm_shards = (v as usize).min(crate::mode::swarm::MAX_SHARDS_CAP);
+        cfg.max_swarm_shards = v as usize;
     } else if let Some(v) = params.get("max_swarm_shards").and_then(Value::as_u64) {
-        cfg.max_swarm_shards = (v as usize).min(crate::mode::swarm::MAX_SHARDS_CAP);
+        cfg.max_swarm_shards = v as usize;
     }
     if let Some(v) = params.get("maxSubExperts").and_then(Value::as_u64) {
-        cfg.max_sub_experts = (v as usize).min(crate::mode::swarm::MAX_SUB_EXPERTS_CAP);
+        cfg.max_sub_experts = v as usize;
     } else if let Some(v) = params.get("max_sub_experts").and_then(Value::as_u64) {
-        cfg.max_sub_experts = (v as usize).min(crate::mode::swarm::MAX_SUB_EXPERTS_CAP);
+        cfg.max_sub_experts = v as usize;
     }
     match crate::mode::swarm::save(&cfg) {
         Ok(()) => mode_swarm_get(),
@@ -302,6 +303,16 @@ pub(crate) async fn models_routing_set(
     if let Err(e) = cfg.save() {
         tracing::warn!("models.routing.set：配置持久化失败（运行时已生效，重启后可能回退）: {e}");
     }
+    // R72+：保存即生效 —— 发布进程级生效快照，运行引擎下一轮即用新路由模式，无需重启
+    // （与 `onboarding_router_configure` 一致；此前此处只落盘不发布，模式切换可能不即时生效）。
+crate::gateway::chat::publish_effective_config(cfg.clone());
+    // P3 打通：路由模式保存广播 models.changed，前端 useChatFeatureToggles 改订
+    // models.changed（此前订阅的 models.routing.changed 在后端从未发布，是死订阅）。
+    crate::events::product::emit(
+        "models.changed",
+        "",
+        json!({ "reason": "routing_set", "mode": mode }),
+    );
     if mode == "omni" {
         let _ = mode_switch(ctx, &json!({ "kind": "omni-transcend" })).await;
     } else if crate::mode::runtime_mode() == crate::mode::ModeKind::OmniTranscend {
@@ -343,6 +354,39 @@ mod tests {
             assert!(v["userMode"]["key"].is_string() && v["userMode"]["intensity"].is_string());
         }
         assert!(v["userMode"]["working"].is_string());
+    }
+
+    #[tokio::test]
+    // 该 guard 串行化的正是「清空生效快照 → 异步 set → 断言快照」这段过程，
+    // 必须跨 await 持有。`std::sync::MutexGuard` 是 `!Send`，持有它的 future
+    // 无法迁移线程，不存在跨线程死锁路径；`#[tokio::test]` 每用例独占运行时。
+    #[allow(clippy::await_holding_lock)]
+    async fn models_routing_set_publishes_effective() {
+        // 隔离配置目录，避免污染真实 ~/.marguerite/config.yaml
+        let tmp = std::env::temp_dir().join(format!("marg-routing-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(tmp.join("config"));
+        crate::persistence::safe_mode::apply_env(
+            &crate::persistence::safe_mode::prepare(tmp.clone()).unwrap(),
+        );
+        let ctx = crate::gateway::methods::GatewayContext {
+            config: crate::persistence::config::Config::default(),
+            token: "t".into(),
+            started_at: std::time::Instant::now(),
+            bus: std::sync::Arc::new(crate::events::EventBus::default()),
+        };
+        // 生效快照是进程级全局：与其它断言快照的用例串行化，避免互相污染。
+        let _g = crate::gateway::chat::effective_config_test_lock();
+        crate::gateway::chat::clear_effective_config();
+        let res = models_routing_set(&ctx, &json!({ "mode": "router" })).await;
+        assert!(res.is_ok(), "models.routing.set 应成功: {res:?}");
+        // 真源（文件）：路由模式已落盘
+        let saved = crate::persistence::config::Config::load().unwrap();
+        assert_eq!(saved.model_routing.mode, "router", "路由模式应已保存");
+        // 生效快照已发布（与 onboarding_router_configure 一致）：运行引擎下一轮即用新路由
+        assert!(
+            crate::gateway::chat::effective_config().is_some(),
+            "应已发布进程级生效快照"
+        );
     }
 
     #[test]

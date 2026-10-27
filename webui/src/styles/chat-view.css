@@ -17,6 +17,8 @@
   /* The input column: the composer panel and everything anchored to it
      (slash menu, queue chips) is deliberately narrower than the thread. */
   --composer-col: 820px;
+  /* 落地页叙事列：比会话列窄，一句话 + 内联实体不会被拉成整屏横幅。 */
+  --landing-col: min(calc(100% - 48px), 45rem);
 }
 
 .chat--new-landing {
@@ -416,7 +418,7 @@
 }
 
 .chat-landing-brand {
-  width: min(calc(100% - 48px), 720px);
+  width: var(--landing-col);
   margin: 0 auto;
   display: flex;
   align-items: center;
@@ -1204,6 +1206,7 @@
   }
 
   .chat-landing-brand,
+  .chat--new-landing .landing-hero,
   .chat--new-landing .chat-composer {
     width: 100%;
   }

@@ -136,3 +136,29 @@ describe('persisted project sidebar arrangement', () => {
     expect(rows[1]?.workspaceId).toBe('html')
   })
 })
+
+describe('multi-root project binding', () => {
+  it('keeps backend projectPaths (dedup + order) and falls back to the legacy single path', () => {
+    const multi = session({
+      key: 'agent:main:webchat:multi',
+      title: 'Multi',
+      updatedAt: 10,
+      projectPath: '/repo/a',
+      projectPaths: ['/repo/a', '/repo/b', '/repo/a', ''],
+    })
+    expect(multi.projectPaths).toEqual(['/repo/a', '/repo/b'])
+    // 主根仍是首个路径：既有的分组/编排都只认它
+    expect(multi.workspace).toBe('/repo/a')
+
+    const legacy = session({
+      key: 'agent:main:webchat:legacy',
+      title: 'Legacy',
+      updatedAt: 9,
+      projectPath: '/repo/only',
+    })
+    expect(legacy.projectPaths).toEqual(['/repo/only'])
+
+    const none = session({ key: 'agent:main:webchat:none', title: 'None', updatedAt: 8 })
+    expect(none.projectPaths).toBeUndefined()
+  })
+})

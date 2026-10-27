@@ -7,7 +7,7 @@ export type IconName =
   | 'send' | 'play' | 'stop' | 'paperclip' | 'plus' | 'share' | 'trash'
   | 'refresh' | 'download' | 'save' | 'menu' | 'moreHorizontal' | 'user' | 'search' | 'eye' | 'eye-off'
   | 'edit' | 'info' | 'settings' | 'gear' | 'gauge' | 'router' | 'regenerate'
-  | 'pencil' | 'fork' | 'listChecks' | 'chevronDown' | 'chevronLeft' | 'chevronRight' | 'arrowUp'
+  | 'pencil' | 'fork' | 'listChecks' | 'chevronDown' | 'chevronLeft' | 'chevronRight' | 'arrowUp' | 'arrowDown'
   | 'expand' | 'collapse'
   | 'panel-left-open' | 'panel-left-close' | 'panel-right-open' | 'panel-right-close'
   | 'sidebar-visible' | 'sidebar-hidden'
@@ -19,7 +19,8 @@ export type IconName =
   | 'keyboard' | 'languages' | 'shield' | 'lock' | 'key' | 'terminal'
   | 'thumbs-up' | 'thumbs-down'
   | 'music' | 'pause' | 'volume' | 'video'
-  | 'cursor' | 'sparkles' | 'blocks'
+  | 'skipBack' | 'skipForward' | 'shuffle' | 'repeat' | 'repeatOne'
+  | 'cursor' | 'sparkles' | 'blocks' | 'droplet'
   | 'camera' | 'crosshair' | 'timer' | 'command' | 'move' | 'drag' | 'window'
   | 'mouse-left' | 'mouse-right' | 'mouse-middle' | 'mouse-double' | 'scroll-vertical'
   | 'clipboard-write' | 'clipboard-read'
@@ -84,6 +85,7 @@ const ICONS: Record<IconName, IconDef> = {
   chevronLeft:{ path: '<polyline points="15 18 9 12 15 6"/>', strokeWidth: 1.5 },
   chevronRight:{ path: '<polyline points="9 18 15 12 9 6"/>', strokeWidth: 1.5 },
   arrowUp:    { path: '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>', strokeWidth: 2 },
+  arrowDown:  { path: '<path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/>', strokeWidth: 2 },
   expand:     { path: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>', strokeWidth: 1.5 },
   collapse:   { path: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="14" y1="10" x2="21" y2="3"/>', strokeWidth: 1.5 },
   'panel-left-open':  { path: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M14 9l6 6-6 6"/>' },
@@ -119,10 +121,16 @@ const ICONS: Record<IconName, IconDef> = {
   lock:       { path: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>', strokeWidth: 1.7 },
   key:        { path: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 8.3-8.3"/><path d="m16 6 2.5 2.5"/><path d="m12.5 9.5 2 2"/>', strokeWidth: 1.7 },
   music:      { path: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>', strokeWidth: 1.7 },
+  skipBack:   { path: '<polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/>', strokeWidth: 1.7 },
+  skipForward:{ path: '<polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/>', strokeWidth: 1.7 },
+  shuffle:    { path: '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>', strokeWidth: 1.6 },
+  repeat:     { path: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>', strokeWidth: 1.6 },
+  repeatOne:  { path: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><path d="M11 15v-4.5"/><path d="M13.5 11.5a1.3 1.3 0 1 0-2.6 0c0 .9 2.6 1.1 2.6 2.4" />', strokeWidth: 1.6 },
   video:      { path: '<rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/>', strokeWidth: 1.7 },
   cursor:     { path: '<path d="M4 4l7 18 2-7 7-2z"/>', strokeWidth: 1.7 },
   sparkles:   { path: '<path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/>', strokeWidth: 1.5 },
   blocks:     { path: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>', strokeWidth: 1.7 },
+  droplet:    { path: '<path d="M12 2.7 17.7 8.4a8 8 0 1 1-11.4 0z"/><path d="M9.6 12.2a2.6 2.6 0 0 1 1.6-2.4"/>', strokeWidth: 1.6 },
   pause:      { path: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>', strokeWidth: 1.7 },
   volume:     { path: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>', strokeWidth: 1.7 },
 

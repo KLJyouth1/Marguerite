@@ -1,11 +1,23 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
+import { createPinia } from 'pinia'
 import i18n from '@/i18n'
 import ChatComposer from './ChatComposer.vue'
 
 function pointerDown(target: EventTarget) {
   target.dispatchEvent(new Event('pointerdown', { bubbles: true, composed: true }))
+}
+
+/// 编排四面板（子智能体 / 团队 / 蜂群 / 模式能力）只有在传入 orchestration 时才渲染。
+const ORCH = {
+  form: 'single',
+  agents: [],
+  swarmOn: false,
+  swarmSize: 3,
+  modeKey: 'standard_doit',
+  capabilities: [],
+  confirmed: false,
 }
 
 async function mountComposer(overrides: Record<string, unknown> = {}) {
@@ -35,6 +47,7 @@ async function mountComposer(overrides: Record<string, unknown> = {}) {
     runModeLockMessage: '',
     ...overrides,
   })
+  app.use(createPinia())
   app.use(i18n)
   const vm = app.mount(el) as unknown as { canCollapse: () => boolean }
   await nextTick()
@@ -232,6 +245,40 @@ describe('ChatComposer popovers', () => {
     app.unmount()
   })
 
+  // 真机截图缺陷（模式与能力 + 执行模式与路由 同时挂在输入区上方互相叠压）。
+  // 编排四面板此前是各自独立的 ref，只和 Add/More 互斥，彼此之间不互斥。
+  it('keeps orchestration panels mutually exclusive with run-mode and with each other', async () => {
+    const { app, el } = await mountComposer({ orchestration: ORCH })
+
+    const modeBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-orchestration-btn-mode"]',
+    )!
+    const teamBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-orchestration-btn-team"]',
+    )!
+
+    // 1) 先开执行模式与路由，再开模式与能力 → 前者必须被抢占关闭
+    await clickButton(el, 'Run mode & routing')
+    expectPopover(el, '.run-mode-panel__popover', true)
+    modeBtn.click()
+    await nextTick()
+    expectPopover(el, '.orch-mode', true)
+    expectPopover(el, '.run-mode-panel__popover', false)
+
+    // 2) 模式与能力 → 团队专家：同一时刻仍只有一个
+    teamBtn.click()
+    await nextTick()
+    expectPopover(el, '.orch-popover', true)
+    expect(el.querySelectorAll('.orch-popover')).toHaveLength(1)
+
+    // 3) 再点同一个控件 = 关闭
+    teamBtn.click()
+    await nextTick()
+    expect(el.querySelectorAll('.orch-popover')).toHaveLength(0)
+
+    app.unmount()
+  })
+
   it('closes every open popover when the composer collapses', async () => {
     const props = reactive({
       modelValue: '',
@@ -260,7 +307,8 @@ describe('ChatComposer popovers', () => {
     const el = document.createElement('div')
     document.body.appendChild(el)
     const app = createApp({ render: () => h(ChatComposer, props as any) })
-    app.use(i18n)
+    app.use(createPinia())
+  app.use(i18n)
     app.mount(el)
     await nextTick()
 
@@ -340,7 +388,8 @@ describe('ChatComposer popovers', () => {
       voiceReady: true,
       onExportMarkdown: () => { exports += 1 },
     })
-    app.use(i18n)
+    app.use(createPinia())
+  app.use(i18n)
     app.mount(el)
     await nextTick()
 

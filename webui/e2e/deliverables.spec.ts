@@ -108,27 +108,55 @@ async function openSeededSession(
   await page.waitForSelector('.chat-header', { timeout: 10000 })
 }
 
-async function deliverablesTrigger(page: Page): Promise<Locator> {
+interface DeliverablesInvoker {
+  trigger: Locator
+  fromMenu: boolean
+}
+
+// 顶部栏右簇的 `--topbar-right-reserve` 首帧是 224px 回退值，挂载后由
+// ResizeObserver 换成实测值（更大），于是 `.chat-header` 宽度会在首帧后收缩，
+// 可能跨过 wide/compact 断点：宽版交付物按钮被紧凑版主按钮替换。若在宽度稳定
+// 前快照触发器，Playwright 会拿到一个即将卸载的元素并重试到超时。
+async function waitForHeaderSettled(page: Page): Promise<void> {
+  const header = page.getByTestId('chat-header-actions')
+  let previous = -1
+  await expect.poll(async () => {
+    const width = await header.evaluate(el => Math.round(el.getBoundingClientRect().width))
+    const stable = width > 0 && width === previous
+    previous = width
+    return stable
+  }, { timeout: 10000, intervals: [250, 250, 250, 250, 250, 250, 250, 250] }).toBe(true)
+}
+
+// ChatHeaderActions 会在交付物数据变化时关闭已打开的动作菜单，因此「过早打开
+// 菜单」会与历史/索引水合赛跑：菜单里的交付物项会短暂出现又消失，若把它当成
+// 触发器的快照，后续 locator 就会永久等待（曾让 --all 门禁在 Escape 用例超时）。
+// 先等种子轮次渲染完（= 历史已注入），再轮询稳定触发面；菜单被水合关掉就重开，
+// 每次都当场返回，不持有临时快照。
+async function deliverablesTrigger(page: Page): Promise<DeliverablesInvoker> {
   const directAction = page.getByTestId('chat-session-action-deliverables')
   const primaryAction = page.getByTestId('chat-header-primary-action')
   const menuTrigger = page.getByTestId('chat-session-actions-trigger')
-  let menuOpened = false
 
-  await expect.poll(async () => {
-    if (await directAction.isVisible()) return 'deliverables'
+  await expect(page.locator('.msg-ai-main').last()).toBeVisible({ timeout: 10000 })
+  await waitForHeaderSettled(page)
+
+  const deadline = Date.now() + 10000
+  while (Date.now() < deadline) {
+    if (await directAction.isVisible()) return { trigger: directAction, fromMenu: false }
     if (await primaryAction.isVisible()
-      && await primaryAction.getAttribute('data-action') === 'deliverables') {
-      return 'primary'
+      && (await primaryAction.getAttribute('data-action')) === 'deliverables') {
+      return { trigger: primaryAction, fromMenu: false }
     }
-    if (!menuOpened && await menuTrigger.isVisible()) {
-      await menuTrigger.click()
-      menuOpened = true
+    if (await menuTrigger.isVisible()) {
+      if ((await menuTrigger.getAttribute('aria-expanded')) !== 'true') {
+        await menuTrigger.click()
+      }
+      if (await directAction.isVisible()) return { trigger: directAction, fromMenu: true }
     }
-    return ''
-  }, { timeout: 10000 }).not.toBe('')
-
-  if (await directAction.isVisible()) return directAction
-  return primaryAction
+    await page.waitForTimeout(100)
+  }
+  throw new Error('deliverables trigger did not stabilise within 10s')
 }
 
 test.describe('Per-session deliverables drawer', () => {
@@ -155,7 +183,7 @@ test.describe('Per-session deliverables drawer', () => {
   test('trigger opens the drawer with dialog a11y and lists every deliverable', async ({ page }) => {
     await openSeededSession(page, SESSION_KEY, true)
 
-    const trigger = await deliverablesTrigger(page)
+    const { trigger } = await deliverablesTrigger(page)
     await expect(trigger).toBeVisible({ timeout: 10000 })
     await expect(trigger).toHaveAccessibleName('Deliverables (2)')
 
@@ -184,10 +212,8 @@ test.describe('Per-session deliverables drawer', () => {
   test('Escape closes the drawer and returns focus to the trigger', async ({ page }) => {
     await openSeededSession(page, SESSION_KEY, true)
 
-    const trigger = await deliverablesTrigger(page)
-    const invokedFromMenu = await trigger.evaluate(element =>
-      Boolean(element.closest('[data-testid="chat-session-actions-menu"]')))
-    const focusTarget = invokedFromMenu
+    const { trigger, fromMenu } = await deliverablesTrigger(page)
+    const focusTarget = fromMenu
       ? page.getByTestId('chat-session-actions-trigger')
       : trigger
     await trigger.click()
@@ -202,7 +228,8 @@ test.describe('Per-session deliverables drawer', () => {
   test('non-image deliverable opens a metadata preview with a download action', async ({ page }) => {
     await openSeededSession(page, SESSION_KEY, true)
 
-    await (await deliverablesTrigger(page)).click()
+    const { trigger } = await deliverablesTrigger(page)
+    await trigger.click()
     await page.locator('.deliv-tile').first().click()
 
     const preview = page.locator('.deliv-preview')
@@ -221,7 +248,8 @@ test.describe('Per-session deliverables drawer', () => {
     await page.setViewportSize({ width: 375, height: 667 })
     await openSeededSession(page, SESSION_KEY, true)
 
-    await (await deliverablesTrigger(page)).click()
+    const { trigger } = await deliverablesTrigger(page)
+    await trigger.click()
     const drawer = page.locator('.deliv-drawer')
     await expect(drawer).toBeVisible()
 
@@ -246,7 +274,7 @@ test.describe('Indexed deliverables with the default Workbench', () => {
     // The default Workbench cannot preview CSV, and the current history page
     // has no artifact card. The index must still expose the complete Drawer.
     await expect(page.locator('.msg-artifact-chip')).toHaveCount(0)
-    const trigger = await deliverablesTrigger(page)
+    const { trigger } = await deliverablesTrigger(page)
     await expect(trigger).toHaveAccessibleName('Deliverables (1)')
     await trigger.click()
 
@@ -258,6 +286,9 @@ test.describe('Indexed deliverables with the default Workbench', () => {
     await expect(page.locator('.deliv-tile__meta')).toHaveText('CSV · 4 KB')
     await page.locator('.deliv-tile').click()
     await expect(page.locator('.deliv-preview')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Download' })).toBeVisible()
+    // Scoped + exact: `name: 'Download'` is a substring match, so a real
+    // sidebar project path like `D:\Downloads\…` also matches it.
+    await expect(page.locator('.deliv-preview')
+      .getByRole('button', { name: 'Download', exact: true })).toBeVisible()
   })
 })

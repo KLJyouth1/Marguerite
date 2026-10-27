@@ -39,6 +39,7 @@ from opensquilla.engine.steps.inject_time_prefix import TIME_PREFIX_RE
 from opensquilla.gateway.routing import RouteEnvelope, SourceKind
 from opensquilla.gateway.session_lifecycle import TaskLifecycleEvent, TaskLifecycleListener
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id, parse_agent_id
+from opensquilla.engine.turn_budget import TurnBudgetExhausted
 from opensquilla.session.models import AgentTaskRecord, AgentTaskStatus, QueueMode
 from opensquilla.session.terminal_reply import (
     build_terminal_reply,
@@ -77,6 +78,7 @@ TERMINAL_STATUSES = frozenset(
         AgentTaskStatus.CANCELLED,
         AgentTaskStatus.TIMEOUT,
         AgentTaskStatus.ABANDONED,
+        AgentTaskStatus.BUDGET_EXHAUSTED,
     }
 )
 
@@ -2973,6 +2975,27 @@ class TaskRuntime:
                 error_message=str(exc),
             )
             await self._promote_reclaimed_steers(task)
+        except TurnBudgetExhausted as exc:
+            # P2-9: a unified env-driven turn budget (steps / wall-clock / tokens)
+            # hard-breached. This is a recognizable terminal state, not a generic
+            # failure: surface ``budget_exhausted`` with the structured breach on
+            # the task row details.
+            _emit_metric(
+                "turn_budget_exhausted_total",
+                value=1,
+                budget_kind=exc.breach.kind,
+                session_key=task.envelope.session_key,
+            )
+            task.budget_breach = exc.breach.to_dict()
+            await self._record_drained_steers(task)
+            await self._mark_terminal(
+                task,
+                AgentTaskStatus.BUDGET_EXHAUSTED,
+                terminal_reason="budget_exhausted",
+                error_class=exc.code,
+                error_message=str(exc),
+            )
+            await self._promote_reclaimed_steers(task)
         except Exception as exc:  # noqa: BLE001 - runtime ledger records the class.
             terminal_reason = str(getattr(exc, "terminal_reason", None) or "error")
             status = (
@@ -4811,6 +4834,12 @@ class TaskRuntime:
             }
             details["cancellation"] = cancellation
         details.pop("cancellation_requested", None)
+        budget_breach = getattr(task, "budget_breach", None)
+        if budget_breach is not None:
+            # P2-9: persist the structured budget breach so the RPC/WS layer can
+            # return {status:"budget_exhausted", budget:{...}} from the durable row.
+            details["budget_exhausted"] = True
+            details["budget"] = budget_breach
         if status == AgentTaskStatus.SUCCEEDED:
             details["turn_outcome"] = completed_outcome().to_dict()
             if task.terminal_assistant_message_content is not None:

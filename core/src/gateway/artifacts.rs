@@ -19,7 +19,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
-use crate::gateway::_helpers::{open_in_system, rpc_err, rpc_ok};
+use crate::gateway::_helpers::{rpc_err, rpc_ok};
 use crate::gateway::server::GatewayState;
 use crate::tools::file_change::ArtifactEntry;
 
@@ -40,8 +40,16 @@ pub fn artifacts_list(params: &Value) -> Value {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(50);
-    let (items, has_more, next_cursor) =
-        crate::tools::file_change::list_artifacts(session, cursor, limit);
+    let (items, has_more, next_cursor) = if params
+        .get("allSessions")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        // 「我的文件」聚合面：跨会话合并（本应用只在这里读全量桶）。
+        crate::tools::file_change::list_all_artifacts(cursor, limit)
+    } else {
+        crate::tools::file_change::list_artifacts(session, cursor, limit)
+    };
     json!({
         "artifacts": items.iter().map(|a| json!({
             "id": a.id,
@@ -53,6 +61,8 @@ pub fn artifacts_list(params: &Value) -> Value {
             "mime": a.mime.as_deref().unwrap_or(""),
             "session_key": a.session_key,
             "sha256": a.sha256.as_deref().unwrap_or(""),
+            // 磁盘实况：登记过不等于还在（可能被移动/删除/外部清理）。
+            "present": std::path::Path::new(&a.path).exists(),
         })).collect::<Vec<_>>(),
         "has_more": has_more,
         "next_cursor": next_cursor,
@@ -118,25 +128,31 @@ pub fn artifacts_register(params: &Value) -> Value {
 }
 
 /// `artifacts.open_in_system`：调用 OS 默认程序打开已登记产物。
-/// 无 id 时退化为直接按 `path` 打开（前端降级路径）。
+///
+/// 无 id 时的裸 `path` 只允许**工作区根目录内**的普通文件（W3.2）：旧实现直接
+/// `cmd /c start <任意路径>`，等于给前端开了一个任意文件/可执行程序的启动口。
+/// 已登记产物按台账路径放行（可能在临时目录），但仍拦截可执行扩展名与控制字符。
 pub fn artifacts_open_in_system(params: &Value) -> Value {
     let id = params.get("id").and_then(Value::as_str).unwrap_or("");
     let path = params.get("path").and_then(Value::as_str).unwrap_or("");
-    let target = if !id.is_empty() {
+    let (target, registered) = if !id.is_empty() {
         match crate::tools::file_change::get_artifact(id) {
-            Some(a) => a.path,
+            Some(a) => (a.path, true),
             None => return rpc_err(1404, "产物不存在"),
         }
     } else if !path.is_empty() {
-        if !std::path::Path::new(path).is_file() {
-            return rpc_err(1404, "路径不存在或不是文件");
-        }
-        path.to_string()
+        (path.to_string(), false)
     } else {
         return rpc_err(1401, "缺少 artifact id 或 path");
     };
-    if open_in_system(&target) {
-        rpc_ok(json!({ "id": id, "path": target }))
+    let explicit = params.get("projectPath").and_then(Value::as_str);
+    let roots = crate::workspace::resolve_for_session(explicit).roots().to_vec();
+    let canonical = match crate::gateway::open_path::open_path_checked(&target, &roots, registered) {
+        Ok(path) => path,
+        Err(err) => return rpc_err(err.code(), &err.message()),
+    };
+    if crate::gateway::open_path::launch_checked(&canonical) {
+        rpc_ok(json!({ "id": id, "path": target, "registered": registered }))
     } else {
         rpc_err(1502, "系统默认程序打开失败")
     }
@@ -241,6 +257,19 @@ pub async fn artifact_download(
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    // 产物字节是本地文件内容：必须与 WS/审批同一 token，否则本机任意进程
+    // 只要猜中 id 就能读走用户产物（id 含路径，容易被枚举）。
+    if !crate::gateway::auth::rest_authorized(&headers, Some(&uri), &state.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({
+                "error": "UNAUTHORIZED",
+                "code": "UNAUTHORIZED",
+                "message": "缺少或错误的本地网关 token",
+            })),
+        )
+            .into_response();
+    }
     let Some(entry) = crate::tools::file_change::get_artifact(&id) else {
         return match crate::gateway::sidecar_proxy::forward_get(&state, &uri, &headers).await {
             // 侧车也没有（或其自己回 404）→ 如实把侧车的回答交给控制台

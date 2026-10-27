@@ -6,6 +6,7 @@ pub mod budget;
 pub mod cache;
 pub mod optimize;
 pub mod paging;
+pub mod project_docs;
 pub mod session;
 
 pub use budget::{BudgetAlert, TokenBudget, TokenBudgetError};

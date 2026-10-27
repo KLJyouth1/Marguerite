@@ -33,6 +33,7 @@
 //!   在 axum 里优先于本模块的通配 `/api/{*path}`，所以它们仍由 Rust 直接服务。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -43,15 +44,59 @@ use serde_json::json;
 use crate::gateway::approvals::{origin_allowed, sidecar_client};
 use crate::gateway::server::{api_unimplemented, py_sidecar, GatewayState};
 
+/// P0-3：普通 JSON 请求超时（30s）。共享 client 本身不带默认超时（长连接复用 +
+/// 流式响应需要），此前 forward 无任何超时 → 侧卡死时请求永久挂起，控制台点啥都转圈。
+const PROXY_JSON_TIMEOUT: Duration = Duration::from_secs(30);
+/// P0-3：流式 / 大文件 upload/download 白名单超时（5 分钟——大文件传输与 bundle
+/// 导出在慢盘上 30s 装不完，不能跟 JSON 同档）。
+const PROXY_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// P0-3：超时档位（与具体时长解耦——时长可注入，测试用小档验证分档行为）。
+pub(crate) enum ProxyTimeoutTier {
+    /// 普通 JSON：短超时。
+    Json,
+    /// 流式 / 大文件 upload/download：长超时。
+    Stream,
+}
+
+/// P0-3：判定请求落在哪个超时档（纯函数）。
+pub(crate) fn proxy_timeout_tier(path: &str, content_type: Option<&str>) -> ProxyTimeoutTier {
+    const STREAM_PREFIXES: &[&str] = &[
+        "/api/v1/files/upload",
+        "/api/v1/artifacts",
+        "/api/v1/artifact-preview",
+        "/api/v1/attachments",
+        "/api/v1/diagnostics/bundle",
+    ];
+    if let Some(ct) = content_type {
+        if ct.eq_ignore_ascii_case("application/octet-stream") {
+            return ProxyTimeoutTier::Stream;
+        }
+    }
+    if STREAM_PREFIXES.iter().any(|p| path.starts_with(p)) {
+        return ProxyTimeoutTier::Stream;
+    }
+    ProxyTimeoutTier::Json
+}
+
 /// 不转发的请求头：逐跳头 + 由转发方自己决定/承载的头。
 ///
 /// - `host`：目标（侧车）自己的 authority，照搬会破坏侧车的同源判定；
+/// - `origin` / `referer`：**同源判定的唯一权威是本网关**
+///   （[`api_proxy`] 已用 [`crate::gateway::approvals::origin_allowed`] 校验过，
+///   对的是**网关**的 host/port）。若继续把浏览器的 `Origin` 透传给侧车，
+///   侧车会拿它跟**自己**的 host/port 比 —— 侧车端口必然不同于网关端口，
+///   于是每个带 `Origin` 的浏览器 `/api/*` 请求都拿到 403 `FORBIDDEN_ORIGIN`
+///   （实测：`POST /api/elevated-mode` 响应头 `server: uvicorn`，体是该错误码）。
+///   症状极具迷惑性：侧车**离线**时反而正常（走 501 契约），一上线就全红。
 /// - `authorization`：客户端的凭据与侧车无关，网关改用共享 token 认证（[`forward`]）；
 /// - `content-length`：请求体是流，长度由 reqwest 自己算（照搬会与流不一致）。
 pub(crate) fn forward_request_header(name: &HeaderName) -> bool {
     !matches!(
         name.as_str(),
         "host"
+            | "origin"
+            | "referer"
             | "authorization"
             | "content-length"
             | "connection"
@@ -85,6 +130,15 @@ pub(crate) fn forward_response_header(name: &HeaderName) -> bool {
     )
 }
 
+/// 能力令牌预览路径（侧车签发的 `/api/v1/artifact-preview/<capability>/…`）。
+///
+/// 这类 URL 由 `<iframe>` / `<img>` 等浏览器子资源**直载**，无法附加
+/// `Authorization` 头；鉴权由 URL 里的一次性 capability token 承担（侧车校验）。
+/// 若在这里强求网关 token，HTML 产物预览会整体白屏。
+fn capability_preview_path(path: &str) -> bool {
+    path.starts_with("/api/v1/artifact-preview/")
+}
+
 /// `/api/{*path}` 的处理器：侧车在线 → 转发；离线 → 501（既有契约）。
 pub(crate) async fn api_proxy(State(state): State<Arc<GatewayState>>, req: Request) -> Response {
     if !origin_allowed(
@@ -92,6 +146,26 @@ pub(crate) async fn api_proxy(State(state): State<Arc<GatewayState>>, req: Reque
         req.headers().get(header::HOST).and_then(|v| v.to_str().ok()),
     ) {
         return forbidden_origin();
+    }
+    // 侧车代理会把请求连同 `state.token` 一起转发给 Python —— 若不校验调用方，
+    // 本机任意进程可借这条通道零凭据驱动侧车全部 REST（上传/配置/诊断…）。
+    // 与 WS、审批、产物下载使用同一 token 口径。
+    if !capability_preview_path(req.uri().path())
+        && !crate::gateway::auth::rest_authorized(
+            req.headers(),
+            Some(req.uri()),
+            &state.token,
+        )
+    {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "error": "UNAUTHORIZED",
+                "code": "UNAUTHORIZED",
+                "message": "缺少或错误的本地网关 token",
+            })),
+        )
+            .into_response();
     }
     let Some(base) = sidecar_base() else {
         return api_unimplemented().await.into_response();
@@ -126,11 +200,42 @@ fn sidecar_base() -> Option<String> {
 }
 
 /// 侧车在线时把请求原样转发（方法 / 路径 / 查询 / 体 / 头），并把响应如实回给调用方。
+///
+/// P0-3：按请求形态套分档超时（[`proxy_timeout_tier`] + `json_timeout`/`stream_timeout`）——普通 JSON 30s，
+/// 流式 / 大文件白名单 5 分钟；超时与「连不上」同契约回 502 sidecar_unreachable。
 pub(crate) async fn forward(base: &str, token: &str, req: Request) -> Response {
+    forward_inner(
+        base,
+        token,
+        req,
+        PROXY_JSON_TIMEOUT,
+        PROXY_STREAM_TIMEOUT,
+    )
+    .await
+}
+
+/// P0-3：可注入时长的内部实现（生产 [`forward`] 传默认档；测试传小档，
+/// 不用真等 30s 就能验证「JSON 超时回 502、流式档不被短超时误杀」）。
+pub(crate) async fn forward_inner(
+    base: &str,
+    token: &str,
+    req: Request,
+    json_timeout: Duration,
+    stream_timeout: Duration,
+) -> Response {
     let (parts, body) = req.into_parts();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let timeout = match proxy_timeout_tier(parts.uri.path(), content_type) {
+        ProxyTimeoutTier::Json => json_timeout,
+        ProxyTimeoutTier::Stream => stream_timeout,
+    };
     let mut builder = sidecar_client()
         .request(parts.method.clone(), target_url(base, &parts.uri))
-        .bearer_auth(token);
+        .bearer_auth(token)
+        .timeout(timeout);
     for (name, value) in parts.headers.iter() {
         if forward_request_header(name) {
             builder = builder.header(name, value);
@@ -142,7 +247,15 @@ pub(crate) async fn forward(base: &str, token: &str, req: Request) -> Response {
         .await
     {
         Ok(resp) => relay(resp),
-        Err(err) => sidecar_unreachable(&error_chain(&err)),
+        Err(err) => {
+            let reason = if err.is_timeout() {
+                // 区分于连接拒绝：UI 排障时「等超时」与「连不上」是两种现场。
+                format!("请求侧车超时（{}s）：{}", timeout.as_secs(), error_chain(&err))
+            } else {
+                error_chain(&err)
+            };
+            sidecar_unreachable(&reason)
+        }
     }
 }
 
@@ -238,11 +351,22 @@ mod tests {
                 "`{dropped}` 不得转发给侧车（否则破坏侧车 authority / 凭据 / 帧定界）"
             );
         }
+        // 同源判定的权威是网关，不是侧车：`origin` / `referer` 必须剥掉。
+        //
+        // ⚠️ 这条断言此前**写反了**（把 origin/referer 归入「必须透传」），
+        // 于是缺陷被测试合法化：侧车在线时，每个浏览器 `/api/*` 请求都被侧车
+        // 用自己的 host/port 与浏览器 Origin 比对 → 403 FORBIDDEN_ORIGIN。
+        // 侧车离线时反而正常（走 501），所以只测离线路径永远发现不了。
+        for dropped in ["origin", "referer"] {
+            let name = HeaderName::from_bytes(dropped.as_bytes()).unwrap();
+            assert!(
+                !forward_request_header(&name),
+                "`{dropped}` 不得转发：侧车会拿它与自己的 authority 比对，导致全部 /api/* 403"
+            );
+        }
         for kept in [
             "content-type",
             "accept",
-            "origin",
-            "referer",
             "cookie",
             "x-marguerite-session-key",
             "x-opensquilla-session-key",
@@ -481,6 +605,133 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // P0-3：分档超时（纯函数分档 + sleep-stub 真实往返）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn timeout_tier_splits_json_vs_stream_paths() {
+        use ProxyTimeoutTier::{Json, Stream};
+        // 普通 JSON：短档
+        assert!(matches!(
+            proxy_timeout_tier("/api/config", Some("application/json")),
+            Json
+        ));
+        assert!(matches!(
+            proxy_timeout_tier("/api/sessions", None),
+            Json
+        ));
+        // 字节流白名单路径：长档
+        for p in [
+            "/api/v1/files/upload",
+            "/api/v1/artifacts/artifact:sess:/x.txt",
+            "/api/v1/artifact-preview/cap/abc",
+            "/api/v1/attachments/a/download",
+            "/api/v1/diagnostics/bundle",
+        ] {
+            assert!(
+                matches!(proxy_timeout_tier(p, None), Stream),
+                "{p} 是字节流路径，必须走长超时档"
+            );
+        }
+        // octet-stream 请求体（大文件 upload）：长档，与路径无关
+        assert!(matches!(
+            proxy_timeout_tier("/api/config", Some("application/octet-stream")),
+            Stream
+        ));
+        // 默认时长映射：JSON=30s，Stream=300s
+        assert_eq!(PROXY_JSON_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(PROXY_STREAM_TIMEOUT, Duration::from_secs(300));
+    }
+
+    /// sleep-stub：收到任何请求先睡 1.5s 再回 201（模拟侧车处理慢）。
+    async fn spawn_slow_stub() -> std::net::SocketAddr {
+        async fn slow(_req: Request) -> Response {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            Response::new(Body::from("slow-ok"))
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/{*path}", any(slow)))
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+    /// P0-3：JSON 请求超过短档超时 → 502 sidecar_unreachable（不再永久挂起）。
+    ///
+    /// 用注入的小档（json=200ms / stream=10s）跑真实 forward_inner，避免真等 30s。
+    #[tokio::test]
+    async fn json_request_times_out_to_502_instead_of_hanging() {
+        let addr = spawn_slow_stub().await;
+        let base = format!("http://{addr}");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let started = Instant::now();
+        let resp = forward_inner(
+            &base,
+            "t",
+            req,
+            Duration::from_millis(200),
+            Duration::from_secs(10),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "JSON 请求超时必须回 502 sidecar_unreachable"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "必须在短档超时附近放弃，实际 {elapsed:?}（>1.2s 说明超时没生效）"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("sidecar_unreachable"),
+            "超时与连不上同契约，实际: {text}"
+        );
+    }
+
+    /// P0-3：同一条慢侧车，流式白名单路径**不被**短 JSON 超时误杀（1.5s > 200ms
+    /// 但 < 10s 长档 → 201 成功）。
+    #[tokio::test]
+    async fn stream_path_is_not_killed_by_the_short_json_timeout() {
+        let addr = spawn_slow_stub().await;
+        let base = format!("http://{addr}");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/files/upload")
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from("bytes"))
+            .unwrap();
+        let resp = forward_inner(
+            &base,
+            "t",
+            req,
+            Duration::from_millis(200),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "流式档（10s）必须装下 1.5s 的慢响应，实际 {}",
+            resp.status()
+        );
+    }
+
+    // ------------------------------------------------------------------
     // 路由层（真实 HTTP）：侧车离线 → 501 契约不变；跨源 → 403
     // ------------------------------------------------------------------
 
@@ -491,11 +742,18 @@ mod tests {
             token: "proxy-probe-token".to_string(),
             started_at: Instant::now(),
             webui_dir: std::env::temp_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         })
     }
 
     /// 侧车离线（`py_sidecar()` 未注册）时行为**必须**与代理上线前一致：
     /// 501 + `not_implemented` JSON，未被通配路由改写、也没落进 SPA HTML 回退。
+    ///
+    /// 带合法 token 才走到「侧车探测」这一步；无 token 一律 401（见下一条用例）。
     #[tokio::test]
     async fn router_keeps_501_contract_when_sidecar_is_offline() {
         let state = proxy_test_state();
@@ -512,7 +770,16 @@ mod tests {
             ("GET", "/api/v1/attachments/deadbeef"),
             ("POST", "/api/v1/files/upload"),
         ] {
-            let raw = raw_http(addr, method, path, "").await;
+            let raw = raw_http_with_headers(
+                addr,
+                method,
+                path,
+                &[(
+                    "Authorization",
+                    "Bearer proxy-probe-token",
+                )],
+            )
+            .await;
             assert!(raw.starts_with("HTTP/1.1 501"), "{method} {path} 应 501: {raw}");
             assert!(
                 raw.contains("\"error\":\"not_implemented\""),
@@ -523,6 +790,67 @@ mod tests {
                 "{method} {path} 不得落进 SPA 回退: {raw}"
             );
         }
+    }
+
+    /// 侧车代理**不能**成为「零凭据驱动本机 Python 侧车」的通道：
+    /// 缺 token → 401，且绝不触发转发。
+    #[tokio::test]
+    async fn router_rejects_api_requests_without_token() {
+        let state = proxy_test_state();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+
+        for (method, path) in [
+            ("GET", "/api/config"),
+            ("POST", "/api/v1/files/upload"),
+            ("GET", "/api/v1/diagnostics/bundle"),
+        ] {
+            let raw = raw_http(addr, method, path, "").await;
+            assert!(raw.starts_with("HTTP/1.1 401"), "{method} {path} 应 401: {raw}");
+            assert!(raw.contains("UNAUTHORIZED"), "载荷应含错误码: {raw}");
+        }
+
+        // 错误 token 同样拒绝（恒定时间比较失败）
+        let raw = raw_http_with_headers(
+            addr,
+            "GET",
+            "/api/config",
+            &[("Authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert!(raw.starts_with("HTTP/1.1 401"), "错误 token 应 401: {raw}");
+    }
+
+    /// 能力令牌预览 URL 是浏览器子资源直载（iframe/img），无法带 `Authorization`：
+    /// 该前缀放行到侧车，由 capability token 自身鉴权。
+    #[tokio::test]
+    async fn router_allows_capability_preview_without_gateway_token() {
+        let state = proxy_test_state();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+
+        let raw = raw_http(
+            addr,
+            "GET",
+            "/api/v1/artifact-preview/cap-token/index.html",
+            "",
+        )
+        .await;
+        assert!(
+            !raw.starts_with("HTTP/1.1 401"),
+            "能力令牌预览不得被网关 token 拦下: {raw}"
+        );
+        assert!(raw.starts_with("HTTP/1.1 501"), "侧车离线仍走 501: {raw}");
     }
 
     /// 带跨源 `Origin` 的请求在代理前就被拒（403 FORBIDDEN_ORIGIN）：浏览器 CSRF 兜底，

@@ -236,6 +236,16 @@ pub struct PluginManifest {
     /// 声明的权限（最小可用集）。
     #[serde(default)]
     pub permissions: Vec<Permission>,
+
+    // ── 动态加载（2026-10-24）：MCP 子进程后端 ──
+    /// MCP 子进程启动声明。`Some` 时该插件可经 `plugins.mcp.start` 真启动，
+    /// 并把其工具暴露给调用方；`None` = 纯声明式（不假装可执行）。
+    ///
+    /// 为什么不是 `entry`：`entry` 是 DLL/WASM 入口语义（同步 `DynamicLoad`）；
+    /// MCP 是**长驻子进程 + 行分隔 JSON-RPC**，需要独立生命周期与超时，
+    /// 硬塞进同一字段会让"原生入口"含义模糊。
+    #[serde(default)]
+    pub mcp: Option<crate::plugins::mcp_launch::McpLaunchSpec>,
 }
 
 impl PluginManifest {

@@ -120,6 +120,8 @@ export interface UseChatRpcEventHandlersOptions {
    * must never collapse the turn the user is still being asked about.
    */
   hasActiveInterrupt?: Ref<boolean>
+  /** 重新挂上在屏的中断帧（审批/澄清）：实时快照重置 turn 后调用，防止卡片消失。 */
+  reappendInterruptFrames?: () => void
   queueRouterDecision: (payload: RouterDecisionPayload) => void
   appendEnsembleProgress: (payload: EnsembleProgressPayload) => void
   markEnsembleHandoff: () => void
@@ -528,6 +530,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     ) {
       lastStreamSeq.value = Math.max(0, snapshot.current_stream_seq)
     }
+    // 快照重置了 live turn，但审批/澄清不是流事件 —— 不重新挂上就会「卡片凭空消失」
+    // （badge 仍显示 pending，用户却无法裁决）。fold 按 approvalId 去重，重复挂安全。
+    options.reappendInterruptFrames?.()
   }
 
   function replayPendingTerminalEvent(entry: BufferedTerminalEvent) {
@@ -620,21 +625,20 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   })
 
   function appendThinkingDelta(text: string, payload: SessionEventPayload) {
-    if (!text) return
+    // 空/纯空白帧不进入思考流：否则会渲染出一个没有正文的「思考」折叠块，
+    // 用户点开只能看到标题（真机截图里的空思考卡）。
+    if (!text || !text.trim()) return
     if (!stream.isStreaming.value) stream.startStreaming()
-    // A3：编排叙述（payload.kind === 'narration'）是**整条记录**而非 token 增量。
-    // 多条记录若首尾直接相接，会被 Markdown 粘成同一段落（`> a…> b…` → 一整段），
-    // 故记录之间补一个空行分隔；真实推理增量（无 kind）必须保持原样拼接，绝不插分隔。
-    const narration = String((payload as Record<string, unknown>)?.kind || '') === 'narration'
+    // 编排叙述（`kind: "narration"`）已在上游被丢弃，这里拿到的都是模型真实推理增量，
+    // 按原样逐段拼接（绝不插分隔符，那会把推理链切断）。
     const current = streamThinking.value
-    const frameText = narration && current?.text ? `\n\n${text}` : text
     if (current) {
-      streamThinking.value = { ...current, text: current.text + frameText }
+      streamThinking.value = { ...current, text: current.text + text }
     } else {
       const now = Date.now()
       const serverStartedAt = trustedReasoningStartedAt(payload.started_at, now)
       streamThinking.value = {
-        text: frameText,
+        text,
         startedAt: serverStartedAt ?? now,
         serverStartedAt,
       }
@@ -644,7 +648,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     stream.setThinkingContent(streamThinking.value.text)
     // The fold concats the same text into its thinkingText. Gating already
     // passed upstream (handleRpcAny), so this frame mirrors an accepted delta.
-    if (stream.useReducer.value) stream.appendFrame({ kind: 'thinking', text: frameText, at: Date.now() })
+    if (stream.useReducer.value) stream.appendFrame({ kind: 'thinking', text, at: Date.now() })
     // Reasoning growth must re-pin the thread to the bottom just like answer
     // text and tool deltas. Schedule the same batched render/scroll flush so a
     // long thinking phase keeps following the live turn instead of only
@@ -874,6 +878,8 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     options.markEnsembleHandoff()
+    // payload.approval 是后端引擎（PermissionMatrix）的**真实裁决**
+    // （approved / pending / denied）；原样交给 stream，缺失即不渲染徽章。
     stream.appendToolCall(payload)
   }
 
@@ -1443,6 +1449,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
     if (event === 'session.event.thinking') {
       if (aborted.value) return
+      // 编排器自己的决策叙述（`kind: "narration"`）不是模型推理：不进入思考区，
+      // 否则用户看到的「思考」是路由说明而不是模型真实思维链。
+      if (String((payload as Record<string, unknown>)?.kind || '') === 'narration') return
       const thinkingText = (payload as SessionEventPayload).text
       if (typeof thinkingText !== 'string' || !thinkingText) return
       stream.resetStreamIdleTimer()
@@ -1468,6 +1477,28 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
         stream.resetStreamIdleTimer()
         return
       }
+    }
+
+    // 每次真实 LLM 调用后网关都会发 `session.event.usage`（core usage::record）。
+    // 这是**唯一**带真实 token 的帧：`session.event.done` 的载荷里没有用量字段
+    // （实测 done = {text, reason, strategy, completeness}），此前只从 done 累加
+    // 的 `usageAccum` 因此永远是 0 —— 底部计量条显示的 token 也就是假的。
+    if (event === 'session.event.usage') {
+      // 只累计「本会话当前这一轮」：usage 帧的 payload 不带 session 字段（session
+      // 在 meta 里，而这里只拿得到 payload），所以用流状态做归属判据 ——
+      // 非流式期间到达的 usage 属于定时任务 / 其它会话，不能计入本会话计量条。
+      if (!stream.isStreaming.value) return
+      const u = (payload as Record<string, unknown>) || {}
+      const input = Number(u.input_tokens ?? u.inputTokens ?? u.prompt_tokens ?? u.promptTokens ?? 0) || 0
+      const output = Number(u.output_tokens ?? u.outputTokens ?? u.completion_tokens ?? u.completionTokens ?? 0) || 0
+      const cached = Number(u.cached_tokens ?? u.cachedTokens ?? u.cache_read_tokens ?? u.cacheReadTokens ?? 0) || 0
+      if (input || output || cached) {
+        usageAccum.value.input += input
+        usageAccum.value.output += output
+        usageAccum.value.cacheRead += cached
+      }
+      if (typeof u.model === 'string' && u.model) usageModel.value = u.model
+      return
     }
 
     if (event.endsWith('.done') || event === 'chat.done') {

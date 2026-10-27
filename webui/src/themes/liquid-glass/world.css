@@ -1,0 +1,437 @@
+/* 液态玻璃 · 流光 —— 全局世界层（激活本主题时懒加载）。
+ *
+ * 设计纪律（对齐"高级 UI 的克制"四条）：
+ *   1) 多用留白：控制台收窄到 1180px 并居中，卡片内边距/区块间距走 --glass-gap / --glass-stack；
+ *   2) 黑白灰为主：层次靠**明度阶 + 玻璃叠层 + 1px 白边**，彩色只出现在主按钮/焦点/状态点；
+ *   3) 信息层级靠字号/字重/字距：展示字 -0.015em 紧字距、正文 1.72 行高、辅助文字降到 --text-muted；
+ *   4) 真实使用感：玻璃有厚度（内高光 + 底部冷色内阴影）、有折射（角部柔光）、会因悬停/按压给出反馈。
+ *
+ * 玻璃参数全部来自 `tokens.css` 的 --glass-*（参数面板可实时调）：
+ *   --glass-blur / --glass-saturate / --glass-tint / --glass-edge / --glass-sheen
+ *   --glass-radius / --glass-gap / --glass-stack / --glass-lift / --glass-text-veil
+ *
+ * 性能纪律：backdrop-filter 只出现在**外壳级**容器（内容区 / 侧栏 / 对话顶栏 / 设置弹窗 / 设置遮罩），
+ * 卡片与输入框只做半透明+描边，不叠第二层实时模糊 —— 否则每张卡片都要重算整屏背景。
+ * 输入框之所以不单独加模糊：它整块压在已模糊的内容区之上，再叠一次就是"玻璃叠玻璃"，
+ * 既糊成一片又翻倍 GPU 成本（这是刻意的取舍，不是漏写）。
+ */
+
+/* ── 0. 层级：背景层在 #app 之下（负 z-index），玻璃才能"看见"背景 ───── */
+[data-theme="liquid-glass"] .glass-backdrop {
+  z-index: -1;
+}
+
+/* 关键：底座的 .main / .content / .chat / .chat-body 自带不透明底色，会把背景层整块盖住
+   （真机实测：背景层"画了但看不见"，玻璃只剩一片死黑）。这里必须把中间层让开，
+   让背景质感透过玻璃被看见 —— 这是磨砂玻璃能成立的前提，不是可选装饰。
+   `!important` 是实测必需：`.chat` / `.chat-body` 的底色在 base 层以多种组合声明，
+   仅靠 (0,2,0) 特异度无法稳定压过（同一元素在多处被 `background` 简写重置回来）。 */
+[data-theme="liquid-glass"] .main,
+[data-theme="liquid-glass"] .main--chat,
+[data-theme="liquid-glass"] .chat,
+[data-theme="liquid-glass"] .chat--new-landing,
+[data-theme="liquid-glass"] .chat-thread,
+[data-theme="liquid-glass"] .chat-body {
+  background: transparent !important;
+}
+
+/* 对话页的空状态粒子是"细碎纹理"，与极简质感冲突：本主题只保留大块柔和背景。
+   这里必须提高一级特异度：ParticleField 的 scoped 规则（.particle-field[data-v-*]）与本规则同级，
+   且组件样式在懒加载的 world.css 之后注入，同级会输给它。 */
+[data-theme="liquid-glass"] .chat .particle-field {
+  display: none;
+}
+
+/* ── 1. 排版：用字重/字号/字距建立层级 ─────────────────────────────── */
+[data-theme="liquid-glass"] h1,
+[data-theme="liquid-glass"] h2,
+[data-theme="liquid-glass"] h3,
+[data-theme="liquid-glass"] .control-stage__title,
+[data-theme="liquid-glass"] .view-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+[data-theme="liquid-glass"] .control-stage__title,
+[data-theme="liquid-glass"] .view-title {
+  font-size: clamp(1.45rem, 1.1rem + 1vw, 2rem);
+  line-height: 1.2;
+}
+
+[data-theme="liquid-glass"] .control-stage__header {
+  position: relative;
+  padding-bottom: 16px;
+}
+
+/* 标题下的一条"流光"：从主色淡出，替代整条硬分隔线 */
+[data-theme="liquid-glass"] .control-stage__header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: min(360px, 46%);
+  height: 1px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 70%, transparent) 0%,
+    color-mix(in srgb, var(--accent-secondary) 30%, transparent) 52%,
+    transparent 100%);
+}
+
+[data-theme="liquid-glass"] p,
+[data-theme="liquid-glass"] li,
+[data-theme="liquid-glass"] .msg-ai-text,
+[data-theme="liquid-glass"] .inspect-msg__text,
+[data-theme="liquid-glass"] .control-section__desc {
+  line-height: 1.72;
+  letter-spacing: 0.004em;
+}
+
+[data-theme="liquid-glass"] .control-section__desc,
+[data-theme="liquid-glass"] .control-row__desc {
+  color: var(--text-muted);
+}
+
+[data-theme="liquid-glass"] code,
+[data-theme="liquid-glass"] pre,
+[data-theme="liquid-glass"] .mono,
+[data-theme="liquid-glass"] table td,
+[data-theme="liquid-glass"] table th {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 2. 留白：宽屏不摊开，收在 1180px 的中轴线上 ───────────────────── */
+[data-theme="liquid-glass"] .control-stage {
+  max-width: 1180px;
+  margin-inline: auto;
+  padding: var(--glass-gap) calc(var(--glass-gap) + 8px) calc(var(--glass-gap) + 16px);
+}
+[data-theme="liquid-glass"] .control-stage__subtitle {
+  margin-top: 8px;
+  max-width: 76ch;
+}
+[data-theme="liquid-glass"] .control-section + .control-section {
+  margin-top: var(--glass-stack);
+}
+[data-theme="liquid-glass"] .control-row + .control-row {
+  margin-top: 10px;
+}
+
+/* ── 3. 外壳：四块实时磨砂玻璃 ─────────────────────────────────────── */
+
+/* 3a. 内容区（主面板）—— 全应用唯一的"大玻璃"。
+   三层叠加：液面反光（左上）+ 12% 白玻璃 + 52% 暗纱。
+   暗纱仍然必须有（否则白字会被亮背景吞掉），但 66% 的暗纱会让壁纸"看得见却没感觉"；
+   改成 52% + `brightness(90%)` 把过亮区域压下来：白字的对比度由"压亮度"而不是
+   "加厚黑纱"来保证，背景的色相与光斑才真的透得出来。 */
+[data-theme="liquid-glass"] .content {
+  background:
+    /* 顶部一层"液面反光"：左上亮、右下冷，模拟玻璃边缘的折射 */
+    radial-gradient(140% 70% at 8% -12%,
+      color-mix(in srgb, var(--text) calc(var(--glass-sheen) * 0.9), transparent) 0%,
+      transparent 46%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 4%), transparent) 0%,
+      color-mix(in srgb, var(--text) var(--glass-tint), transparent) 46%,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) - 2%), transparent) 100%),
+    color-mix(in srgb, var(--bg) var(--glass-scrim), transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  border: 1px solid color-mix(in srgb, var(--text) var(--glass-edge), transparent);
+  border-radius: var(--radius-panel);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 48%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--accent) 16%, transparent),
+    0 48px 96px -56px var(--shadow-color);
+}
+
+/* 3b. 对话页内容区：贴边，不切圆角，仅保留左/上的一条亮边 */
+[data-theme="liquid-glass"] .content--chat {
+  border-radius: 0;
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.5), transparent);
+  border-top: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.5), transparent);
+  box-shadow: none;
+}
+
+/* 3c. 侧栏：更薄的一层玻璃（越靠边越轻），但同样带暗纱 —— 贴边文字最容易糊 */
+[data-theme="liquid-glass"] .sidebar {
+  background:
+    radial-gradient(120% 60% at 10% -10%,
+      color-mix(in srgb, var(--text) calc(var(--glass-sheen) * 0.7), transparent) 0%,
+      transparent 48%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) * 0.7), transparent) 0%,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) * 0.45), transparent) 100%),
+    color-mix(in srgb, var(--bg) calc(var(--glass-scrim) + 6%), transparent);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 0.75)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  backdrop-filter: blur(calc(var(--glass-blur) * 0.75)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  border-right: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.55), transparent);
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--bg) 40%, transparent);
+}
+
+/* 3d. 对话顶栏 */
+[data-theme="liquid-glass"] .topbar--chat {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 4%), transparent) 0%,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 1%), transparent) 100%),
+    color-mix(in srgb, var(--bg) calc(var(--glass-scrim) + 8%), transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  border-bottom: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.6), transparent);
+  border-radius: var(--radius-panel) 0 0 0;
+}
+
+/* 3e. 设置弹窗：磨砂玻璃面板（遮罩只压暗 + 轻微虚化，不另铺一层色） */
+[data-theme="liquid-glass"] .settings-overlay {
+  background: color-mix(in srgb, var(--bg) 58%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+[data-theme="liquid-glass"] .settings-modal {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 4%), transparent) 0%,
+      color-mix(in srgb, var(--text) var(--glass-tint), transparent) 100%),
+    color-mix(in srgb, var(--bg) calc(var(--glass-scrim) + 6%), transparent);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) + 8px)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  backdrop-filter: blur(calc(var(--glass-blur) + 8px)) saturate(var(--glass-saturate))
+    brightness(var(--glass-brightness, 100%));
+  border: 1px solid color-mix(in srgb, var(--text) var(--glass-edge), transparent);
+  border-radius: var(--radius-modal);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 44%, transparent),
+    0 64px 128px -64px var(--shadow-color);
+}
+[data-theme="liquid-glass"] .settings-rail {
+  background: color-mix(in srgb, var(--text) calc(var(--glass-tint) * 0.5), transparent);
+  border-right: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.5), transparent);
+}
+
+/* ── 4. 卡片：半透明玻璃片 + 1px 白边 + 角部折射 ─────────────────────
+   选择器带 `#app` 是必需的：底座里存在 (0,3,0) 级上下文覆盖，例如
+   `.content .usage-stage .control-stat { background: var(--bg-surface) }`、
+   `.main .content .control-card { … }` —— 只写 (0,2,0) 会被它们压回不透明黑块
+   （真机实测：用量页四张统计卡仍是死黑瓷砖，玻璃完全没生效）。 */
+[data-theme="liquid-glass"] #app .card,
+[data-theme="liquid-glass"] #app .control-card,
+[data-theme="liquid-glass"] #app .control-stat,
+[data-theme="liquid-glass"] #app .control-panel,
+[data-theme="liquid-glass"] #app .control-section,
+[data-theme="liquid-glass"] #app .settings-card {
+  position: relative;
+  border-radius: var(--glass-radius);
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.85), transparent);
+  /* 角部柔光 = 轻微折射：左上白光 + 右下主色冷光，两点之间保持大面积中性 */
+  background:
+    radial-gradient(120% 90% at 6% -8%,
+      color-mix(in srgb, var(--text) var(--glass-sheen), transparent) 0%,
+      transparent 44%),
+    radial-gradient(110% 80% at 104% 108%,
+      color-mix(in srgb, var(--accent) calc(var(--glass-sheen) * 0.7), transparent) 0%,
+      transparent 46%),
+    /* 卡片比外壳再亮 2 个百分点：玻璃的层级靠"更亮一层"，不靠更强的描边 */
+    color-mix(in srgb, var(--text) calc(var(--glass-tint) + 2%), transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 30%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--bg) 45%, transparent),
+    0 22px 48px -30px var(--shadow-color);
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-base) var(--ease-standard);
+}
+
+/* 悬停：抬 2px，亮边变亮，投影加深 —— 只动这三样，不做缩放/发光 */
+[data-theme="liquid-glass"] #app .card:hover,
+[data-theme="liquid-glass"] #app .control-card:hover,
+[data-theme="liquid-glass"] #app .control-stat--clickable:hover {
+  transform: translateY(calc(-1 * var(--glass-lift)));
+  border-color: color-mix(in srgb, var(--text) calc(var(--glass-edge) + 14%), transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 40%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--bg) 45%, transparent),
+    0 30px 60px -34px var(--shadow-color);
+}
+
+[data-theme="liquid-glass"] #app .control-section {
+  padding: var(--glass-gap) calc(var(--glass-gap) * 0.86);
+}
+
+/* ── 5. 控件：玻璃胶囊 / 输入框 ─────────────────────────────────────── */
+[data-theme="liquid-glass"] .btn,
+[data-theme="liquid-glass"] .control-segmented,
+[data-theme="liquid-glass"] input,
+[data-theme="liquid-glass"] select,
+[data-theme="liquid-glass"] textarea {
+  border-radius: var(--radius-control);
+}
+
+[data-theme="liquid-glass"] .btn {
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.7), transparent);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 4%), transparent) 0%,
+      color-mix(in srgb, var(--text) var(--glass-tint), transparent) 100%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent);
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+
+[data-theme="liquid-glass"] .btn:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--text) calc(var(--glass-edge) + 10%), transparent);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 8%), transparent) 0%,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 2%), transparent) 100%);
+}
+
+/* 按压：只缩 1px 的观感，不做夸张弹跳 */
+[data-theme="liquid-glass"] .btn:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+/* 主按钮：全应用唯一的强彩色（克制原则里的"少量彩色突出重点"） */
+[data-theme="liquid-glass"] .btn--primary,
+[data-theme="liquid-glass"] .sidebar-new-session {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background-image: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 88%, var(--bg)) 0%,
+    color-mix(in srgb, var(--accent-secondary) 42%, var(--accent)) 100%);
+  color: var(--accent-foreground);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 45%, transparent),
+    0 18px 36px -22px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+
+/* 主按钮上的那道流光：悬停时从左扫到右（一次，不循环） */
+[data-theme="liquid-glass"] .btn--primary::after,
+[data-theme="liquid-glass"] .sidebar-new-session::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(105deg,
+    transparent 34%,
+    color-mix(in srgb, var(--text) 32%, transparent) 50%,
+    transparent 66%);
+  transform: translateX(-120%);
+  transition: transform var(--dur-slow) var(--ease-out);
+  pointer-events: none;
+}
+[data-theme="liquid-glass"] .btn--primary:hover::after,
+[data-theme="liquid-glass"] .sidebar-new-session:hover::after {
+  transform: translateX(120%);
+}
+
+/* 输入框：玻璃底 + 亮边，聚焦时边色变主色（不做整块高亮） */
+[data-theme="liquid-glass"] input,
+[data-theme="liquid-glass"] select,
+[data-theme="liquid-glass"] textarea {
+  background: color-mix(in srgb, var(--text) calc(var(--glass-tint) * 0.55), transparent);
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.6), transparent);
+  transition: border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+[data-theme="liquid-glass"] input:focus-visible,
+[data-theme="liquid-glass"] select:focus-visible,
+[data-theme="liquid-glass"] textarea:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow: var(--focus-ring-inset);
+}
+
+/* ── 6. 对话：输入框玻璃 + 气泡可读性 ─────────────────────────────── */
+[data-theme="liquid-glass"] .chat-input-panel {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 6%), transparent) 0%,
+      color-mix(in srgb, var(--text) calc(var(--glass-tint) + 2%), transparent) 100%),
+    color-mix(in srgb, var(--bg) calc(var(--glass-scrim) + 8%), transparent);
+  border: 1px solid color-mix(in srgb, var(--text) var(--glass-edge), transparent);
+  border-radius: var(--radius-panel);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 34%, transparent),
+    0 26px 54px -34px var(--shadow-color);
+}
+
+/* 文字区底板：把字压在"更实的玻璃"上，保证长段落可读（设计基准 58%） */
+[data-theme="liquid-glass"] .msg-ai .msg-bubble,
+[data-theme="liquid-glass"] .msg-user .msg-bubble {
+  background: color-mix(in srgb, var(--bg) var(--glass-text-veil), transparent);
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.55), transparent);
+  border-radius: var(--radius-card);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 14%, transparent);
+}
+[data-theme="liquid-glass"] .msg-user .msg-bubble {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ── 7. 侧栏条目：选中=一片薄玻璃，未选中=完全安静 ─────────────────── */
+[data-theme="liquid-glass"] .sidebar-item {
+  border-radius: var(--radius-control);
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+[data-theme="liquid-glass"] .sidebar-item.is-active {
+  background: color-mix(in srgb, var(--text) calc(var(--glass-tint) + 6%), transparent);
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.8), transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent);
+}
+
+/* ── 8. 桌宠舞台 / 选区 / 滚动条 ───────────────────────────────────── */
+[data-theme="liquid-glass"] .pet3d-stage {
+  background:
+    radial-gradient(64% 54% at 50% 30%,
+      color-mix(in srgb, var(--accent) 12%, transparent) 0%,
+      transparent 68%),
+    color-mix(in srgb, var(--bg) 46%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) calc(var(--glass-edge) * 0.6), transparent);
+  border-radius: var(--radius-panel);
+}
+
+[data-theme="liquid-glass"] ::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--text);
+}
+
+[data-theme="liquid-glass"] * {
+  scrollbar-color: color-mix(in srgb, var(--text) 22%, transparent) transparent;
+}
+
+/* ── 9. 降级：无磨砂能力时退回"实色玻璃"，保持可读 ───────────────── */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  [data-theme="liquid-glass"] .content,
+  [data-theme="liquid-glass"] .content--chat,
+  [data-theme="liquid-glass"] .sidebar,
+  [data-theme="liquid-glass"] .topbar--chat {
+    background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  }
+}
+
+/* ── 10. 动效降级：静态画面里也不失去层次 ─────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="liquid-glass"] .card:hover,
+  [data-theme="liquid-glass"] .control-card:hover {
+    transform: none;
+  }
+  [data-theme="liquid-glass"] .btn--primary::after,
+  [data-theme="liquid-glass"] .sidebar-new-session::after {
+    display: none;
+  }
+}

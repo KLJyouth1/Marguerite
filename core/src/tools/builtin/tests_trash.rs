@@ -218,7 +218,7 @@ async fn restore_unknown_entry_errors() {
     match out {
         ToolResult::Error { code, message } => {
             assert_eq!(code, "RESTORE_FAILED");
-            assert!(message.contains("not found"), "错误应说明条目不存在: {message}");
+            assert!(message.contains("找不到条目"), "错误应说明条目不存在: {message}");
         }
         ref other => panic!("未知 id 必须拒绝: {other:?}"),
     }

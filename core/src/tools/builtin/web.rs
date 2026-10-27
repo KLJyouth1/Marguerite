@@ -4,33 +4,110 @@
 
 use super::*;
 
-pub(crate) fn shell_exec_tool(workspace: PathBuf, guard: Arc<CommandGuard>) -> Box<dyn ToolExecutor> {
+/// 多根快照：逐根采集后按文件路径合并；任一根被截断即整体标记截断
+/// （截断快照不参与差分，避免把没扫到的文件误判为新增）。
+fn snapshot_all_roots(ws: &RootSet) -> crate::tools::file_change::WorkspaceSnapshot {
+    let mut merged = crate::tools::file_change::WorkspaceSnapshot::default();
+    for root in ws.all() {
+        let snap = crate::tools::file_change::snapshot_workspace(root);
+        merged.truncated |= snap.truncated;
+        for (path, meta) in snap.files {
+            merged.files.insert(path, meta);
+        }
+    }
+    merged
+}
+
+pub(crate) fn shell_exec_tool(
+    workspace: impl Into<RootSet>,
+    guard: Arc<CommandGuard>,
+) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "shell_exec",
-        "在工作区内执行 shell 命令（经命令护栏拦截高危操作，超时强制终止）。参数: command, timeout_sec(可选)",
-        json!({"type":"object","properties":{"command":{"type":"string"},"timeout_sec":{"type":"number"}}}),
+        "在工作区内执行 shell 命令（经命令护栏拦截高危操作，超时强制终止进程树，输出有上限）。\
+         参数: command, timeout_sec(可选, 1-900), cwd(可选, 工作区内相对目录), \
+         shell(可选: default|cmd|powershell|pwsh|bash|sh), max_output_bytes(可选, 4096-4194304)",
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "timeout_sec": {"type": "number", "description": "超时秒数（1-900，默认 30）"},
+                "cwd": {"type": "string", "description": "工作区内的相对目录（可选）"},
+                "shell": {"type": "string", "description": "default|cmd|powershell|pwsh|bash|sh（可选）"},
+                "max_output_bytes": {"type": "number", "description": "stdout/stderr 各自上限（默认 256KB）"}
+            },
+            "required": ["command"]
+        }),
         Arc::new(move |args| {
             let ws = workspace.clone();
             let guard = guard.clone();
             Box::pin(async move {
                 let cmd = args.get("command").ok_or_else(|| anyhow!("missing 'command'"))?;
                 let timeout = match args.get("timeout_sec").and_then(|t| t.parse::<u64>().ok()) {
-                    Some(s) => Duration::from_secs(s),
+                    // 上限与 agent 工具回路的 900s 对齐：再长就该走长任务队列而不是 shell。
+                    Some(s) => Duration::from_secs(s.clamp(1, 900)),
                     None => DEFAULT_TIMEOUT,
                 };
-                // L2+L3 在 L1（sandboxed_exec 内的 CommandGuard）之前先行裁决。
+                let shell = match args
+                    .get("shell")
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .and_then(ExecShell::from_id)
+                {
+                    Some(s) => s,
+                    None if args
+                        .get("shell")
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false) =>
+                    {
+                        return err(
+                            "未知 shell：仅支持 default / cmd / powershell / pwsh / bash / sh"
+                                .to_string(),
+                            "INVALID_PARAMS",
+                        );
+                    }
+                    None => ExecShell::Default,
+                };
+                let max_output = args
+                    .get("max_output_bytes")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .map(|n| n.clamp(4096, 4 * 1024 * 1024))
+                    .unwrap_or(DEFAULT_MAX_OUTPUT);
+                // cwd 限定工作区内：模型给的是相对路径（多根会话可命中任一登记根）；
+                // 越界按既有文案报告根目录。
+                let cwd = match args
+                    .get("cwd")
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(raw) => match ws.resolve(raw) {
+                        Ok(p) => p,
+                        Err(e) => return err(format!("{e}"), "INVALID_PATH"),
+                    },
+                    None => ws.primary().to_path_buf(),
+                };
+                if !cwd.is_dir() {
+                    return err(format!("工作目录不存在：{}", cwd.display()), "INVALID_PATH");
+                }
+                // L2+L3 在 L1（exec_with 内的 CommandGuard）之前先行裁决。
                 // 补的是 CommandGuard 正则表里没有的洞：chroot / unshare / nsenter /
                 // pkexec / docker --privileged 等沙箱逃逸原语，以及 /dev/tcp 反弹 shell。
-                if let Some(denied) = gate(&PREFLIGHT.check_exec(cmd, &normalize_workspace(&ws))) {
+                if let Some(denied) = gate(&PREFLIGHT.check_exec_multi(cmd, &guard_roots(&ws))) {
                     return denied;
                 }
                 // 命令类工具此前**完全不登记产物**：模型用 `python make_ppt.py` 之类的
                 // 脚本产出交付物时，磁盘上有文件、产物面板却是空的（真机缺陷）。
                 // 用「命令前后工作区快照差分」补齐，有界扫描（见 file_change 模块常量）。
-                let before = crate::tools::file_change::snapshot_workspace(&ws);
-                match sandboxed_exec(cmd, &ws, timeout, &guard).await {
+                // 多根：逐个根快照并按路径合并（产物可能落在附加根）。
+                let before = snapshot_all_roots(&ws);
+                let req = ExecRequest::new(cmd, &cwd)
+                    .with_timeout(timeout)
+                    .with_shell(shell)
+                    .with_max_output(max_output);
+                match exec_with(&req, &guard).await {
                     Ok(o) => {
-                        let after = crate::tools::file_change::snapshot_workspace(&ws);
+                        let after = snapshot_all_roots(&ws);
                         let registered = crate::tools::file_change::register_workspace_diff(
                             &before,
                             &after,
@@ -41,13 +118,24 @@ pub(crate) fn shell_exec_tool(workspace: PathBuf, guard: Arc<CommandGuard>) -> B
                         // 「产物面板空」的另一半根因，此前完全不可见。
                         tracing::info!(
                             registered,
-                            workspace = %ws.to_string_lossy(),
+                            workspace = %ws.primary().display(),
                             exit_code = o.exit_code,
                             "命令产物差分登记完成"
                         );
+                        let trunc = if o.truncated {
+                            format!("\n[输出已截断：超过 {} 字节，仅保留前 {} 字节]",
+                                max_output, max_output)
+                        } else {
+                            String::new()
+                        };
                         ok(format!(
-                            "[exit {}]\n--- stdout ---\n{}\n--- stderr ---\n{}",
-                            o.exit_code, o.stdout, o.stderr
+                            "[exit {}] [shell {}] [cwd {}]{} \n--- stdout ---\n{}\n--- stderr ---\n{}",
+                            o.exit_code,
+                            shell.id(),
+                            cwd.display(),
+                            trunc,
+                            o.stdout,
+                            o.stderr
                         ))
                     }
                     Err(e) => err(e.to_string(), "EXEC_ERROR"),

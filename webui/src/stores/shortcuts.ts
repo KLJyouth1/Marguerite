@@ -11,7 +11,7 @@ import { bindingsEqual, type Binding } from '@/utils/keychord'
 // Persistence mirrors the theme preference: a browser-local localStorage value,
 // applied instantly, never part of the settings dirty bar.
 
-export type ShortcutId = 'command-palette' | 'new-chat' | 'toggle-sidebar'
+export type ShortcutId = 'command-palette' | 'quick-open' | 'new-chat' | 'toggle-sidebar'
 
 export interface ShortcutDef {
   id: ShortcutId
@@ -44,6 +44,13 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
     get label() { return i18n.global.t('shared.shortcuts.commandPalette.label') },
     get description() { return i18n.global.t('shared.shortcuts.commandPalette.description') },
     defaultBinding: { primary: true, key: 'k' },
+    defaultEnabled: true,
+  },
+  {
+    id: 'quick-open',
+    get label() { return i18n.global.t('shared.shortcuts.quickOpen.label') },
+    get description() { return i18n.global.t('shared.shortcuts.quickOpen.description') },
+    defaultBinding: { primary: true, key: 'p' },
     defaultEnabled: true,
   },
   {

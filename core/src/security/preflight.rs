@@ -149,6 +149,53 @@ impl Preflight {
         }
     }
 
+    /// L3 多根版本（P2-9 多项目工作区）：目标落在**任一**登记根内即放行。
+    ///
+    /// 逐个根裁决而不是「先拼一个大边界」：每个根都要走软链/凭证目录等既有规则，
+    /// 合并边界会绕过单一根上的检查。
+    pub fn check_path_multi(
+        &self,
+        op: OpKind,
+        target: &Path,
+        roots: &[PathBuf],
+    ) -> PreflightDecision {
+        let mut last_deny: Option<PreflightDecision> = None;
+        for root in roots {
+            match self.check_path(op, target, root) {
+                PreflightDecision::Allow => return PreflightDecision::Allow,
+                deny => last_deny = Some(deny),
+            }
+        }
+        last_deny.unwrap_or(PreflightDecision::Deny {
+            layer: "L3",
+            code: CODE_GUARDRAIL_DENIED,
+            reason: "没有可用的工作区根，按拒绝处理".to_string(),
+        })
+    }
+
+    /// 写入类多根裁决：路径过任一登记根 + 内容扫描
+    pub fn check_write_multi(
+        &self,
+        target: &Path,
+        roots: &[PathBuf],
+        content: &str,
+    ) -> PreflightDecision {
+        let p = self.check_path_multi(OpKind::WriteFile, target, roots);
+        if !p.is_allowed() {
+            return p;
+        }
+        self.check_content(content)
+    }
+
+    /// 执行类多根裁决：命令逃逸意图过任一登记根 + 命令文本扫描
+    pub fn check_exec_multi(&self, command: &str, roots: &[PathBuf]) -> PreflightDecision {
+        let p = self.check_path_multi(OpKind::Exec, Path::new(command), roots);
+        if !p.is_allowed() {
+            return p;
+        }
+        self.check_content(command)
+    }
+
     /// L2：内容恶意模式扫描（落盘 / 执行前）
     pub fn check_content(&self, content: &str) -> PreflightDecision {
         if !self.content_scan {

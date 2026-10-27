@@ -2,7 +2,8 @@
 //!
 //! - 持久化到 `Config::data_dir()/workspaces.json`（`id/name/path/pinned`）；
 //! - `workspaces.open` 按路径幂等注册（同一路径复用同一 id）；
-//! - `taskCount` 按 `sessions.db` 中 `project_path` 匹配统计；
+//! - `taskCount` 按 `sessions.db` 中 `project_path` 命中主根、或 `project_paths`
+//!   数组包含该路径（P2-9 多根）统计；
 //! - `chat.send` 可通过 `workspaceId` 把会话绑定到具体项目目录（工具根目录随之切换）。
 
 use std::path::Path;
@@ -24,6 +25,10 @@ pub struct WorkspaceEntry {
     pub pinned: bool,
     #[serde(default)]
     pub created_at: String,
+    /// 最近一次被打开/选中（RFC3339）。旧 `workspaces.json` 没有该字段 →
+    /// `serde(default)` 得到空串，读取不报错，排序时排最后。
+    #[serde(default)]
+    pub last_opened_at: String,
 }
 
 /// 进程级工作区台账（读盘加载，写盘持久化）
@@ -56,7 +61,18 @@ fn default_name(path: &str) -> String {
 
 impl WorkspaceStore {
     fn path() -> std::path::PathBuf {
-        Config::data_dir().join("workspaces.json")
+        // 单测隔离（与 `gateway::pet::prefs_path` 同一范式）：绝不写真实用户数据目录。
+        #[cfg(test)]
+        let path = match Config::current_config_dir_override() {
+            Some(dir) => dir.join("workspaces.json"),
+            None => std::env::temp_dir().join(format!(
+                "marguerite_test_workspaces_{}.json",
+                std::process::id()
+            )),
+        };
+        #[cfg(not(test))]
+        let path = Config::data_dir().join("workspaces.json");
+        path
     }
 
     fn load() -> Self {
@@ -100,13 +116,13 @@ impl WorkspaceStore {
     }
 }
 
-/// 会话数（sessions.db 中 project_path 匹配）
+/// 会话数（sessions.db 中 project_path 命中主根，或 project_paths 含该路径）
 fn task_count(project_path: &str) -> usize {
     let db_path = Config::config_dir().join("sessions.db");
     let mut manager = SessionManager::new(&db_path);
     manager
         .init()
-        .and_then(|_| manager.list_sessions_by_project(project_path, 1000))
+        .and_then(|_| manager.list_sessions_by_any_project(project_path, 1000))
         .map(|v| v.len())
         .unwrap_or(0)
 }
@@ -122,8 +138,33 @@ fn view(entry: &WorkspaceEntry) -> Value {
         "pinned": entry.pinned,
         "available": available,
         "availabilityReason": if available { Value::Null } else { json!("目录不存在") },
+        // 前端两种命名都在读：驼峰是主字段，snake_case 是兼容别名。
+        "lastOpenedAt": entry.last_opened_at,
+        "last_opened_at": entry.last_opened_at,
     })
 }
+
+/// `workspaces.list` 的排序：`pinned desc, last_opened_at desc, created_at desc`。
+///
+/// 空的 `last_opened_at`（旧版 `workspaces.json`）永远排在有值之后；RFC3339 同格式
+/// 字符串可安全按字典序比较时间。该函数是纯函数，便于直接对排序规则做单测。
+fn sort_for_list(entries: &mut [WorkspaceEntry]) {
+    entries.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(
+                || match (a.last_opened_at.is_empty(), b.last_opened_at.is_empty()) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => b.last_opened_at.cmp(&a.last_opened_at),
+                },
+            )
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+}
+
+/// `workspaces.list` 最多返回的条数（`pinned` 优先、最近打开在前）。
+const LIST_LIMIT: usize = 50;
 
 /// 按 id 取工作区条目（编辑器文件树/读写共用）
 pub fn get(id: &str) -> Option<WorkspaceEntry> {
@@ -134,11 +175,14 @@ pub fn get(id: &str) -> Option<WorkspaceEntry> {
 /// `workspaces.list`
 pub fn list(_params: &Value) -> Value {
     let guard = store().lock().unwrap_or_else(|e| e.into_inner());
-    let items: Vec<Value> = guard.entries.iter().map(view).collect();
+    let mut ordered = guard.entries.clone();
+    sort_for_list(&mut ordered);
+    let items: Vec<Value> = ordered.iter().take(LIST_LIMIT).map(view).collect();
     json!({ "workspaces": items })
 }
 
-/// `workspaces.open`：把本地目录注册为项目工作区（幂等）。
+/// `workspaces.open`：把本地目录注册为项目工作区（幂等，每次打开都会刷新
+/// `last_opened_at`，让「最近打开」列表反映真实选择顺序）。
 ///
 /// params: `{ path: string, trusted?: bool }` → `{ workspace: {...} }`
 pub fn open(params: &Value) -> Value {
@@ -154,16 +198,24 @@ pub fn open(params: &Value) -> Value {
         return json!({ "error": format!("目录不存在：{path}") });
     }
     let id = id_for_path(path);
+    let now = chrono::Utc::now().to_rfc3339();
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
-    match guard.get(&id) {
-        Some(existing) => json!({ "workspace": view(existing) }),
+    match guard.entries.iter().position(|w| w.id == id) {
+        Some(index) => {
+            // 幂等：同一路径复用同一 id，但「打开」这个动作本身要计入最近时间。
+            guard.entries[index].last_opened_at = now;
+            let entry = guard.entries[index].clone();
+            guard.save();
+            json!({ "workspace": view(&entry) })
+        }
         None => {
             let entry = WorkspaceEntry {
                 id,
                 name: default_name(path),
                 path: path.to_string(),
                 pinned: false,
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: now.clone(),
+                last_opened_at: now,
             };
             guard.upsert(entry.clone());
             json!({ "workspace": view(&entry) })
@@ -194,12 +246,15 @@ pub fn create(params: &Value) -> Value {
     let path_str = path.to_string_lossy().to_string();
     let id = id_for_path(&path_str);
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
+    let now = chrono::Utc::now().to_rfc3339();
     let entry = WorkspaceEntry {
         id,
         name: name.to_string(),
         path: path_str,
         pinned: false,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: now.clone(),
+        // 新建工作区即被选中，视同一次打开；否则它会因 last_opened_at 为空排到最后。
+        last_opened_at: now,
     };
     guard.upsert(entry.clone());
     json!({ "workspace": view(&entry) })
@@ -288,7 +343,7 @@ pub fn history_delete(params: &Value) -> Value {
     let mut manager = SessionManager::new(&db_path);
     let mut deleted = Vec::new();
     if let Ok(()) = manager.init() {
-        if let Ok(sessions) = manager.list_sessions_by_project(&project_path, 1000) {
+        if let Ok(sessions) = manager.list_sessions_by_any_project(&project_path, 1000) {
             for s in &sessions {
                 if manager.delete_session(&s.session_id).is_ok() {
                     deleted.push(s.session_id.clone());
@@ -339,8 +394,9 @@ mod tests {
 
     #[test]
     fn test_store_roundtrip_via_api() {
-        // 用临时目录注册 → list 可见 → remove 移除（写入 data_dir 的真实注册表，
-        // 仅验证 handler 逻辑，不依赖具体目录存在性之外的断言）
+        // 用临时目录注册 → list 可见 → remove 移除。
+        // 注册表路径在 cfg(test) 下落到临时目录（见 `WorkspaceStore::path`），
+        // 因此这里不会读写真实用户数据。
         let tmp = std::env::temp_dir();
         let p = tmp.to_string_lossy().to_string();
         let opened = open(&json!({ "path": p }));
@@ -365,5 +421,140 @@ mod tests {
             .unwrap()
             .iter()
             .any(|w| w["id"] == id));
+    }
+
+    /// 每个用例独立临时目录（配置目录覆盖是线程局部的，并行用例互不串扰）。
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "marguerite-workspaces-test-{tag}-{}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn position_of(listed: &Value, id: &str) -> usize {
+        listed["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|w| w["id"] == id)
+            .unwrap_or_else(|| panic!("工作区 {id} 不在 list 结果里"))
+    }
+
+    #[test]
+    fn list_orders_by_recent_open_and_refreshes_on_reopen() {
+        let base = temp_root("order");
+        Config::set_config_dir_override(base.join("config"));
+        let alpha = base.join("alpha");
+        let beta = base.join("beta");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&beta).unwrap();
+
+        let a = open(&json!({ "path": alpha.to_string_lossy() }))["workspace"].clone();
+        // RFC3339 的纳秒精度在 Windows 上足够，但显式隔开 2ms 让顺序断言与时钟无关。
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = open(&json!({ "path": beta.to_string_lossy() }))["workspace"].clone();
+
+        // view() 同时下发驼峰与 snake_case 两个别名，值都是非空 RFC3339。
+        assert!(!a["lastOpenedAt"].as_str().unwrap().is_empty());
+        assert_eq!(a["lastOpenedAt"], a["last_opened_at"]);
+
+        let a_id = a["id"].as_str().unwrap();
+        let b_id = b["id"].as_str().unwrap();
+
+        let listed = list(&Value::Null);
+        assert!(
+            position_of(&listed, b_id) < position_of(&listed, a_id),
+            "后打开的 beta 必须排在 alpha 之前: {listed}"
+        );
+
+        // 幂等重开 alpha：不新增条目，且刷新 last_opened_at 后排到最前。
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let reopened = open(&json!({ "path": alpha.to_string_lossy() }))["workspace"].clone();
+        assert_eq!(reopened["id"], a["id"]);
+        assert_ne!(reopened["lastOpenedAt"], a["lastOpenedAt"]);
+
+        let listed = list(&Value::Null);
+        assert!(
+            position_of(&listed, a_id) < position_of(&listed, b_id),
+            "重开后的 alpha 必须排在 beta 之前: {listed}"
+        );
+        assert_eq!(
+            listed["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["id"] == a["id"])
+                .count(),
+            1,
+            "幂等打开不得产生重复条目"
+        );
+
+        remove(&json!({ "workspaceId": a_id }));
+        remove(&json!({ "workspaceId": b_id }));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_keeps_pinned_workspaces_first() {
+        let base = temp_root("pinned");
+        Config::set_config_dir_override(base.join("config"));
+        let old = base.join("old");
+        let fresh = base.join("fresh");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+
+        let o = open(&json!({ "path": old.to_string_lossy() }))["workspace"].clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let f = open(&json!({ "path": fresh.to_string_lossy() }))["workspace"].clone();
+        let o_id = o["id"].as_str().unwrap();
+        let f_id = f["id"].as_str().unwrap();
+
+        // 未置顶时按最近打开排序：fresh 在前。
+        let listed = list(&Value::Null);
+        assert!(position_of(&listed, f_id) < position_of(&listed, o_id));
+
+        // 置顶旧的之后，pinned 优先于 last_opened_at。
+        assert_eq!(
+            pin(&json!({ "workspaceId": o_id, "pinned": true }))["ok"],
+            true
+        );
+        let listed = list(&Value::Null);
+        assert!(
+            position_of(&listed, o_id) < position_of(&listed, f_id),
+            "pinned 工作区必须永远排在未置顶项之前: {listed}"
+        );
+
+        pin(&json!({ "workspaceId": o_id, "pinned": false }));
+        remove(&json!({ "workspaceId": o_id }));
+        remove(&json!({ "workspaceId": f_id }));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_entries_without_last_opened_at_still_load() {
+        // 旧版 workspaces.json 结构（没有 last_opened_at）：serde(default) 必须给空串，
+        // 而不是整份注册表反序列化失败。
+        let raw = r#"[{
+            "id": "ws-legacy",
+            "name": "Legacy",
+            "path": "C:/definitely-not-a-dir",
+            "pinned": false,
+            "created_at": "2026-01-01T00:00:00+00:00"
+        }]"#;
+        let entries: Vec<WorkspaceEntry> = serde_json::from_str(raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].last_opened_at, "");
+
+        let base = temp_root("legacy");
+        Config::set_config_dir_override(base.join("config"));
+        let v = view(&entries[0]);
+        assert_eq!(v["lastOpenedAt"], "");
+        assert_eq!(v["last_opened_at"], "");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

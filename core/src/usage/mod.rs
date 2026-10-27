@@ -7,6 +7,7 @@
 //! - 会话维度用 tokio task-local 注入（`chat.send` 的 turn 内设置），跨 await 安全，
 //!   多个并行会话互不串扰。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -93,6 +94,25 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `query_contract` 的可选视图开关。
+///
+/// 把 4 个开关/上限收成一个结构：8 参函数既难读，也过不了 `clippy::too_many_arguments`。
+#[derive(Debug, Clone, Copy)]
+pub struct UsageQueryOptions<'a> {
+    /// 时间范围预设（`today` / `7d` / `30d` / `all`），原样回填到 `range.preset`
+    pub preset: &'a str,
+    /// IANA 时区名，原样回填到 `range.timezone`
+    pub timezone: &'a str,
+    /// 是否返回按本地日分桶的 `days` 视图
+    pub include_days: bool,
+    /// 是否返回按模型聚合的 `models` 视图
+    pub include_models: bool,
+    /// 是否返回按会话聚合的 `sessions` 视图
+    pub include_sessions: bool,
+    /// 旧消费方读取的 `items` 明细条数上限
+    pub item_limit: i64,
 }
 
 impl UsageLedger {
@@ -226,6 +246,10 @@ impl UsageLedger {
     }
 
     /// 最近 `limit` 条调用明细（倒序）。
+    ///
+    /// 生产路径已改走 [`Self::query_contract`]（四视图），这里只服务单测
+    /// （断言明细字段形状）；`cfg(test)` 避免 lib 构建出现 dead_code 告警。
+    #[cfg(test)]
     fn query(&self, limit: i64) -> rusqlite::Result<Value> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -248,6 +272,194 @@ impl UsageLedger {
         })?;
         let items = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(json!({ "items": items }))
+    }
+
+    /// `usage.query` 的完整体：totals / sessions / models / days 四视图。
+    ///
+    /// # 为什么必须由 Rust 提供（真机缺陷，2026-10-23）
+    /// 前端 `useUsageQuery` 只认 `{ totals, sessions, models, days, coverage }`，
+    /// 而 Rust 旧实现返回 `{ items: [...] }`。于是 `/usage` 页面拿到的 `totals`
+    /// 是 undefined → 全部 KPI 归零：用户发起请求、台账明明有 10 万 token，
+    /// 页面显示 0。这正是「Token 消耗计量是否准确」这条验收点会失败的原因。
+    ///
+    /// 聚合口径与前端 `normalizeUsageTotals` 对齐（camelCase 字段名）：
+    /// `inputTokens / outputTokens / totalTokens / cacheReadTokens / cacheWriteTokens /
+    /// costNanos / sessionCount / eventCount`。
+    /// 日维度用 SQLite `localtime` 分桶（与用户看到的「今天」一致），并把范围
+    /// 起点显式算成毫秒传进来，避免 SQL 里做时区算术。
+    pub fn query_contract(
+        &self,
+        from_ms: Option<i64>,
+        opts: UsageQueryOptions<'_>,
+    ) -> rusqlite::Result<Value> {
+        let UsageQueryOptions {
+            preset,
+            timezone,
+            include_days,
+            include_models,
+            include_sessions,
+            item_limit,
+        } = opts;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 单趟扫描：按 (本地日, 会话, 模型) 聚合，再在 Rust 里折叠成四个视图。
+        // 行数 = 组合数（远小于事件数），比四次 GROUP BY 更省。
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(strftime('%Y-%m-%d', created_ms/1000, 'unixepoch', 'localtime'), ''),
+                    session, model,
+                    COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    MIN(created_ms), MAX(created_ms)
+             FROM usage_events
+             WHERE (?1 IS NULL OR created_ms >= ?1)
+             GROUP BY 1, session, model
+             ORDER BY 1 ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![from_ms], |r| {
+                Ok(UsageAggRow {
+                    day: r.get::<_, String>(0)?,
+                    session: r.get::<_, String>(1)?,
+                    model: r.get::<_, String>(2)?,
+                    calls: r.get::<_, i64>(3)?,
+                    input: r.get::<_, i64>(4)?,
+                    output: r.get::<_, i64>(5)?,
+                    total: r.get::<_, i64>(6)?,
+                    cache_read: r.get::<_, i64>(7)?,
+                    cache_write: r.get::<_, i64>(8)?,
+                    first_ms: r.get::<_, i64>(9)?,
+                    last_ms: r.get::<_, i64>(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut totals = UsageTotalsAcc::default();
+        let mut sessions: BTreeMap<String, UsageTotalsAcc> = BTreeMap::new();
+        let mut models: BTreeMap<String, UsageTotalsAcc> = BTreeMap::new();
+        let mut days: BTreeMap<String, UsageTotalsAcc> = BTreeMap::new();
+        let mut model_sessions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut all_sessions: BTreeSet<String> = BTreeSet::new();
+        // 会话 → 首末时间 / 模型明细：前端明细表的「修改时间 / 来源 / 模型」三列
+        // 只认这些字段；缺了就是三列全 `-`（真机可见）。
+        let mut session_span: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        let mut session_models: BTreeMap<String, BTreeMap<String, UsageTotalsAcc>> =
+            BTreeMap::new();
+
+        for row in &rows {
+            totals.add(row);
+            all_sessions.insert(row.session.clone());
+            sessions.entry(row.session.clone()).or_default().add(row);
+            models.entry(row.model.clone()).or_default().add(row);
+            days.entry(row.day.clone()).or_default().add(row);
+            model_sessions
+                .entry(row.model.clone())
+                .or_default()
+                .insert(row.session.clone());
+            session_models
+                .entry(row.session.clone())
+                .or_default()
+                .entry(row.model.clone())
+                .or_default()
+                .add(row);
+            let span = session_span
+                .entry(row.session.clone())
+                .or_insert((row.first_ms, row.last_ms));
+            span.0 = span.0.min(row.first_ms);
+            span.1 = span.1.max(row.last_ms);
+        }
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let mut out = json!({
+            "schemaVersion": 1,
+            "asOfMs": now_ms,
+            "range": {
+                "preset": preset,
+                "timezone": timezone,
+                "fromMs": from_ms,
+                "toMs": null,
+            },
+            "totals": totals.to_json(all_sessions.len()),
+            "coverage": {
+                "status": "complete",
+                "reasonCodes": [],
+                "legacyUnattributed": null,
+                "nativeBilling": { "status": "unavailable", "reasonCodes": ["no_billing_receipts"] },
+            },
+            // 旧消费方（审计脚本 / 明细面板）仍按 `items` 读取最近 N 条：
+            // 保留它，避免这次修复把别的调用方打断。
+            "items": query_recent(&conn, item_limit)?,
+        });
+        let obj = out.as_object_mut().expect("json! 构造的一定是对象");
+        if include_days {
+            obj.insert(
+                "days".into(),
+                Value::Array(
+                    days.iter()
+                        .map(|(day, acc)| json!({ "date": day, "totals": acc.to_json(1) }))
+                        .collect(),
+                ),
+            );
+        }
+        if include_models {
+            obj.insert(
+                "models".into(),
+                Value::Array(
+                    models
+                        .iter()
+                        .map(|(model, acc)| {
+                            json!({
+                                "model": model,
+                                "provider": model.split(['/', ':']).next().unwrap_or(model),
+                                "sessionCount": model_sessions.get(model).map(|s| s.len()).unwrap_or(0),
+                                "totals": acc.to_json(model_sessions.get(model).map(|s| s.len()).unwrap_or(0)),
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if include_sessions {
+            obj.insert(
+                "sessions".into(),
+                Value::Array(
+                    sessions
+                        .iter()
+                        .map(|(session, acc)| {
+                            let span = session_span.get(session).copied().unwrap_or((0, 0));
+                            let breakdown: Vec<Value> = session_models
+                                .get(session)
+                                .map(|m| {
+                                    m.iter()
+                                        .map(|(model, a)| {
+                                            json!({ "model": model, "totals": a.to_json(1) })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            json!({
+                                "sessionKey": session,
+                                "sessionId": session,
+                                "firstUsageAtMs": span.0,
+                                "lastUsageAtMs": span.1,
+                                "costSource": "Marguerite_estimate",
+                                "modelBreakdown": breakdown,
+                                "totals": acc.to_json(1),
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        Ok(out)
     }
 
     /// 最近 `days` 天按日聚合（UTC 日边界）。
@@ -489,6 +701,188 @@ fn session_cost_locked(
     Ok((tokens, input, output, cost))
 }
 
+/// `created_ms >= since_ms` 以来的累计用量 `(tokens, usd)`（按模型单价估算）。
+///
+/// `session = None` 表示全部会话。单价口径与 [`session_cost_locked`] 完全一致
+/// （同一 [`price_for`] 表），避免"预算按 A 单价算、账单按 B 单价算"的双口径。
+fn spend_locked(
+    conn: &Connection,
+    session: Option<&str>,
+    since_ms: i64,
+) -> rusqlite::Result<(i64, f64)> {
+    let sql_all = "SELECT model, COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0)
+                   FROM usage_events WHERE created_ms >= ?1 GROUP BY model";
+    let sql_session = "SELECT model, COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0)
+                       FROM usage_events WHERE created_ms >= ?1 AND session = ?2 GROUP BY model";
+    let mut stmt = conn.prepare(if session.is_some() { sql_session } else { sql_all })?;
+    let mut tokens = 0i64;
+    let mut cost = 0f64;
+    let acc = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, f64)> {
+        let (model, inp, outp, total): (String, i64, i64, i64) =
+            (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+        let (p_in, p_out) = price_for(&model);
+        Ok((
+            total,
+            inp as f64 / 1_000_000.0 * p_in + outp as f64 / 1_000_000.0 * p_out,
+        ))
+    };
+    let rows = match session {
+        Some(s) => stmt
+            .query_map(rusqlite::params![since_ms, s], |r| acc(r))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>(),
+        None => stmt
+            .query_map(rusqlite::params![since_ms], |r| acc(r))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>(),
+    };
+    for (t, c) in rows {
+        tokens += t;
+        cost += c;
+    }
+    Ok((tokens, cost))
+}
+
+/// 已配置预算的**实测快照**：上限来自 `budget_meta`，已用来自台账真实事件。
+///
+/// # 为什么必须由台账来算「已用」
+///
+/// `model::tier::SessionBudget` 是**生效**的预算口径（档位解析与 `model.tier.get`
+/// 都读它），但它的 `tokens_used/usd_used` **全仓没有任何写入点** ——
+/// `record_usage()` 零调用者，于是 `remaining_ratio()` 恒为 1.0：
+/// 预算降档与 `Depleted` 永不触发，用户在控制台看到的是「剩余 100%」这个假读数。
+/// 上限（用户经 `usage.budget.set` 设定）与已用（台账事件）必须落在同一处，
+/// 这里就是那个「同一处」。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetSnapshot {
+    /// 归属会话（全局视图下为「最紧的那个」）
+    pub session: String,
+    pub tokens_cap: u64,
+    pub usd_cap: f64,
+    pub tokens_used: u64,
+    pub usd_used: f64,
+    /// 剩余比例 0..1（两个口径取更紧者）
+    pub remaining_ratio: f64,
+    /// 计量起点（= 该预算最近一次设定时刻）：预算一改就从零重新计
+    pub since_ms: i64,
+}
+
+impl BudgetSnapshot {
+    /// 由上限与已用算出剩余比例（与 `SessionBudget::remaining_ratio` 同口径）。
+    fn ratio(tokens_cap: u64, tokens_used: u64, usd_cap: f64, usd_used: f64) -> f64 {
+        let token_ratio = if tokens_cap == 0 {
+            1.0
+        } else {
+            1.0 - (tokens_used as f64 / tokens_cap as f64)
+        };
+        let usd_ratio = if usd_cap <= 0.0 {
+            1.0
+        } else {
+            1.0 - (usd_used / usd_cap)
+        };
+        token_ratio.min(usd_ratio).clamp(0.0, 1.0)
+    }
+}
+
+impl UsageLedger {
+    /// 某会话的预算实测快照；该会话未配置预算（或两个阈值都为空）时返回 `None`。
+    pub fn budget_snapshot_for(&self, session: &str) -> rusqlite::Result<Option<BudgetSnapshot>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((s, tc, uc, since)) = configured_budgets_locked(&conn)?
+            .into_iter()
+            .find(|b| b.0 == session)
+        else {
+            return Ok(None);
+        };
+        snapshot_of_locked(&conn, &s, tc, uc, since)
+    }
+
+    /// **最紧**的已配置预算（按剩余比例最小者；并列则按会话名升序取第一个）。
+    ///
+    /// 全局档位态（`SessionState` 无会话维度）用它作为预算来源：
+    /// 「任何一个已配置预算吃紧」都该让全局生效档降下来，而不是各自为政。
+    pub fn tightest_budget_snapshot(&self) -> rusqlite::Result<Option<BudgetSnapshot>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut best: Option<BudgetSnapshot> = None;
+        let mut configured = configured_budgets_locked(&conn)?;
+        configured.sort_by(|a, b| a.0.cmp(&b.0)); // 确定性：会话名升序
+        for (s, tc, uc, since) in configured {
+            let Some(snap) = snapshot_of_locked(&conn, &s, tc, uc, since)? else {
+                continue;
+            };
+            let better = match &best {
+                None => true,
+                Some(cur) => {
+                    snap.remaining_ratio < cur.remaining_ratio
+                        || (snap.remaining_ratio == cur.remaining_ratio
+                            && snap.session < cur.session)
+                }
+            };
+            if better {
+                best = Some(snap);
+            }
+        }
+        Ok(best)
+    }
+}
+
+/// `budget_meta` 中所有**已配置**（至少一个阈值非空）的预算：`(session, tokens_cap, usd_cap, updated_ms)`。
+fn configured_budgets_locked(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(String, u64, f64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT session, threshold_tokens, threshold_usd, updated_ms
+         FROM budget_meta WHERE threshold_tokens IS NOT NULL OR threshold_usd IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let session: String = r.get(0)?;
+            let tokens: Option<i64> = r.get(1)?;
+            let usd: Option<f64> = r.get(2)?;
+            let updated: i64 = r.get(3)?;
+            Ok((
+                session,
+                tokens.unwrap_or(0).max(0) as u64,
+                usd.unwrap_or(0.0).max(0.0),
+                updated,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    Ok(rows)
+}
+
+/// 由上限 + 计量起点算出的实测快照（已用 = 起点以来的真实台账事件）。
+fn snapshot_of_locked(
+    conn: &Connection,
+    session: &str,
+    tokens_cap: u64,
+    usd_cap: f64,
+    since_ms: i64,
+) -> rusqlite::Result<Option<BudgetSnapshot>> {
+    if tokens_cap == 0 && usd_cap <= 0.0 {
+        return Ok(None); // 两个口径都无上限 = 未配置预算，不得假装有
+    }
+    let (tokens_used, usd_used) = spend_locked(conn, Some(session), since_ms)?;
+    Ok(Some(BudgetSnapshot {
+        session: session.to_string(),
+        tokens_cap,
+        usd_cap,
+        tokens_used: tokens_used.max(0) as u64,
+        usd_used,
+        remaining_ratio: BudgetSnapshot::ratio(tokens_cap, tokens_used.max(0) as u64, usd_cap, usd_used),
+        since_ms,
+    }))
+}
+
+/// 全局（最紧）已配置预算的实测快照；台账未初始化或无任何预算配置时 `None`。
+pub fn tightest_budget_snapshot() -> Option<BudgetSnapshot> {
+    LEDGER
+        .get()
+        .and_then(|l| l.tightest_budget_snapshot().ok().flatten())
+}
+
+
 /// 台账落盘路径。
 ///
 /// ⚠️ **单元测试永不打开用户真实目录**。`init()` 被 chat / engine / gateway / TUI
@@ -522,6 +916,27 @@ pub fn init() {
             tracing::warn!(err = %e, path = %db_path.display(), "用量台账初始化失败（用量不记录）")
         }
     }
+}
+
+/// 当前 turn 的会话键（task-local；无上下文或空串时返回 `None`）。
+///
+/// 为什么需要公开：`tokio::spawn` **不会**继承 task-local。流式 LLM 的生产者
+/// 跑在独立任务里，`usage::record` 在那里读到的是空串 —— 结果所有流式用量都归到
+/// 空会话（真机：`usage_events.session=''`，按会话统计全错）。生产者必须在
+/// spawn **之前**把归属取出来带走。
+pub fn current_session() -> Option<String> {
+    SESSION
+        .try_with(|s| s.clone())
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// 当前 turn 的 run 归因（同上，用于跨 `tokio::spawn` 携带）。
+pub fn current_run() -> Option<String> {
+    RUN_ID
+        .try_with(|r| r.clone())
+        .ok()
+        .filter(|r| !r.trim().is_empty())
 }
 
 /// 记录一次 LLM 调用用量。台账未初始化或无真实用量时为 no-op，绝不阻塞调用方。
@@ -558,6 +973,8 @@ pub fn record_attributed(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 usage.total_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
             ));
         }
     }
@@ -587,20 +1004,185 @@ pub fn status(params: &Value) -> Value {
     }
 }
 
-/// `usage.query` 契约：最近 N 条调用明细（前端用量页/图表数据源）。
+/// 最近 N 条明细（倒序）。独立函数是因为 `query_contract` 已持有连接锁，不能重入。
+fn query_recent(conn: &Connection, limit: i64) -> rusqlite::Result<Value> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id, session, model, prompt_tokens, completion_tokens, total_tokens,
+                cache_read_tokens, cache_creation_tokens, created_ms
+         FROM usage_events ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![limit], |r| {
+        Ok(json!({
+            "run_id": r.get::<_, Option<String>>(0)?,
+            "session": r.get::<_, String>(1)?,
+            "model": r.get::<_, String>(2)?,
+            "prompt_tokens": r.get::<_, i64>(3)?,
+            "completion_tokens": r.get::<_, i64>(4)?,
+            "total_tokens": r.get::<_, i64>(5)?,
+            "cache_read_tokens": r.get::<_, i64>(6)?,
+            "cache_creation_tokens": r.get::<_, i64>(7)?,
+            "ts": r.get::<_, i64>(8)?,
+        }))
+    })?;
+    let items = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Array(items))
+}
+
+/// `usage.query` 聚合扫描的一行（按 本地日 × 会话 × 模型 分组）。
+struct UsageAggRow {
+    day: String,
+    session: String,
+    model: String,
+    calls: i64,
+    input: i64,
+    output: i64,
+    total: i64,
+    cache_read: i64,
+    cache_write: i64,
+    first_ms: i64,
+    last_ms: i64,
+}
+
+/// 累加器：把若干 [`UsageAggRow`] 折叠成前端 `normalizeUsageTotals` 认得的形状。
+#[derive(Default)]
+struct UsageTotalsAcc {
+    calls: i64,
+    input: i64,
+    output: i64,
+    total: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost_nanos: i64,
+}
+
+impl UsageTotalsAcc {
+    fn add(&mut self, row: &UsageAggRow) {
+        self.calls += row.calls;
+        self.input += row.input;
+        self.output += row.output;
+        self.total += row.total;
+        self.cache_read += row.cache_read;
+        self.cache_write += row.cache_write;
+        // 与 `task_cost_view` 同口径（同一份 `price_for` 单价表），避免两处账单打架。
+        let (p_in, p_out) = price_for(&row.model);
+        let usd = row.input as f64 / 1_000_000.0 * p_in
+            + row.output as f64 / 1_000_000.0 * p_out;
+        self.cost_nanos += (usd * 1_000_000_000.0).round() as i64;
+    }
+
+    fn to_json(&self, sessions: usize) -> Value {
+        json!({
+            "inputTokens": self.input,
+            "outputTokens": self.output,
+            "totalTokens": if self.total > 0 { self.total } else { self.input + self.output },
+            "cacheReadTokens": self.cache_read,
+            "cacheWriteTokens": self.cache_write,
+            "costNanos": self.cost_nanos,
+            // 前端 `costSourceKey` 只认 `Marguerite_estimate` / `provider_billed` 等
+            // 固定枚举；写 `estimated` 会落进 `default → none`，明细表「来源」列显示「无」。
+            "costSource": "Marguerite_estimate",
+            "sessionCount": sessions as i64,
+            "eventCount": self.calls,
+            "missingCostEntries": 0,
+        })
+    }
+}
+
+/// `usage.query` 契约：前端用量页的唯一数据源。
+///
+/// 参数（与 webui `useUsageQuery.queryParams` 一一对应）：
+/// ```json
+/// { "schemaVersion": 1, "range": { "preset": "today|last_7_calendar_days|all" },
+///   "timezone": "Asia/Shanghai", "include": { "days": true, "models": true, "sessions": true } }
+/// ```
+/// 返回 `{ totals, days, models, sessions, coverage, range, asOfMs, items }`。
+///
+/// **不能用 `{items}` 糊弄**：前端 `normalizeUsageQueryResponse` 只读 `totals` 等
+/// 字段，只返回 items 会让整页 KPI 归零（真机缺陷，见 `query_contract` 注释）。
 pub fn query(params: &Value) -> Value {
+    let preset = params
+        .pointer("/range/preset")
+        .and_then(Value::as_str)
+        .unwrap_or("all");
+    let timezone = params
+        .get("timezone")
+        .and_then(Value::as_str)
+        .unwrap_or("UTC");
+    let include_bool = |key: &str| {
+        params
+            .pointer(&format!("/include/{key}"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    };
     let limit = params
         .get("limit")
         .and_then(Value::as_i64)
-        .unwrap_or(100)
+        .unwrap_or(200)
         .clamp(1, 500);
+    let from_ms = range_from_ms(preset);
     match LEDGER.get() {
-        None => json!({ "items": [] }),
-        Some(ledger) => ledger.query(limit).unwrap_or_else(|e| {
-            tracing::warn!(err = %e, "用量台账明细查询失败");
-            json!({ "items": [] })
+        None => json!({
+            "schemaVersion": 1,
+            "asOfMs": now_ms(),
+            "range": { "preset": preset, "timezone": timezone, "fromMs": from_ms, "toMs": null },
+            "totals": UsageTotalsAcc::default().to_json(0),
+            "days": [], "models": [], "sessions": [], "items": [],
+            "coverage": { "status": "complete", "reasonCodes": ["ledger_unavailable"], "legacyUnattributed": null },
         }),
+        Some(ledger) => ledger
+            .query_contract(
+                from_ms,
+                UsageQueryOptions {
+                    preset,
+                    timezone,
+                    include_days: include_bool("days"),
+                    include_models: include_bool("models"),
+                    include_sessions: include_bool("sessions"),
+                    item_limit: limit,
+                },
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(err = %e, "用量台账查询失败");
+                json!({
+                    "schemaVersion": 1,
+                    "asOfMs": now_ms(),
+                    "range": { "preset": preset, "timezone": timezone, "fromMs": from_ms, "toMs": null },
+                    "totals": UsageTotalsAcc::default().to_json(0),
+                    "days": [], "models": [], "sessions": [], "items": [],
+                    "coverage": { "status": "partial", "reasonCodes": ["ledger_query_failed"], "legacyUnattributed": null },
+                })
+            }),
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 预设范围 → 本地时区「今天/N 天前」的零点毫秒。
+///
+/// `all` / 未知预设返回 `None`（不限时间）。日边界用 `chrono::Local`，与用户
+/// 看到的「今天」一致；SQL 只拿到毫秒阈值，不做时区算术。
+fn range_from_ms(preset: &str) -> Option<i64> {
+    use chrono::{Local, TimeZone};
+
+    let days: i64 = match preset {
+        "today" => 1,
+        "last_7_calendar_days" => 7,
+        "last_14_calendar_days" => 14,
+        "last_30_calendar_days" => 30,
+        _ => return None,
+    };
+    let today = Local::now().date_naive();
+    let start = today - chrono::Duration::days(days - 1);
+    let naive = start.and_hms_opt(0, 0, 0)?;
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// `usage.daily` 契约：最近 N 天按日聚合（用量页热力图/月度开销数据源）。
@@ -824,6 +1406,224 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }
+    }
+
+    /// 预算「已用」必须由**真实台账事件**算出，且计量起点 = 预算设定时刻
+    /// （审计：SessionBudget 的已用字段全仓无人写入 ⇒ 剩余恒 100% 的假读数）。
+    #[test]
+    fn budget_snapshot_counts_only_events_after_budget_set() {
+        let ledger = tmp_db("budget-since");
+        // 预算设定**之前**的历史用量：不得计入（否则一设预算就"已用"一大截）
+        ledger
+            .record_attributed(None, "s1", "deepseek-v4-pro", &usage(1_000, 0))
+            .unwrap();
+        ledger.set_session_budget("s1", Some(100_000), None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        ledger
+            .record_attributed(None, "s1", "deepseek-v4-pro", &usage(2_000, 1_000))
+            .unwrap();
+
+        let snap = ledger
+            .budget_snapshot_for("s1")
+            .unwrap()
+            .expect("已配置预算 → 必须给快照");
+        assert_eq!(snap.tokens_cap, 100_000);
+        assert_eq!(snap.tokens_used, 3_000, "只计设定之后的 3000 token");
+        assert!(
+            (snap.remaining_ratio - 0.97).abs() < 1e-9,
+            "剩余比例必须实测: {}",
+            snap.remaining_ratio
+        );
+
+        // 别的会话用量不得混入本会话预算
+        ledger
+            .record_attributed(None, "s2", "deepseek-v4-pro", &usage(50_000, 0))
+            .unwrap();
+        let again = ledger.budget_snapshot_for("s1").unwrap().unwrap();
+        assert_eq!(again.tokens_used, 3_000, "跨会话不得串味");
+    }
+
+    /// 未配置预算 → 必须是 `None`，不得假装有预算（否则会凭默认值私自降档）。
+    #[test]
+    fn budget_snapshot_is_none_without_configured_budget() {
+        let ledger = tmp_db("budget-none");
+        ledger
+            .record_attributed(None, "s1", "deepseek-v4-pro", &usage(500, 0))
+            .unwrap();
+        assert!(ledger.budget_snapshot_for("s1").unwrap().is_none());
+        assert!(
+            ledger.tightest_budget_snapshot().unwrap().is_none(),
+            "无任何配置时全局视图也必须是 None"
+        );
+    }
+
+    /// 多会话各自配了预算 → 全局视图取**最紧**的那个（剩余比例最小）。
+    #[test]
+    fn tightest_budget_renders_the_tightest_session() {
+        let ledger = tmp_db("budget-tightest");
+        ledger.set_session_budget("loose", Some(1_000_000), None).unwrap();
+        ledger.set_session_budget("tight", Some(1_000), None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        ledger
+            .record_attributed(None, "tight", "deepseek-v4-pro", &usage(900, 0))
+            .unwrap();
+        ledger
+            .record_attributed(None, "loose", "deepseek-v4-pro", &usage(10, 0))
+            .unwrap();
+
+        let snap = ledger.tightest_budget_snapshot().unwrap().expect("应有快照");
+        assert_eq!(snap.session, "tight", "必须选中吃紧的那个会话");
+        assert!(snap.remaining_ratio < 0.2, "ratio={}", snap.remaining_ratio);
+    }
+
+    /// 美元口径用**同一张单价表**估算，避免「预算按 A 价、账单按 B 价」双口径。
+    #[test]
+    fn budget_snapshot_uses_price_table_for_usd_cap() {
+        let ledger = tmp_db("budget-usd");
+        ledger.set_session_budget("s1", None, Some(1.0)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        // gpt-4o 输入 $2.5/MTok → 100k 输入 ≈ $0.25
+        ledger
+            .record_attributed(None, "s1", "gpt-4o", &usage(100_000, 0))
+            .unwrap();
+        let snap = ledger.budget_snapshot_for("s1").unwrap().unwrap();
+        assert!((snap.usd_used - 0.25).abs() < 1e-6, "usd_used={}", snap.usd_used);
+        assert!(
+            (snap.remaining_ratio - 0.75).abs() < 1e-6,
+            "ratio={}",
+            snap.remaining_ratio
+        );
+    }
+
+    /// `usage.query` 必须返回前端认得的四视图（totals/sessions/models/days）。
+    ///
+    /// 回归的缺陷：旧实现只回 `{items}`，前端 `normalizeUsageQueryResponse` 读不到
+    /// `totals` → `/usage` 整页 KPI 归零（台账明明有数据，页面显示 0 token）。
+    #[test]
+    fn query_contract_aggregates_four_views_for_webui() {
+        let ledger = tmp_db("query-contract");
+        ledger
+            .record_attributed(None, "s-a", "deepseek-chat", &usage(1000, 200))
+            .unwrap();
+        ledger
+            .record_attributed(None, "s-a", "deepseek-chat", &usage(500, 100))
+            .unwrap();
+        ledger
+            .record_attributed(None, "s-b", "deepseek-v4-pro", &usage(2000, 300))
+            .unwrap();
+
+        let v = ledger
+            .query_contract(
+                None,
+                UsageQueryOptions {
+                    preset: "all",
+                    timezone: "Asia/Shanghai",
+                    include_days: true,
+                    include_models: true,
+                    include_sessions: true,
+                    item_limit: 10,
+                },
+            )
+            .expect("query contract");
+
+        // totals：三次调用合计
+        assert_eq!(v["totals"]["inputTokens"], 3500);
+        assert_eq!(v["totals"]["outputTokens"], 600);
+        assert_eq!(v["totals"]["totalTokens"], 4100);
+        assert_eq!(v["totals"]["eventCount"], 3);
+        assert_eq!(v["totals"]["sessionCount"], 2);
+        assert!(v["totals"]["costNanos"].as_i64().unwrap_or(0) > 0, "成本必须有估算值");
+
+        // sessions：两个会话，合计守恒
+        let sessions = v["sessions"].as_array().expect("sessions 数组");
+        assert_eq!(sessions.len(), 2);
+        let sum_in: i64 = sessions
+            .iter()
+            .map(|s| s["totals"]["inputTokens"].as_i64().unwrap_or(0))
+            .sum();
+        assert_eq!(sum_in, 3500, "会话合计必须等于总量");
+
+        // 明细表三列（修改时间 / 来源 / 模型）必须真的有字段，不能全是 `-`。
+        let sa = sessions
+            .iter()
+            .find(|s| s["sessionKey"] == "s-a")
+            .expect("应有 s-a 会话");
+        assert!(sa["lastUsageAtMs"].as_i64().unwrap_or(0) > 0, "缺 lastUsageAtMs");
+        assert!(sa["firstUsageAtMs"].as_i64().unwrap_or(0) > 0, "缺 firstUsageAtMs");
+        assert_eq!(sa["costSource"], "Marguerite_estimate");
+        let breakdown = sa["modelBreakdown"].as_array().expect("modelBreakdown 数组");
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0]["model"], "deepseek-chat");
+
+        // models：两个模型
+        let models = v["models"].as_array().expect("models 数组");
+        assert_eq!(models.len(), 2);
+        let pro = models
+            .iter()
+            .find(|m| m["model"] == "deepseek-v4-pro")
+            .expect("应有 deepseek-v4-pro");
+        assert_eq!(pro["totals"]["inputTokens"], 2000);
+        assert_eq!(pro["sessionCount"], 1);
+
+        // days：今天一条
+        let days = v["days"].as_array().expect("days 数组");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0]["totals"]["totalTokens"], 4100);
+
+        // 兼容：items 仍在（审计脚本按它读明细）
+        assert_eq!(v["items"].as_array().map(|a| a.len()), Some(3));
+        // 范围元数据
+        assert_eq!(v["range"]["preset"], "all");
+        assert!(v["range"]["fromMs"].is_null());
+        assert_eq!(v["coverage"]["status"], "complete");
+    }
+
+    /// 预设范围必须真的过滤（`today` 只算今天，历史行不能被算进来）。
+    #[test]
+    fn query_contract_respects_range_preset() {
+        let ledger = tmp_db("query-range");
+        ledger
+            .record_attributed(None, "s-today", "deepseek-chat", &usage(100, 10))
+            .unwrap();
+        // 手工插一条 40 天前的历史行
+        {
+            let conn = ledger.conn.lock().unwrap();
+            let old_ms = now_ms() - 40 * 86_400_000;
+            conn.execute(
+                "INSERT INTO usage_events (run_id, session, model, prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, created_ms)
+                 VALUES (NULL, 's-old', 'deepseek-chat', 9999, 1, 10000, 0, 0, ?1)",
+                rusqlite::params![old_ms],
+            )
+            .unwrap();
+        }
+        let all = ledger
+            .query_contract(
+                None,
+                UsageQueryOptions {
+                    preset: "all",
+                    timezone: "UTC",
+                    include_days: false,
+                    include_models: false,
+                    include_sessions: false,
+                    item_limit: 10,
+                },
+            )
+            .unwrap();
+        let today = ledger
+            .query_contract(
+                range_from_ms("today"),
+                UsageQueryOptions {
+                    preset: "today",
+                    timezone: "UTC",
+                    include_days: false,
+                    include_models: false,
+                    include_sessions: false,
+                    item_limit: 10,
+                },
+            )
+            .unwrap();
+        assert_eq!(all["totals"]["inputTokens"], 10099);
+        assert_eq!(today["totals"]["inputTokens"], 100, "today 不得包含 40 天前的行");
     }
 
     #[test]

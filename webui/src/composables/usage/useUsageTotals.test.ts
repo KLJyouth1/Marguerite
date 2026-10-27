@@ -178,6 +178,20 @@ describe('usage total native billing presentation', () => {
     expect(result.costHintText.value).toBe('≈ $1.0000 USD')
   })
 
+  it('derives the cache hit rate from prompt + cache_read only', () => {
+    const result = summary(totals({ input: 750, cacheRead: 250 }), 'USD')
+    expect(result.cacheHitRatePct.value).toBe(25)
+    expect(result.cacheHitRateDisplay.value).toBe('25%')
+    expect(result.cacheHitRateHint.value).toContain('cache_read 250')
+    expect(result.cacheHitRateHint.value).toContain('prompt 750')
+  })
+
+  it('does not fake a 0% cache hit rate when no cache reads exist', () => {
+    const result = summary(totals({ input: 900, cacheRead: 0 }), 'USD')
+    expect(result.cacheHitRatePct.value).toBeNull()
+    expect(result.cacheHitRateDisplay.value).toBe('—')
+  })
+
   it('divides exact native CNY rather than reapplying the generic UI rate', () => {
     const source = totals({
       cost: 2,

@@ -33,6 +33,40 @@ export const sandboxSetupRpcCallOptions: RpcCallOptions = {
   abortAction: 'reject',
 }
 
+/**
+ * `onboarding.status` 的调用选项 —— **它决定 readiness 显示，必须用与
+ * sandboxSetup 相同的宽限**。
+ *
+ * # 为什么必须有它（2026-10-22 实测的「一直连接中」机制）
+ *
+ * `useGatewayReadiness` 用 `optionalSessionRpcCallOptions`（**10 秒** +
+ * `timeoutAction: 'reconnect'`）调 `onboarding.status`。而上面那段注释已经写明：
+ * **首次 setup-status 读取可能排在 Windows 能力 canary 后面，该探针最长 30 秒**。
+ *
+ * 于是形成一个自我维持的死循环：
+ *
+ * ```
+ * 10s 超时 → reconnect（砸掉整条 WS）→ 重连后第一帧又排在 canary 后
+ *          → 再次 10s 超时 → 再 reconnect → …
+ * ```
+ *
+ * 期间 `useRpcCall` 的 `loading` 恒为 true、`status` 恒为 null，
+ * `useGatewayReadiness` 因此恒返回 `'connecting'` —— 用户看到的就是
+ * **顶栏一直「连接中」**，与真实的网关健康状态无关。
+ *
+ * 同一份文件里，`sandboxSetupRpcCallOptions` 已经为**同一类**读取给出了正确判据
+ * （45 秒 + `reject` 而不断连），只是这个调用点被漏掉了。本常量就是把那条判据
+ * 补到漏掉的调用点 ——「半修」的补齐，不是新设计。
+ *
+ * 为什么不直接改 `optionalSessionRpcCallOptions`：它同时服务 chat 会话恢复等
+ * 关键路径，那里「真卡住就重连」是**正确**的语义。只有这个诊断型读取不该继承它。
+ */
+export const readinessRpcCallOptions: RpcCallOptions = {
+  timeoutMs: 45_000,
+  timeoutAction: 'reject',
+  abortAction: 'reject',
+}
+
 // A mode click is an interactive control, so it must never look frozen behind
 // an unrelated slow RPC on the connection. The composable updates the visible
 // selection optimistically; this bound only governs persistence/rollback.

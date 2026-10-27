@@ -1,4 +1,5 @@
 import { ref, type Ref } from 'vue'
+import { audioEngine } from './audioEngine'
 
 /**
  * Procedurally-synthesised background ambience: a slow "pad" built from a few
@@ -35,6 +36,9 @@ const FILTER_SWING = 320 // Hz LFO modulation depth
 const MASTER_LEVEL = 0.18 // headroom: a pad, never a lead
 
 let ctx: AudioContext | null = null
+// True when the pad rides the shared engine context: we must neither suspend
+// nor close it (file playback lives on the same graph).
+let usingSharedContext = false
 let master: GainNode | null = null
 let filter: BiquadFilterNode | null = null
 let analyser: AnalyserNode | null = null
@@ -59,17 +63,28 @@ function audioCtor(): typeof AudioContext | null {
 }
 
 function buildGraph(): boolean {
-  const Ctor = audioCtor()
-  if (!Ctor) {
-    available.value = false
-    return false
-  }
   if (ctx) return true
-  try {
-    ctx = new Ctor()
-  } catch {
-    available.value = false
-    return false
+  // Prefer the shared engine context: when the player already unlocked Web
+  // Audio (file playback), the pad rides the SAME graph so the shared
+  // analyser sees both sources for visualisation. Otherwise fall back to our
+  // own context (the pad is the only audio in the app).
+  const shared = audioEngine.context()
+  if (shared) {
+    ctx = shared
+    usingSharedContext = true
+  } else {
+    const Ctor = audioCtor()
+    if (!Ctor) {
+      available.value = false
+      return false
+    }
+    try {
+      ctx = new Ctor()
+    } catch {
+      available.value = false
+      return false
+    }
+    usingSharedContext = false
   }
   available.value = true
 
@@ -83,8 +98,14 @@ function buildGraph(): boolean {
   analyser.fftSize = 1024
   analyserBuf = new Uint8Array(new ArrayBuffer(analyser.fftSize))
   filter.connect(master)
+  // Local analyser doubles as the amplitude tap in both modes; in shared mode
+  // the audible path additionally goes through the engine's analyser.
   master.connect(analyser)
-  analyser.connect(ctx.destination)
+  if (usingSharedContext) {
+    audioEngine.connectExternalSource(master)
+  } else {
+    analyser.connect(ctx.destination)
+  }
 
   for (const v of VOICES) {
     const o = ctx.createOscillator()
@@ -169,12 +190,17 @@ export function useAmbientSynth() {
     amplitude.value = 0
     cancelAnimationFrame(ampRaf)
     ampRaf = 0
-    if (ctx) {
-      try {
-        void ctx.suspend()
-      } catch {
-        /* noop */
-      }
+    if (!ctx) return
+    if (usingSharedContext) {
+      // Shared context: silence the pad by ramping its gain instead of
+      // suspending the engine (which would also mute file playback).
+      applyVolume(0)
+      return
+    }
+    try {
+      void ctx.suspend()
+    } catch {
+      /* noop */
     }
   }
 
@@ -196,11 +222,12 @@ export function useAmbientSynth() {
       /* noop */
     }
     try {
-      ctx?.close()
+      if (!usingSharedContext) ctx?.close()
     } catch {
       /* noop */
     }
     ctx = null
+    usingSharedContext = false
     master = null
     filter = null
     analyser = null

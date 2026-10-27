@@ -1,224 +1,68 @@
-import { describe, expect, it, vi } from 'vitest'
-import type {
-  NativeWorkbenchApi,
-  NativeWorkbenchCapabilities,
-  NativeWorkbenchSurfaceResult,
-  Platform,
-} from '@/platform/types'
+import { describe, expect, it } from 'vitest'
 import { createBrowserWorkbenchItem } from '@/workbench/browserItems'
-import type {
-  NativeSurfaceRect,
-  WorkbenchRuntimeContext,
-} from '@/workbench/types'
 import { createBrowserWorkbenchDefinition } from './browserWorkbenchProvider'
 
-function successfulResult(): Promise<NativeWorkbenchSurfaceResult> {
-  return Promise.resolve({ ok: true })
-}
+/**
+ * 侧边浏览器面板的契约（2026-10-24 改版：CDP 镜像，不再是原生 WebContents 表面）。
+ *
+ * 回归锚点：这一族用例原本守护的是「原生表面失败时不要留白」；改版后需要守护的是
+ * **面板不再依赖壳的原生表面能力**（壳里根本没实现那组命令），以及 URL 归一与
+ * 作用域透传仍然是 fail-closed 的。
+ */
+describe('browser Workbench provider (CDP mirror)', () => {
+  const definition = createBrowserWorkbenchDefinition({ t: key => key })
 
-function nativeApi(
-  overrides: Partial<NativeWorkbenchApi> = {},
-): NativeWorkbenchApi {
-  return {
-    getCapabilities: vi.fn(async (): Promise<NativeWorkbenchCapabilities> => ({
-      protocolVersions: [1, 2],
-      modes: ['full', 'offline'],
-      maxSurfaces: 8,
-    })),
-    createSurface: vi.fn(successfulResult),
-    setSurfaceRect: vi.fn(successfulResult),
-    activateSurface: vi.fn(successfulResult),
-    destroySurface: vi.fn(successfulResult),
-    onSurfaceEvent: vi.fn(() => () => undefined),
-    ...overrides,
-  }
-}
-
-async function createHarness(api: NativeWorkbenchApi) {
-  const item = createBrowserWorkbenchItem({
-    scopeId: 'session-a',
-    url: 'https://example.test/start',
-  })!
-  const renderState: Record<string, unknown> = {}
-  const reportError = vi.fn()
-  const context: WorkbenchRuntimeContext = {
-    nativeWorkbenchApi: api,
-    getRenderState: () => renderState,
-    updateRenderState: patch => Object.assign(renderState, patch),
-    isItemOpen: () => true,
-    setExpanded: vi.fn(),
-    reportError,
-  }
-  const definition = createBrowserWorkbenchDefinition({
-    confirmPermission: vi.fn(async () => false),
-    openExternal: vi.fn(),
-    platform: {} as Platform,
-    t: key => key,
+  it('面板项走 DOM 宿主，不再要求原生表面能力', () => {
+    const item = createBrowserWorkbenchItem({ scopeId: 'session-a', url: 'https://example.test/start' })
+    expect(item).toBeTruthy()
+    expect(item!.hostKind).toBe('dom')
+    expect(item!.kind).toBe('browser')
   })
-  const runtime = await definition.createRuntime!(item, context)
-  return {
-    api,
-    definition,
-    item,
-    renderState,
-    reportError,
-    runtime,
-  }
-}
 
-const visibleRect: NativeSurfaceRect = {
-  itemId: 'ignored-by-provider',
-  x: 320,
-  y: 40,
-  width: 640,
-  height: 520,
-  visible: true,
-}
+  it('拒绝非 http(s) 与带控制字符的地址（fail-closed）', () => {
+    expect(createBrowserWorkbenchItem({ scopeId: 's', url: 'javascript:alert(1)' })).toBeNull()
+    expect(createBrowserWorkbenchItem({ scopeId: 's', url: 'file:///C:/Windows/win.ini' })).toBeNull()
+    expect(createBrowserWorkbenchItem({ scopeId: 's', url: 'https://a.test/\u0000' })).toBeNull()
+    expect(createBrowserWorkbenchItem({ scopeId: '  ', url: 'https://a.test' })).toBeNull()
+  })
 
-describe('browser Workbench provider', () => {
-  it('shows an upgrade error instead of leaving an old Desktop shell loading', async () => {
-    const api = nativeApi({
-      getCapabilities: vi.fn(async (): Promise<NativeWorkbenchCapabilities> => ({
-        protocolVersions: [1],
-        modes: ['offline'],
-        maxSurfaces: 8,
-      })),
-    })
-    const harness = await createHarness(api)
+  it('只接 browser 项且必须有可用 URL', () => {
+    const item = createBrowserWorkbenchItem({ scopeId: 'session-a', url: 'https://example.test/x' })!
+    expect(definition.supports?.(item)).toBe(true)
+    expect(definition.supports?.({ ...item, kind: 'file' })).toBe(false)
+    expect(definition.supports?.({ ...item, payload: { initialUrl: '', scopeId: 'session-a' } })).toBe(false)
+  })
 
-    expect(harness.renderState).toMatchObject({
-      errorMessage: 'Update Marguerite Desktop to use the side browser.',
-      loading: false,
-    })
-    expect(api.createSurface).not.toHaveBeenCalled()
-    expect(api.destroySurface).toHaveBeenCalledWith(harness.item.id)
-    expect(harness.definition.getProps?.(harness.item, {
+  it('把会话作用域与初始 URL 透传给面板，并只在激活时让面板刷新', () => {
+    const item = createBrowserWorkbenchItem({ scopeId: 'session-a', url: 'https://example.test/x' })!
+    expect(definition.getProps?.(item, {
       active: true,
       hostAvailable: true,
-      nativeSurface: true,
-      runtimeState: harness.renderState,
-    })).toMatchObject({
-      errorMessage: 'Update Marguerite Desktop to use the side browser.',
-      loading: false,
+      nativeSurface: false,
+      runtimeState: {},
+    })).toEqual({
+      scopeId: 'session-a',
+      initialUrl: 'https://example.test/x',
+      active: true,
     })
+    expect(definition.getProps?.(item, {
+      active: false,
+      hostAvailable: true,
+      nativeSurface: false,
+      runtimeState: {},
+    })).toMatchObject({ active: false })
   })
 
-  it('turns a rejected create into a visible recoverable error', async () => {
-    const api = nativeApi({
-      createSurface: vi.fn(async () => ({
-        ok: false,
-        message: 'native create failed',
-      })),
+  it('标题回退到主机名（没有页标题时不能显示一整条 URL）', () => {
+    const item = createBrowserWorkbenchItem({ scopeId: 'session-a', url: 'https://example.test/a/b?c=d' })!
+    const header = definition.getHeader!(item, {
+      active: true,
+      hostAvailable: true,
+      nativeSurface: false,
+      runtimeState: {},
     })
-    const harness = await createHarness(api)
-
-    expect(harness.renderState).toMatchObject({
-      errorMessage: 'native create failed',
-      loading: false,
-    })
-    expect(harness.reportError).toHaveBeenCalledOnce()
-    expect(api.destroySurface).toHaveBeenCalledWith(harness.item.id)
-  })
-
-  it.each(['navigate', 'rect', 'activate'] as const)(
-    'hides and destroys the native surface after a %s failure',
-    async failingOperation => {
-      const setSurfaceRect = vi.fn(async (request) => {
-        if (failingOperation === 'rect' && request.visible) {
-          return { ok: false, message: 'rect failed' }
-        }
-        return { ok: true }
-      })
-      const activateSurface = vi.fn(async () => (
-        failingOperation === 'activate'
-          ? { ok: false, message: 'activate failed' }
-          : { ok: true }
-      ))
-      const navigateSurface = vi.fn(async () => {
-        if (failingOperation === 'navigate') throw new Error('navigate failed')
-        return { ok: true }
-      })
-      const api = nativeApi({
-        setSurfaceRect,
-        activateSurface,
-        navigateSurface,
-      })
-      const harness = await createHarness(api)
-
-      if (failingOperation === 'navigate') {
-        await harness.runtime.handleSurfaceRect?.(visibleRect, harness.item)
-        await harness.runtime.handleComponentEvent?.({
-          type: 'browser-action',
-          payload: { action: 'navigate', url: 'https://example.test/next' },
-        }, harness.item)
-      } else {
-        await harness.runtime.handleSurfaceRect?.(visibleRect, harness.item)
-      }
-
-      expect(harness.renderState).toMatchObject({
-        errorMessage: `${failingOperation} failed`,
-        loading: false,
-      })
-      expect(setSurfaceRect).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          surfaceId: harness.item.id,
-          visible: false,
-        }),
-      )
-      expect(api.destroySurface).toHaveBeenCalledWith(harness.item.id)
-    },
-  )
-
-  it.each(['crashed', 'unresponsive'] as const)(
-    'fails closed and exposes a visible error after a native %s event',
-    async eventType => {
-      const api = nativeApi()
-      const harness = await createHarness(api)
-      await harness.runtime.handleSurfaceRect?.(visibleRect, harness.item)
-
-      await harness.runtime.handleNativeSurfaceEvent?.({
-        version: 2,
-        surfaceId: harness.item.id,
-        type: eventType,
-        detail: { reason: `${eventType}-reason` },
-      }, harness.item)
-
-      expect(harness.renderState).toMatchObject({
-        errorMessage: `${eventType}-reason`,
-        loading: false,
-      })
-      expect(api.setSurfaceRect).toHaveBeenLastCalledWith(
-        expect.objectContaining({ visible: false }),
-      )
-      expect(api.destroySurface).toHaveBeenCalledWith(harness.item.id)
-    },
-  )
-
-  it('reloads an errored browser with a fresh native surface', async () => {
-    const createSurface = vi.fn()
-      .mockResolvedValueOnce({ ok: false, message: 'first create failed' })
-      .mockResolvedValue({ ok: true })
-    const api = nativeApi({ createSurface })
-    const harness = await createHarness(api)
-    await harness.runtime.handleSurfaceRect?.(visibleRect, harness.item)
-
-    await harness.runtime.handleComponentEvent?.({
-      type: 'browser-action',
-      payload: { action: 'reload' },
-    }, harness.item)
-
-    expect(createSurface).toHaveBeenCalledTimes(2)
-    expect(api.destroySurface).toHaveBeenCalled()
-    expect(api.setSurfaceRect).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        surfaceId: harness.item.id,
-        visible: true,
-      }),
-    )
-    expect(api.activateSurface).toHaveBeenCalledWith(harness.item.id)
-    expect(harness.renderState).toMatchObject({
-      errorMessage: '',
-      loading: true,
-    })
+    expect(header.title).toBe('example.test')
+    expect(header.subtitle).toBe('https://example.test/a/b?c=d')
+    expect(header.icon).toBe('languages')
   })
 })

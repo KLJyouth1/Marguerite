@@ -25,6 +25,8 @@ pub enum PetSkinId {
     Purple,
     /// 四叶草精灵 3D · 少女花嫁
     Green,
+    /// 玛格丽特公主 · 星夜（银紫长发 / 象牙裙 / 海蓝宝石 / 雏菊花冠）
+    Princess,
 }
 
 impl PetSkinId {
@@ -35,6 +37,7 @@ impl PetSkinId {
             Self::Pink => "pink",
             Self::Purple => "purple",
             Self::Green => "green",
+            Self::Princess => "princess",
         }
     }
 
@@ -45,6 +48,7 @@ impl PetSkinId {
             Self::Pink => "樱花精灵 3D · 少女花嫁",
             Self::Purple => "薰衣草精灵 3D · 少女花嫁",
             Self::Green => "四叶草精灵 3D · 少女花嫁",
+            Self::Princess => "玛格丽特公主 · 星夜",
         }
     }
 
@@ -63,6 +67,8 @@ impl PetSkinId {
             Self::Pink => 0xf4a8c0,
             Self::Purple => 0xb8a0d8,
             Self::Green => 0x8ec9a0,
+            // 海蓝宝石（星夜主题的点缀色）：与 `--accent-secondary` 同源
+            Self::Princess => 0x7fe3d4,
         }
     }
 
@@ -72,6 +78,7 @@ impl PetSkinId {
             "pink" => Self::Pink,
             "purple" => Self::Purple,
             "green" => Self::Green,
+            "princess" => Self::Princess,
             _ => Self::Cat,
         }
     }
@@ -217,7 +224,7 @@ pub struct TriggerActionReq {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 进程内共享状态（内存 · 跨 WS 客户端共享；持久化仍由 workbench/pet 负责）
+// 进程内共享状态（内存缓存 · 跨 WS 客户端共享；皮肤/心情落盘见 PetPrefs）
 // ──────────────────────────────────────────────────────────────────────
 
 struct PetShared {
@@ -225,9 +232,62 @@ struct PetShared {
     mood: PetMood,
 }
 
+/// 皮肤 + 心情的落盘偏好（`data_dir/pet_prefs.json`）。
+///
+/// # 为什么必须落盘（真机缺陷，2026-10-23）
+///
+/// 旧实现把 skin / mood 只放在进程内 `OnceLock`：**页面刷新**看不出来（网关进程没死），
+/// 但**彻底退出重开**后皮肤从 pink 退回 cat、心情退回 normal，违反「数据状态重启后保持一致」。
+/// 能量/好感度早已落在 `pet_state.json`，这里补齐 UI 侧偏好的持久化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PetPrefs {
+    skin: String,
+    mood: String,
+}
+
+impl Default for PetPrefs {
+    fn default() -> Self {
+        Self {
+            skin: "cat".into(),
+            mood: "normal".into(),
+        }
+    }
+}
+
+fn prefs_path() -> std::path::PathBuf {
+    // 单测隔离：绝不写真实用户数据目录。
+    #[cfg(test)]
+    let path = match crate::persistence::config::Config::current_config_dir_override() {
+        Some(dir) => dir.join("pet_prefs.json"),
+        None => std::env::temp_dir().join("marguerite_test_pet_prefs.json"),
+    };
+    #[cfg(not(test))]
+    let path = crate::persistence::config::Config::data_dir().join("pet_prefs.json");
+    path
+}
+
+fn load_prefs() -> PetPrefs {
+    match std::fs::read_to_string(prefs_path()) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => PetPrefs::default(),
+    }
+}
+
+fn save_prefs(p: &PetPrefs) {
+    if let Ok(json) = serde_json::to_string(p) {
+        let _ = crate::persistence::write_json_atomic(&prefs_path(), &json);
+    }
+}
+
 fn shared() -> &'static Arc<Mutex<PetShared>> {
     static CELL: OnceLock<Arc<Mutex<PetShared>>> = OnceLock::new();
-    CELL.get_or_init(|| Arc::new(Mutex::new(PetShared { skin: PetSkinId::Cat, mood: PetMood::Normal })))
+    CELL.get_or_init(|| {
+        let prefs = load_prefs();
+        Arc::new(Mutex::new(PetShared {
+            skin: PetSkinId::parse(&prefs.skin),
+            mood: PetMood::parse(&prefs.mood),
+        }))
+    })
 }
 
 pub fn get_skin() -> PetSkinId {
@@ -235,9 +295,15 @@ pub fn get_skin() -> PetSkinId {
 }
 
 pub fn set_skin(id: PetSkinId) {
-    if let Ok(mut s) = shared().lock() {
+    let snapshot = {
+        let Ok(mut s) = shared().lock() else { return };
         s.skin = id;
-    }
+        (s.skin, s.mood)
+    };
+    save_prefs(&PetPrefs {
+        skin: snapshot.0.as_str().to_string(),
+        mood: snapshot.1.as_str().to_string(),
+    });
 }
 
 pub fn get_mood() -> PetMood {
@@ -245,18 +311,25 @@ pub fn get_mood() -> PetMood {
 }
 
 pub fn set_mood(m: PetMood) {
-    if let Ok(mut s) = shared().lock() {
+    let snapshot = {
+        let Ok(mut s) = shared().lock() else { return };
         s.mood = m;
-    }
+        (s.skin, s.mood)
+    };
+    save_prefs(&PetPrefs {
+        skin: snapshot.0.as_str().to_string(),
+        mood: snapshot.1.as_str().to_string(),
+    });
 }
 
-/// 5 款皮肤（单一来源 · 与前端 PET_SKINS/ELF_SPECS 对齐）。
+/// 6 款皮肤（单一来源 · 与前端 PET_SKINS/ELF_SPECS 对齐）。
 pub const SKIN_CATALOG: &[PetSkinId] = &[
     PetSkinId::Cat,
     PetSkinId::Blue,
     PetSkinId::Pink,
     PetSkinId::Purple,
     PetSkinId::Green,
+    PetSkinId::Princess,
 ];
 
 #[cfg(test)]
@@ -264,14 +337,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skin_catalog_size_equals_five() {
-        assert_eq!(SKIN_CATALOG.len(), 5, "皮肤目录必须是猫 + 4 精灵");
+    fn skin_catalog_size_equals_six() {
+        assert_eq!(SKIN_CATALOG.len(), 6, "皮肤目录必须是猫 + 5 精灵（含玛格丽特公主）");
     }
 
     #[test]
     fn kind_is_consistent_with_skin_id() {
         assert_eq!(PetSkinId::Cat.kind(), PetKind::Beast);
-        for s in [PetSkinId::Blue, PetSkinId::Pink, PetSkinId::Purple, PetSkinId::Green] {
+        for s in [PetSkinId::Blue, PetSkinId::Pink, PetSkinId::Purple, PetSkinId::Green, PetSkinId::Princess] {
             assert_eq!(s.kind(), PetKind::Humanoid, "精灵 {:?} 必须为人型", s);
         }
     }
@@ -321,5 +394,25 @@ mod tests {
         for (k, _) in ["pet", "feed", "celebrate", "wake", "doze"].iter().zip(0..) {
             assert!(PetAction::parse(k).is_some());
         }
+    }
+
+    /// 回归锚点：皮肤/心情必须落盘，否则「彻底退出重开」后回退默认值。
+    /// 只验证文件读写，不触碰全局 CELL，避免与并行单测互相干扰。
+    #[test]
+    fn prefs_file_roundtrip_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("pet_prefs_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+
+        save_prefs(&PetPrefs {
+            skin: "green".into(),
+            mood: "excited".into(),
+        });
+        // 模拟重启后的初始化路径：从磁盘读回并解析
+        let got = load_prefs();
+        assert_eq!(PetSkinId::parse(&got.skin), PetSkinId::Green);
+        assert_eq!(PetMood::parse(&got.mood), PetMood::Excited);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -61,6 +61,8 @@ pub struct UsageAccumulated {
     pub total_tokens: u64,
     #[serde(default)]
     pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
     pub at_ms: u64,
     /// 写入 ledger 是否成功（失败时事件仍发布，用于告警）。
     pub persisted: bool,
@@ -351,6 +353,7 @@ impl UsageQueryService {
             completion_tokens: usage.completion_tokens as u64,
             total_tokens: usage.total_tokens as u64,
             cache_read_tokens: usage.cache_read_input_tokens as u64,
+            cache_creation_tokens: usage.cache_creation_input_tokens as u64,
             at_ms: now_ms,
             persisted,
         }
@@ -364,6 +367,8 @@ impl UsageQueryService {
             acc.prompt_tokens as u32,
             acc.completion_tokens as u32,
             acc.total_tokens as u32,
+            acc.cache_read_tokens as u32,
+            acc.cache_creation_tokens as u32,
         )
     }
 }

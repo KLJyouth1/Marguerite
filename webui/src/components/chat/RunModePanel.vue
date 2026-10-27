@@ -53,9 +53,11 @@
           role="note"
         >{{ runModeLockMessage }}</p>
         <ChatComposerRunMode
+          inline
           :run-mode="runMode"
           :allowed-run-modes="allowedRunModes"
           :safe-setup-available="safeSetupAvailable"
+          :safe-setup-state="safeSetupState"
           :run-mode-locked="runModeLocked"
           :run-mode-lock-message="runModeLockMessage"
           @close="close"
@@ -103,6 +105,7 @@
       <div class="run-mode-panel__section">
         <div class="run-mode-panel__section-title">{{ t('chat.composer.modelRouting') }}</div>
         <ChatComposerModelRouting
+          inline
           :model-routing-mode="modelRoutingMode"
           :busy="modelRoutingSettingsBusy"
           @close="close"
@@ -120,7 +123,7 @@ import Icon from '@/components/Icon.vue'
 import ChatComposerRunMode from '@/components/chat/ChatComposerRunMode.vue'
 import ChatComposerModelRouting from '@/components/chat/ChatComposerModelRouting.vue'
 import ChatComposerPlanMode from '@/components/chat/ChatComposerPlanMode.vue'
-import type { SandboxRunMode } from '@/types/sandbox'
+import type { SandboxRunMode, SandboxSetupState } from '@/types/sandbox'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 import type { CollaborationMode } from '@/types/plans'
 
@@ -132,6 +135,8 @@ const props = defineProps<{
   runMode: SandboxRunMode
   allowedRunModes: SandboxRunMode[]
   safeSetupAvailable?: boolean
+  /** 沙箱 setup 真实状态：未 ready 时 chip 显示「安全·待安装」。 */
+  safeSetupState?: SandboxSetupState | null
   runModeLocked: boolean
   runModeLockMessage: string
   collaborationMode?: CollaborationMode
@@ -155,9 +160,15 @@ const effectiveCollaborationMode = computed<CollaborationMode>(
   () => props.collaborationMode || 'default',
 )
 
-const sandboxShort = computed(() =>
-  t(`chat.composer.modeShort.${props.runMode === 'safe' ? 'safe' : 'full'}`),
+const safeSetupPending = computed(
+  () => props.safeSetupState != null && props.safeSetupState !== 'ready',
 )
+const sandboxShort = computed(() => {
+  if (props.runMode === 'safe' && safeSetupPending.value) {
+    return t('settings.sandbox.safeMode.pendingShort')
+  }
+  return t(`chat.composer.modeShort.${props.runMode === 'safe' ? 'safe' : 'full'}`)
+})
 const collaborationShort = computed(() =>
   t(`chat.composer.modeShort.${effectiveCollaborationMode.value === 'plan' ? 'plan' : 'default'}`),
 )
@@ -353,7 +364,7 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
-  width: min(360px, calc(100vw - 48px));
+  width: min(400px, calc(100vw - 48px));
   padding: 0.75rem;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -361,7 +372,14 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow-xl);
   z-index: 30;
   display: grid;
-  gap: 0.875rem;
+  gap: 0.75rem;
+  /* 三段内容（执行模式 2 项 + PLAN 2 项 + 模型路由 5 项）实测约 667px：
+     560 的上限会切掉最后一段。上限放到 680，并给视口留 12rem，窄屏时仍可滚动。 */
+  max-height: min(680px, calc(100dvh - 12rem));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 .run-mode-panel__head {

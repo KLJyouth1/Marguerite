@@ -35,6 +35,230 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
+/// 模型的多模态能力声明。
+///
+/// # 为什么需要它（2026-10-23）
+///
+/// 此前系统只区分「能不能聊天」。生图 / 生视频 / 生语音 / 音频理解全靠各工具
+/// 自己猜端点，`models.json` 里没有任何位置让用户说明「我这个自定义端点支持出图」。
+/// 结果：接入一个支持出图的模型后，主智能体既不知道可以调生图工具，工具也不知道
+/// 该打哪个端点——能力存在但永远用不上。
+///
+/// # 判定优先级（高 → 低）
+///
+/// 1. `declared == true`：用户勾选/填写的内容**逐字采信**（没勾就是明确不支持，
+///    不再用名字去猜）。这一点很关键：用户手动取消勾选「图像输出」时，
+///    自动识别不得把它"猜回来"。
+/// 2. 未声明：按 `provider` + `model` 名做**保守**识别（[`recognize`]）。
+/// 3. 都判不出：全 false。宁可判"不支持"，也不假装会——假能力比没能力更糟。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelCapabilities {
+    /// 文本对话
+    #[serde(default)]
+    pub text: bool,
+    /// 图像理解（把图片作为输入）
+    #[serde(default)]
+    pub image_input: bool,
+    /// 图像生成（文本→图片 / 图片→图片）
+    #[serde(default)]
+    pub image_output: bool,
+    /// 视频生成
+    #[serde(default)]
+    pub video_output: bool,
+    /// 音频理解（ASR：音频→文本）
+    #[serde(default)]
+    pub audio_input: bool,
+    /// 语音合成（TTS：文本→音频）
+    #[serde(default)]
+    pub audio_output: bool,
+    /// 用户是否**显式声明**过本结构（true 时不做任何自动识别）
+    #[serde(default)]
+    pub declared: bool,
+    /// 图像端点覆盖（缺省 = 供应商默认路径，如 `/v1/images/generations`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_endpoint: Option<String>,
+    /// 视频端点覆盖
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_endpoint: Option<String>,
+    /// 音频端点覆盖（ASR/TTS 共用，缺省按 action 选默认路径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_endpoint: Option<String>,
+    /// 生图的额外输入/输出参数（如 `{"size":"1024x1024","n":1}`）。
+    ///
+    /// 存原始 JSON 而不是强类型字段：不同服务商的图像接口参数差异极大
+    /// （OpenAI 的 `quality` / Stability 的 `aspect_ratio` / 火山 `seed`），
+    /// 固定 schema 一定会漏。留空 = 用工具内置的保守默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_params: Option<serde_json::Value>,
+    /// 视频生成参数（`{"duration":5,"aspect_ratio":"16:9"}` 等）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_params: Option<serde_json::Value>,
+    /// 音频参数（`{"voice":"alloy","format":"mp3"}` / `{"language":"zh"}`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_params: Option<serde_json::Value>,
+}
+
+impl ModelCapabilities {
+    /// 纯文本对话档案的便捷构造（测试与内置种子用）。
+    pub fn text_only() -> Self {
+        Self { text: true, ..Default::default() }
+    }
+
+    /// 用户已声明的能力集合（用于 UI 回填与工具侧判定）。
+    ///
+    /// 声明态下 `text` 恒为 true：本系统所有档案都以对话为入口，允许用户
+    /// 把「文本」也取消勾选只会造出一个连消息都发不出去的档案。
+    pub fn sanitized(&self) -> Self {
+        let mut c = self.clone();
+        if c.declared {
+            c.text = true;
+        }
+        c
+    }
+
+    /// 从 RPC 参数里的 `capabilities` 对象解析。
+    ///
+    /// 约定：
+    /// - 键名同时接受 camelCase 与 snake_case（前端习惯 camelCase，配置文件习惯 snake_case）。
+    /// - 只要出现本对象就视为「用户声明」（`declared = true`），除非显式 `declared: false`。
+    ///   这是关键语义：声明态下不再按模型名猜，用户取消勾选才不会被"猜回来"。
+    /// - 空字符串 / null 的端点 → `None`（走供应商默认路径），不存空串。
+    /// - 非法类型直接忽略该键，不整单失败（表单可能只提交了部分字段）。
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let mut c = ModelCapabilities { declared: true, ..Default::default() };
+        let Some(obj) = v.as_object() else {
+            return c;
+        };
+        // 取布尔：同名两种拼写都认。
+        let flag = |camel: &str, snake: &str| -> Option<bool> {
+            obj.get(camel).or_else(|| obj.get(snake)).and_then(serde_json::Value::as_bool)
+        };
+        if let Some(b) = flag("text", "text") {
+            c.text = b;
+        }
+        if let Some(b) = flag("imageInput", "image_input") {
+            c.image_input = b;
+        }
+        if let Some(b) = flag("imageOutput", "image_output") {
+            c.image_output = b;
+        }
+        if let Some(b) = flag("videoOutput", "video_output") {
+            c.video_output = b;
+        }
+        if let Some(b) = flag("audioInput", "audio_input") {
+            c.audio_input = b;
+        }
+        if let Some(b) = flag("audioOutput", "audio_output") {
+            c.audio_output = b;
+        }
+        // 显式 declared=false 允许调用方只要端点、不要声明语义。
+        if let Some(b) = obj.get("declared").and_then(serde_json::Value::as_bool) {
+            c.declared = b;
+        }
+        let endpoint = |camel: &str, snake: &str| -> Option<String> {
+            obj.get(camel)
+                .or_else(|| obj.get(snake))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        c.image_endpoint = endpoint("imageEndpoint", "image_endpoint");
+        c.video_endpoint = endpoint("videoEndpoint", "video_endpoint");
+        c.audio_endpoint = endpoint("audioEndpoint", "audio_endpoint");
+        let params = |camel: &str, snake: &str| -> Option<serde_json::Value> {
+            match obj.get(camel).or_else(|| obj.get(snake)) {
+                // 空对象等同未填：留空 = 用工具内置保守默认值。
+                Some(serde_json::Value::Object(m)) if !m.is_empty() => {
+                    Some(serde_json::Value::Object(m.clone()))
+                }
+                _ => None,
+            }
+        };
+        c.image_params = params("imageParams", "image_params");
+        c.video_params = params("videoParams", "video_params");
+        c.audio_params = params("audioParams", "audio_params");
+        c.sanitized()
+    }
+}
+
+impl ModelProfile {
+    /// 该档案**实际生效**的多模态能力。
+    ///
+    /// 声明优先、否则自动识别；两者都不成立时只保留文本（对话是唯一保底）。
+    pub fn effective_capabilities(&self) -> ModelCapabilities {
+        if self.capabilities.declared {
+            return self.capabilities.sanitized();
+        }
+        ModelCapabilities { declared: false, ..recognize(&self.provider, &self.model) }
+    }
+}
+
+/// 按 供应商 + 模型名 做**保守**能力识别。
+///
+/// 设计原则：只认「名字里明确带模态特征」的型号，不靠猜测。
+/// 判错的代价是工具被调用后拿到 404/400；判漏的代价是用户手动勾一下。
+/// 因此这里宁可漏判（少给能力），也不误判（多给能力）。
+pub fn recognize(provider: &str, model: &str) -> ModelCapabilities {
+    let p = provider.to_ascii_lowercase();
+    let m = model.to_ascii_lowercase();
+    let has = |needle: &str| m.contains(needle);
+
+    let mut c = ModelCapabilities { text: true, ..Default::default() };
+
+    // ── 图像理解（多模态输入）──
+    // 明确支持视觉输入的家族：gpt-4o/4.1/5 系列、claude 3+、gemini、qwen-vl、
+    // llava、minicpm-v、internvl。
+    //
+    // `vision` 是**实测补入**的（2026-10-23）：用户档案里有一个
+    // `deepseek-v4-flash-vision-exp`，名字直接带 vision，却被判成纯文本 ——
+    // 这类「厂商用 vision 当后缀」的命名很常见，漏判会让工具误拒。
+    // 仍保持保守：只认单词级特征，不猜 "pro"/"max" 这类与模态无关的后缀。
+    if has("gpt-4o") || has("gpt-4.1") || has("gpt-5")
+        || has("claude-3") || has("claude-sonnet") || has("claude-opus")
+        || has("gemini") || has("vision") || has("-vl") || has("_vl") || has("llava")
+        || has("minicpm-v") || has("internvl")
+    {
+        c.image_input = true;
+    }
+
+    // ── 图像生成 ──
+    // 只认专用出图型号：gpt-image-1 / dall-e / imagen / flux / sd3 / stable-diffusion。
+    if has("gpt-image") || has("dall-e") || has("imagen") || has("flux")
+        || has("stable-diffusion") || has("sd3")
+    {
+        c.image_output = true;
+        // 出图模型通常不能对话，但保留 text 作为"可被路由"的标记；
+        // 真正的对话能力由 profile 的其它字段决定，这里不改写。
+    }
+
+    // ── 视频生成 ──
+    if has("sora") || has("veo") || has("kling") || has("seedance") || has("runway") {
+        c.video_output = true;
+    }
+
+    // ── 音频 ──
+    if has("whisper") || has("transcribe") || has("sensevoice") || has("paraformer") {
+        c.audio_input = true;
+    }
+    if has("tts") || has("speech") || has("cosyvoice") || has("sambert") {
+        c.audio_output = true;
+    }
+
+    // DeepSeek 的常规型号只有文本；但**名字里明确写了 vision 的实验型号**要保留
+    // 读图能力（实测档案 `deepseek-v4-flash-vision-exp` 就属于这类）。
+    // 此前这里是「provider=deepseek 一律清空」，会把用户真实接入的视觉型号判成纯文本。
+    if p == "deepseek" {
+        return ModelCapabilities {
+            text: true,
+            image_input: c.image_input,
+            ..Default::default()
+        };
+    }
+
+    c
+}
+
 /// 模型档案（一个命名的接入点）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfile {
@@ -49,6 +273,13 @@ pub struct ModelProfile {
     /// API 密钥（BYOK；本地可空；serde 序列化跳过 —— 密钥绝不落 models.json）
     #[serde(default, skip_serializing)]
     pub api_key: String,
+    /// 用户指定的密钥环境变量名（如 `OPENAI_API_KEY`）。
+    ///
+    /// 只存**变量名**、不存密钥本身，可安全序列化。设置页「使用环境变量」选项写这里；
+    /// 运行期由 [`crate::model::byok::resolve_api_key`] 按该名字从进程环境变量 / `.env`
+    /// 读取。旧 `models.json` 无此字段时 serde default 为空串，零漂移加载。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_env: String,
     /// 实际模型名
     pub model: String,
     /// 类别
@@ -80,6 +311,16 @@ pub struct ModelProfile {
     /// 若不分这两种情况，当前种子数据（只标 tier、未写 caps）会让旗舰档候选链变空。
     #[serde(default)]
     pub tier_caps_declared: bool,
+    /// 请求协议：`chat`（默认）或 `responses`。与 Codex 的 `wire_api` 同义。
+    ///
+    /// 档案级声明（而非全局）：同一个人可能既有只支持 chat 的本地端点，也有
+    /// 只支持 Responses 的云端服务商，两者共存于同一份 `models.json`。
+    /// `#[serde(default)]` → 旧档案缺字段即 `chat`，零迁移。
+    #[serde(default)]
+    pub wire_api: crate::model::wire::WireApi,
+    /// 多模态能力声明（2026-10-23）。缺省 = 未声明 = 走自动识别。
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
 }
 
 impl ModelProfile {
@@ -93,6 +334,14 @@ impl ModelProfile {
                 base_url: self.base_url.clone(),
             },
         };
+        // 上下文窗口必须来自档案自己的声明：此前后端硬编码 64K，
+        // 让 1M 窗口的旗舰模型在 ~109K 就被判定「该压缩」，
+        // 长任务的关键中间结论被摘要掉 → 越聊越差。
+        let context_window = if self.tier_caps_declared && self.tier_caps.context_window > 0 {
+            self.tier_caps.context_window
+        } else {
+            self.tier.caps().context_window
+        };
         LLMConfig {
             provider,
             model: self.model.clone(),
@@ -102,7 +351,10 @@ impl ModelProfile {
             temperature: self.temperature,
             timeout_secs: 60,
             thinking: crate::model::thinking::ThinkingEffort::Off,
-            context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+            context_window,
+            // 档案自己声明的协议：这是 models.json → LLMClient 的**唯一**传递点，
+            // 漏了它就会"配置写了 responses、请求仍打 chat/completions"。
+            wire_api: self.wire_api,
         }
     }
 }
@@ -269,11 +521,41 @@ impl ModelRegistry {
                     reg.active = reg.profiles.keys().next().cloned().unwrap_or_default();
                 }
             }
+            reg.normalize_local_costs();
             Ok(reg)
         } else {
             Ok(Self::with_seeds())
         }
     }
+
+    /// 本地/回环档案的单价归零（读侧归一化，**不改用户文件**）。
+    ///
+    /// # 为什么必须做（2026-10-23 实测）
+    ///
+    /// 未声明 `tier_caps` 的档案会从档位表中继承一份"准入线"作为展示单价：
+    /// 实测 `models.json` 里 11 个 Ollama 档案都是
+    /// `tier: balanced` + `cost_per_m_in: 3.5` + `cost_per_m_out: 16.0`
+    /// （`tier_caps_declared: false`）。但那 3.5/16 是**云端均衡档的价格上限**，
+    /// 不是本地推理的真实成本（本地为 0）。后果有三：
+    ///   ① 用量页把本地 Tokens 折算成真金白银；
+    ///   ② 按成本做准入/预算的路由会把本地模型误判为"贵"，反而选云端；
+    ///   ③ 用户看到"本地模型也在花钱"，与事实相反。
+    ///
+    /// 判定复用执行侧同一条 `byok::is_keyless_endpoint`（Ollama/LM Studio/回环），
+    /// 与「是否需要密钥」单源 —— 不需要密钥的端点，成本就该是 0。
+    /// 只在**未显式声明**时归一化：用户手填的价格永不被覆盖。
+    fn normalize_local_costs(&mut self) {
+        for p in self.profiles.values_mut() {
+            if p.tier_caps_declared {
+                continue;
+            }
+            if crate::model::byok::is_keyless_endpoint(&p.provider, &p.base_url) {
+                p.tier_caps.cost_per_m_in = 0.0;
+                p.tier_caps.cost_per_m_out = 0.0;
+            }
+        }
+    }
+
 
     /// 保存到文件（确保父目录存在）
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -363,6 +645,81 @@ impl ModelRegistry {
 mod tests {
     use super::*;
 
+    /// 名字识别：保守但覆盖真实厂商命名习惯。
+    ///
+    /// 每条断言都对应一个**实测存在**的档案名，防止把回归写成「想当然」。
+    #[test]
+    fn recognize_is_conservative_but_covers_real_names() {
+        // 视觉家族
+        for m in [
+            "claude-opus-4",
+            "claude-sonnet-4-6",
+            "gemini-2-5-pro",
+            "qwen-vl-max",
+            "gpt-4o",
+            "llava-13b",
+            "deepseek-v4-flash-vision-exp", // 实测档案：名字带 vision
+        ] {
+            assert!(recognize("openai", m).image_input, "{m} 应判为可读图");
+        }
+        // 出图 / 视频 / 音频
+        assert!(recognize("openai", "gpt-image-1").image_output);
+        assert!(recognize("openai", "dall-e-3").image_output);
+        assert!(!recognize("openai", "gpt-image-1").image_input, "出图不等于读图");
+        assert!(recognize("x", "sora-2").video_output);
+        assert!(recognize("x", "seedance-1.0").video_output);
+        assert!(recognize("x", "whisper-1").audio_input);
+        assert!(recognize("x", "cosyvoice-v2").audio_output);
+        // 不该误判的：纯文本型号
+        for m in ["deepseek-chat", "qwen-max", "llama3", "gpt-3.5-turbo"] {
+            let c = recognize("deepseek", m);
+            assert!(!c.image_input && !c.image_output && !c.audio_output, "{m} 不该被判多模态");
+        }
+    }
+
+    /// DeepSeek 的视觉实验型号不能被 provider 短路清空（实测缺陷）。
+    #[test]
+    fn deepseek_vision_variant_keeps_image_input() {
+        let c = recognize("deepseek", "deepseek-v4-flash-vision-exp");
+        assert!(c.image_input, "名字带 vision 的 deepseek 型号应保留读图");
+        assert!(!c.image_output && !c.video_output && !c.audio_input, "其余模态仍应清空");
+    }
+
+    /// 声明优先：用户勾掉后，自动识别不得把它「猜回来」。
+    #[test]
+    fn declared_capabilities_win_over_recognition() {
+        let mut p = custom_profile("x", "https://api.openai.com/v1");
+        p.model = "gpt-image-1".into();
+        assert!(p.effective_capabilities().image_output, "未声明时应识别出图");
+        p.capabilities = ModelCapabilities { declared: true, text: true, ..Default::default() };
+        let eff = p.effective_capabilities();
+        assert!(!eff.image_output, "用户声明后不得回填识别结果");
+        assert!(eff.text, "声明态下 text 恒为 true");
+    }
+
+    /// 端点与参数：空串/null 视为未填，空对象视为未填。
+    #[test]
+    fn capabilities_from_json_normalizes_empty_values() {
+        let c = ModelCapabilities::from_json(&serde_json::json!({
+            "imageOutput": true,
+            "imageEndpoint": "  ",
+            "audio_endpoint": "/custom/asr",
+            "imageParams": {},
+            "audioParams": {"voice": "nova"},
+            "declared": true
+        }));
+        assert!(c.declared);
+        assert!(c.text, "声明态恒有文本");
+        assert!(c.image_output);
+        assert_eq!(c.image_endpoint, None, "空白端点应归 None");
+        assert_eq!(c.audio_endpoint.as_deref(), Some("/custom/asr"));
+        assert!(c.image_params.is_none(), "空对象等同未填");
+        assert_eq!(
+            c.audio_params.as_ref().and_then(|v| v.get("voice")).and_then(|v| v.as_str()),
+            Some("nova")
+        );
+    }
+
     fn custom_profile(id: &str, base: &str) -> ModelProfile {
         ModelProfile {
             id: id.into(),
@@ -370,6 +727,7 @@ mod tests {
             provider: "custom".into(),
             base_url: base.into(),
             api_key: "k".into(),
+            api_key_env: String::new(),
             model: "m".into(),
             kind: ProfileKind::Local,
             builtin: false,
@@ -378,7 +736,43 @@ mod tests {
             tier: ModelTier::Balanced,
             tier_caps: TierCaps::default(),
             tier_caps_declared: false,
+            wire_api: crate::model::wire::WireApi::Chat,
+            capabilities: Default::default(),
         }
+    }
+
+    /// 本地/回环档案的展示单价必须为 0（回归：曾继承云端均衡档 3.5/16.0）。
+    #[test]
+    fn test_local_profiles_cost_zeroed_on_load() {
+        let dir = std::env::temp_dir().join(format!("mq-reg-cost-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        let mut reg = ModelRegistry::with_seeds();
+        let mut local = custom_profile("ollama-local", "http://localhost:11434");
+        local.provider = "ollama".into();
+        local.tier = ModelTier::Balanced;
+        local.tier_caps = ModelTier::Balanced.caps();
+        local.tier_caps_declared = false;
+        local.tier_caps.cost_per_m_in = 3.5;
+        local.tier_caps.cost_per_m_out = 16.0;
+        reg.add(local).unwrap();
+        // 显式声明价格的云档案不得被改写
+        let mut cloud = custom_profile("cloud-declared", "https://api.example.com");
+        cloud.provider = "openai".into();
+        cloud.tier_caps.cost_per_m_in = 2.0;
+        cloud.tier_caps.cost_per_m_out = 8.0;
+        cloud.tier_caps_declared = true;
+        reg.add(cloud).unwrap();
+        reg.save(&path).unwrap();
+
+        let loaded = ModelRegistry::load(&path).unwrap();
+        let local = loaded.profiles.get("ollama-local").unwrap();
+        assert_eq!(local.tier_caps.cost_per_m_in, 0.0);
+        assert_eq!(local.tier_caps.cost_per_m_out, 0.0);
+        let cloud = loaded.profiles.get("cloud-declared").unwrap();
+        assert_eq!(cloud.tier_caps.cost_per_m_in, 2.0);
+        assert_eq!(cloud.tier_caps.cost_per_m_out, 8.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -564,6 +958,8 @@ mod tests {
         let ds = reg.get("deepseek-v4-pro").unwrap();
         let cfg = ds.to_llm_config();
         assert!(matches!(cfg.provider, LLMProvider::DeepSeek));
+        // 档案声明的 1M 窗口必须传到 LLMConfig（此前硬编码 64K）
+        assert_eq!(cfg.context_window, 1_000_000);
         let oc = reg.get("openai-compatible").unwrap();
         let cfg2 = oc.to_llm_config();
         assert!(matches!(cfg2.provider, LLMProvider::Custom { .. }));
@@ -607,6 +1003,7 @@ mod tests {
                 provider: "custom".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: String::new(),
+                api_key_env: String::new(),
                 model: "llama3".into(),
                 kind: ProfileKind::Local,
                 builtin: false,
@@ -615,6 +1012,8 @@ mod tests {
                 tier: ModelTier::Balanced,
                 tier_caps: TierCaps::default(),
                 tier_caps_declared: false,
+                wire_api: crate::model::wire::WireApi::Chat,
+                capabilities: Default::default(),
             },
         );
         reg.active = "my-custom".into();
@@ -744,6 +1143,7 @@ mod tests {
                 provider: "custom".into(),
                 base_url: "https://example.invalid".into(),
                 api_key: String::new(),
+                api_key_env: String::new(),
                 model: id.into(),
                 kind: ProfileKind::Custom,
                 builtin: false,
@@ -752,6 +1152,8 @@ mod tests {
                 tier,
                 tier_caps: caps,
                 tier_caps_declared: declared,
+                wire_api: crate::model::wire::WireApi::Chat,
+                capabilities: Default::default(),
             }
         }
         let mut reg = ModelRegistry::default();

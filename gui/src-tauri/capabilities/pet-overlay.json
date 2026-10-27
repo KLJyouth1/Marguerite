@@ -1,0 +1,19 @@
+{
+  "identifier": "com.marguerite.workbench.pet-overlay",
+  "description": "桌宠悬浮窗：拖动自身与隐藏；显隐由主窗口的 pet_overlay_show/toggle 驱动",
+  "windows": [
+    "pet-overlay"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "allow-pet-overlay-move",
+    "allow-pet-overlay-hide"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:18790/*",
+      "http://127.0.0.1:18790/*"
+    ]
+  }
+}

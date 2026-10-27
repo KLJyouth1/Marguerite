@@ -115,7 +115,8 @@ pub async fn collab_ssh_probe(params: &Value) -> Value {
     }
 }
 
-/// collab.ssh.exec：在已登记主机上真实执行命令（BatchMode 非交互，60s 超时）。
+/// collab.ssh.exec：在已登记主机上真实执行命令（BatchMode 非交互；
+/// 超时默认取自适应预算 Standard 档，调用方可传 `timeoutSec` 覆盖）。
 pub async fn collab_ssh_exec(params: &Value) -> Value {
     let name = param_str(params, "name", "name", "");
     let command = param_str(params, "command", "command", "");
@@ -125,6 +126,38 @@ pub async fn collab_ssh_exec(params: &Value) -> Value {
     let Some(entry) = collab_ssh_load().into_iter().find(|e| e.name == name) else {
         return json!({ "ok": false, "error": "主机不存在" });
     };
+    exec_ssh_entry(&entry, command, params).await
+}
+
+/// 执行单个台账条目（审批 → spawn ssh）。抽成独立函数便于单测验证
+/// 「审批未通过时绝不 spawn」——测试不必写真实用户数据目录的台账文件。
+async fn exec_ssh_entry(entry: &CollabSshEntry, command: &str, params: &Value) -> Value {
+    // W3.1：远程命令一律先过审批 —— 与工具回路共用同一条链路
+    // （ApprovalGate → 全局注册表 → 控制台审批卡 → 裁决）。无宿主 / 拒绝 /
+    // 超时都 fail-closed：**审批通过之前绝不 spawn ssh**。
+    let mut approval_args = std::collections::HashMap::new();
+    approval_args.insert("host".to_string(), entry.host.clone());
+    approval_args.insert("user".to_string(), entry.user.clone());
+    approval_args.insert("command".to_string(), command.to_string());
+    if let Some(blocked) = crate::agent::tool_cycle::suspend_for_remote_command(
+        crate::guard::gateway::agent_gate(),
+        crate::guard::gateway::agent_approval_host_present(),
+        "collab.ssh.exec",
+        &approval_args,
+    )
+    .await
+    {
+        return match blocked {
+            crate::agent::tool_cycle::ToolResult::Error { message, code } => {
+                json!({ "ok": false, "code": code, "error": message })
+            }
+            _ => json!({
+                "ok": false,
+                "code": "APPROVAL_BLOCKED",
+                "error": "审批未通过，未执行远程命令",
+            }),
+        };
+    }
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.silent()
         .arg("-o")
@@ -139,8 +172,26 @@ pub async fn collab_ssh_exec(params: &Value) -> Value {
         cmd.arg("-i").arg(k);
     }
     let fut = cmd.output();
-    match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
-        Err(_) => json!({ "ok": false, "error": "命令执行超时（60s）" }),
+    // 超时可由调用方声明（模型给出的 `timeoutSec` / `timeout_sec`），
+    // 未声明时按自适应预算的 Standard 档（300s）；仍钳制在 5s..1800s。
+    // 历史值固定 60s：远程编译/打包类命令必然超时。
+    let declared = ["timeoutSec", "timeout_sec", "timeout"]
+        .iter()
+        .find_map(|key| params.get(*key))
+        .and_then(|value| match value {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        });
+    let secs = declared
+        .unwrap_or_else(|| {
+            crate::agent::budget_policy::resolve("[[budget:standard]]", 1, 0)
+                .step_timeout
+                .as_secs()
+        })
+        .clamp(5, crate::agent::budget_policy::MAX_STEP_SECS);
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Err(_) => json!({ "ok": false, "error": format!("命令执行超时（{secs}s）") }),
         Ok(Err(e)) => json!({ "ok": false, "error": e.to_string() }),
         Ok(Ok(o)) => json!({
             "ok": o.status.success(),
@@ -148,5 +199,43 @@ pub async fn collab_ssh_exec(params: &Value) -> Value {
             "stdout": String::from_utf8_lossy(&o.stdout).trim().to_string(),
             "stderr": String::from_utf8_lossy(&o.stderr).trim().to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod approval_guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fake_entry() -> CollabSshEntry {
+        CollabSshEntry {
+            name: "probe".into(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            user: "nobody".into(),
+            key: None,
+        }
+    }
+
+    /// W3.1：远程命令在批准之前**绝不 spawn ssh**。
+    /// 单元测试环境没有审批宿主：要么直接 fail-closed（APPROVAL_BUSY），
+    /// 要么走 10ms 短门超时（APPROVAL_TIMEOUT，见 `agent_gate()` 的 cfg(test) 分支）。
+    #[tokio::test]
+    async fn remote_exec_is_blocked_before_ssh_spawn_without_approval() {
+        let out = exec_ssh_entry(&fake_entry(), "echo should-not-run", &json!({})).await;
+        assert_eq!(out["ok"], false, "{out}");
+        let code = out["code"].as_str().unwrap_or("");
+        assert!(
+            ["APPROVAL_BUSY", "APPROVAL_TIMEOUT", "APPROVAL_DENIED", "APPROVAL_PENDING"]
+                .contains(&code),
+            "必须由审批分支拒绝，实际: {out}"
+        );
+        // 批准前不得执行：没有 ssh 的 stdout/exitCode，也没有「命令执行超时」文案。
+        assert!(out.get("stdout").is_none(), "{out}");
+        assert!(out.get("exitCode").is_none(), "{out}");
+        assert!(
+            !out["error"].as_str().unwrap_or("").contains("命令执行超时"),
+            "不应走到 spawn 后的超时分支: {out}"
+        );
     }
 }

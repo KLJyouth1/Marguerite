@@ -6,7 +6,7 @@
         <p class="sk-stage__subtitle control-stage__subtitle">{{ t('cronSkills.skillsView.subtitle') }}</p>
       </div>
       <div class="sk-stage__actions control-stage__actions">
-        <div class="sk-search-wrap" :style="{ visibility: activeTab === 'installed' ? 'visible' : 'hidden' }">
+        <div class="sk-search-wrap" :style="{ visibility: activeTab === 'skills' ? 'visible' : 'hidden' }">
           <span class="sk-search-icon">
             <Icon name="search" :size="16" />
           </span>
@@ -18,12 +18,52 @@
             autocomplete="off"
           />
         </div>
+        <button class="btn btn--ghost" data-testid="skills-create-toggle" type="button" @click="showCreate = !showCreate">
+          <Icon name="plus" :size="16" />
+          <span>{{ t('plugins.createSkill') }}</span>
+        </button>
         <button class="btn btn--ghost" data-testid="skills-overview" type="button" @click="skillsOverviewOpen = true">
           <Icon name="skills" :size="16" />
           <span>{{ t('cronSkills.skillsView.overviewTitle') }}</span>
         </button>
       </div>
     </header>
+
+    <!-- 技能覆盖统计（skills.coverage）：总数 / 唯一 / 跳过 / 插件引用合并数 -->
+    <section class="sk-coverage" data-testid="skills-coverage">
+      <span class="sk-coverage__label">{{ t('skills.hub.coverageTitle') }}</span>
+      <template v-if="coverage && coverage.ok">
+        <span class="sk-coverage__pill">{{ t('skills.hub.coverageTotal', { count: coverageStats.total }) }}</span>
+        <span class="sk-coverage__pill">{{ t('skills.hub.coverageUnique', { count: coverageStats.unique }) }}</span>
+        <span class="sk-coverage__pill sk-coverage__pill--warn">{{ t('skills.hub.coverageSkipped', { count: coverageStats.skipped }) }}</span>
+        <span class="sk-coverage__pill sk-coverage__pill--accent">{{ t('skills.hub.coverageMerged', { count: coverageStats.merged }) }}</span>
+        <span v-if="coverage.plugins" class="sk-coverage__hint">
+          {{ t('skills.hub.coveragePlugins', { refs: coverage.plugins.refsTotal ?? 0, resolved: coverage.plugins.resolved ?? 0, unresolved: coverage.plugins.unresolved ?? 0 }) }}
+        </span>
+      </template>
+      <span v-else-if="coverageError" class="sk-coverage__hint sk-coverage__hint--err">{{ coverageError }}</span>
+      <span v-else class="sk-coverage__hint">{{ t('skills.hub.coverageUnavailable') }}</span>
+    </section>
+
+    <!-- 已停用技能：真实改名后不在扫描结果里，单独回传以便重新启用/删除 -->
+    <section v-if="disabledSkills.length" class="sk-disabled" data-testid="skills-disabled">
+      <div class="sk-disabled__head">
+        <span class="sk-coverage__label">{{ t('skills.manage.disabledTitle') }}</span>
+        <span class="sk-coverage__hint">{{ t('skills.manage.disabledHint', { count: disabledSkills.length }) }}</span>
+      </div>
+      <div class="sk-disabled__list">
+        <div v-for="s in disabledSkills" :key="s.name" class="sk-disabled__row">
+          <code class="sk-disabled__name">{{ s.name }}</code>
+          <span class="sk-disabled__path">{{ s.file_path || '' }}</span>
+          <button class="btn btn--sm btn--ghost" :disabled="togglingName === s.name" @click="toggleSkill(s.name, true)">
+            {{ t('skills.manage.enable') }}
+          </button>
+          <button class="btn btn--sm btn--ghost sk-disabled__danger" :disabled="deletingName === s.name" @click="deleteSkill(s.name)">
+            {{ t('skills.manage.delete') }}
+          </button>
+        </div>
+      </div>
+    </section>
 
     <Transition name="modal">
       <div v-if="skillsOverviewOpen" class="sk-overview-modal" role="dialog" aria-modal="true" aria-labelledby="skills-overview-title" @click.self="skillsOverviewOpen = false">
@@ -42,36 +82,54 @@
 
     <div class="sk-tabs" role="tablist" :aria-label="t('cronSkills.skillsView.tabsLabel')">
       <button
-        id="sk-tab-installed"
+        v-for="tab in hubTabs"
+        :id="'sk-tab-' + tab.id"
+        :key="tab.id"
         class="sk-tab"
-        :class="{ 'is-active': activeTab === 'installed' }"
+        :class="{ 'is-active': activeTab === tab.id }"
         type="button"
         role="tab"
-        :aria-selected="activeTab === 'installed'"
-        aria-controls="sk-panel-installed"
-        @click="activeTab = 'installed'"
+        :aria-selected="activeTab === tab.id"
+        :aria-controls="tab.id === 'community' ? 'sk-panel-community' : 'sk-panel-skills'"
+        @click="activeTab = tab.id"
       >
-        <Icon name="skills" :size="16" />
-        <span>{{ t('cronSkills.skillsView.tabInstalled') }}</span>
-      </button>
-      <button
-        id="sk-tab-registry"
-        class="sk-tab"
-        :class="{ 'is-active': activeTab === 'registry' }"
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'registry'"
-        aria-controls="sk-panel-registry"
-        @click="activeTab = 'registry'"
-      >
-        <Icon name="download" :size="16" />
-        <span>{{ t('cronSkills.skillsView.tabCommunity') }}</span>
+        <Icon :name="tab.icon" :size="16" />
+        <span>{{ t(tab.labelKey) }}</span>
       </button>
     </div>
 
-    <div v-show="activeTab === 'installed'" class="sk-panel" role="tabpanel" id="sk-panel-installed" aria-labelledby="sk-tab-installed">
+    <div v-show="activeTab !== 'community'" class="sk-panel" role="tabpanel" id="sk-panel-skills" aria-labelledby="sk-tab-skills">
       <div class="sk-installed">
-        <section v-if="isDesktop" class="sk-launch" :aria-label="t('cronSkills.skillsView.launchTitle')">
+        <section v-if="showCreate" class="sk-create">
+          <h2 class="sk-create__title">{{ t('plugins.skill.formTitle') }}</h2>
+          <div class="sk-create__form">
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.nameLabel') }}</span>
+              <input v-model="createForm.name" class="sk-create__input" :placeholder="t('plugins.skill.namePlaceholder')" />
+            </label>
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.descriptionLabel') }}</span>
+              <input v-model="createForm.description" class="sk-create__input" :placeholder="t('plugins.skill.descriptionPlaceholder')" />
+            </label>
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.triggersLabel') }}</span>
+              <input v-model="createForm.triggers" class="sk-create__input" :placeholder="t('plugins.skill.triggersPlaceholder')" />
+            </label>
+            <label class="sk-create__field sk-create__field--full">
+              <span>{{ t('plugins.skill.promptLabel') }}</span>
+              <textarea v-model="createForm.prompt_template" class="sk-create__textarea" rows="5" :placeholder="t('plugins.skill.promptPlaceholder')"></textarea>
+            </label>
+            <div class="sk-create__actions">
+              <button class="btn btn--ghost" type="button" @click="showCreate = false">{{ t('plugins.skill.cancel') }}</button>
+              <button class="btn btn--primary" type="button" :disabled="creating" @click="createSkill">
+                {{ creating ? t('plugins.skill.saving') : t('plugins.skill.save') }}
+              </button>
+            </div>
+            <div v-if="createResult" class="sk-create__result" :class="{ 'is-error': !createOk }">{{ createResult }}</div>
+          </div>
+        </section>
+
+        <section v-if="isDesktop" v-show="activeTab === 'tools'" class="sk-launch" :aria-label="t('cronSkills.skillsView.launchTitle')">
           <div class="sk-launch__head">
             <h3 class="sk-launch__title">{{ t('cronSkills.skillsView.launchTitle') }}</h3>
             <p class="sk-launch__desc">{{ t('cronSkills.skillsView.launchDesc') }}</p>
@@ -122,7 +180,7 @@
           </div>
         </section>
 
-        <section class="sk-tools" :aria-label="t('cronSkills.skillsView.toolsTitle')">
+        <section v-show="activeTab === 'tools'" class="sk-tools" :aria-label="t('cronSkills.skillsView.toolsTitle')">
           <div class="sk-tools__head">
             <h3 class="sk-tools__title">{{ t('cronSkills.skillsView.toolsTitle') }}</h3>
             <p class="sk-tools__desc">{{ t('cronSkills.skillsView.toolsDesc') }}</p>
@@ -232,6 +290,7 @@
 
         <details
           v-if="proposalsSettings.available"
+          v-show="activeTab === 'proposals'"
           class="sk-group sk-group--ap-settings"
           :open="proposalsSettingsOn"
         >
@@ -290,14 +349,16 @@
         </details>
 
         <PendingSkillProposals
+          v-show="activeTab === 'proposals'"
           ref="proposalsPanelRef"
           :proposals="proposals"
           @show="openProposalDialog"
           @accept="acceptProposal"
           @reject="rejectProposal"
         />
-        <AutoEnabledSkills :skills="autoEnabledSkills" @disable="disableAutoEnabled" />
+        <AutoEnabledSkills v-show="activeTab === 'proposals'" :skills="autoEnabledSkills" @disable="disableAutoEnabled" />
         <SkillGroup
+          v-show="activeTab === 'skills'"
           :title="t('cronSkills.skillsView.metaSkillsTitle')"
           :description="t('cronSkills.skillsView.metaSkillsDesc')"
           :skills="metaSkills"
@@ -307,6 +368,7 @@
         />
         <SkillGroup
           v-for="layer in visibleLayerGroups"
+          v-show="activeTab === 'skills'"
           :key="layer.key"
           :title="skillLayerLabel(layer.key)"
           :description="skillLayerHelp(layer.key)"
@@ -314,7 +376,7 @@
           @open="openSkillDialog"
         />
 
-        <div v-if="installedEmpty" class="state">
+        <div v-if="installedEmpty" v-show="activeTab === 'skills'" class="state">
           <div class="state-icon">
             <Icon name="skills" :size="36" />
           </div>
@@ -328,7 +390,7 @@
       </div>
     </div>
 
-    <div v-show="activeTab === 'registry'" class="sk-panel" role="tabpanel" id="sk-panel-registry" aria-labelledby="sk-tab-registry">
+    <div v-show="activeTab === 'community'" class="sk-panel" role="tabpanel" id="sk-panel-community" aria-labelledby="sk-tab-community">
       <SkillsRegistryPanel
         v-model:registry-query="registryQuery"
         v-model:github-url="githubUrl"
@@ -348,11 +410,49 @@
       :content-error="selectedSkillError"
       :install-feedback="installFeedback"
       :installing-deps-id="installingDepsId"
-      :uninstalling-name="uninstallingName"
+      :uninstalling-name="deletingName || uninstallingName"
+      :toggling-name="togglingName"
       @close="closeDialog"
       @install-deps="installDepsAndMaybeClose"
       @uninstall="uninstallSkillAndClose"
+      @toggle="toggleSkillFromDetail"
+      @edit="openSkillEditor"
     />
+
+    <Transition name="modal">
+      <div v-if="editOpen" class="sk-edit-modal" role="dialog" aria-modal="true" aria-labelledby="skill-edit-title" @click.self="editOpen = false">
+        <section class="sk-edit-modal__panel">
+          <header class="sk-edit-modal__head">
+            <div>
+              <span class="sk-overview-modal__eyebrow">SKILL</span>
+              <h2 id="skill-edit-title">{{ t('skills.manage.editTitle', { name: editForm.name }) }}</h2>
+            </div>
+            <button class="btn btn--ghost sk-overview-modal__close" type="button" :aria-label="t('common.close')" @click="editOpen = false"><Icon name="x" :size="18" /></button>
+          </header>
+          <div class="sk-edit-modal__body">
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.descriptionLabel') }}</span>
+              <input v-model="editForm.description" class="sk-create__input" />
+            </label>
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.triggersLabel') }}</span>
+              <input v-model="editForm.triggers" class="sk-create__input" :placeholder="t('plugins.skill.triggersPlaceholder')" />
+            </label>
+            <label class="sk-create__field">
+              <span>{{ t('plugins.skill.promptLabel') }}</span>
+              <textarea v-model="editForm.prompt_template" class="sk-create__textarea" rows="10"></textarea>
+            </label>
+            <div v-if="editMessage" class="sk-create__result" :class="{ 'is-error': !editOk }">{{ editMessage }}</div>
+          </div>
+          <footer class="sk-edit-modal__foot">
+            <button class="btn btn--ghost" @click="editOpen = false">{{ t('plugins.skill.cancel') }}</button>
+            <button class="btn btn--primary" :disabled="editSaving" @click="saveSkillEdit">
+              {{ editSaving ? t('plugins.skill.saving') : t('plugins.skill.save') }}
+            </button>
+          </footer>
+        </section>
+      </div>
+    </Transition>
 
     <BaotaCredentialsDialog
       :open="baotaCredOpen"
@@ -363,7 +463,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
@@ -380,10 +480,12 @@ import { useSkillDetailController } from '@/composables/skills/useSkillDetailCon
 import { useSkillRegistry } from '@/composables/skills/useSkillRegistry'
 import { skillLayerHelp, skillLayerLabel, useSkillsCatalog } from '@/composables/skills/useSkillsCatalog'
 import { useToasts } from '@/composables/useToasts'
+import { useConfirm } from '@/composables/useConfirm'
 import { applyDisabled, computeNextDisabled, disabledNames } from '@/utils/tools/toolPatch'
 import { refreshToolSources } from '@/composables/useToolSources'
 import { usePlatform } from '@/platform'
 import { useRpcStore } from '@/stores/rpc'
+import type { IconName } from '@/utils/icons'
 import type { Proposal, Skill } from '@/types/skills'
 
 interface SkillReloadError {
@@ -408,13 +510,96 @@ const { t } = useI18n()
 const skillsOverviewOpen = ref(false)
 const baotaCredOpen = ref(false)
 const { pushToast } = useToasts()
+const { confirm } = useConfirm()
 const rpc = useRpcStore()
 const router = useRouter()
 const isDesktop = usePlatform().capabilities.isDesktop
-const activeTab = ref('installed')
+type SkillsTabId = 'skills' | 'tools' | 'proposals' | 'community'
+const activeTab = ref<SkillsTabId>('skills')
+const hubTabs: Array<{ id: SkillsTabId; labelKey: string; icon: IconName }> = [
+  { id: 'skills', labelKey: 'skills.hub.tabSkills', icon: 'skills' },
+  { id: 'tools', labelKey: 'skills.hub.tabTools', icon: 'terminal' },
+  { id: 'proposals', labelKey: 'skills.hub.tabProposals', icon: 'listChecks' },
+  { id: 'community', labelKey: 'skills.hub.tabCommunity', icon: 'download' },
+]
 const reloading = ref(false)
 const selectedProposal = ref<Proposal | null>(null)
 const proposalsPanelRef = ref<InstanceType<typeof PendingSkillProposals> | null>(null)
+
+// 创建技能（原 PluginsView 里的表单迁移到此，插件页不再承担技能创建）。
+const showCreate = ref(false)
+const creating = ref(false)
+const createResult = ref('')
+const createOk = ref(false)
+const createForm = reactive({ name: '', description: '', prompt_template: '', triggers: '' })
+
+async function createSkill() {
+  if (!createForm.name.trim() || !createForm.description.trim() || !createForm.prompt_template.trim()) {
+    createOk.value = false
+    createResult.value = t('plugins.skill.requiredFields')
+    return
+  }
+  creating.value = true
+  createResult.value = ''
+  try {
+    const res = await rpc.call<{ success: boolean; message: string }>('skills.create', {
+      name: createForm.name.trim(),
+      description: createForm.description.trim(),
+      prompt_template: createForm.prompt_template,
+      triggers: createForm.triggers.split(',').map(s => s.trim()).filter(Boolean),
+    })
+    createOk.value = res.success
+    createResult.value = res.message
+    if (res.success) {
+      createForm.name = ''
+      createForm.description = ''
+      createForm.prompt_template = ''
+      createForm.triggers = ''
+      showCreate.value = false
+      await loadData()
+    }
+  } catch (e) {
+    createOk.value = false
+    createResult.value = t('plugins.skill.createFailed', { error: e instanceof Error ? e.message : String(e) })
+  } finally {
+    creating.value = false
+  }
+}
+
+// 顶部覆盖率（skills.coverage）：loaded 是去重后的唯一技能数；
+// yaml + skillMd 是扫描成功文件总数（去重前）；mergedTotal 含插件引用合并后的总数。
+interface SkillsCoverage {
+  ok: boolean
+  loaded?: number
+  yaml?: number
+  skillMd?: number
+  skippedTotal?: number
+  mergedTotal?: number
+  plugins?: { refsTotal?: number; resolved?: number; unresolved?: number }
+  error?: string
+  code?: string
+}
+const coverage = ref<SkillsCoverage | null>(null)
+const coverageError = ref('')
+const coverageStats = computed(() => ({
+  total: (coverage.value?.yaml ?? 0) + (coverage.value?.skillMd ?? 0),
+  unique: coverage.value?.loaded ?? 0,
+  skipped: coverage.value?.skippedTotal ?? 0,
+  merged: coverage.value?.mergedTotal ?? 0,
+}))
+
+async function loadCoverage() {
+  coverageError.value = ''
+  try {
+    await rpc.waitForConnection()
+    const res = await rpc.call<SkillsCoverage>('skills.coverage', {})
+    coverage.value = res ?? null
+    if (res?.ok === false) coverageError.value = res.error || t('skills.hub.coverageUnavailable')
+  } catch (e) {
+    coverage.value = null
+    coverageError.value = e instanceof Error ? e.message : String(e)
+  }
+}
 
 // 快捷入口：与设置 › 高级 › Labs 共享同一组 localStorage 开关。直接读键（与
 // SettingsAdvancedPanel 完全一致的约定），不引入 chat 依赖。桌面工具箱在此
@@ -610,6 +795,7 @@ const {
   installedEmpty,
   emptyMessage,
   statTiles,
+  disabledSkills = ref([]),
   setStatusFilter,
 } = catalog
 
@@ -677,7 +863,6 @@ const {
   installGithub,
   installSkill,
   installDeps,
-  uninstallSkill,
 } = registry
 
 const skillDetail = useSkillDetailController({ rpc, installDeps })
@@ -709,6 +894,7 @@ function teardownLive() {
 onActivated(() => {
   void loadData()
   void loadTools()
+  void loadCoverage()
 })
 
 onDeactivated(teardownLive)
@@ -728,12 +914,12 @@ async function showProposalsFromOverview() {
   await showProposalsFromStats()
 }
 function selectStatusFilter(key: string) {
-  activeTab.value = 'installed'
+  activeTab.value = 'skills'
   setStatusFilter(key)
 }
 
 async function showProposalsFromStats() {
-  activeTab.value = 'installed'
+  activeTab.value = 'proposals'
   await nextTick()
   scrollToProposals()
 }
@@ -759,9 +945,112 @@ async function installDepsAndMaybeClose(name: string, installId: string) {
   await installCurrentDependencies(name, installId)
 }
 
+const togglingName = ref('')
+const deletingName = ref('')
+
+/** 启停：真实改名 + 持久索引；停用后技能从列表消失，进入「已停用」区。 */
+async function toggleSkill(name: string, enabled: boolean) {
+  if (togglingName.value) return
+  togglingName.value = name
+  try {
+    const res = await rpc.call<{ ok?: boolean; message?: string }>('skills.setEnabled', { name, enabled })
+    if (res?.ok === false) {
+      pushToast(res.message || t('skills.manage.toggleFailed'), { tone: 'danger' })
+      return
+    }
+    pushToast(t(enabled ? 'skills.manage.enabledNotice' : 'skills.manage.disabledNotice', { name }), { tone: 'ok' })
+    await loadData()
+    await loadCoverage()
+    if (!enabled) closeDialog()
+  } catch (e) {
+    pushToast(t('skills.manage.toggleFailedDetail', { error: (e as Error).message }), { tone: 'danger' })
+  } finally {
+    togglingName.value = ''
+  }
+}
+
+function toggleSkillFromDetail(name: string, enabled: boolean) {
+  void toggleSkill(name, enabled)
+}
+
+/** 删除：优先用 skills.uninstall（覆盖 YAML 与 SKILL.md 目录），删除前确认。 */
+async function deleteSkill(name: string) {
+  if (deletingName.value) return
+  const approved = await confirm({
+    title: t('skills.manage.deleteTitle', { name }),
+    body: t('skills.manage.deleteBody', { name }),
+    primaryLabel: t('skills.manage.deleteConfirm'),
+  })
+  if (!approved) return
+  deletingName.value = name
+  try {
+    const res = await rpc.call<{ success?: boolean; message?: string }>('skills.uninstall', { name })
+    if (res?.success === false) {
+      pushToast(res.message || t('skills.manage.deleteFailed'), { tone: 'danger' })
+      return
+    }
+    pushToast(t('skills.manage.deletedNotice', { name }), { tone: 'ok' })
+    await loadData()
+    await loadCoverage()
+    if (selectedSkill.value?.name === name) closeDialog()
+  } catch (e) {
+    pushToast(t('skills.manage.deleteFailedDetail', { error: (e as Error).message }), { tone: 'danger' })
+  } finally {
+    deletingName.value = ''
+  }
+}
+
 async function uninstallSkillAndClose(name: string) {
-  const removed = await uninstallSkill(name)
-  if (removed) closeDialog()
+  await deleteSkill(name)
+}
+
+// ── 编辑 YAML 技能 ──────────────────────────────────────────────────────
+const editOpen = ref(false)
+const editSaving = ref(false)
+const editMessage = ref('')
+const editOk = ref(true)
+const editForm = reactive({ name: '', description: '', triggers: '', prompt_template: '' })
+
+function openSkillEditor(skill: Skill) {
+  editForm.name = skill.name
+  editForm.description = skill.description || ''
+  editForm.triggers = (skill.triggers || []).join(', ')
+  editForm.prompt_template = skill.content || ''
+  editMessage.value = ''
+  editOk.value = true
+  editOpen.value = true
+}
+
+async function saveSkillEdit() {
+  if (editSaving.value) return
+  if (!editForm.name || !editForm.description.trim() || !editForm.prompt_template.trim()) {
+    editOk.value = false
+    editMessage.value = t('plugins.skill.requiredFields')
+    return
+  }
+  editSaving.value = true
+  editMessage.value = ''
+  try {
+    const res = await rpc.call<{ success?: boolean; message?: string }>('skills.update', {
+      name: editForm.name,
+      description: editForm.description.trim(),
+      prompt_template: editForm.prompt_template,
+      triggers: editForm.triggers.split(',').map(s => s.trim()).filter(Boolean),
+    })
+    editOk.value = res?.success !== false
+    editMessage.value = res?.message || (editOk.value ? t('skills.manage.saved') : t('skills.manage.saveFailed'))
+    if (editOk.value) {
+      editOpen.value = false
+      closeDialog()
+      await loadData()
+      await loadCoverage()
+    }
+  } catch (e) {
+    editOk.value = false
+    editMessage.value = (e as Error).message
+  } finally {
+    editSaving.value = false
+  }
 }
 </script>
 
@@ -2184,5 +2473,166 @@ async function uninstallSkillAndClose(name: string) {
   letter-spacing: .04em;
   line-height: 20px;
   margin: 0;
+}
+/* Coverage summary (skills.coverage) */
+.sk-coverage {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+}
+.sk-coverage__label {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.sk-coverage__pill {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 9px;
+}
+.sk-coverage__pill--warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  color: var(--warn);
+}
+.sk-coverage__pill--accent {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--accent);
+}
+.sk-coverage__hint { color: var(--text-dim); font-size: 11px; }
+.sk-coverage__hint--err { color: var(--danger); }
+
+/* Create skill form (moved from PluginsView) */
+.sk-create {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3) var(--sp-4);
+}
+.sk-create__title { font-size: 14px; font-weight: 650; margin: 0 0 var(--sp-3); }
+.sk-create__form { display: grid; gap: var(--sp-2) var(--sp-3); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sk-create__field { display: flex; flex-direction: column; gap: 4px; color: var(--text-dim); font-size: 11px; }
+.sk-create__field--full { grid-column: 1 / -1; }
+.sk-create__input,
+.sk-create__textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 7px 10px;
+}
+.sk-create__textarea { font-family: var(--font-mono); resize: vertical; }
+.sk-create__input:focus,
+.sk-create__textarea:focus { border-color: var(--accent); }
+.sk-create__actions { display: flex; gap: 8px; grid-column: 1 / -1; justify-content: flex-end; }
+.sk-create__result {
+  background: color-mix(in srgb, var(--ok) 10%, var(--card));
+  border-radius: var(--radius-sm);
+  color: var(--ok);
+  font-size: 12px;
+  grid-column: 1 / -1;
+  padding: 8px 12px;
+}
+.sk-create__result.is-error {
+  background: color-mix(in srgb, var(--danger) 10%, var(--card));
+  color: var(--danger);
+}
+@media (max-width: 720px) {
+  .sk-create__form { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 已停用技能 */
+.sk-disabled {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+}
+.sk-disabled__head { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.sk-disabled__list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.sk-disabled__row {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(140px, max-content) minmax(0, 1fr) auto auto;
+  padding: 5px 0;
+}
+.sk-disabled__row:last-child { border-bottom: 0; }
+.sk-disabled__name { font-family: var(--font-mono); font-size: 12px; }
+.sk-disabled__path { color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-disabled__danger { color: var(--danger); }
+
+/* 技能编辑弹窗 */
+.sk-edit-modal {
+  align-items: center;
+  background: var(--scrim);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 1101;
+}
+.sk-edit-modal__panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-3);
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  max-width: 720px;
+  width: 100%;
+}
+.sk-edit-modal__head {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 18px 20px;
+}
+.sk-edit-modal__head h2 { font-size: 16px; margin: 4px 0 0; }
+.sk-edit-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  overflow: auto;
+  padding: 16px 20px;
+}
+.sk-edit-modal__foot {
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 20px;
+}
+.sk-detail__foot-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+@media (max-width: 720px) {
+  .sk-edit-modal { align-items: flex-end; padding: 0; }
+  .sk-edit-modal__panel { border-bottom-left-radius: 0; border-bottom-right-radius: 0; max-height: 92vh; }
+  .sk-disabled__row { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .sk-disabled__path { display: none; }
 }
 </style>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-notify-turn-ended"
+description = "Enables the notify_turn_ended command without any pre-configured scope."
+commands.allow = ["notify_turn_ended"]
+
+[[permission]]
+identifier = "deny-notify-turn-ended"
+description = "Denies the notify_turn_ended command without any pre-configured scope."
+commands.deny = ["notify_turn_ended"]

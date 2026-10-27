@@ -1,13 +1,18 @@
-<!-- 「@」专家 / 智能体引用候选（对话框内）。
-     数据源复用桌面网关原生 RPC：experts.list（预设专家库）+ agents.list（预设智能体）。
-     纯只读候选：选中后由 ChatComposer 把 `@名称` 插入输入框，不改动 chat.send 负载。 -->
+<!-- 「@」引用候选（对话框内）。
+     三类来源：
+     1. 上下文引用 —— 网关 `context.references`（文件 / 目录 / 规则 / 历史会话）；
+        选中后进入本轮 `chat.send.contextRefs`，由后端渲染成材料拼在用户消息尾部。
+     2. 专家库 —— `experts.list`；3. 智能体 —— `agents.list`。
+        后两者是「角色指向」，选中只插入 `@名称` 文本（不改变负载），
+        整队启动仍走专家中心页的 team.run。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
+import type { ContextRefItem } from '@/composables/chat/contextRefs'
 
-const props = defineProps<{ query: string }>()
-const emit = defineEmits<{ select: [label: string] }>()
+const props = defineProps<{ query: string; workspaceId?: string }>()
+const emit = defineEmits<{ select: [payload: { label: string; ref?: ContextRefItem }] }>()
 
 const rpc = useRpcStore()
 
@@ -15,21 +20,29 @@ interface Expert {
   id: string
   label: string
   lineage?: string
-  expertise?: string
+  /** 网关返回数组（`gateway/team.rs::experts_list`）；此前声明成 string 属于契约谎言。 */
+  expertise?: string[]
 }
 interface AgentItem {
   id: string
   name?: string
 }
+interface ContextGroup {
+  id: string
+  label: string
+  items: Array<{ kind: string; id: string; label: string; subtitle?: string; path?: string }>
+}
 interface Candidate {
-  kind: 'expert' | 'agent'
+  kind: 'expert' | 'agent' | 'ref'
   id: string
   label: string
   sub?: string
+  ref?: ContextRefItem
 }
 
 const experts = ref<Expert[]>([])
 const agents = ref<AgentItem[]>([])
+const refCandidates = ref<Candidate[]>([])
 const active = ref(0)
 
 const candidates = computed<Candidate[]>(() => {
@@ -38,14 +51,14 @@ const candidates = computed<Candidate[]>(() => {
     kind: 'expert',
     id: e.id,
     label: e.label,
-    sub: e.expertise || e.lineage,
+    sub: Array.isArray(e.expertise) ? e.expertise.join('、') : (e.expertise || e.lineage),
   }))
   const ag: Candidate[] = agents.value.map((a) => ({
     kind: 'agent',
     id: a.id,
     label: a.name || a.id,
   }))
-  const all = [...ex, ...ag]
+  const all = [...refCandidates.value, ...ex, ...ag]
   if (!q) return all
   return all.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(q))
 })
@@ -64,7 +77,48 @@ async function load() {
   }
 }
 
-onMounted(load)
+/**
+ * 拉取上下文引用候选。后端对文件/目录做项目根边界校验，这里只负责展示。
+ * 失败时清空该组而不是保留上一次结果——避免把过期路径塞进本轮负载。
+ */
+async function loadRefs() {
+  try {
+    if (!rpc.isConnected) await rpc.waitForConnection(8_000)
+    const res = await rpc.call<{ ok?: boolean; workspace?: string | null; groups?: ContextGroup[] }>(
+      'context.references',
+      { q: props.query.trim(), workspaceId: props.workspaceId, limit: 6 },
+    )
+    const groups = res.groups ?? []
+    refCandidates.value = groups.flatMap((g) =>
+      (g.items ?? []).slice(0, 6).map<Candidate>((it) => ({
+        kind: 'ref',
+        id: `${g.id}:${it.id}`,
+        label: it.label,
+        sub: it.subtitle || g.label,
+        ref: { kind: it.kind || g.id, id: it.id, label: it.label, path: it.path },
+      })),
+    )
+  } catch {
+    refCandidates.value = []
+  }
+}
+
+let debounce: ReturnType<typeof setTimeout> | null = null
+watch(
+  () => [props.query, props.workspaceId],
+  () => {
+    if (debounce) clearTimeout(debounce)
+    debounce = setTimeout(() => void loadRefs(), 180)
+  },
+)
+
+onMounted(() => {
+  void load()
+  void loadRefs()
+})
+onBeforeUnmount(() => {
+  if (debounce) clearTimeout(debounce)
+})
 
 // 候选随 query 收窄时把高亮归零，避免高亮停留在越界索引上。
 watch(candidates, () => {
@@ -78,10 +132,17 @@ function move(delta: number) {
 }
 function selectActive() {
   const c = candidates.value[active.value]
-  if (c) emit('select', c.label)
+  if (c) emit('select', { label: c.label, ref: c.ref })
 }
 function pick(c: Candidate) {
-  emit('select', c.label)
+  emit('select', { label: c.label, ref: c.ref })
+}
+
+/** 引用项按来源给图标：目录用 folder，其余用 fileText，专家/智能体沿用原图标。 */
+function itemIcon(c: Candidate): 'folder' | 'fileText' | 'sparkles' | 'agents' {
+  if (c.kind === 'expert') return 'sparkles'
+  if (c.kind === 'agent') return 'agents'
+  return c.ref?.kind === 'folder' ? 'folder' : 'fileText'
 }
 
 defineExpose({
@@ -92,8 +153,8 @@ defineExpose({
 </script>
 
 <template>
-  <div class="mention-popover" role="listbox" aria-label="引用专家 / 智能体">
-    <div class="mention-popover__head">引用专家 / 智能体</div>
+  <div class="mention-popover" role="listbox" aria-label="引用文件 / 规则 / 会话 / 专家 / 智能体">
+    <div class="mention-popover__head">引用文件 / 规则 / 会话 / 专家 / 智能体</div>
     <ul v-if="candidates.length" class="mention-popover__list">
       <li v-for="(c, i) in candidates" :key="`${c.kind}:${c.id}`">
         <button
@@ -106,13 +167,13 @@ defineExpose({
           @mouseenter="active = i"
           @click="pick(c)"
         >
-          <Icon :name="c.kind === 'expert' ? 'sparkles' : 'agents'" :size="14" />
+          <Icon :name="itemIcon(c)" :size="14" />
           <span class="mention-popover__label">{{ c.label }}</span>
           <span v-if="c.sub" class="mention-popover__sub">{{ c.sub }}</span>
         </button>
       </li>
     </ul>
-    <p v-else class="mention-popover__empty">无匹配的专家或智能体</p>
+    <p v-else class="mention-popover__empty">无匹配的文件、规则、会话、专家或智能体</p>
   </div>
 </template>
 

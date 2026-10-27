@@ -18,6 +18,7 @@
     :enabled="rpcStore.canChooseProject"
     :session-key="sessionKey || 'agent:main:webchat:workspace-picker'"
     :initial-path="projectCreateSourcePath"
+    :start-in-browser="true"
     @close="projectSourcePickerOpen = false"
     @choose="onProjectSourcePathChosen"
   />

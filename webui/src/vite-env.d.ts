@@ -47,6 +47,7 @@ declare global {
     dismissUpdate?: () => Promise<DesktopUpdateState>
     onUpdateState?: (callback: (payload: unknown) => void) => () => void
     getGatewayStatus: () => Promise<DesktopSettings['gateway']>
+    getAppVersion?: () => Promise<string | undefined>
     getCliInvocation?: () => Promise<unknown>
     revealGatewayLog: () => Promise<boolean>
     getDesktopSettings: () => Promise<DesktopSettings>
@@ -141,11 +142,22 @@ declare global {
     onBootStatus: (callback: (payload: unknown) => void) => () => void
     onBootError: (callback: (payload: unknown) => void) => () => void
     onMigrationProgress?: (callback: (payload: unknown) => void) => () => void
+    /**
+     * 桌面桌宠悬浮窗（Tauri 独立窗口 pet-overlay）。
+     * 只有真壳才提供；Web 端缺席时 UI 必须如实降级（按钮 disabled + 说明），
+     * 不能假装已显示。
+     */
+    petOverlayShow?: () => Promise<{ created: boolean; label: string }>
+    petOverlayHide?: () => Promise<void>
+    petOverlayToggle?: () => Promise<{ created: boolean; label: string }>
   }
 
   interface Window {
     MargueriteDesktop?: MargueriteDesktopApi
   }
+
+  /** Injected by vite.config.ts from package.json (`version`). */
+  const __APP_VERSION__: string
 }
 
 declare module '*.vue' {

@@ -50,6 +50,22 @@ const SIDECAR_LIST_TIMEOUT: Duration = Duration::from_secs(2);
 /// 但仍必须有上限 —— 侧车卡死时界面要能落到明确错误，而不是无限转圈。
 const SIDECAR_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 审批 REST 未授权响应（fail-closed）。
+///
+/// 为什么必须在这里也校验 token：审批裁决是**能放行高危操作**的写接口，
+/// 仅靠 Origin 校验挡不住本机进程（无 Origin 头会被 `origin_allowed` 放行）。
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(json!({
+            "error": "UNAUTHORIZED",
+            "code": "UNAUTHORIZED",
+            "message": "缺少或错误的本地网关 token",
+        })),
+    )
+        .into_response()
+}
+
 /// GET `/api/approvals`：当前挂起审批的快照。
 ///
 /// `mode` / `allowPatterns` / `denyPatterns` 是 pyengine 快照的必备字段；Rust 引擎
@@ -58,7 +74,14 @@ const SIDECAR_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// 侧车在线时**合并**它的队列（见 `merge_pending`）：两边是两套独立队列，只报自己那半
 /// 会让控制台漏掉侧车侧挂起的审批 —— 那些卡片推得到、裁决却打不通（R57 实测）。
-pub(crate) async fn approvals_list(State(state): State<std::sync::Arc<GatewayState>>) -> Response {
+pub(crate) async fn approvals_list(
+    State(state): State<std::sync::Arc<GatewayState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    if !crate::gateway::auth::rest_authorized(&headers, Some(&uri), &state.token) {
+        return unauthorized();
+    }
     let mut pending: Vec<Value> = global_registry()
         .pending_snapshots()
         .iter()
@@ -105,8 +128,12 @@ pub(crate) async fn approvals_list(State(state): State<std::sync::Arc<GatewaySta
 pub(crate) async fn approvals_resolve(
     State(state): State<std::sync::Arc<GatewayState>>,
     headers: HeaderMap,
+    uri: axum::http::Uri,
     body: Bytes,
 ) -> Response {
+    if !crate::gateway::auth::rest_authorized(&headers, Some(&uri), &state.token) {
+        return unauthorized();
+    }
     if !origin_allowed(
         headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
         headers.get(header::HOST).and_then(|v| v.to_str().ok()),
@@ -457,6 +484,11 @@ mod tests {
             token: "t".to_string(),
             started_at: std::time::Instant::now(),
             webui_dir: std::env::temp_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         };
         assert!(
             forward_resolve(&state, &Bytes::from_static(b"{}")).await.is_none(),

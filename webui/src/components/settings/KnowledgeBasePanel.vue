@@ -79,12 +79,12 @@ async function doIngest() {
   try {
     const result = ov(await rpc.call('kb.ingest', { title: ingestTitle.value.trim(), text: ingestText.value }))
     if (result.ok) {
-      ingestMsg.value = '已灌入'
+      ingestMsg.value = t('settings.knowledgeBase.ingestDone')
       ingestTitle.value = ''; ingestText.value = ''
       showIngest.value = false
       await loadStatus()
     } else {
-      ingestMsg.value = tv(result.error) || '失败'
+      ingestMsg.value = tv(result.error) || t('settings.knowledgeBase.ingestFailed')
     }
   } catch (e) { ingestMsg.value = String(e) } finally { ingesting.value = false }
 }
@@ -130,16 +130,16 @@ onMounted(() => {
           <span class="kb-stat__label">{{ t('settings.knowledgeBase.engine') }}</span>
         </div>
         <button class="btn btn--ghost btn--sm" @click="showIngest = !showIngest">
-          <Icon name="plus" :size="14" /><span>灌入文档</span>
+          <Icon name="plus" :size="14" /><span>{{ t('settings.knowledgeBase.ingestOpen') }}</span>
         </button>
       </div>
 
       <div v-if="showIngest" class="kb-ingest">
-        <input v-model="ingestTitle" class="kb-input" placeholder="文档标题" />
-        <textarea v-model="ingestText" class="kb-textarea" rows="4" placeholder="粘贴文档正文…"></textarea>
+        <input v-model="ingestTitle" class="kb-input" :placeholder="t('settings.knowledgeBase.ingestTitlePlaceholder')" />
+        <textarea v-model="ingestText" class="kb-textarea" rows="4" :placeholder="t('settings.knowledgeBase.ingestTextPlaceholder')"></textarea>
         <div class="kb-ingest__actions">
           <span v-if="ingestMsg" class="kb-ingest__msg">{{ ingestMsg }}</span>
-          <button class="btn btn--primary btn--sm" :disabled="ingesting" @click="doIngest">灌入</button>
+          <button class="btn btn--primary btn--sm" :disabled="ingesting" @click="doIngest">{{ t('settings.knowledgeBase.ingestSubmit') }}</button>
         </div>
       </div>
 
@@ -170,11 +170,11 @@ onMounted(() => {
       </div>
 
       <div v-if="docList.length" class="kb-docs">
-        <h4 class="kb-docs__title">已索引文档</h4>
+        <h4 class="kb-docs__title">{{ t('settings.knowledgeBase.indexedDocs') }}</h4>
         <div v-for="doc in docList" :key="doc.doc_id" class="kb-doc">
           <span class="kb-doc__title">{{ doc.title }}</span>
-          <span class="kb-doc__meta">{{ doc.chunks }} 块</span>
-          <button class="kb-doc__del" @click="removeDoc(doc.doc_id)" title="删除">
+          <span class="kb-doc__meta">{{ t('settings.knowledgeBase.chunks', { count: doc.chunks }) }}</span>
+          <button class="kb-doc__del" @click="removeDoc(doc.doc_id)" :title="t('common.delete')">
             <Icon name="trash" :size="14" />
           </button>
         </div>

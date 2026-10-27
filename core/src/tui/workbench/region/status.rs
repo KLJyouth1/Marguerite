@@ -35,8 +35,19 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
         ConnectionStatus::Disconnected => ("已断开", t.danger),
     };
 
+    // 档位颜色跟随预算状态机：健康绿 / 吃紧橙 / 紧急·耗尽红。
+    let tier_color = match state.tier_ledger.budget_state.as_str() {
+        "healthy" => t.success,
+        "degraded" => t.warning,
+        "emergency" | "depleted" => t.danger,
+        _ => t.brand,
+    };
+    let tier_label = state.tier_ledger.label();
+
     let line = Line::from(vec![
         Span::styled(format!(" {} ", state.model), Style::default().fg(t.brand)),
+        Span::styled(" | ", Style::default().fg(t.border)),
+        Span::styled(format!(" {tier_label} "), Style::default().fg(tier_color)),
         Span::styled(" | ", Style::default().fg(t.border)),
         Span::styled(format!(" {mode_char} "), Style::default().fg(t.brand_light)), // 模式标识
         Span::styled(" | ", Style::default().fg(t.border)),

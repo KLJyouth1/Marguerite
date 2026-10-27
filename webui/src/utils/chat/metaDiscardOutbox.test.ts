@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   listPendingMetaDiscards,
@@ -6,6 +6,9 @@ import {
   removePendingMetaDiscard,
   type MetaDiscardStorage,
 } from './metaDiscardOutbox'
+
+const notifyReadFailure = vi.hoisted(() => vi.fn())
+vi.mock('@/utils/readFailureNotice', () => ({ notifyReadFailure }))
 
 function memoryStorage(): MetaDiscardStorage {
   const values = new Map<string, string>()
@@ -70,5 +73,19 @@ describe('meta discard outbox', () => {
     expect(listPendingMetaDiscards(undefined, storage)).toMatchObject([{
       clientRequestId: 'future-clock-cancellation',
     }])
+  })
+
+  it('存储读取抛错时提示用户，而不是静默当作「没有墓碑」', () => {
+    const storage: MetaDiscardStorage = {
+      getItem: () => { throw new Error('storage denied') },
+      setItem: () => {},
+      removeItem: () => {},
+    }
+
+    expect(listPendingMetaDiscards(undefined, storage)).toEqual([])
+    expect(notifyReadFailure).toHaveBeenCalledWith(
+      'meta-discard',
+      'shared.storage.metaDiscardReadFailed',
+    )
   })
 })

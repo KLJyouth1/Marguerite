@@ -42,6 +42,8 @@ pub enum PyEngineStatus {
     Running,
     Restarting,
     Failed,
+    /// P0-1：崩溃循环熔断——守护任务已放弃自动重启，等待人工显式 sidecar_start。
+    Degraded,
 }
 
 /// 侧车配置（定位二进制、路径、端口）
@@ -649,13 +651,6 @@ pub fn listening_ports_of(pid: u32) -> Vec<u16> {
     }
 }
 
-/// 复用路径守护任务（[`ATTACH_WATCH_INTERVAL`])的轮询间隔。
-///
-/// 比主守护循环的 2s 略长：复用路径用 `tasklist` 判活，每次轮询都要**起一个子进程**
-/// （见 [`pid_is_alive`]），比主路径的 `try_wait()`（纯内存态查询）贵得多。
-/// 3s 仍远快于用户感知的「侧车没了」，且把常驻子进程开销压到可忽略。
-const ATTACH_WATCH_INTERVAL: Duration = Duration::from_secs(3);
-
 /// 解析 `tasklist /FI "PID eq <n>" /NH /FO CSV` 的输出，判断该 pid 是否仍在运行。
 ///
 /// 纯函数（不做进程调用），便于单测覆盖「找得到 / 找不到 / 名字里带数字」三种形态。
@@ -821,6 +816,9 @@ pub fn clear_last_exit_evidence() {
 pub struct PyEngineSidecar {
     pub config: SidecarConfig,
     child: Arc<Mutex<Option<Child>>>,
+    /// P1-5：当前侧车进程的内存围栏（Job Object / RLIMIT 归属）。每次
+    /// `spawn_once` 成功都会替换为新进程的围栏；旧围栏 drop 即关闭旧 Job。
+    fence: Arc<Mutex<Option<crate::pyengine::memfence::MemoryFence>>>,
     status: Arc<std::sync::atomic::AtomicU8>,
     /// 当前子进程的 spawn 时刻；每次 `spawn_once` 成功都会重置（S5：算存活时长）。
     started_at: Arc<std::sync::Mutex<Instant>>,
@@ -836,6 +834,8 @@ const STATUS_STARTING: u8 = 1;
 const STATUS_RUNNING: u8 = 2;
 const STATUS_RESTARTING: u8 = 3;
 const STATUS_FAILED: u8 = 4;
+/// P0-1：崩溃循环熔断后停止自动重启（人工 sidecar_start 会构造全新实例，窗口随之重置）。
+const STATUS_DEGRADED: u8 = 5;
 
 impl PyEngineSidecar {
     pub fn status(&self) -> PyEngineStatus {
@@ -844,6 +844,7 @@ impl PyEngineSidecar {
             STATUS_STARTING => PyEngineStatus::Starting,
             STATUS_RUNNING => PyEngineStatus::Running,
             STATUS_RESTARTING => PyEngineStatus::Restarting,
+            STATUS_DEGRADED => PyEngineStatus::Degraded,
             _ => PyEngineStatus::Failed,
         }
     }
@@ -863,23 +864,40 @@ impl PyEngineSidecar {
     /// 复用恰恰是**最需要**这份证据的路径：用户看到的现象就是「上次好好的，这次
     /// 侧车没了」，而复用路径下崩溃的侧车根本没人负责记录死因。
     ///
-    /// 与主路径的差别只有一处：附着的进程**不是本进程的子进程**，没有 [`Child`]
-    /// 句柄，因此判活只能按 pid 问系统（[`pid_is_alive`]），拿不到 `ExitStatus`
-    /// → `code` 恒为 `None`（这是事实，不是缺失）。存活时长也只能从**附着时刻**起算。
+    /// 与主路径的差别：附着的进程**不是本进程的子进程**，没有 [`Child`]
+    /// 句柄，因此初始判活只能按 pid 问系统（[`pid_is_alive`]），拿不到 `ExitStatus`
+    /// → 取证 `code` 恒为 `None`（这是事实，不是缺失）。存活时长从**附着时刻**起算。
     ///
-    /// 仍然**不负责重启**：复用即意味着「不接管它的生命周期」，重启语义与主路径
-    /// 不同（详见 [`spawn_attach_guard`] 的说明），保持既有行为不变。
+    /// # P1-7：复用路径失活后自动接管
+    ///
+    /// 附着的外部侧车一旦失活，统一监督循环先取证（code=None），然后与主路径
+    /// **同一策略** `spawn_once` 接管拉起（见 [`run_sidecar_supervisor`] /
+    /// [`InitialTarget::Attached`]），解决「孤儿侧车被杀→只取证不重启→控制台永久
+    /// 降级」；侧车崩溃不拖死网关。
     pub fn attach(cfg: SidecarConfig, pid: Option<u32>) -> Self {
         let started_at = Arc::new(std::sync::Mutex::new(Instant::now()));
-        let guard = pid.and_then(|pid| {
-            spawn_attach_guard(cfg.clone(), pid, Arc::clone(&started_at))
+        let child = Arc::new(Mutex::new(None));
+        let fence = Arc::new(Mutex::new(None));
+        let status = Arc::new(std::sync::atomic::AtomicU8::new(STATUS_RUNNING));
+        // P1-7：复用路径也跑统一监督循环。附着 pid 失活时先取证，再自动
+        // `spawn_once` 接管（InitialTarget::Attached）。
+        let guard = pid.map(|attached_pid| {
+            tokio::spawn(run_sidecar_supervisor(
+                cfg.clone(),
+                cfg.py_home.clone(),
+                child.clone(),
+                fence.clone(),
+                status.clone(),
+                started_at.clone(),
+                InitialTarget::Attached(attached_pid),
+            ))
         });
         Self {
             config: cfg,
-            child: Arc::new(Mutex::new(None)),
-            status: Arc::new(std::sync::atomic::AtomicU8::new(STATUS_RUNNING)),
-            // 复用路径没有本进程 spawn 的子进程，spawn 时刻无从谈起；用当前时刻
-            // 让 `uptime_ms` 至少是个合法非负数，而不是凭空造一个 0。
+            child,
+            fence,
+            status,
+            // 复用路径初始无自有子进程，spawn 起点用当前时刻，保证 uptime 非负。
             started_at,
             last_exit: global_exit_slot().clone(),
             _guard: guard,
@@ -910,12 +928,13 @@ impl PyEngineSidecar {
             fb
         };
         let child = Arc::new(Mutex::new(None));
+        let fence = Arc::new(Mutex::new(None));
         let status = Arc::new(std::sync::atomic::AtomicU8::new(STATUS_STARTING));
         let started_at = Arc::new(std::sync::Mutex::new(Instant::now()));
 
         // 首次 spawn。返回的 pid 用于在「启动即退出」时仍能写出一条合法记录
         // （此时 `Child::id()` 已被 tokio 融合成 None，见 `spawn_once` 注释）。
-        let spawned_pid = spawn_once(&cfg, &eff_home, &child, &started_at).await?;
+        let spawned_pid = spawn_once(&cfg, &eff_home, &child, &started_at, &fence).await?;
         // 启动即退出（最典型：`OPENSQUILLA_PROFILE_IN_USE` —— 同 profile 已有侧车）
         // 必须**快速报错**：否则 `wait_healthy` 会白等满 90s，调用方只看到「启动失败」，
         // 真正原因（profile 被占用）留在子进程 stdout 里无人查看。
@@ -954,116 +973,21 @@ impl PyEngineSidecar {
         info!(port = cfg.port, "Python 引擎侧车已启动并健康");
 
         // 守护任务：周期检查进程存活 + HTTP 健康；死亡则退避重启
-        let child_guard = child.clone();
-        let cfg_guard = cfg.clone();
-        let eff_home_guard = eff_home.clone();
-        let status_guard = status.clone();
-        let started_at_guard = started_at.clone();
-        let handle = tokio::spawn(async move {
-            let mut backoff = cfg_guard.restart_backoff_min;
-            let mut misses: u32 = 0;
-            loop {
-                sleep(Duration::from_secs(2)).await;
-                // S5：`try_wait()` 拿到 `ExitStatus` 时**先取证据再判死**。
-                // 旧代码写作 `Ok(Some(_exit)) => false`，退出码被直接丢弃；这里补上
-                // 退出码 + 存活时长 + stderr 尾部三件确定可得的事实。
-                //
-                // 时序很关键：证据必须在**重启之前**采集。S6 起`spawn_once`
-                // 改用轮转写入（`observability::rotation`），重启不再抹掉
-                // 上一代日志（它被保留为 `.err.log.1`），但本次运行的 stderr
-                // 仍会在重启后被新一轮写入接续——先取证再重启的顺序必须保留。
-                let alive = {
-                    let mut lock = child_guard.lock().await;
-                    match lock.as_mut() {
-                        Some(c) => match c.try_wait() {
-                            Ok(Some(exit)) => {
-                                let uptime_ms = current_uptime_ms(&started_at_guard);
-                                let (_, err_path) = sidecar_log_paths(cfg_guard.port);
-                                // 记录**必须在重启之前**落定：下一次 `spawn_once`
-                                // 开启新一轮写入，本次的 stderr 现场不再独占该文件。
-                                record_exit_evidence(
-                                    c.id(),
-                                    cfg_guard.port,
-                                    HostExitEvidence {
-                                        code: exit.code(),
-                                        uptime_ms,
-                                        stderr_tail: tail_bytes(
-                                            &err_path,
-                                            STDERR_TAIL_MAX_BYTES,
-                                        ),
-                                        observed: true,
-                                    },
-                                );
-                                false
-                            }
-                            Ok(None) => true,
-                            Err(_) => false,
-                        },
-                        None => false,
-                    }
-                };
-                let http_ok = check_health(&cfg_guard, HEALTH_PROBE_TIMEOUT).await;
-                // 进程还活着但一次探活失败 → 用长超时复核一次：繁忙机器上 3s 探活会超时
-                // （实测 4-worker 全量 e2e 期间出现「alive=true http_ok=false」），
-                // 单次失手就杀会把正在跑任务的引擎干掉（实测 21s 空窗，UI 上引擎答案翻转）。
-                let reprobe_ok = if alive && !http_ok {
-                    check_health(&cfg_guard, HEALTH_REPROBE_TIMEOUT).await
-                } else {
-                    false
-                };
-                let healthy = alive && (http_ok || reprobe_ok);
-                misses = if healthy { 0 } else { misses.saturating_add(1) };
-                let verdict = classify_health(alive, healthy, misses, HEALTH_MISS_LIMIT);
-                if verdict == HealthVerdict::Healthy {
-                    backoff = cfg_guard.restart_backoff_min;
-                    continue;
-                }
-                if verdict == HealthVerdict::Suspect {
-                    warn!(
-                        misses,
-                        limit = HEALTH_MISS_LIMIT,
-                        "Python 侧车探活失手（进程仍在），继续观察，不重启"
-                    );
-                    continue;
-                }
-                warn!(
-                    alive,
-                    http_ok,
-                    reprobe_ok,
-                    misses,
-                    "Python 侧车健康异常，{}ms 后重启",
-                    backoff.as_millis()
-                );
-                misses = 0;
-                status_guard.store(STATUS_RESTARTING, std::sync::atomic::Ordering::Release);
-                sleep(backoff).await;
-                // kill 旧进程（若有残尸）
-                let mut lock = child_guard.lock().await;
-                if let Some(mut c) = lock.take() {
-                    let _ = c.kill().await;
-                }
-                drop(lock);
-                let spawned = spawn_once(&cfg_guard, &eff_home_guard, &child_guard, &started_at_guard).await;
-                if let Err(e) = spawned {
-                    error!(err = %e, "Python 侧车重启失败");
-                    status_guard.store(STATUS_FAILED, std::sync::atomic::Ordering::Release);
-                } else if wait_healthy(&cfg_guard, cfg_guard.health_timeout)
-                    .await
-                    .is_ok()
-                {
-                    status_guard.store(STATUS_RUNNING, std::sync::atomic::Ordering::Release);
-                    info!(port = cfg_guard.port, "Python 侧车重启成功");
-                } else {
-                    error!("Python 侧车重启后健康探测超时");
-                    status_guard.store(STATUS_FAILED, std::sync::atomic::Ordering::Release);
-                }
-                backoff = (backoff * 2).min(cfg_guard.restart_backoff_max);
-            }
-        });
+        // 守护任务：统一监督循环（主路径初始即持有自有子进程）。
+        let handle = tokio::spawn(run_sidecar_supervisor(
+            cfg.clone(),
+            eff_home.clone(),
+            child.clone(),
+            fence.clone(),
+            status.clone(),
+            started_at.clone(),
+            InitialTarget::Owned,
+        ));
 
         Ok(Self {
             config: cfg,
             child,
+            fence,
             status,
             started_at,
             last_exit: global_exit_slot().clone(),
@@ -1088,16 +1012,30 @@ impl PyEngineSidecar {
         current_uptime_ms(&self.started_at)
     }
 
+    /// P1-5（QA）：当前侧车进程是否处于内存围栏（Job Object / RLIMIT）内。
+    /// 也用于让 `fence` 字段被实际读取（围栏句柄仅需持有存活，但保留一个
+    /// 可对账的自查入口）。
+    pub async fn memory_fence_present(&self) -> bool {
+        self.fence.lock().await.is_some()
+    }
+
     /// 基础 URL（例如 `http://127.0.0.1:18792`）
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.config.port)
     }
 
-    /// 主动停止（drop 也会触发）
+    /// 主动停止（drop 也会触发）。
+    ///
+    /// P0-4 三段式：① POST 侧车 graceful shutdown 端点（`/api/system/shutdown`，
+    /// 触发 Python `GatewayServer.close()` 排空在飞 turn）；② 等 drain 自然退出
+    /// ≤ [`SIDECAR_DRAIN_TIMEOUT`]（对齐 Python deadline）；③ 超时才硬杀。
+    /// 旧实现直接 `kill()`——Python 侧精心实现的 drain 在 Windows 桌面上永远
+    /// 拿不到执行机会，进行中的 agent turn 被硬杀。
     pub async fn stop(&self) {
+        request_sidecar_shutdown(&self.base_url(), &self.config.shared_token).await;
         let mut lock = self.child.lock().await;
         if let Some(mut c) = lock.take() {
-            let _ = c.kill().await;
+            drain_or_kill(&mut c, SIDECAR_DRAIN_TIMEOUT).await;
         }
         self.status
             .store(STATUS_STOPPED, std::sync::atomic::Ordering::Release);
@@ -1107,13 +1045,17 @@ impl PyEngineSidecar {
 impl Drop for PyEngineSidecar {
     fn drop(&mut self) {
         // 最佳努力：同步层面无法 await；守护任务在引用 child 时若发现被 drop 则自行退出
-        // 实际停止由 self.stop().await 保证；drop 只做一次后台 fire-and-forget
+        // 实际停止由 self.stop().await 保证；drop 只做一次后台 fire-and-forget。
+        // P0-4：Drop 路径同样优先优雅（短 drain 预算再 kill），不放弃在飞 turn。
         let child = self.child.clone();
         let status = self.status.clone();
+        let base = self.base_url();
+        let token = self.config.shared_token.clone();
         tokio::spawn(async move {
+            request_sidecar_shutdown(&base, &token).await;
             let mut lock = child.lock().await;
             if let Some(mut c) = lock.take() {
-                let _ = c.kill().await;
+                drain_or_kill(&mut c, SIDECAR_DROP_DRAIN_TIMEOUT).await;
             }
             status.store(STATUS_STOPPED, std::sync::atomic::Ordering::Release);
         });
@@ -1215,74 +1157,205 @@ pub async fn early_exit_reason(
     }
 }
 
-/// 复用路径的退出证据守护任务（S5）。
+/// 监督循环的初始目标（P1-7：统一主路径与复用路径）。
+pub(crate) enum InitialTarget {
+    /// `start()`：child 槽已持有本进程 spawn 的子进程。
+    Owned,
+    /// `attach()`：复用一个已存在的外部侧车（仅知 pid，无 Child 句柄）。
+    Attached(u32),
+}
+
+/// 统一侧车监督循环（主路径与复用路径共用）。
 ///
-/// 只做一件事：**盯着附着的 pid，进程一消失就把退出证据落下来**，然后退出。
+/// - **主路径（[`InitialTarget::Owned`]）**：初始 child 槽已持有自有子进程，按
+///   `try_wait()` + HTTP `/ready` 判活。
+/// - **复用路径（[`InitialTarget::Attached`]）**：先按 `pid_is_alive` 盯着外部
+///   pid；外部进程失活时**先取证（code=None）**，随后与主路径**同一策略**
+///   `spawn_once` 接管拉起（此后是自有子进程，回到 try_wait）。这正是 P1-7：
+///   解决「孤儿侧车被杀→只取证不重启→控制台永久降级」，且侧车崩溃不拖死网关。
 ///
-/// # 为什么不重启
-///
-/// 复用路径的语义是「不接管这个进程的生命周期」——它不是我们 spawn 的，重启它
-/// 意味着要重建一整套 `OPENSQUILLA_HOME` / token / profile 环境，且 Python 侧车
-/// 对同一 profile 是单实例，抢占行为会和用户手动启动的实例打架。因此这里**只取证、
-/// 不重启**，把「要不要拉新的」这个决定留给上层（与本任务前的行为一致）。
-///
-/// # 为什么必须有
-///
-/// 复用是实机上最常见的路径（网关被强杀 → 侧车成孤儿 → 下次启动复用）。旧实现
-/// 在这条路径上没有任何守护，于是运行期崩溃**必然丢失全部死因**——用户看到的只是
-/// 「侧车没了」，日志与 RPC 都是空的。
-///
-/// 拿到 `None` 就直接返回：证据已经落定，继续轮询只会反复写同一条记录，还会白白
-/// 产生 `tasklist` 子进程。
-fn spawn_attach_guard(
+/// 其余行为（指数退避、[`classify_restart_loop`] 崩溃循环熔断、[`classify_health`]
+/// 连续失手保护、P1-6 RSS 采样）两路径完全一致。
+async fn run_sidecar_supervisor(
     cfg: SidecarConfig,
-    pid: u32,
+    eff_home: PathBuf,
+    child: Arc<Mutex<Option<Child>>>,
+    fence: Arc<Mutex<Option<crate::pyengine::memfence::MemoryFence>>>,
+    status: Arc<std::sync::atomic::AtomicU8>,
     started_at: Arc<std::sync::Mutex<Instant>>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    // 没有 tokio 运行时可借用（例如纯同步上下文里构造）→ 不起守护，
-    // 与「拿不到 tokio 运行时时的其它旁路」保持一致的降级而不是 panic。
-    if tokio::runtime::Handle::try_current().is_err() {
-        warn!(pid, "无可用 tokio 运行时，复用路径不启用退出证据守护");
-        return None;
-    }
-    let handle = tokio::spawn(async move {
-        loop {
-            sleep(ATTACH_WATCH_INTERVAL).await;
-            if pid_is_alive(pid) {
-                continue;
-            }
-            // 进程已消失 → 取证（唯一时机，必须在这一刻；错过就永远拿不到了）。
-            //
-            // pid 用**附着时**拿到的那个，而不是现在去问系统：进程已经死了，
-            // 主路径那种「从 `Child` 句柄现取 id」的做法在这里不适用，
-            // 而这个 pid 正是我们判活时一直在用的那个，写进记录最自洽。
-            let uptime_ms = current_uptime_ms(&started_at);
-            let (_, err_path) = sidecar_log_paths(cfg.port);
-            record_exit_evidence(
-                Some(pid),
-                cfg.port,
-                HostExitEvidence {
-                    // 附着的进程不是本进程子进程 → 拿不到 ExitStatus。
-                    // code=None 表示「运行时被杀/非子进程，退出码不可知」，
-                    // 而不是「没采集到」——两者在语义上必须区分开。
-                    code: None,
+    initial: InitialTarget,
+) {
+    // 复用路径：记录当前附着的外部 pid；主路径为 None。
+    let mut attached_pid: Option<u32> = match initial {
+        InitialTarget::Attached(p) => Some(p),
+        InitialTarget::Owned => None,
+    };
+    let mut backoff = cfg.restart_backoff_min;
+    let mut misses: u32 = 0;
+    // 崩溃循环熔断窗口（单调时钟）；人工 sidecar_start 构造全新实例时窗口重置。
+    let loop_policy = RestartLoopPolicy::default();
+    let mut restart_events: Vec<Instant> = Vec::new();
+    let mut fast_exit_events: Vec<Instant> = Vec::new();
+    // P1-6：指标采样计数（主循环 tick 2s，每 15 tick = 30s 采一次 RSS）。
+    let mut metrics_ticks: u32 = 0;
+
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        let now = Instant::now();
+        restart_events.retain(|t| now.saturating_duration_since(*t) <= loop_policy.window);
+        fast_exit_events.retain(|t| now.saturating_duration_since(*t) <= loop_policy.window);
+
+        // 判活 + 取证。
+        let alive = if let Some(ap) = attached_pid {
+            // 复用路径：外部进程。
+            if pid_is_alive(ap) {
+                true
+            } else {
+                // 外部进程已消失：取证（code=None），随后走接管重启。
+                let uptime_ms = current_uptime_ms(&started_at);
+                let (_, err_path) = sidecar_log_paths(cfg.port);
+                record_exit_evidence(
+                    Some(ap),
+                    cfg.port,
+                    HostExitEvidence {
+                        code: None,
+                        uptime_ms,
+                        stderr_tail: tail_bytes(&err_path, STDERR_TAIL_MAX_BYTES),
+                        observed: true,
+                    },
+                );
+                warn!(
+                    pid = ap,
+                    port = cfg.port,
                     uptime_ms,
-                    stderr_tail: tail_bytes(&err_path, STDERR_TAIL_MAX_BYTES),
-                    observed: true,
+                    "复用的 Python 侧车已消失，已取证并将自动接管拉起"
+                );
+                // 清空附着态：本循环重启分支将 spawn_once 接管。
+                attached_pid = None;
+                false
+            }
+        } else {
+            // 主路径：自有子进程。
+            let mut lock = child.lock().await;
+            match lock.as_mut() {
+                Some(c) => match c.try_wait() {
+                    Ok(Some(exit)) => {
+                        let uptime_ms = current_uptime_ms(&started_at);
+                        let (_, err_path) = sidecar_log_paths(cfg.port);
+                        record_exit_evidence(
+                            c.id(),
+                            cfg.port,
+                            HostExitEvidence {
+                                code: exit.code(),
+                                uptime_ms,
+                                stderr_tail: tail_bytes(&err_path, STDERR_TAIL_MAX_BYTES),
+                                observed: true,
+                            },
+                        );
+                        if uptime_ms < loop_policy.fast_exit.as_millis() as u64 {
+                            fast_exit_events.push(Instant::now());
+                        }
+                        false
+                    }
+                    Ok(None) => true,
+                    Err(_) => false,
                 },
-            );
-            // 让 supervisor 看得见这件事发生过（默认 warn 级别即可见，
-            // 不依赖 info——此前「日志里搜不到 退出证据」正是本缺陷的隐蔽之处）。
+                None => false,
+            }
+        };
+
+        let http_ok = check_health(&cfg, HEALTH_PROBE_TIMEOUT).await;
+        // 进程还活着但一次探活失败 → 长超时复核（防繁忙机器误杀，见 HEALTH_MISS_LIMIT）。
+        let reprobe_ok = if alive && !http_ok {
+            check_health(&cfg, HEALTH_REPROBE_TIMEOUT).await
+        } else {
+            false
+        };
+        let healthy = alive && (http_ok || reprobe_ok);
+        misses = if healthy { 0 } else { misses.saturating_add(1) };
+        let verdict = classify_health(alive, healthy, misses, HEALTH_MISS_LIMIT);
+        if verdict == HealthVerdict::Healthy {
+            backoff = cfg.restart_backoff_min;
+            if (!restart_events.is_empty() || !fast_exit_events.is_empty())
+                && current_uptime_ms(&started_at) >= loop_policy.stable_clear.as_millis() as u64
+            {
+                restart_events.clear();
+                fast_exit_events.clear();
+                info!("Python 侧车稳定运行已满阈值，崩溃重启窗口清零");
+            }
+            // P1-6：周期采样 RSS。
+            metrics_ticks = metrics_ticks.saturating_add(1);
+            if metrics_ticks >= METRICS_SAMPLE_TICKS {
+                metrics_ticks = 0;
+                // 复用外部进程也可只读采样；优先自有 child pid，否则用附着 pid。
+                let pid_for_metrics = child_pid(&child).await.or(attached_pid);
+                if let Some(pid) = pid_for_metrics {
+                    let rss = read_process_rss_bytes(pid).unwrap_or(0);
+                    record_sidecar_metrics(SidecarMetrics {
+                        pid,
+                        rss_bytes: rss,
+                        sampled_at_ms: now_ms(),
+                        uptime_ms: current_uptime_ms(&started_at),
+                    });
+                }
+            }
+            continue;
+        }
+        if verdict == HealthVerdict::Suspect {
             warn!(
-                pid,
-                port = cfg.port,
-                uptime_ms,
-                "复用的 Python 侧车进程已消失，已记录退出证据（不自动重启）"
+                misses,
+                limit = HEALTH_MISS_LIMIT,
+                "Python 侧车探活失手（进程仍在），继续观察，不重启"
             );
+            continue;
+        }
+        warn!(
+            alive,
+            http_ok,
+            reprobe_ok,
+            misses,
+            "Python 侧车健康异常，{}ms 后重启",
+            backoff.as_millis()
+        );
+        misses = 0;
+        restart_events.push(Instant::now());
+        if classify_restart_loop(
+            &restart_events,
+            &fast_exit_events,
+            Instant::now(),
+            &loop_policy,
+        ) == RestartLoopVerdict::Degraded
+        {
+            warn!(
+                restarts = restart_events.len(),
+                fast_exits = fast_exit_events.len(),
+                window_secs = loop_policy.window.as_secs(),
+                "Python 侧车进入崩溃循环，熔断为 Degraded：停止自动重启，等待人工 sidecar_start"
+            );
+            status.store(STATUS_DEGRADED, std::sync::atomic::Ordering::Release);
             return;
         }
-    });
-    Some(handle)
+        status.store(STATUS_RESTARTING, std::sync::atomic::Ordering::Release);
+        sleep(backoff).await;
+        // kill 旧进程（复用接管时 child 为 None，no-op）。
+        let mut lock = child.lock().await;
+        if let Some(mut c) = lock.take() {
+            let _ = c.kill().await;
+        }
+        drop(lock);
+        let spawned = spawn_once(&cfg, &eff_home, &child, &started_at, &fence).await;
+        if let Err(e) = spawned {
+            error!(err = %e, "Python 侧车重启失败");
+            status.store(STATUS_FAILED, std::sync::atomic::Ordering::Release);
+        } else if wait_healthy(&cfg, cfg.health_timeout).await.is_ok() {
+            status.store(STATUS_RUNNING, std::sync::atomic::Ordering::Release);
+            info!(port = cfg.port, "Python 侧车重启成功");
+        } else {
+            error!("Python 侧车重启后健康探测超时");
+            status.store(STATUS_FAILED, std::sync::atomic::Ordering::Release);
+        }
+        backoff = (backoff * 2).min(cfg.restart_backoff_max);
+    }
 }
 
 async fn spawn_once(
@@ -1290,6 +1363,7 @@ async fn spawn_once(
     eff_home: &Path,
     child_slot: &Arc<Mutex<Option<Child>>>,
     started_at_slot: &Arc<std::sync::Mutex<Instant>>,
+    fence_slot: &Arc<Mutex<Option<crate::pyengine::memfence::MemoryFence>>>,
 ) -> Result<Option<u32>> {
     let mut cmd = Command::new(&cfg.python_exe);
     cmd.args(["-m", "opensquilla.cli.main", "gateway", "run"])
@@ -1352,6 +1426,14 @@ async fn spawn_once(
     cmd.stdout(Stdio::from(out_file))
         .stderr(Stdio::from(err_file))
         .kill_on_drop(true);
+    // P1-5：内存围栏。
+    let limit_mb = crate::pyengine::memfence::limit_mb_from_env();
+    let limit_bytes = limit_mb.map(crate::pyengine::memfence::mb_to_bytes);
+    // Linux: spawn 前在 pre_exec 内 setrlimit(RLIMIT_AS)。
+    if let Some(bytes) = limit_bytes {
+        crate::pyengine::memfence::prepare_command(&mut cmd, bytes)
+            .context("套用侧车内存围栏(RLIMIT)失败")?;
+    }
     // Windows: 静默后台运行，不弹出 Python 控制台窗口
     #[cfg(windows)]
     {
@@ -1360,6 +1442,35 @@ async fn spawn_once(
     let spawned = cmd
         .spawn()
         .with_context(|| format!("spawn Python 失败: {}", cfg.python_exe.display()))?;
+    // Windows: spawn 后把进程放进 Job Object 并设 JobMemoryLimit。
+    #[cfg(windows)]
+    {
+        // tokio 1.53 的 raw_handle 返回 Option<RawHandle>（*mut c_void）。
+        let raw_handle = spawned.raw_handle().map(|h| h as isize);
+        let new_fence = match (limit_bytes, raw_handle) {
+            (Some(bytes), Some(h)) => Some(
+                crate::pyengine::memfence::fence_after_spawn(h, bytes)
+                    .with_context(|| "侧车 Job Object 内存围栏套用失败")?,
+            ),
+            (Some(_), None) => {
+                return Err(anyhow!("侧车刚 spawn 即融合，拿不到进程句柄套用围栏"));
+            }
+            (None, _) => None,
+        };
+        // 替换为新围栏（旧围栏 drop → 关闭旧 Job）。
+        *fence_slot.lock().await = new_fence;
+        if let Some(mb) = limit_mb {
+            info!(limit_mb = mb, "Python 侧车已套用 Job Object 内存围栏");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if limit_bytes.is_some() {
+            *fence_slot.lock().await = Some(crate::pyengine::memfence::MemoryFence);
+        } else {
+            *fence_slot.lock().await = None;
+        }
+    }
     // S5：pid 必须在**此刻**取。tokio 的 `Child::id()` 在 `try_wait()` 回收之后
     // 会转为 `FusedChild::Done` 并返回 `None`（见 tokio process/mod.rs）——
     // 也就是说等我们发现进程退出时再问 pid，永远只能拿到 None，早退证据就
@@ -1429,9 +1540,11 @@ pub(crate) fn classify_health(
 }
 
 async fn check_health(cfg: &SidecarConfig, wait: Duration) -> bool {
-    // Python 网关实际健康端点是 /health（app.py: Route("/health", health)），
+    // P0-2：探活从静态 /health（写死 200，只证明 TCP 在）改为 /ready
+    // （Python 侧把"事件循环是否真的在转"自证进去：loop tick 停滞 >15s → 503）。
+    // /health 与 /healthz 仍是纯存活探针（app.py: Route("/health", health)），
     // 非 /api/health（那是 Rust 网关自己的端点）。
-    let url = format!("http://127.0.0.1:{}/health", cfg.port);
+    let url = format!("http://127.0.0.1:{}{}", cfg.port, ready_probe_path());
     timeout(wait, async {
         match reqwest::Client::builder()
             // 客户端超时必须与调用方给的上限一致：固定 2s 会让「长超时复核」
@@ -1467,6 +1580,231 @@ async fn wait_healthy(cfg: &SidecarConfig, total: Duration) -> Result<()> {
     }
     Err(anyhow!("Python 侧车 {}s 内未健康", total.as_secs()))
 }
+
+/// P0-2：看门狗探活路径。用 `/ready`（事件循环新鲜度自证）而非静态 `/health`。
+///
+/// 抽成常量函数而非内联字符串：纯函数守卫（[`health_verdict_tests`] 内）钉住
+/// "不得回退成静态 /health"——事故复盘里最常见的回退就是换探针时把 URL 改回去。
+pub(crate) fn ready_probe_path() -> &'static str {
+    "/ready"
+}
+
+// ---------------------------------------------------------------------------
+// P0-1：崩溃循环熔断（crash-loop circuit breaker，对齐 supervisord
+//       `startretries` + `startsecs`：退避封顶 30s 后无限重启必须被熔断终结）
+// ---------------------------------------------------------------------------
+
+/// 熔断参数（10 分钟窗口 / 重启 ≥5 次 / 30s 内秒退 ≥3 次 / 稳定 5 分钟清零）。
+#[derive(Debug, Clone)]
+pub(crate) struct RestartLoopPolicy {
+    /// 滑动窗口长度：窗口外的重启事件不计入熔断。
+    pub window: Duration,
+    /// 窗口内重启达到该次数 → Degraded（停止自动重启）。
+    pub restart_threshold: usize,
+    /// 一次「秒退」的判定：本代进程存活不足该时长即退出。
+    pub fast_exit: Duration,
+    /// 窗口内秒退达到该次数 → Degraded（即便总重启数未达阈值——profile 锁坏 /
+    /// 缺依赖的典型形态正是「每次起来 1 秒就死」）。
+    pub fast_exit_threshold: usize,
+    /// 连续健康运行达到该时长 → 清零熔断窗口（故障已自愈）。
+    pub stable_clear: Duration,
+}
+
+impl Default for RestartLoopPolicy {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(600),        // 10 分钟
+            restart_threshold: 5,
+            fast_exit: Duration::from_secs(30),
+            fast_exit_threshold: 3,
+            stable_clear: Duration::from_secs(300), // 稳定跑满 5 分钟清零
+        }
+    }
+}
+
+/// 熔断判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartLoopVerdict {
+    /// 继续按退避自动重启。
+    Continue,
+    /// 熔断：停止自动重启，状态转 `Degraded`，等待人工显式 `sidecar_start`。
+    Degraded,
+}
+
+/// P0-1 纯函数：判定重启事件序列是否已构成崩溃循环。
+///
+/// 输入全部是**单调时钟**（[`Instant`]）上的事件时刻，不受系统校时影响：
+/// - `restarts`：守护任务每决定重启一次即记一笔（含本次待执行的这次）；
+/// - `fast_exits`：每发现一代进程存活 < [`RestartLoopPolicy::fast_exit`] 即退出，记一笔；
+/// - `now`：判定时刻。
+///
+/// 熔断条件（任一命中即 [`RestartLoopVerdict::Degraded`]）：
+/// ① 滑动窗口内重启 ≥ `restart_threshold`；
+/// ② 滑动窗口内秒退 ≥ `fast_exit_threshold`。
+///
+/// 「稳定运行满 stable_clear 清零」**刻意不放在本函数**：它是时间推进下的窗口修剪，
+/// 由守护循环在「本轮健康且本代已跑满 stable_clear」时直接 `clear()`——纯函数只
+/// 负责判定，副作用留在调用方，便于两边各自单测。
+pub(crate) fn classify_restart_loop(
+    restarts: &[Instant],
+    fast_exits: &[Instant],
+    now: Instant,
+    policy: &RestartLoopPolicy,
+) -> RestartLoopVerdict {
+    let count_in_window = |events: &[Instant]| -> usize {
+        events
+            .iter()
+            .filter(|t| now.saturating_duration_since(**t) <= policy.window)
+            .count()
+    };
+    if count_in_window(restarts) >= policy.restart_threshold {
+        return RestartLoopVerdict::Degraded;
+    }
+    if count_in_window(fast_exits) >= policy.fast_exit_threshold {
+        return RestartLoopVerdict::Degraded;
+    }
+    RestartLoopVerdict::Continue
+}
+
+/// P0-4：Python 侧 graceful shutdown 端点（app.py: `POST /api/system/shutdown`，
+/// owner-only，202 accepted 后异步执行 `GatewayServer.close()` 排空在飞 turn）。
+///
+/// 我们**只调用、不改动**该路径（Python 侧契约）：不带 Origin 的 Rust 直连请求过
+/// `_same_origin`，带共享 token → `resolve_auth` 判 operator → `is_owner=True`。
+pub(crate) const SIDECAR_SHUTDOWN_PATH: &str = "/api/system/shutdown";
+/// `stop()` 的 drain 预算（对齐 Python `gateway_shutdown_deadline`）。
+const SIDECAR_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Drop 路径的 drain 预算（应用关闭流程不容久等）。
+const SIDECAR_DROP_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// shutdown POST 自身的超时（端点 202 立即返回，drain 是它自己异步做的）。
+const SIDECAR_SHUTDOWN_POST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// P0-4：向侧车请求 graceful shutdown（最佳努力）。
+///
+/// 任何失败（侧车没起来 / 不支持 shutdown / 超时）都静默吞掉——调用方随后还有
+/// drain→kill 两段兜底，这里绝不能因为「优雅关停请求发不出去」而把 stop() 本身
+/// 变成错误源。
+async fn request_sidecar_shutdown(base_url: &str, token: &str) {
+    let url = format!("{base_url}{SIDECAR_SHUTDOWN_PATH}");
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return;
+    };
+    let _ = timeout(
+        SIDECAR_SHUTDOWN_POST_TIMEOUT,
+        client.post(&url).bearer_auth(token).send(),
+    )
+    .await;
+}
+
+/// P0-4：先等子进程自然退出（drain 完成后 Python 自行 exit），超时再硬杀。
+///
+/// 抽成独立函数是为了让「drain 预算内自行退出 = 不硬杀」这条契约可单测：
+/// 用一个立刻退出的真子进程验证 wait 自然返回，用一个 sleep 长进程验证超时硬杀。
+pub(crate) async fn drain_or_kill(child: &mut Child, drain: Duration) {
+    match timeout(drain, child.wait()).await {
+        Ok(Ok(_)) => { /* drain 窗口内自然退出：优雅关停成功 */ }
+        Ok(Err(_)) => {
+            // wait 句柄异常：按硬杀兜底（不重复在文档里猜原因）
+            let _ = child.kill().await;
+        }
+        Err(_) => {
+            // drain 超时：排空未完成，硬杀收尾（既有行为，仅推迟到此刻）
+            let _ = child.kill().await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P1-6：侧车资源指标（RSS）——只采集暴露，不做预警重启（避免与重启路径耦合）
+// ---------------------------------------------------------------------------
+
+/// 侧车最近一次资源采样（P1-6）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SidecarMetrics {
+    /// 采样时的子进程 pid（复用路径没有子进程句柄时为 0）。
+    pub pid: u32,
+    /// 常驻集 RSS（字节）；采样失败为 0（诚实降级，不伪造读数）。
+    pub rss_bytes: u64,
+    /// 采样时刻（Unix 毫秒）。
+    pub sampled_at_ms: u64,
+    /// 采样时已存活毫秒。
+    pub uptime_ms: u64,
+}
+
+/// P1-6：采样槽（进程级，与 [`global_exit_slot`] 同型——读方是同步 RPC handler）。
+fn global_metrics_slot() -> &'static std::sync::Mutex<Option<SidecarMetrics>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<SidecarMetrics>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 守护任务写入一次采样。
+pub(crate) fn record_sidecar_metrics(m: SidecarMetrics) {
+    match global_metrics_slot().lock() {
+        Ok(mut slot) => *slot = Some(m),
+        Err(poisoned) => *poisoned.into_inner() = Some(m),
+    }
+}
+
+/// 读最近一次采样（从未采样过 → `None`）。
+pub fn sidecar_metrics_snapshot() -> Option<SidecarMetrics> {
+    match global_metrics_slot().lock() {
+        Ok(slot) => *slot,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// 守护任务的指标采样间隔（30s；主循环 tick 是 2s，即每 15 轮采一次）。
+const METRICS_SAMPLE_TICKS: u32 = 15;
+
+/// Linux：从 `/proc/<pid>/status` 文本解析 `VmRSS:`（kB）。纯函数，便于单测。
+pub fn parse_vmrss_kb(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        if it.next()? == "VmRSS:" {
+            let kb: u64 = it.next()?.parse().ok()?;
+            return Some(kb);
+        }
+    }
+    None
+}
+
+/// 读某 pid 的常驻内存 RSS（字节）；任何失败一律 `None`（只读指标，不允许拖垮守护）。
+pub fn read_process_rss_bytes(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        read_process_rss_windows(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        parse_vmrss_kb(&text).map(|kb| kb.saturating_mul(1024))
+    }
+}
+
+#[cfg(windows)]
+fn read_process_rss_windows(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let result = GetProcessMemoryInfo(
+            handle,
+            &mut counters as *mut _ as *mut _,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        let _ = CloseHandle(handle);
+        result.ok()?;
+        // WorkingSetSize 即进程当前常驻物理内存（RSS 语义，usize 无符号）。
+        Some(counters.WorkingSetSize as u64)
+    }
+}
+
 
 /// 从任意目录计算绝对 `pyengine/src` 路径（供集成测试覆盖）
 pub fn resolve_src_for(dir: &Path) -> Option<PathBuf> {
@@ -1594,6 +1932,171 @@ mod health_verdict_tests {
         assert!(!health_status_is_alive(503), "503 同上");
     }
 }
+
+/// P0-1 / P0-2 / P0-4 / P1-6：侧车稳定性加固单测。
+#[cfg(test)]
+mod stability_hardening_tests {
+    use super::*;
+
+    /// P0-2：看门狗探活必须打 `/ready`（事件循环新鲜度自证），不得回退到静态 `/health`。
+    #[test]
+    fn watchdog_probe_targets_ready_not_static_health() {
+        assert_eq!(ready_probe_path(), "/ready");
+        assert_ne!(ready_probe_path(), "/health", "静态 /health 只证明 TCP 在，会放过卡死的引擎");
+    }
+
+    fn policy() -> RestartLoopPolicy {
+        RestartLoopPolicy {
+            window: Duration::from_secs(600),
+            restart_threshold: 5,
+            fast_exit: Duration::from_secs(30),
+            fast_exit_threshold: 3,
+            stable_clear: Duration::from_secs(300),
+        }
+    }
+
+    /// 测试用的"当前时刻"：基准 + 1 小时。
+    ///
+    /// 这些用例要构造 `now - 20min` 的事件流，而 `Instant` 的零点是**开机时刻**：
+    /// 机器刚启动 12 分钟时 `Instant::now() - 20min` 会直接 panic
+    /// （overflow when subtracting duration from instant，真机 05:0x 复现）。
+    /// 加 1 小时对 `classify_restart_loop` 的语义没有影响（它只做时间差），
+    /// 但保证任何开机时长下都不会下溢。
+    fn test_now() -> Instant {
+        Instant::now() + Duration::from_secs(3_600)
+    }
+
+    /// P0-1：10 分钟窗口内第 5 次重启 → Degraded（停止自动重启）。
+    #[test]
+    fn crash_loop_trips_on_five_restarts_in_window() {
+        let now = test_now();
+        let p = policy();
+        let ev: Vec<Instant> = (0..4)
+            .map(|i| now - Duration::from_secs(60 * (i + 1)))
+            .collect();
+        // 4 次（都在窗口内）→ 继续
+        assert_eq!(
+            classify_restart_loop(&ev, &[], now, &p),
+            RestartLoopVerdict::Continue
+        );
+        // 第 5 次（含本次）→ 熔断
+        let mut ev5 = ev.clone();
+        ev5.push(now);
+        assert_eq!(
+            classify_restart_loop(&ev5, &[], now, &p),
+            RestartLoopVerdict::Degraded,
+            "窗口内第 5 次重启必须熔断"
+        );
+    }
+
+    /// P0-1：总重启数没到 5，但 30s 内秒退已达 3 次 → 同样熔断
+    /// （profile 锁坏 / 缺依赖的典型形态：退避封顶 30s 也救不回来）。
+    #[test]
+    fn crash_loop_trips_on_three_fast_exits_even_with_few_restarts() {
+        let now = test_now();
+        let p = policy();
+        let fast: Vec<Instant> = (0..3)
+            .map(|i| now - Duration::from_secs(90 * (i + 1)))
+            .collect();
+        assert_eq!(
+            classify_restart_loop(&[now - Duration::from_secs(60)], &fast, now, &p),
+            RestartLoopVerdict::Degraded,
+            "3 次秒退（即便总重启只有 2 次）必须熔断"
+        );
+        let mut fast2 = fast.clone();
+        fast2.pop();
+        assert_eq!(
+            classify_restart_loop(&[now - Duration::from_secs(60)], &fast2, now, &p),
+            RestartLoopVerdict::Continue,
+            "2 次秒退还在容忍区"
+        );
+    }
+
+    /// P0-1：窗口外的重启事件不计入（11 分钟前的 100 次重启 ≠ 崩溃循环）。
+    #[test]
+    fn restarts_outside_the_window_do_not_trip() {
+        let now = test_now();
+        let p = policy();
+        let old: Vec<Instant> = (0..10)
+            .map(|i| now - Duration::from_secs(60 * (11 + i)))
+            .collect();
+        assert_eq!(
+            classify_restart_loop(&old, &[], now, &p),
+            RestartLoopVerdict::Continue,
+            "窗口外的历史重启不得触发熔断"
+        );
+    }
+
+    /// P1-6：`/proc/<pid>/status` 的 VmRSS 解析（纯函数）。
+    #[test]
+    fn parse_vmrss_kb_extracts_value_and_rejects_garbage() {
+        let sample = "Name:\tpython3\nState:\tS (sleeping)\nVmRSS:\t  40960 kB\nThreads:\t5\n";
+        assert_eq!(parse_vmrss_kb(sample), Some(40_960));
+        assert_eq!(parse_vmrss_kb("VmPeak:\t10000 kB\n"), None, "只认 VmRSS:");
+        assert_eq!(parse_vmrss_kb("VmRSS:\tnotanumber kB\n"), None);
+        assert_eq!(parse_vmrss_kb(""), None);
+    }
+
+    /// P1-6：本进程 RSS 必须读得到且 > 0（Windows GetProcessMemoryInfo /
+    /// Linux /proc 两条实现至少在本平台上真实可用——这是「采集不是空转」的证据）。
+    #[test]
+    fn own_process_rss_is_readable() {
+        let rss = read_process_rss_bytes(std::process::id())
+            .expect("本进程 RSS 必须读得到（实现至少在本平台可用）");
+        assert!(rss > 0, "本进程 RSS 必须 > 0，实际 {rss}");
+    }
+
+    /// P0-4：drain 窗口内子进程自然退出 → 不硬杀（wait 正常返回）。
+    #[tokio::test]
+    async fn drain_or_kill_accepts_natural_exit_without_killing() {
+        #[cfg(windows)]
+        let mut child = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit", "0"]);
+            c.spawn().unwrap()
+        };
+        #[cfg(not(windows))]
+        let mut child = {
+            let mut c = Command::new("sh");
+            c.args(["-c", "exit 0"]);
+            c.spawn().unwrap()
+        };
+        drain_or_kill(&mut child, Duration::from_secs(5)).await;
+        let status = child.try_wait().unwrap();
+        assert!(
+            status.is_some(),
+            "自然退出后 wait 应已回收（drain_or_kill 没有硬杀）"
+        );
+        assert!(status.unwrap().success());
+    }
+
+    /// P0-4：drain 窗口内子进程不肯退 → 超时硬杀（200ms 预算 vs 30s 睡眠）。
+    #[tokio::test]
+    async fn drain_or_kill_kills_after_budget() {
+        #[cfg(windows)]
+        let mut child = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "ping", "-n", "30", "127.0.0.1", ">nul"]);
+            c.spawn().unwrap()
+        };
+        #[cfg(not(windows))]
+        let mut child = {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 30"]);
+            c.spawn().unwrap()
+        };
+        let started = Instant::now();
+        drain_or_kill(&mut child, Duration::from_millis(200)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain 超时后必须立刻硬杀，实际 {:?}",
+            started.elapsed()
+        );
+        let status = child.try_wait().unwrap();
+        assert!(status.is_some(), "睡眠子进程应被 drain 超时后硬杀");
+    }
+}
+
 
 /// S5：`save_last_exit` 在**记录文件不存在**时必须新建一条。
 ///
@@ -2037,7 +2540,7 @@ python  32484 user   12u  IPv4 0x1234      0t0  TCP 127.0.0.1:61750 (LISTEN)\n";
             restart_backoff_max: Duration::from_millis(50),
             health_timeout: Duration::from_millis(50),
         };
-        let sidecar = PyEngineSidecar::attach(cfg, Some(pid));
+        let mut sidecar = PyEngineSidecar::attach(cfg, Some(pid));
         // attach 必须真的挂上守护任务——这正是原缺陷（`_guard: None`）。
         assert!(
             sidecar._guard.is_some(),
@@ -2067,7 +2570,7 @@ python  32484 user   12u  IPv4 0x1234      0t0  TCP 127.0.0.1:61750 (LISTEN)\n";
         // 存活时长必须落在「附着 → 被杀 → 采集」这个真实区间内。
         //
         // 刻意**不**断言与 `sidecar.uptime_ms()` 完全相等：守护任务落证据的时刻与
-        // 断言读取的时刻之间隔着一次轮询（`ATTACH_WATCH_INTERVAL`），逐毫秒漂移
+        // 断言读取的时刻之间隔着一次监督轮询（2s tick），逐毫秒漂移
         // 是正常的（实测 3329 vs 3330）。断言相等于把测试绑死在调度时序上。
         assert!(
             ev.uptime_ms > 0,
@@ -2079,6 +2582,11 @@ python  32484 user   12u  IPv4 0x1234      0t0  TCP 127.0.0.1:61750 (LISTEN)\n";
             "存活时长 {} 不应超过「附着至今 + 一轮轮询余量」",
             ev.uptime_ms
         );
+        // 收尾：先显式中止监督任务并 drop，避免接管路径在删除目录后继续 spawn。
+        if let Some(g) = sidecar._guard.take() {
+            g.abort();
+        }
+        drop(sidecar);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

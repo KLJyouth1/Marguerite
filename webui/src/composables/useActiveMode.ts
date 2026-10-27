@@ -38,6 +38,7 @@ import { useRpcStore } from '@/stores/rpc'
 import {
   MODE_KINDS,
   normalizeModeKind,
+  normalizeModePayload,
   useActiveModeStore,
   USER_MODE_META,
   USER_MODE_INTENSITY,
@@ -51,6 +52,18 @@ import {
 export { MODE_KINDS, normalizeModeKind, USER_MODE_META, USER_MODE_INTENSITY, USER_MODE_WORKING, userModeKeyForKind, userModeInfoFor }
 export type { ModePayload, UserModeInfo }
 
+// Some consumers intentionally mount the composer as an isolated component
+// (unit tests, visual harnesses, and embedders) before installing Pinia. The
+// app itself always has an active Pinia instance, but the shared computed
+// exports must not make those lightweight consumers crash during setup.
+function activeModeStoreOrNull() {
+  try {
+    return useActiveModeStore()
+  } catch {
+    return null
+  }
+}
+
 /**
  * Shared, cross-chunk reactive ref of the active runtime mode.
  *
@@ -61,28 +74,29 @@ export type { ModePayload, UserModeInfo }
  * exact bug this refactor fixes (see the header comment).
  */
 export const activeMode = computed({
-  get: () => useActiveModeStore().mode,
+  get: () => activeModeStoreOrNull()?.mode ?? null,
   set: (value: ModePayload | null) => {
-    useActiveModeStore().mode = value
+    const store = activeModeStoreOrNull()
+    if (store) store.mode = value
   },
 })
 
 /** Who requested the last change (broadcast payload's `from`). */
-export const lastChangedFrom = computed(() => useActiveModeStore().lastChangedFrom)
+export const lastChangedFrom = computed(() => activeModeStoreOrNull()?.lastChangedFrom ?? null)
 
 /** 当前 3×3 用户模式格位（来自 `mode.get.userMode`），未 hydrate 时为 null。 */
 export const activeUserMode = computed<UserModeInfo | null>(
-  () => useActiveModeStore().mode?.userMode ?? null,
+  () => activeModeStoreOrNull()?.mode?.userMode ?? null,
 )
 
 /**
  * Last `mode.switch` failure, or `null`. Read by the top-bar badge to show an
  * honest error instead of silently keeping the old mode.
  */
-export const switchError = computed(() => useActiveModeStore().switchError)
+export const switchError = computed(() => activeModeStoreOrNull()?.switchError ?? null)
 
 /** True while a `mode.switch` round-trip is in flight (drives the badge busy state). */
-export const switching = computed(() => useActiveModeStore().switching)
+export const switching = computed(() => activeModeStoreOrNull()?.switching ?? false)
 
 let unsubscribe: (() => void) | null = null
 /** Transport-state listener used only while waiting for the first `connected`. */
@@ -134,7 +148,9 @@ export function initActiveMode(): void {
     rpc
       .call<ModePayload>('mode.get', {})
       .then((md) => {
-        if (md) store.mode = md
+        // 归一化：老网关可能只回 kind，或字段命名不一致；不让 UI 拿到半截载荷。
+        const payload = normalizeModePayload(md)
+        if (payload) store.mode = payload
         else console.warn('[activeMode] mode.get returned an empty payload')
       })
       .catch((err: unknown) => {
@@ -208,10 +224,16 @@ export async function switchUserMode(key: string): Promise<ModePayload | null> {
   store.switchError = null
   try {
     const r = await rpc.call<ModePayload>('mode.switch', { userMode: key })
-    const userMode = userModeInfoFor(key)
-    if (r) store.mode = r
-    else if (userMode) store.mode = { ...(store.mode ?? {}), userMode }
-    return r
+    // 网关的 `mode.switch` 把 `userMode` 回成**字符串**（mode.get 回对象）。
+    // 必须归一化，否则 store 里的 userMode 变成裸字符串，胶囊/网格/发送门禁
+    // 三处同时读不到 key（真机：切到「标准·执行」后仍按「标准·方案」拒发）。
+    const payload = normalizeModePayload(r)
+    if (payload) store.mode = payload
+    else {
+      const userMode = userModeInfoFor(key)
+      if (userMode) store.mode = { ...(store.mode ?? {}), userMode }
+    }
+    return payload
   } catch (err) {
     store.switchError = err instanceof Error ? err.message : String(err)
     return null
@@ -232,9 +254,10 @@ export async function switchActiveMode(kind: string): Promise<ModePayload | null
     // Only reflect the change AFTER the gateway confirms it. A broadcast
     // `mode.changed` will refine the payload; when `mode.switch` returns no
     // body we still fall back to the requested kind because the call succeeded.
-    if (r) store.mode = r
+    const payload = normalizeModePayload(r)
+    if (payload) store.mode = payload
     else applyMode(kind)
-    return r
+    return payload
   } catch (err) {
     // Honest failure: keep the previous mode and surface the reason.
     store.switchError = err instanceof Error ? err.message : String(err)

@@ -11,7 +11,7 @@ pub(crate) async fn run_browser_action(
     action: &str,
     url: &str,
     fresh: bool,
-    workspace: &Path,
+    workspace: &RootSet,
     vision_cap: &Option<Arc<VisionCapability>>,
 ) -> Result<ToolResult> {
     // 复用会话且给了新 url → 先导航到目标页
@@ -149,7 +149,7 @@ pub(crate) async fn run_browser_action(
             if out.trim().is_empty() {
                 return err("screenshot 需要非空 out".into(), "INVALID_PARAMS");
             }
-            let abs = match safe_resolve(workspace, &out) {
+            let abs = match workspace.resolve(&out) {
                 Ok(p) => p,
                 Err(e) => return err(format!("路径解析失败: {e}"), "INVALID_PATH"),
             };

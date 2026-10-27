@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { bootOrchestraSeenStorage } from './bootSeen'
 
 // fold-authoritative live render proof. The fold is now the default live
 // render source (the activity timeline/artifacts/live-thinking project from the
@@ -15,6 +16,7 @@ import { test, expect, type Page } from '@playwright/test'
 const CONTROL_URL = '/control/'
 const LIVE = process.env.OPENSQUILLA_E2E_LIVE === '1'
 const FOLD_FLAG_KEY = 'marguerite.chat.foldLiveTurn'
+const BASE_URL = process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791'
 
 // Pin the ON flag before any page script runs so useChatTurnLog resolves
 // useReducer === true at composable init (the fold becomes authoritative).
@@ -53,7 +55,10 @@ test.describe('Fold-authoritative live turn', () => {
     // A context WITHOUT the init script leaves the key unset. Post default-flip an
     // absent key resolves to ON (the fold is authoritative); only an explicit '0'
     // forces legacy. The key stays null — the ON default needs no key written.
-    const context = await browser.newContext()
+    const context = await browser.newContext({
+      baseURL: BASE_URL,
+      storageState: bootOrchestraSeenStorage(new URL(BASE_URL).origin),
+    })
     const page = await context.newPage()
     await page.goto(CONTROL_URL + 'chat/new')
     await page.waitForSelector('.conn-pill', { timeout: 10000 })

@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-card" :class="`agent-card--${tone}`">
+  <div class="agent-card" :class="`agent-card--${tone}`" @click="onFocus">
     <div class="agent-card__head">
       <span class="agent-card__icon" aria-hidden="true">
         <Icon :name="statusIcon" :size="14" />
@@ -7,6 +7,15 @@
       <span class="agent-card__title">{{ t('chat.subagentCard.title') }}</span>
       <span class="agent-card__badge" :class="`agent-card__badge--${tone}`">{{ statusLabel }}</span>
       <time v-if="timeIso" class="agent-card__time" :datetime="timeIso" :title="timeFull">{{ timeAbs }}</time>
+      <button
+        type="button"
+        class="agent-card__focus"
+        :title="t('chat.subagentCard.openInSidebar')"
+        :aria-label="t('chat.subagentCard.openInSidebar')"
+        @click.stop="onFocus"
+      >
+        <Icon name="panel-right-open" :size="12" />
+      </button>
     </div>
 
     <p v-if="summaryText" class="agent-card__summary" :class="{ 'is-clamped': !expanded && summaryLong }">
@@ -16,7 +25,7 @@
       v-if="summaryLong"
       type="button"
       class="agent-card__more"
-      @click="expanded = !expanded"
+      @click.stop="expanded = !expanded"
     >{{ expanded ? t('chat.subagentCard.collapse') : t('chat.subagentCard.expand') }}</button>
 
     <div v-if="sessionShort" class="agent-card__meta">
@@ -26,13 +35,13 @@
         class="agent-card__copy"
         :title="t('chat.subagentCard.copySession')"
         :aria-label="t('chat.subagentCard.copySession')"
-        @click="copySession"
+        @click.stop="copySession"
       >
         <Icon name="copy" :size="12" />
       </button>
     </div>
 
-    <details v-if="rawJson" class="agent-card__details">
+    <details v-if="rawJson" class="agent-card__details" @click.stop>
       <summary>{{ t('chat.subagentCard.viewJson') }}</summary>
       <pre>{{ rawJson }}</pre>
     </details>
@@ -45,32 +54,20 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { ChatRenderedMessage } from '@/types/chat'
 import { copyTextWithFallback } from '@/utils/browser'
+import { parseSubagentPayload, subagentTone } from '@/utils/chat/subagent'
 import { absoluteTime, fullTime, isoTime } from '@/utils/messageTime'
 
-interface SubagentPayload {
-  type?: string
-  status?: string
-  terminal_reason?: string
-  child_session_key?: string
-  parent_session_key?: string
-  result?: { text?: string; summary?: string; [key: string]: unknown }
-  [key: string]: unknown
-}
-
 const props = defineProps<{ message: ChatRenderedMessage }>()
+
+const emit = defineEmits<{
+  focus: [payload: { key: string }]
+}>()
 
 const { t } = useI18n()
 const expanded = ref(false)
 const copied = ref(false)
 
-const payload = computed<SubagentPayload | null>(() => {
-  try {
-    const parsed = JSON.parse(props.message.text)
-    return parsed && typeof parsed === 'object' ? parsed as SubagentPayload : null
-  } catch {
-    return null
-  }
-})
+const payload = computed(() => parseSubagentPayload(props.message.text))
 
 const rawJson = computed(() => {
   try {
@@ -80,19 +77,8 @@ const rawJson = computed(() => {
   }
 })
 
-// 状态归一：completed/success/done → ok；failed/error/timeout/cancelled → err；
-// running/queued/in_progress → run；其余 → idle。
-const STATUS_OK = new Set(['success', 'completed', 'done', 'finished', 'ok'])
-const STATUS_ERR = new Set(['failed', 'error', 'timeout', 'cancelled', 'aborted', 'rejected'])
-const STATUS_RUN = new Set(['running', 'queued', 'in_progress', 'pending', 'working'])
-
-const tone = computed<'ok' | 'err' | 'run' | 'idle'>(() => {
-  const status = String(payload.value?.status || '').toLowerCase()
-  if (STATUS_OK.has(status)) return 'ok'
-  if (STATUS_ERR.has(status)) return 'err'
-  if (STATUS_RUN.has(status)) return 'run'
-  return 'idle'
-})
+// 状态归一与右栏「子智能体」轴共用同一套口径（utils/chat/subagent.ts）。
+const tone = computed(() => subagentTone(payload.value?.status || payload.value?.terminal_reason))
 
 const statusIcon = computed(() => {
   if (tone.value === 'ok') return 'check'
@@ -135,14 +121,22 @@ const summaryText = computed(() => {
 const SUMMARY_CLAMP_CHARS = 220
 const summaryLong = computed(() => summaryText.value.length > SUMMARY_CLAMP_CHARS)
 
+const sessionKey = computed(() => {
+  return String(payload.value?.child_session_key || payload.value?.session_key || '').trim()
+})
+
 const sessionShort = computed(() => {
-  const key = String(payload.value?.child_session_key || payload.value?.session_key || '').trim()
+  const key = sessionKey.value
   if (!key) return ''
   return key.length > 40 ? `${key.slice(0, 18)}…${key.slice(-14)}` : key
 })
 
+function onFocus() {
+  emit('focus', { key: sessionKey.value })
+}
+
 async function copySession() {
-  const key = String(payload.value?.child_session_key || payload.value?.session_key || '').trim()
+  const key = sessionKey.value
   if (!key) return
   try {
     await copyTextWithFallback(key)
@@ -165,6 +159,7 @@ const timeFull = computed(() => fullTime(props.message.ts))
   border-left: 3px solid var(--text-dim);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-xs);
+  cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
@@ -316,6 +311,34 @@ const timeFull = computed(() => fullTime(props.message.ts))
 .agent-card__copy:hover {
   border-color: var(--border);
   color: var(--text);
+}
+
+.agent-card__focus {
+  align-items: center;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  height: 1.375rem;
+  justify-content: center;
+  padding: 0;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast);
+  width: 1.375rem;
+}
+
+.agent-card__focus:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.agent-card__focus:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 1px;
 }
 
 .agent-card__copy:focus-visible {

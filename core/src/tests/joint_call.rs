@@ -103,6 +103,7 @@ fn offline_cfg(url: &str) -> Config {
             base_url: url.to_string(),
             copilot_model: None,
             timeout_secs: 0,
+                wire_api: crate::model::wire::WireApi::Chat,
         },
         ..Default::default()
     }

@@ -560,11 +560,19 @@ async function loadData() {
 
 async function loadStatus() {
   if (!isActive) return
-  try {
-    status.value = await rpc.call<LogStatus>('logs.status', {})
-  } catch {
-    status.value = null
+  // 连接换代（会话订阅被中止会回收整条 socket）会让首调失败一次；
+  // 直接置 null 就把"日志状态不可用"永久挂在那里，即使后续完全正常。
+  // 只读、幂等，重试一次即可，且不向用户暴露中间态。
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      status.value = await rpc.call<LogStatus>('logs.status', {})
+      return
+    } catch {
+      if (!isActive) return
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 300))
+    }
   }
+  status.value = null
 }
 
 async function poll() {
@@ -690,13 +698,34 @@ function onDetailKeydown(event: KeyboardEvent) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * 级别只按「所处位置」识别，绝不做全文包含判断。
+ *
+ * 真机缺陷：`skill_catalog.refreshed ... errors=0 ...` 这类结构化字段里含
+ * "error"，旧的 `u.includes('ERROR')` 会把整行判成 ERROR —— 日志页的
+ * ERROR 计数与级别筛选同时被污染（用户看到「ERROR 16」但详情全是 INFO）。
+ * 与 pyengine `logs.tail` 的级别筛选保持同一语义。
+ */
+const LEVEL_TOKEN = '(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)'
+const LEVEL_PATTERNS: RegExp[] = [
+  // `[INFO]` 只允许出现在行首 80 字符内（时间戳 + logger 前缀区）。
+  new RegExp(`^.{0,80}?\\[${LEVEL_TOKEN}\\]`, 'i'),
+  new RegExp(`^\\s*${LEVEL_TOKEN}\\b`, 'i'),
+  new RegExp(`^\\s*\\d{4}-\\d{2}-\\d{2}[T ][\\d:.,]+\\s+${LEVEL_TOKEN}\\b`, 'i'),
+]
+
+function normalizeLevel(raw: string): string {
+  const level = raw.toUpperCase()
+  if (level === 'WARNING') return 'WARN'
+  if (level === 'FATAL' || level === 'CRITICAL') return 'ERROR'
+  return level
+}
+
 function guessLevel(line: string): string {
-  const u = line.toUpperCase()
-  if (u.includes('ERROR')) return 'ERROR'
-  if (u.includes('WARN')) return 'WARN'
-  if (u.includes('INFO')) return 'INFO'
-  if (u.includes('DEBUG')) return 'DEBUG'
-  if (u.includes('TRACE')) return 'TRACE'
+  for (const pattern of LEVEL_PATTERNS) {
+    const match = line.match(pattern)
+    if (match?.[1]) return normalizeLevel(match[1])
+  }
   return 'INFO'
 }
 
@@ -1102,7 +1131,9 @@ function escRegex(s: string): string {
   inset: 0;
   justify-content: flex-end;
   position: fixed;
-  z-index: 300;
+  /* Layer: view-drawer. The detail panel is a full-height drawer: at 300 the
+     desktop pet (801) floated over it and stole clicks. */
+  z-index: 1000;
 }
 
 .lg-detail {

@@ -18,7 +18,10 @@ pub mod skill_scan;
 pub mod ssrf_guard;
 
 pub use command_guard::CommandGuard;
-pub use exec::{sandboxed_exec, ExecOutput, DEFAULT_TIMEOUT};
+pub use exec::{
+    exec_with, sandboxed_exec, ExecOutput, ExecRequest, ExecShell, DEFAULT_MAX_OUTPUT,
+    DEFAULT_TIMEOUT,
+};
 pub use os_sandbox::{
     apply_for_current_platform, kernel_isolation_available, platform_sandbox, IsolationLevel,
     OsSandbox, OsSandboxVerdict,

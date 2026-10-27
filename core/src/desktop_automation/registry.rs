@@ -83,6 +83,19 @@ impl AppRegistry {
         Ok(handle)
     }
 
+    /// 附着**已打开**的应用（W6.2）：通用 UIA 驱动的 `launch` 就是附着语义。
+    ///
+    /// - `window = Some("记事本")`：按标题/进程名找窗口、激活它、返回可复用句柄；
+    /// - `window = None`：附着当前前台窗口。
+    ///
+    /// 为什么复用 `launch` 而不是再写一条附着路径：句柄必须登记进本注册表，
+    /// 否则后续 `run_action` 会以 `NotRunning` 拒绝——「拿到一个用不了的句柄」
+    /// 比拿不到更糟。启动**新**应用仍走 `launch` + 显式 app_kind。
+    pub fn attach(&self, window: Option<&str>) -> Result<AppHandle, DesktopError> {
+        let args = json!({ "window": window.unwrap_or("") });
+        self.launch(AppKind::Generic, &args)
+    }
+
     /// 执行动作：按句柄查驱动 -> run_action（含审计快照与产物登记）。
     pub fn run_action(
         &self,
@@ -227,5 +240,19 @@ mod tests {
             matches!(err, DesktopError::NotRunning(_)),
             "未知句柄应返回 NotRunning，实际: {err:?}"
         );
+    }
+
+    /// 没有注册 Generic 驱动时，`attach` 必须是诚实的 AppUnknown ——
+    /// 不能凭空发一个「已附着」的假句柄（那样后续动作只会报 NotRunning，误导排障）。
+    #[test]
+    fn attach_without_a_generic_driver_is_app_unknown() {
+        let reg = AppRegistry::new();
+        for window in [None, Some("记事本")] {
+            let err = reg.attach(window).expect_err("未注册驱动必须失败");
+            assert!(
+                matches!(err, DesktopError::AppUnknown(ref k) if k == "generic"),
+                "实际: {err:?}"
+            );
+        }
     }
 }

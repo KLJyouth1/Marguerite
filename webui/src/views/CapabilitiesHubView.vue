@@ -3,79 +3,154 @@
     <header class="control-stage__header">
       <div class="control-stage__title-block">
         <p class="hub-kicker">Capabilities</p>
-        <h1 class="control-stage__title">能力中心</h1>
+        <h1 class="control-stage__title">{{ t('capabilitiesHub.title') }}</h1>
         <p class="control-stage__subtitle">
-          全部能力、设置分区与扩展入口的单一导航。健康度实时取自 plans.capabilities —
-          真货、部分、叙事一目了然。
+          {{ t('capabilitiesHub.subtitle') }}
         </p>
       </div>
       <div class="control-stage__actions">
         <button class="btn btn--ghost" @click="load">
-          <Icon name="refresh" :size="16" /><span>刷新</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('capabilitiesHub.refresh') }}</span>
         </button>
       </div>
     </header>
 
-    <section v-if="stats" class="hub-meter" aria-label="能力健康度">
+    <section v-if="stats" class="hub-meter" :aria-label="t('capabilitiesHub.meterAria')">
       <div class="hub-meter__bar">
         <span class="hub-meter__seg hub-meter__seg--real" :style="{ width: pct(stats.real) }" />
         <span class="hub-meter__seg hub-meter__seg--partial" :style="{ width: pct(stats.partial) }" />
         <span class="hub-meter__seg hub-meter__seg--narrative" :style="{ width: pct(stats.narrative) }" />
       </div>
       <div class="hub-pills">
-        <span class="hub-pill">已实装 <b>{{ stats.implemented }}</b>/{{ stats.total }}</span>
-        <span class="hub-pill hub-pill--accent">真货 {{ stats.real }}</span>
-        <span class="hub-pill">部分 {{ stats.partial }}</span>
-        <span class="hub-pill hub-pill--dim">纯叙事 {{ stats.narrative }}</span>
+        <i18n-t keypath="capabilitiesHub.pill.implemented" tag="span" class="hub-pill">
+          <template #done><b>{{ stats.implemented }}</b></template>
+          <template #total>{{ stats.total }}</template>
+        </i18n-t>
+        <span class="hub-pill hub-pill--accent">{{ t('capabilitiesHub.pill.real', { n: stats.real }) }}</span>
+        <span class="hub-pill">{{ t('capabilitiesHub.pill.partial', { n: stats.partial }) }}</span>
+        <span class="hub-pill hub-pill--dim">{{ t('capabilitiesHub.pill.narrative', { n: stats.narrative }) }}</span>
       </div>
     </section>
 
+    <!-- P3 打通：能力注册表（capabilities.groups 单一事实源）——与对话编排面板 /
+         舰队页探测 / 权限矩阵共享；点击组卡片展开该组能力明细。 -->
+    <section v-if="registry" class="hub-registry" aria-label="capability registry">
+      <div class="hub-registry__head">
+        <b>{{ t('capabilitiesHub.registryTitle') }}</b>
+        <span>{{ t('capabilitiesHub.registrySubtitle') }}</span>
+      </div>
+      <div class="hub-registry__grid">
+        <button
+          v-for="(g, i) in registry"
+          :key="g.id"
+          type="button"
+          class="hub-reg-group"
+          :class="{ 'is-open': expandedGroup === g.id }"
+          :aria-expanded="expandedGroup === g.id ? 'true' : 'false'"
+          :style="{ '--i': String(i) }"
+          @click="toggleGroup(g.id)"
+        >
+          <div class="hub-reg-group__row">
+            <b>{{ g.label }}</b>
+            <span class="hub-reg-group__meta">
+              {{ t('capabilitiesHub.registryImplemented', { n: implementedCount(g.id) }) }}
+              · {{ t('capabilitiesHub.registryGroupCount', { n: g.capabilities.length }) }}
+            </span>
+          </div>
+          <div v-if="expandedGroup === g.id" class="hub-reg-group__items">
+            <span
+              v-for="cap in g.capabilities"
+              :key="cap.id"
+              class="hub-reg-cap"
+              :class="`hub-reg-cap--${normMaturity(cap.maturity)}`"
+              :title="cap.description"
+            >
+              <b>{{ cap.name || cap.id }}</b>
+              <i>{{ cap.maturity }}</i>
+            </span>
+          </div>
+        </button>
+      </div>
+    </section>
+    <p v-else-if="registryFailed" class="hub-registry-empty">{{ t('capabilitiesHub.registryEmpty') }}</p>
+
     <div class="hub-grid">
-      <a
+      <RouterLink
         v-for="(s, i) in sections"
-        :key="s.name"
+        :key="s.nameKey"
         class="hub-card"
-        :href="s.href || undefined"
+        :to="s.href"
         :style="{ '--i': String(i) }"
-        @click="s.href ? undefined : open(s)"
       >
         <div class="hub-card__icon"><Icon :name="s.icon" :size="18" /></div>
         <div class="hub-card__body">
-          <b>{{ s.name }}</b>
-          <span>{{ s.desc }}</span>
-          <i>{{ s.status }}</i>
+          <b>{{ t(s.nameKey) }}</b>
+          <span>{{ t(s.descKey) }}</span>
+          <i>{{ t(s.statusKey) }}</i>
         </div>
         <span class="hub-card__arrow" aria-hidden="true">→</span>
-      </a>
+      </RouterLink>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 import type { IconName } from '@/utils/icons'
 
 const rpc = useRpcStore()
+const { t } = useI18n()
 interface CapStats { total: number; real: number; partial: number; implemented: number; narrative: number }
 interface Capabilities { stats?: CapStats }
 const stats = ref<CapStats | null>(null)
 
-const sections: Array<{ name: string; icon: IconName; desc: string; status: string; href: string }> = [
-  { name: '模型服务', icon: 'model', desc: '引擎健康页：Rust 模型档案 + 运行时状态 + 模型路由 + 能力健康度', status: '已建页', href: '/control/engine' },
-  { name: '能力', icon: 'capabilities', desc: '能力健康度 real/partial/叙事（plans.capabilities），本页实时取自该接口', status: '实时', href: '/control/engine' },
-  { name: '设置', icon: 'settings', desc: '网关连接 / AI 配置 / 偏好 / 行为 / 隐私 / 沙箱 / 记忆 / 外观 / 键盘 / 高级（统一入口）', status: '设置内', href: '/settings' },
-  { name: '扩展 / 插件', icon: 'boxes', desc: 'PluginsView / SettingsExtensionsPanel', status: '已建页', href: '/control/plugins' },
-  { name: 'Agent 预设', icon: 'agents', desc: 'AgentsView + ExpertCenterView（智能体与专家中心）', status: '已建页', href: '/control/expert-center' },
-  { name: '插件市场', icon: 'plugin', desc: 'PluginsView（market）', status: '已建页', href: '/control/plugins' },
-  { name: 'Web UI 插件', icon: 'appWindow', desc: '浏览器驾驶舱 / 编辑器 / Games / EngineHealth', status: '已建页', href: '/control/browser-cockpit' },
-  { name: '宠物', icon: 'pet', desc: 'PetView：茉莉仙子粒子艺术', status: '已建页', href: '/control/pet' },
-  { name: '社区插件', icon: 'boxes', desc: '插件市场清单（manifest/catalog）', status: '已建页', href: '/control/plugins' },
-  { name: '关系图谱', icon: 'gitBranch', desc: 'GraphView（KB 2.0 知识图谱）', status: '已建页', href: '/control/graph' },
-  { name: '企业协同与 SSH', icon: 'collab', desc: 'SshCollabView（主机台账+探测）', status: '已建页', href: '/control/ssh-collab' },
-  { name: '终端沙箱', icon: 'command', desc: 'TerminalView：sandbox.terminal.* 独立页', status: '已建页', href: '/control/terminal' },
-  { name: '任务执行与质量', icon: 'gauge', desc: 'EngineHealth 任务质量卡 + 计划/执行坞', status: '已建页', href: '/control/engine' },
+/** P3 单一事实源：capabilities.groups 返回的全量能力注册表（12 组）。 */
+interface BackendCapability {
+  id: string
+  name?: string
+  group?: string
+  tier?: string
+  maturity?: 'Real' | 'Partial' | 'Narrative' | string
+  description?: string
+}
+interface CapabilityGroupRow {
+  id: string
+  label: string
+  capabilities: BackendCapability[]
+}
+const registry = ref<CapabilityGroupRow[] | null>(null)
+const registryFailed = ref(false)
+const expandedGroup = ref<string | null>(null)
+
+function toggleGroup(id: string) {
+  expandedGroup.value = expandedGroup.value === id ? null : id
+}
+function normMaturity(m?: string): string {
+  return String(m ?? '').toLowerCase()
+}
+function implementedCount(groupId: string): number {
+  const g = registry.value?.find(r => r.id === groupId)
+  if (!g) return 0
+  return g.capabilities.filter(c => normMaturity(c.maturity) !== 'narrative').length
+}
+
+const sections: Array<{ nameKey: string; icon: IconName; descKey: string; statusKey: string; href: string }> = [
+  { nameKey: 'capabilitiesHub.sections.modelService.name', icon: 'model', descKey: 'capabilitiesHub.sections.modelService.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/engine' },
+  { nameKey: 'capabilitiesHub.sections.capability.name', icon: 'capabilities', descKey: 'capabilitiesHub.sections.capability.desc', statusKey: 'capabilitiesHub.sections.status.live', href: '/engine' },
+  { nameKey: 'capabilitiesHub.sections.settings.name', icon: 'settings', descKey: 'capabilitiesHub.sections.settings.desc', statusKey: 'capabilitiesHub.sections.status.withinSettings', href: '/settings' },
+  { nameKey: 'capabilitiesHub.sections.extensions.name', icon: 'boxes', descKey: 'capabilitiesHub.sections.extensions.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/plugins' },
+  { nameKey: 'capabilitiesHub.sections.agentPresets.name', icon: 'agents', descKey: 'capabilitiesHub.sections.agentPresets.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/expert-center' },
+  { nameKey: 'capabilitiesHub.sections.pluginMarket.name', icon: 'plugin', descKey: 'capabilitiesHub.sections.pluginMarket.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/plugins' },
+  { nameKey: 'capabilitiesHub.sections.webuiPlugins.name', icon: 'appWindow', descKey: 'capabilitiesHub.sections.webuiPlugins.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/browser-cockpit' },
+  { nameKey: 'capabilitiesHub.sections.pet.name', icon: 'pet', descKey: 'capabilitiesHub.sections.pet.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/pet' },
+  { nameKey: 'capabilitiesHub.sections.communityPlugins.name', icon: 'boxes', descKey: 'capabilitiesHub.sections.communityPlugins.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/plugins' },
+  { nameKey: 'capabilitiesHub.sections.graph.name', icon: 'gitBranch', descKey: 'capabilitiesHub.sections.graph.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/graph' },
+  { nameKey: 'capabilitiesHub.sections.collabSsh.name', icon: 'collab', descKey: 'capabilitiesHub.sections.collabSsh.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/ssh-collab' },
+  { nameKey: 'capabilitiesHub.sections.terminalSandbox.name', icon: 'command', descKey: 'capabilitiesHub.sections.terminalSandbox.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/terminal' },
+  { nameKey: 'capabilitiesHub.sections.taskQuality.name', icon: 'gauge', descKey: 'capabilitiesHub.sections.taskQuality.desc', statusKey: 'capabilitiesHub.sections.status.built', href: '/engine' },
 ]
 
 function pct(n: number): string {
@@ -85,13 +160,19 @@ function pct(n: number): string {
 
 async function load() {
   try {
-    const r = await rpc.call<Capabilities>('plans.capabilities', {})
-    stats.value = r.stats ?? null
-  } catch { /* 静默 */ }
-}
-function open(s: { href: string }) {
-  if (s.href) return
-  window.open('/settings', '_self')
+    const [r, reg] = await Promise.all([
+      rpc.call<Capabilities>('plans.capabilities', {}),
+      rpc
+        .call<{ groups?: CapabilityGroupRow[] }>('capabilities.groups', {})
+        .catch(() => null),
+    ])
+    stats.value = r?.stats ?? null
+    // P3 单一事实源：注册表来自 capabilities.groups，取不到时如实降级（不假装）。
+    registry.value = reg?.groups?.length ? reg.groups : null
+    registryFailed.value = !reg?.groups?.length
+  } catch {
+    registryFailed.value = true
+  }
 }
 onMounted(load)
 </script>
@@ -146,6 +227,95 @@ onMounted(load)
 
 .hub-pill--accent { color: var(--accent); }
 .hub-pill--dim { color: var(--text-dim); }
+
+.hub-registry {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--hairline);
+}
+
+.hub-registry__head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+
+.hub-registry__head b { font-family: var(--font-display); font-size: 14px; }
+.hub-registry__head span { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+
+.hub-registry__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 10px;
+}
+
+.hub-reg-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-standard);
+}
+
+.hub-reg-group:hover,
+.hub-reg-group:focus-visible {
+  outline: 0;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--hairline));
+}
+
+.hub-reg-group.is-open { border-color: var(--accent); }
+
+.hub-reg-group__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hub-reg-group__row b { font-size: 13px; }
+.hub-reg-group__meta { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+.hub-reg-group__items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hub-reg-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  font-size: 11px;
+}
+
+.hub-reg-cap b { font-weight: 600; color: var(--text); }
+.hub-reg-cap i { font-style: normal; font-size: 10px; color: var(--text-dim); }
+
+.hub-reg-cap--real { border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+.hub-reg-cap--partial { border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+.hub-reg-cap--narrative { opacity: 0.65; }
+
+.hub-registry-empty {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12px;
+}
 
 .hub-grid {
   display: grid;

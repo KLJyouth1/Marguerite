@@ -32,6 +32,13 @@
     </template>
 
     <template #actions="{ item }">
+      <!-- 新增面板：终端 / 内置浏览器 / 代码编辑器 -->
+      <WorkbenchAddMenu
+        @terminal="openTerminal()"
+        @browser="openBrowserUrl"
+        @editor="openEditor"
+        @runtime="openRuntime()"
+      />
       <button
         v-if="!item"
         type="button"
@@ -147,6 +154,20 @@
       />
     </template>
   </WorkbenchHost>
+
+  <!-- 冷启动 / 收起态入口：还没有任何标签时 WorkbenchHost 不挂载（shouldMount
+       要求有 activeItem），dock 被收起时标题栏也不可见。这两种情况下右边缘
+       常驻悬浮条是唯一入口 —— 必须一直在，否则用户「打开一次再关掉」就再也
+       找不到它（2026-10-24 实测缺陷）。 -->
+  <WorkbenchAddMenu
+    v-if="enabled && routeActive && (store.items.length === 0 || !store.expanded)"
+    variant="rail"
+    align="start"
+    @terminal="openTerminal()"
+    @browser="openBrowserUrl"
+    @editor="openEditor"
+    @runtime="openRuntime()"
+  />
 </template>
 
 <script lang="ts">
@@ -211,6 +232,11 @@ import {
   type BrowserWorkbenchOpenEventDetail,
 } from '@/workbench/browserItems'
 import {
+  EDITOR_WORKBENCH_OPEN_EVENT,
+  createEditorWorkbenchItem,
+  type EditorWorkbenchOpenEventDetail,
+} from '@/workbench/editorItems'
+import {
   artifactCategory,
   artifactFileTitle,
 } from '@/utils/chat/artifacts'
@@ -232,11 +258,13 @@ import type {
 } from '@/workbench/types'
 import { createArtifactWorkbenchDefinitions } from './artifactWorkbenchProvider'
 import { createBrowserWorkbenchDefinition } from './browserWorkbenchProvider'
+import { createEditorWorkbenchDefinition } from './editorWorkbenchProvider'
 import { createTerminalWorkbenchDefinition } from './terminalWorkbenchProvider'
 import { createGoalWorkbenchDefinition } from './goalWorkbenchProvider'
 import { createTaskWorkbenchDefinition } from './taskWorkbenchProvider'
 import { createIslandWorkbenchDefinition } from './islandWorkbenchProvider'
 import { createViewWorkbenchDefinition } from './viewWorkbenchProvider'
+import { createRuntimeWorkbenchDefinition } from './runtimeWorkbenchProvider'
 import {
   TERMINAL_WORKBENCH_OPEN_EVENT,
   createTerminalWorkbenchItem,
@@ -252,7 +280,13 @@ import {
   openIslandWorkbenchItem,
   type IslandWorkbenchOpenEventDetail,
 } from '@/workbench/islandItems'
+import {
+  RUNTIME_WORKBENCH_OPEN_EVENT,
+  createRuntimeWorkbenchItem,
+  type RuntimeWorkbenchOpenEventDetail,
+} from '@/workbench/runtimeItems'
 import WorkbenchHost from './WorkbenchHost.vue'
+import WorkbenchAddMenu from './WorkbenchAddMenu.vue'
 
 const props = withDefaults(defineProps<{
   enabled?: boolean
@@ -272,6 +306,30 @@ const { pushToast } = useToasts()
 const platform = usePlatform()
 const store = useWorkbenchStore()
 const appStore = useAppStore()
+
+/* 面板菜单已抽到 `WorkbenchAddMenu`（标题栏与右边缘悬浮条共用一份实现）。 */
+
+/** 其它入口（如产物卡片/命令）请求在工作台打开文件时走同一套建项逻辑。 */
+function openEditor(path: string, scopeId?: string, projectPath?: string): void {
+  const resolvedScope = (scopeId || store.activeSessionId || props.sessionId || 'app').trim()
+  const item = createEditorWorkbenchItem({
+    scopeId: resolvedScope,
+    path,
+    ...(projectPath ? { projectPath } : {}),
+  })
+  if (!item) {
+    pushToast(t('workbench.panels.editorPathInvalid'), { tone: 'warn' })
+    return
+  }
+  if (!store.openItem(item)) pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
+}
+
+function onEditorWorkbenchOpen(event: Event): void {
+  const detail = (event as CustomEvent<EditorWorkbenchOpenEventDetail>).detail
+  if (detail && typeof detail.path === 'string') {
+    openEditor(detail.path, detail.scopeId, detail.projectPath)
+  }
+}
 
 /**
  * 禅模式：收掉工作台 dock 面板，退出时还原**进入前**的展开状态。
@@ -333,21 +391,24 @@ function confirmWorkbenchPermission(request: {
   })
 }
 
-function openExternalUrl(value: string) {
-  const url = normalizeBrowserUrl(value)
-  if (!url || typeof window === 'undefined') return
-  const opened = window.open(url, '_blank', 'noopener,noreferrer')
-  if (opened) opened.opener = null
-}
-
+/**
+ * 在工作台打开内置浏览器。
+ *
+ * 2026-10-24：不再要求原生表面能力（壳里没有实现），统一走 CDP 镜像面板；
+ * 作用域缺省用 `app`，让「没有会话」时也能开一个浏览器面板。
+ */
 function openBrowserUrl(value: string) {
-  const sessionId = store.activeSessionId || props.sessionId
-  if (!nativeApi || !sessionId) {
-    openExternalUrl(value)
+  const url = normalizeBrowserUrl(value)
+  if (!url) {
+    pushToast(t('workbench.panels.browserUrlInvalid'), { tone: 'warn' })
     return
   }
-  const item = createBrowserWorkbenchItem({ scopeId: sessionId, url: value })
-  if (!item) return
+  const sessionId = (store.activeSessionId || props.sessionId || 'app').trim()
+  const item = createBrowserWorkbenchItem({ scopeId: sessionId, url })
+  if (!item) {
+    pushToast(t('workbench.panels.browserUrlInvalid'), { tone: 'warn' })
+    return
+  }
   if (!store.openItem(item)) {
     pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
   }
@@ -410,6 +471,29 @@ function onIslandWorkbenchOpen(event: Event) {
   openIsland(detail?.scopeId)
 }
 
+/**
+ * 「运行态」面板：Harness 侧的只读观测面（决策 / 执行环境 / 上下文 / 工具面 / 质量门）。
+ * scope 解析口径与终端一致：显式 → 当前活跃会话 → 宿主会话；都没有时用 `app`
+ * （未绑定会话时也能看本机环境）。
+ */
+function openRuntime(scopeId?: string): void {
+  const resolved = (scopeId || store.activeSessionId || props.sessionId || 'app').trim()
+  const item = createRuntimeWorkbenchItem({
+    scopeId: resolved,
+    title: t('workbench.panels.runtime'),
+  })
+  if (!item) {
+    pushToast(t('workbench.itemLimitReached'), { tone: 'warn' })
+    return
+  }
+  if (!store.openItem(item)) pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
+}
+
+function onRuntimeWorkbenchOpen(event: Event) {
+  const detail = (event as CustomEvent<RuntimeWorkbenchOpenEventDetail>).detail
+  openRuntime(detail?.scopeId)
+}
+
 for (const definition of createArtifactWorkbenchDefinitions({
   authToken: readAuthToken,
   baseOrigin,
@@ -457,15 +541,17 @@ for (const definition of createArtifactWorkbenchDefinitions({
   workbenchPanelRegistry.register(definition, { replace: true })
 }
 workbenchPanelRegistry.register(createBrowserWorkbenchDefinition({
-  confirmPermission: confirmWorkbenchPermission,
-  openExternal: openExternalUrl,
-  platform,
   t: (key, params) => String(t(key, params || {})),
 }), { replace: true })
+// 内置编辑器（kind 'file'）：IDE 式单文件标签，读/写走 workspace.file.*
+workbenchPanelRegistry.register(createEditorWorkbenchDefinition(), { replace: true })
 workbenchPanelRegistry.register(createTerminalWorkbenchDefinition(), { replace: true })
 workbenchPanelRegistry.register(createGoalWorkbenchDefinition(), { replace: true })
 workbenchPanelRegistry.register(createTaskWorkbenchDefinition(), { replace: true })
 workbenchPanelRegistry.register(createIslandWorkbenchDefinition(), { replace: true })
+workbenchPanelRegistry.register(createRuntimeWorkbenchDefinition({
+  subtitle: t('workbench.runtime.subtitle'),
+}), { replace: true })
 workbenchPanelRegistry.register(createViewWorkbenchDefinition(), { replace: true })
 detachRuntime = attachWorkbenchRuntime(store, runtimeManager)
 
@@ -640,16 +726,20 @@ watch(
 onMounted(() => {
   if (nativeApi) stopSurfaceEvents = nativeApi.onSurfaceEvent(onNativeSurfaceEvent)
   window.addEventListener(BROWSER_WORKBENCH_OPEN_EVENT, onBrowserWorkbenchOpen)
+  window.addEventListener(EDITOR_WORKBENCH_OPEN_EVENT, onEditorWorkbenchOpen)
   window.addEventListener(TERMINAL_WORKBENCH_OPEN_EVENT, onTerminalWorkbenchOpen)
   window.addEventListener(TASK_WORKBENCH_OPEN_EVENT, onTaskWorkbenchOpen)
   window.addEventListener(ISLAND_WORKBENCH_OPEN_EVENT, onIslandWorkbenchOpen)
+  window.addEventListener(RUNTIME_WORKBENCH_OPEN_EVENT, onRuntimeWorkbenchOpen)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener(BROWSER_WORKBENCH_OPEN_EVENT, onBrowserWorkbenchOpen)
+  window.removeEventListener(EDITOR_WORKBENCH_OPEN_EVENT, onEditorWorkbenchOpen)
   window.removeEventListener(TERMINAL_WORKBENCH_OPEN_EVENT, onTerminalWorkbenchOpen)
   window.removeEventListener(TASK_WORKBENCH_OPEN_EVENT, onTaskWorkbenchOpen)
   window.removeEventListener(ISLAND_WORKBENCH_OPEN_EVENT, onIslandWorkbenchOpen)
+  window.removeEventListener(RUNTIME_WORKBENCH_OPEN_EVENT, onRuntimeWorkbenchOpen)
   stopSurfaceEvents?.()
   stopSurfaceEvents = null
   if (detachRuntime) void detachRuntime()

@@ -42,21 +42,16 @@ if not exist "%WEBUI_SRC%" (
     echo [ERROR] 未找到 webui/dist！请先在 webui 下执行: npm run build
     exit /b 1
 )
-REM 桌宠图片皮肤完整性检查：打包产物若缺 pets/ 目录，精灵皮肤会 404，
-REM 桌面宠物退化为「一张静态图」（已知 P0）。此处强制校验，缺失即中止。
-if not exist "%WEBUI_SRC%\pets" (
-    echo [ERROR] webui/dist 缺少 pets/ 目录（桌宠图片皮肤）。
-    echo         请确认 webui/public/pets/*.jpg 存在并已构建（npm run build）。
+REM 【2026-10-23】原「桌宠图片皮肤完整性检查」已移除：
+REM   桌宠皮肤改为纯本地矢量 / 参数化 3D 渲染（webui/src/components/pet/petSpec.ts 数据驱动），
+REM   `webui/public/pets/*.jpg` 因带第三方水印且未再被引用，已随「无敏感无水印素材」要求下线。
+REM   这里只保留产物入口检查 —— 缺 index.html 才是真的打不出可用控制台。
+if not exist "%WEBUI_SRC%\index.html" (
+    echo [ERROR] webui/dist 缺少 index.html（前端产物不完整）。
+    echo         请确认 webui 下 npm run build 成功。
     exit /b 1
 )
-for %%F in (skin-blue.jpg skin-green.jpg skin-pink.jpg skin-purple.jpg) do (
-    if not exist "%WEBUI_SRC%\pets\%%F" (
-        echo [ERROR] 桌宠皮肤缺失：pets\%%F
-        echo         请确认 webui/public/pets\%%F 已存在并重新构建。
-        exit /b 1
-    )
-)
-echo       桌宠皮肤完整性检查通过（4 张精灵图均存在）。
+echo       前端产物入口检查通过（index.html 存在）。
 if exist "%WEBUI_DST%" rmdir /s /q "%WEBUI_DST%" 2>nul
 xcopy /E /I /Y /Q "%WEBUI_SRC%" "%WEBUI_DST%" >nul
 echo       完成。

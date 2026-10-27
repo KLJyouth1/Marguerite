@@ -57,6 +57,23 @@ export function statusFromStage(stage: BuildingStage, progress: number): IslandA
 }
 
 /**
+ * 地块标题（人读）：优先用配置里的 `name`，否则把 id 的 slug 还原成可读文本。
+ *
+ * 真机缺陷（2026-10-23 截图）：浮层标签直接显示 `construction:workshop-tower`
+ * 这种带命名空间的原始 id，既长又不像建筑名，还因为过长而挤占主堡标签。
+ */
+export function constructionTitle(config: ConstructionPlotConfig): string {
+  const named = config.name?.trim()
+  if (named) return named
+  const slug = config.id
+    .replace(/^[a-z]+:/i, '') // 去掉 plot:/construction: 这类命名空间前缀
+    .replace(/[-_]+/g, ' ')
+    .trim()
+  if (!slug) return config.id
+  return slug.charAt(0).toUpperCase() + slug.slice(1)
+}
+
+/**
  * 把地块配置列表翻译成岛屿实体。纯函数：同一 (plots, day, deviceProgress) 永远同一结果。
  */
 export function buildConstructionEntities(
@@ -78,7 +95,7 @@ export function buildConstructionEntities(
     out.push({
       id: config.id,
       kind: 'construction',
-      title: config.id.replace(/^plot:/, 'construction:'),
+      title: constructionTitle(config),
       status: statusFromStage(snapshot.stage, progress),
       detail: `${stageLabel} · ${snapshot.visibleFloors}/${config.building.totalFloors}F`,
       source: 'construction',

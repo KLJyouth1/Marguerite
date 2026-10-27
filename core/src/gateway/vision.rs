@@ -73,6 +73,7 @@ pub fn computer_use_vision(
         timeout_secs: 30,
         thinking: crate::model::thinking::ThinkingEffort::Off,
         context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+        wire_api: m.wire_api,
     };
     cap.set_transport(Box::new(crate::vision::LlmVisionTransport::new(llm)));
     cap.set_resolver(Box::new(VisionNameResolver(m.model_name.clone())));

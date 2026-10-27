@@ -3,12 +3,20 @@ import {
   waitForSessionRpcConnection,
 } from '@/composables/chat/sessionBootstrapAdmission'
 import { useRpcStore } from '@/stores/rpc'
+import i18n from '@/i18n'
 import { normalizeAgentId } from '@/utils/chat/sessionKeys'
 import type { AgentOption, AgentsListResponse } from '@/types/rpc'
 import type { RpcCallOptions } from '@/lib/rpc'
 
-/** The implicit default agent every chat surface can always start against. */
-const MAIN_AGENT: AgentOption = { id: 'main', name: 'Main Agent' }
+/**
+ * 默认会话（`agent:main:*`）在 `agents.list` 尚未返回时的兜底身份。
+ *
+ * 名字走 i18n：此前硬编码英文 `Main Agent`，于是中文界在冷启动 / 列表失败时
+ * 侧边栏会永久显示 "Main Agent"（`chat.mainAgent` 是六语言齐备的既有键）。
+ */
+function mainAgentFallback(): AgentOption {
+  return { id: 'main', name: i18n.global.t('chat.mainAgent') }
+}
 
 // Module-level singleton state so sidebar session metadata shares one agents
 // list and one fetch. Mirrors the singleton pattern in useConfirm.
@@ -48,7 +56,7 @@ export function useAgentOptions(readCallOptions?: RpcCallOptions) {
       } catch (err: unknown) {
         console.warn('[useAgentOptions] agents.list error:', err instanceof Error ? err.message : err)
         agentListError.value = true
-        if (!agents.value.length) agents.value = [{ ...MAIN_AGENT }]
+        if (!agents.value.length) agents.value = [mainAgentFallback()]
       } finally {
         loadPromise = null
       }

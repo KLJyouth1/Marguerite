@@ -880,7 +880,8 @@ mod tests {
 
         let ctx = create_test_context("世界", vec![]);
         let out = engine.run_agent_combination("main", &ctx).await.unwrap();
-        // "main" 内置技能为可读标签（通用问答/代码生成/文件操作），与注册表 id 不对应 → 全部失败步骤
+        // "main" 内置技能为可读标签（人设技能组合，如 根因诊断/端到端验证），
+        // 与注册表 id 不对应 → 全部失败步骤
         assert!(!out.steps.is_empty(), "应至少取到一个技能步骤");
         assert!(
             out.combined_result.contains("未注册"),

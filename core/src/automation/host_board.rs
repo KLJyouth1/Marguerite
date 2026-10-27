@@ -64,11 +64,16 @@ impl HostBoard {
         self.save_to(&Self::path())
     }
 
+    /// 落盘（原子写，走 `persistence::write_json_atomic`）。
+    ///
+    /// R13（2026-10-18）：此前 `std::fs::write` 先截断再写，中途被打断会留半截
+    /// JSON；读取端解析失败一律回落空看板，用户排好的自动化任务**静默消失**。
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        let raw = serde_json::to_string_pretty(self)?;
+        crate::persistence::write_json_atomic(path, &raw)?;
         Ok(())
     }
 

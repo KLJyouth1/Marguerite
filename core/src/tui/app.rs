@@ -68,6 +68,21 @@ impl App {
         }
         let mut status = StatusBar::new();
         status.model_name = model_name;
+        // 档位/台账与 CLI、网关同源（SessionState），旧版界面也要能看见。
+        {
+            use crate::model::tier::SessionState;
+            let s = SessionState::load();
+            // 剩余比例取台账实测（会话态里的 used 字段无人写入，直接读恒为 100%）。
+            let remaining = crate::usage::tightest_budget_snapshot()
+                .map(|b| b.remaining_ratio)
+                .unwrap_or_else(|| s.budget.remaining_ratio());
+            status.tier_label = format!(
+                "{}({}) 剩{:.0}%",
+                s.effective_tier().as_str(),
+                if s.locked_tier.is_some() { "锁" } else { "自" },
+                remaining * 100.0
+            );
+        }
 
         Self {
             chat: ChatPanel::new(),

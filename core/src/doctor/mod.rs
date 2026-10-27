@@ -244,12 +244,24 @@ pub fn check_tier_caps() -> DoctorItem {
     };
 
     let detail = audit.summary();
-    if !audit.has_issues() {
+    // 严重度分级（2026-10-21 修）：
+    // · 「声明矛盾」= 真缺陷（标了某档却不满足该档准入 → 路由会把它排进它服务不了的档），判 DEGRADED；
+    // · 「未声明」= **默认状态**（按档位声明放行，只是没逐项校验），不是故障。
+    //   此前把两者合并判降级，于是任何一台新装机器都永久显示「3 项降级」，
+    //   用户看到的永远是「有问题」，真正的问题反而被噪声淹没。
+    if audit.mismatched.is_empty() {
+        let mut detail = detail;
+        if !audit.unverified.is_empty() {
+            detail.push_str("（未声明按档位放行，非缺陷）");
+        }
         return ok_item("tier_caps", "档位能力声明", detail);
     }
     let mut hint: Vec<String> = Vec::new();
     if !audit.unverified.is_empty() {
-        hint.push(format!("未声明能力：{}", audit.unverified.join(", ")));
+        hint.push(format!(
+            "另有 {} 个档案未声明能力（按档位放行，非缺陷）",
+            audit.unverified.len()
+        ));
     }
     for (id, tier, why) in &audit.mismatched {
         hint.push(format!("{id} 声明为 {tier:?} 但不满足准入：{}", why.join("；")));

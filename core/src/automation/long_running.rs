@@ -374,6 +374,17 @@ fn open_db() -> Result<rusqlite::Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let db = rusqlite::Connection::open(&path)?;
+    // 日志模式与同步级别（真机事故 2026-10-23 的根因）：
+    // 默认 `journal_mode=DELETE` + `synchronous=FULL` 时，每条语句都是一次独立事务并
+    // fsync。long_running 表累计 8279 条后，`persist()` 的全量重写实测 **49.5s**
+    //（同库同数据改 WAL/NORMAL 仅 0.22s）。这条路径在 `orchestrate.run` 的请求
+    // 处理里同步执行 → 发送蜂群后 RPC 数十秒到数分钟不返回，前端表现为
+    // 「确认发送没反应」，两个 slow-dispatch worker 也会被一起占满。
+    // WAL 允许读写并发、NORMAL 只在小概率掉电时丢最后一批事务（长任务台账可重建），
+    // 换来全量重写亚秒级。busy_timeout 让并发写等待而不是立刻 SQLITE_BUSY。
+    let _: String = db.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    db.pragma_update(None, "synchronous", "NORMAL")?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS long_running_tasks (
             task_id TEXT PRIMARY KEY,
@@ -419,11 +430,16 @@ fn checkpoint_from_json(s: &str) -> Vec<Checkpoint> {
 
 impl LongRunningScheduler {
     /// 持久化全部任务到 SQLite（幂等 upsert）。
+    ///
+    /// **单事务批量写入**：此前是逐行 autocommit —— 每行一次隐式事务 + fsync，
+    /// 台账涨到数千条后单次重写要几十秒（见 [`open_db`] 的实测数据）。所有行共用
+    /// 一条事务后只剩一次提交，全量重写在 WAL 下 <0.3s。
     pub fn persist(&self) -> Result<()> {
-        let db = open_db()?;
+        let mut db = open_db()?;
         let now = Utc::now().timestamp_millis();
+        let tx = db.transaction()?;
         for t in self.tasks.values() {
-            db.execute(
+            tx.execute(
                 "INSERT INTO long_running_tasks
                     (task_id, goal, status, started_at_ms, last_heartbeat_ms,
                      heartbeat_interval_s, max_duration_hours, retry_count, max_retries,
@@ -451,6 +467,7 @@ impl LongRunningScheduler {
                 ],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -684,6 +701,52 @@ mod tests {
         s.tasks.get_mut(&id).unwrap().last_heartbeat_ms = now - 200_000;
         let restored = s.restore_on_startup(now);
         assert_eq!(restored, vec![id]);
+    }
+
+    /// 批量持久化回归：台账库必须是 WAL + synchronous=NORMAL。
+    ///
+    /// 事故背景（2026-10-23 真机）：表里累计 8279 条后，`persist()` 在
+    /// DELETE 日志 + FULL 同步下逐行 autocommit，一次全量重写耗时 **49.5s**
+    ///（同数据 WAL/NORMAL 仅 0.22s）。该重写发生在 `orchestrate.run` 的请求路径上，
+    /// 于是「确认发送」后前端数十秒到数分钟收不到任何响应，slow-dispatch 的两个
+    /// worker 也被占满。这里锁死日志模式，避免以后为了「省事」把 PRAGMA 删掉又把
+    /// 延迟带回来。
+    #[test]
+    fn sqlite_uses_wal_and_writes_all_tasks() {
+        let _g = lock_tests();
+        let tmp =
+            std::env::temp_dir().join(format!("mrg_lrt_wal_{}", Utc::now().timestamp_millis()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("lrt.db");
+        std::env::set_var(
+            "MARGUERITE_LONG_RUNNING_DB",
+            db_path.to_string_lossy().to_string(),
+        );
+
+        {
+            let mut s = LongRunningScheduler::new();
+            for i in 0..120 {
+                s.register(&format!("批量任务 {i}"), 30);
+            }
+        }
+
+        let db = open_db().unwrap();
+        let mode: String = db
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            mode.to_lowercase(),
+            "wal",
+            "长任务台账必须用 WAL；DELETE+FULL 的逐行 autocommit 会随行数退化到分钟级"
+        );
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM long_running_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 120, "单事务批量 upsert 必须写全全部任务");
+        drop(db);
+
+        std::env::remove_var("MARGUERITE_LONG_RUNNING_DB");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

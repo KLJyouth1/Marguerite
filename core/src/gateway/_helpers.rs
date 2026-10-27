@@ -1,11 +1,9 @@
 //! 网关共享工具函数（参数解析 / 信封构造 / OS 打开）。
 //!
 //! 本模块集中 `methods.rs` 跨方法族复用的小工具，避免每新增一个方法族就
-//! 复制一遍 `param_str` / `open_in_system` 之类的样板代码。
+//! 复制一遍 `param_str` 之类的样板代码。系统打开已迁到 `gateway::open_path`。
 
 use serde_json::{json, Value};
-
-use crate::proc::SilentCommand;
 
 /// 统一把 `Result<T, String>` 映射为 RPC 返回值：成功 `to_value`，失败 `{ok:false,error}`。
 pub fn ok_or_err<T: serde::Serialize>(res: Result<T, String>) -> Value {
@@ -61,28 +59,7 @@ pub(crate) fn rpc_err(code: u32, message: &str) -> Value {
     json!({ "code": code, "message": message, "data": Value::Null })
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// 跨平台「用系统默认程序打开文件」（供 artifacts.open_in_system 复用）。
-// 原实现曾在 methods.rs 里因为条件编译位置不同而重复定义两次，现统一收口。
-// ───────────────────────────────────────────────────────────────────────────
-
-/// 用系统默认程序打开文件（无 tauri 依赖，纯 std::process）。
-pub(crate) fn open_in_system(path: &str) -> bool {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("cmd")
-            .silent()
-            .args(["/c", "start", "", path])
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(windows))]
-    {
-        let cmd = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        std::process::Command::new(cmd).silent().arg(path).spawn().is_ok()
-    }
-}
+// 「用系统默认程序打开文件」已迁到 `gateway::open_path`（W3.2）：
+// 旧实现在这里用 `cmd /c start <任意路径>`，既无工作区边界也无需可执行扩展名拦截。
+// 新入口是 `open_path::open_path_checked`（校验）+ `open_path::launch_checked`（ShellExecuteW），
+// 唯一调用点 `artifacts.open_in_system` 已切换；不要再在这里恢复 shell 版本。

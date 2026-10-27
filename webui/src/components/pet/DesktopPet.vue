@@ -47,23 +47,21 @@
         <span v-for="(p, i) in particles" :key="i" class="pet-particle" :style="p.style">{{ p.emoji }}</span>
       </div>
 
-      <!-- 2D SVG 立体桌宠（矢量分层 + 伪 3D 光照：猫/精灵全数据驱动，免 WebGL）。
-           悬停 → 局部聚焦注视（视线/瞳孔幅度放大 + 头部视差）；无 WebGL 也能完整渲染。 -->
+      <!-- 桌宠舞台（优先真三维；WebGL 不可用时回退 2.5D 矢量）。
+           悬停 → 局部聚焦注视（视线/瞳孔幅度放大 + 头部视差）。 -->
       <div
         v-if="skin.kind === 'canvas' || skin.kind === 'model'"
         ref="petSceneEl"
         class="desktop-pet__3d"
-        :class="{ 'is-2d': !petScene, 'is-focused': focused }"
+        :class="{ 'is-3d': sceneReady && pet3d, 'is-2d': sceneReady && !pet3d, 'is-focused': focused }"
         @pointerenter="onStageEnter"
         @pointerleave="onStageLeave"
-      >
-        <span v-if="!petScene" class="desktop-pet__badge">渲染未启动</span>
-      </div>
+      ></div>
       <!-- 静态立绘（保留 image 类型兼容；当前皮肤列表已全 3D 化） -->
       <img
         v-else
         class="desktop-pet__img"
-        :src="skin.src"
+        :src="imageSrc"
         :alt="skin.name"
         draggable="false"
       />
@@ -84,9 +82,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { PetSvg } from './petSvg'
+// 渲染器工厂：优先真三维（three 动态加载），不可用/失败才回退 2.5D 矢量
+import { createPetRenderer, type PetRenderer } from './petRenderer'
 import type { PetMood3D } from './petContract'
 import { getCurrentSkin, PET_SKINS, type PetSkin } from './skins'
+import { staticAssetUrl } from '@/utils/staticAsset'
 // 数据驱动模型：猫/精灵全 3D 化 —— 按皮肤 id 取 Spec 热插拔渲染
 import { getPetModelSpec, PET_INTERACTION } from './petSpec'
 // 契约驱动：后端 mood → PetMood3D（单一来源，未知值收敛 normal，绝不绕过契约）
@@ -209,13 +209,29 @@ function togglePsiPanel(): void {
 const ENABLED_KEY = 'pet.desktopEnabled'
 const POSITION_KEY = 'pet.desktop.position'
 
-const enabled = ref(localStorage.getItem(ENABLED_KEY) === 'true')
+// 桌宠舞台尺寸（与 CSS `--pet-w/--pet-h` 同源；默认位置、拖动/散步边界都用它）。
+// 2026-10-24：原来 100×110，用户反馈「显示不正常 / 看不清」——在 1440 宽屏上
+// 只有指甲盖大，花冠、海蓝宝石、裙摆全糊在一起。放大到 168×186，
+// 与 PetView 大舞台的造型一致，仍不遮挡输入区。
+const PET_W = 168
+const PET_H = 186
+
+// 缺省开启：只有用户**显式关过**（写入 'false'）才不显示。
+// 旧实现把「从未设置」当成关闭 —— 新用户在任何页面都看不到桌宠，
+// 这就是「桌宠不显示」的根因之一（设置里的开关也因此长期显示为关）。
+function readPetEnabled(): boolean {
+  return localStorage.getItem(ENABLED_KEY) !== 'false'
+}
+
+const enabled = ref(readPetEnabled())
 const pos = ref(readPosition())
 const dragging = ref(false)
 const petted = ref(false)
 const petEl = ref<HTMLElement | null>(null)
 const petSceneEl = ref<HTMLElement | null>(null)
 const skin = ref<PetSkin>(getCurrentSkin())
+// 静态立绘走 public/ 资产解析：DEV 直取根路径，PROD 由网关 `<base>/static/` 提供。
+const imageSrc = computed(() => (skin.value.src ? staticAssetUrl(skin.value.src) : ''))
 
 // ── 后端联动（V2.1 · 桌宠持久化）──
 // 启动拉取真实好感度/心情；交互按后端「真实支持」的动作调 triggerAction；
@@ -296,7 +312,12 @@ const bubble = ref('')
 const menuOpen = ref(false)
 const particles = ref<{ emoji: string; style: Record<string, string> }[]>([])
 
-let petScene: PetSvg | null = null
+// 渲染器实例（三维 / 2.5D 同接口，见 petRenderer.ts）
+let petScene: PetRenderer | null = null
+/** 当前舞台是否真三维（模板 `is-3d` 状态位，供诊断/样式；三维下 canvas 不吃指针事件） */
+const pet3d = ref(false)
+/** 渲染器是否已就绪：未就绪时既不打 `is-2d` 也不打 `is-3d`，避免加载期闪一次 2.5D 光晕 */
+const sceneReady = ref(false)
 
 interface Point { x: number; y: number }
 
@@ -308,15 +329,14 @@ function readPosition(): Point {
       if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return { x: parsed.x, y: parsed.y }
     }
   } catch { /* fall through */ }
-  return { x: window.innerWidth - 120, y: window.innerHeight - 170 }
+  return { x: window.innerWidth - PET_W - 20, y: window.innerHeight - PET_H - 24 }
 }
-
-const PET_W = 100
-const PET_H = 110
 
 const petStyle = computed(() => ({
   left: `${pos.value.x}px`,
   top: `${pos.value.y}px`,
+  '--pet-w': `${PET_W}px`,
+  '--pet-h': `${PET_H}px`,
   // 走路/工作时用 CSS transition 平滑移动
   transition: behavior.value === 'walk' || behavior.value === 'work'
     ? 'left 1.2s var(--ease-in-out), top 1.2s var(--ease-in-out)'
@@ -632,16 +652,60 @@ function spawnParticles(emojis: string[], count: number) {
   particleTimer = setTimeout(() => { particles.value = [] }, 2500)
 }
 
+// ── 「工作态」看门狗（对齐 Codex `ambient.rs` / DeepSeek `dsh-desktop-pet` 的衰减语义）──
+//
+// # 为什么必须有 TTL
+//
+// `working` 分支原本只等 `done` / `cancelled` 事件来收尾。但"事件永远不来"在真机上是常态：
+// 进程被杀、网络断、WS 重连、用户中途关掉会话、后端 panic —— 任何一种都会让桌宠**永久**
+// 停在 work 态。这比不显示更糟：用户看到宠物一直在"干活"，会以为任务还在跑。
+//
+// 参考实现的做法（2026 公开实现核对）：
+// - OpenAI Codex 的宠物是**环境状态指示器**，状态有存活期：Running 3min / Failed 1h /
+//   Waiting 24h / Review 7d，超时回退 idle（见 dsh 插件对 `ambient.rs` 的移植说明）；
+// - `dsh-desktop-pet` 明确"不是第二个聊天 UI，只做状态指示"，7 态折叠 + 超时回退。
+//
+// 我们只取 Running 一档 3min：其余状态（dance/spin/sleep/celebrate/sad）本来就是 1.2–5s
+// 的短动效，各自已有定时器收尾，不需要长存活；而 work 态是唯一**可能无限长**的。
+const WORK_STALE_MS = 3 * 60 * 1000
+let workTtlTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearWorkTtl(): void {
+  if (workTtlTimer) {
+    clearTimeout(workTtlTimer)
+    workTtlTimer = null
+  }
+}
+
+/** 重新计时：每收到一次真实进度就续命，静默超过阈值才判"卡死"。 */
+function armWorkTtl(): void {
+  clearWorkTtl()
+  workTtlTimer = setTimeout(() => {
+    if (behavior.value !== 'work') return
+    behavior.value = 'idle'
+    mood.value = 'normal'
+    bubble.value = ''
+    scheduleIdleBehavior()
+  }, WORK_STALE_MS)
+}
+
+/** 进入工作态的唯一入口：保证"设状态"与"武装看门狗"永远成对，避免漏挂。 */
+function enterWork(): void {
+  mood.value = 'working'
+  behavior.value = 'work'
+  bubble.value = '💭'
+  if (behaviorTimer) clearTimeout(behaviorTimer)
+  if (idleTimer) clearTimeout(idleTimer)
+  armWorkTtl()
+}
+
 // ── 任务事件 ──
 function onTaskEvent(e: Event) {
   const detail = (e as CustomEvent).detail as { state: string }
   if (detail.state === 'working') {
-    mood.value = 'working'
-    behavior.value = 'work'
-    bubble.value = '💭'
-    if (behaviorTimer) clearTimeout(behaviorTimer)
-    if (idleTimer) clearTimeout(idleTimer)
+    enterWork()
   } else if (detail.state === 'done') {
+    clearWorkTtl()
     mood.value = 'excited'
     behavior.value = 'celebrate'
     bubble.value = '✨'
@@ -656,6 +720,7 @@ function onTaskEvent(e: Event) {
       scheduleIdleBehavior()
     }, 3500)
   } else if (detail.state === 'cancelled') {
+    clearWorkTtl()
     mood.value = 'sad'
     behavior.value = 'sad'
     bubble.value = '😅'
@@ -670,6 +735,8 @@ function onTaskEvent(e: Event) {
 
 function onToolEvent(e: Event) {
   if (mood.value !== 'working') return
+  // 有工具进度 = 这一轮还活着 → 续命看门狗（否则长任务会在 3min 处被误判卡死）
+  armWorkTtl()
   const detail = (e as CustomEvent).detail as { name: string }
   // 工具调用时偶尔跳一下
   if (Math.random() < 0.3) {
@@ -687,7 +754,7 @@ function onToolEvent(e: Event) {
 // ── 存储/皮肤事件 ──
 function onStorage(event: StorageEvent) {
   if (event.key === ENABLED_KEY) {
-    enabled.value = localStorage.getItem(ENABLED_KEY) === 'true'
+    enabled.value = readPetEnabled()
   }
   if (event.key === 'pet.skin') {
     skin.value = getCurrentSkin()
@@ -701,40 +768,62 @@ function onSkinChanged(e: Event) {
   initPetScene()
 }
 
-// ── SVG 桌宠初始化（矢量渲染，无 WebGL 依赖；档位只影响特效预算，不降级形象）──
-function initPetScene() {
-  // 静态立绘（当前列表已全模型化）不需要矢量场景
+// ── SVG 桌宠初始化（优先真三维，WebGL 不可用/构建失败才回退 2.5D 矢量）──
+// 2026-10-24：用户反馈「桌宠要能显示 3D 的」。此前这里固定构造 `PetSvg`，
+// 而 3D 场景（`pet3d/Pet3DScene`）只在 PetView 里用 —— 同一个皮肤在两处长得不一样。
+// 现在统一走 `createPetRenderer`：页内桌宠与桌面悬浮窗都先试三维。
+let sceneToken = 0
+async function initPetScene(): Promise<void> {
+  // 静态立绘（当前列表已全模型化）不需要场景
   if (skin.value.kind === 'image') {
     petScene?.dispose()
     petScene = null
+    pet3d.value = false
+    sceneReady.value = false
     return
   }
-  nextTick(() => {
-    if (!petSceneEl.value) return
-    petScene?.dispose()
-    petScene = null
-    const accentHex = skin.value.accent.startsWith('#')
-      ? parseInt(skin.value.accent.slice(1), 16)
-      : 0x9ec5e8
-    try {
-      // 数据驱动造型：兽形/人形由 Spec 决定外观（热插拔，渲染代码零改动）
-      const spec = getPetModelSpec(skin.value.model ?? skin.value.id)
-      petScene = new PetSvg({
-        container: petSceneEl.value,
-        accent: accentHex,
-        spec,
-        quality: renderTierOf(runtime.value.quality),
-      })
-      petScene.setMood(mood.value as PetMood3D)
-      petScene.setFacing(flipped.value ? -1 : 1)
-      // 重建后补上当前悬停态（光标可能一直停在它身上，换皮肤不应丢失聚焦）
-      petScene.setHover(focused.value ? 1 : 0)
-    } catch (e) {
-      // 构造失败（如环境缺 document）→ 置空并由模板如实标注，不假装已渲染
-      console.warn('[PetSvg] 创建失败:', e)
-      petScene = null
+  const token = ++sceneToken
+  await nextTick()
+  const container = petSceneEl.value
+  if (!container) return
+  petScene?.dispose()
+  petScene = null
+  pet3d.value = false
+  sceneReady.value = false
+  const accentHex = skin.value.accent.startsWith('#')
+    ? parseInt(skin.value.accent.slice(1), 16)
+    : 0x9ec5e8
+  try {
+    // 数据驱动造型：兽形/人形由 Spec 决定外观（热插拔，渲染代码零改动）
+    const spec = getPetModelSpec(skin.value.model ?? skin.value.id)
+    const result = await createPetRenderer({
+      container,
+      accent: accentHex,
+      spec,
+      quality: renderTierOf(runtime.value.quality),
+    })
+    // 异步（three 动态 import + 建模）期间可能已换皮肤/被卸载：丢弃过期构建
+    if (token !== sceneToken) {
+      result.renderer.dispose()
+      return
     }
-  })
+    petScene = result.renderer
+    pet3d.value = result.kind === '3d'
+    sceneReady.value = true
+    if (result.fallbackReason) {
+      console.warn('[Pet3D] 三维不可用，已回退 2.5D 矢量:', result.fallbackReason)
+    }
+    petScene.setMood(mood.value as PetMood3D)
+    petScene.setFacing(flipped.value ? -1 : 1)
+    // 重建后补上当前悬停态（光标可能一直停在它身上，换皮肤不应丢失聚焦）
+    petScene.setHover(focused.value ? 1 : 0)
+  } catch (e) {
+    // 构造失败（如环境缺 document）→ 置空并由模板如实标注，不假装已渲染
+    console.warn('[PetRenderer] 创建失败:', e)
+    petScene = null
+    pet3d.value = false
+    sceneReady.value = false
+  }
 }
 
 // ── 鼠标视线追踪 ──
@@ -789,9 +878,36 @@ function mountBrain(): void {
     try { unsubs.push(rpc.on(event, () => brain.feed(feed))) } catch { /* rpc 未就绪时跳过 */ }
   }
   on('session.event.text_delta', 'text_delta')
+  // 流式文本同样是"这一轮还活着"的证据：工作态下续命，避免长时间只在吐字、
+  // 没有工具调用的轮次被 3min 看门狗误判卡死。
+  try {
+    unsubs.push(rpc.on('session.event.text_delta', () => {
+      if (behavior.value === 'work') armWorkTtl()
+    }))
+  } catch { /* rpc 未就绪时跳过 */ }
   on('session.event.tool_use_start', 'tool_start')
   on('session.event.tool_result', 'tool_result')
   on('session.event.warning', 'warning')
+  // 终结性错误 → 明确的 sad（对齐 Codex 的 failed 档），并**立刻**解除工作态：
+  // 否则报错后桌宠仍会显示"干活中"，最长到 3min 看门狗超时才纠正。
+  try {
+    unsubs.push(rpc.on('session.event.error', () => {
+      clearWorkTtl()
+      if (behavior.value !== 'work') return
+      mood.value = 'sad'
+      behavior.value = 'sad'
+      bubble.value = '⚠️'
+      if (behaviorTimer) clearTimeout(behaviorTimer)
+      behaviorTimer = setTimeout(() => {
+        if (behavior.value === 'sad') {
+          behavior.value = 'idle'
+          mood.value = 'normal'
+          bubble.value = ''
+          scheduleIdleBehavior()
+        }
+      }, 3000)
+    }))
+  } catch { /* rpc 未就绪时跳过 */ }
   on('session.event.task_group.done', 'done')
   on('session.event.plan_delta', 'plan')
   on('task.queued', 'queued')
@@ -842,6 +958,9 @@ function unmountBrain(): void {
   psiBubbleTimer = null
   if (bubbleTimer) clearTimeout(bubbleTimer)
   bubbleTimer = null
+  // 工作态看门狗必须与组件同生共死：漏清会让 setBehavior 之外的残留定时器
+  // 在卸载后仍改状态（Vue 会警告且可能写坏已销毁的 ref）。
+  clearWorkTtl()
   for (const off of unsubs) { try { off() } catch { /* 已断开 */ } }
   unsubs = []
 }
@@ -887,10 +1006,23 @@ onUnmounted(() => {
 
 /* 3D 容器 */
 .desktop-pet__3d {
-  width: 100px;
-  height: 110px;
+  width: var(--pet-w, 168px);
+  height: var(--pet-h, 186px);
   position: relative;
   filter: drop-shadow(0 6px 12px color-mix(in srgb, var(--text) 25%, transparent));
+}
+
+/* 真三维画布：拖拽/点击手势归外层（拖桌宠、点它互动），
+   画布自身只负责渲染 —— 否则一次拖动会同时转动模型和挪动桌宠。
+   视线跟随仍由 window 级 mousemove → lookAt 驱动，不依赖 canvas 事件。 */
+.desktop-pet__3d.is-3d :deep(canvas) {
+  pointer-events: none;
+}
+
+/* 三维场景自带落地阴影；再叠一层 CSS drop-shadow 会让画布每帧多一次
+   离屏滤镜（168×186 也要重算整块 alpha），故三维态关掉这条。 */
+.desktop-pet__3d.is-3d {
+  filter: none;
 }
 
 /* R1 诚实降级：无 WebGL 时的 CSS 2.5D —— 呼吸/眨眼用 CSS 动画，不假装 3D */
@@ -902,20 +1034,6 @@ onUnmounted(() => {
 @keyframes pet2dBreathe {
   0%, 100% { transform: scaleY(1) scaleX(1); }
   50% { transform: scaleY(0.97) scaleX(1.02); }
-}
-.desktop-pet__badge {
-  position: absolute;
-  left: 50%;
-  bottom: 2px;
-  transform: translateX(-50%);
-  font-size: 9px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  color: var(--text-dim);
-  background: color-mix(in srgb, var(--card) 88%, transparent);
-  border: 1px solid var(--hairline);
-  white-space: nowrap;
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-pet__3d.is-2d { animation: none; }
@@ -935,6 +1053,13 @@ onUnmounted(() => {
   -webkit-user-drag: none;
   transform-origin: bottom center;
   transition: transform var(--dur-base) var(--ease-out);
+}
+
+/* 专属立绘是竖构图（1773×2364），100px 会显得过小；单独给一档高度并限宽。 */
+.desktop-pet.is-image .desktop-pet__img {
+  height: 138px;
+  max-width: 112px;
+  border-radius: var(--radius-lg);
 }
 
 /* ── 情绪气泡 ── */

@@ -173,17 +173,29 @@ export function useChatUsageWidget(options: UseChatUsageWidgetOptions) {
       const sessions = usage?.sessions || []
       const current = sessions.find(s => (s.session || s.sessionKey || s.key) === options.sessionKey.value)
       if (current) {
-        usageAccum.value.input = Number(current.input_tokens || current.inputTokens || 0)
-        usageAccum.value.output = Number(current.output_tokens || current.outputTokens || 0)
-        usageAccum.value.cacheRead = Number(current.cache_read_tokens || current.cacheReadTokens || 0)
-        usageAccum.value.cacheWrite = Number(current.cache_write_tokens || current.cacheWriteTokens || 0)
-        const costVal = Number(current.cost_usd || current.costUsd || 0)
-        usageAccum.value.cost = costVal > 0 ? costVal : null
-        usageModel.value = current.model || ''
+        const backendInput = Number(current.input_tokens || current.inputTokens || 0)
+        const backendOutput = Number(current.output_tokens || current.outputTokens || 0)
+        const backendCached = Number(current.cache_read_tokens || current.cacheReadTokens || 0)
+        const backendWrite = Number(current.cache_write_tokens || current.cacheWriteTokens || 0)
+        // usage.status 的 Rust 台账按 usage_events.session 过滤，而多数历史行
+        // session 是空串，按会话查回来常是 0。只有当后端**真的有数**、或本地还
+        // 什么都没累计时才覆盖；否则重连会把实时累计到的真实 token 清零。
+        if (backendInput + backendOutput + backendCached > 0
+          || (usageAccum.value.input === 0 && usageAccum.value.output === 0)) {
+          usageAccum.value.input = backendInput
+          usageAccum.value.output = backendOutput
+          usageAccum.value.cacheRead = backendCached
+          usageAccum.value.cacheWrite = backendWrite
+        }
         // Refresh (or clear) the context-pressure chip for this session. Clearing
         // when absent stops a previous session's warning from sticking after a
         // switch to a session that is well under threshold.
         contextStatus.value = current.contextStatus ?? current.context_status ?? null
+        if (backendInput + backendOutput > 0) {
+          const costVal = Number(current.cost_usd || current.costUsd || 0)
+          usageAccum.value.cost = costVal > 0 ? costVal : null
+          usageModel.value = current.model || ''
+        }
         saveWidgetState()
       }
     } catch {

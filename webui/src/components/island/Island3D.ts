@@ -114,6 +114,69 @@ export interface IslandLabelAnchor {
   selected: boolean
 }
 
+/** HTML 标签胶囊的估算尺寸（与 `.island-label` 的 11px 字号、2×8px 横向内边距对齐）。
+ *
+ *  投影层每 100ms 跑一次，不能去量 DOM（会触发重排）；用字宽估算即可——
+ *  宁可早一点隐藏，也不要让胶囊被画布边缘切掉一半（真机截图里就出现过半截药丸）。 */
+export function estimateLabelBox(title: string): { width: number; height: number } {
+  let width = 16
+  for (const ch of title) {
+    width += ((ch.codePointAt(0) ?? 0) > 0x2e80 ? 11 : 6.2)
+  }
+  return { width: Math.min(width, 220), height: 22 }
+}
+
+/** 锚点是否能让整枚标签落在画布内。
+ *
+ *  标签是 `translate(-50%, -100%)` 的胶囊：底边贴锚点、水平居中，
+ *  因此要求「上沿 ≥ 0、下沿 ≤ 高、左右都不越界」。 */
+export function anchorFitsCanvas(
+  px: number,
+  py: number,
+  width: number,
+  height: number,
+  box: LabelBox,
+): boolean {
+  if (width <= 0 || height <= 0) return false
+  const half = box.width / 2
+  return px - half >= 0 && px + half <= width && py - box.height >= 0 && py <= height - 2
+}
+
+export interface LabelBox {
+  width: number
+  height: number
+}
+
+/** 同屏标签的竖向避让：`y` 是胶囊底边，按 y 从上到下依次排开。
+ *
+ *  真机实测：`session`（主堡）与 `construction:workshop-tower` 的胶囊在默认视角
+ *  重叠 5.3px，把主堡名字遮掉约四分之一。锚点间距太近时**只下移**下方那枚，
+ *  x 保持不变——宁可标签略微离开建筑顶部，也不要两枚名字叠在一起。
+ *  下移后若越出画布底部，则该枚退回隐藏（宁缺勿假）。 */
+export function separateLabelAnchors(
+  anchors: readonly IslandLabelAnchor[],
+  boxes: ReadonlyMap<string, LabelBox>,
+  width: number,
+  height: number,
+  gap = 2,
+): IslandLabelAnchor[] {
+  const visible = anchors
+    .filter((anchor) => anchor.visible)
+    .sort((a, b) => a.y - b.y || a.x - b.x)
+  let floor = Number.NEGATIVE_INFINITY
+  const adjusted: IslandLabelAnchor[] = []
+  for (const anchor of visible) {
+    const box = boxes.get(anchor.id) ?? { width: 0, height: 22 }
+    const y = Math.max(anchor.y, floor + box.height + gap)
+    const stillFits = y <= height - 2 && anchorFitsCanvas(anchor.x, y, width, height, box)
+    adjusted.push({ ...anchor, y, visible: stillFits })
+    floor = y
+  }
+  // 未参与避让（不可见）的锚点原样保留，便于上层按 id 稳定渲染
+  const hidden = anchors.filter((anchor) => !anchor.visible)
+  return [...adjusted, ...hidden]
+}
+
 export interface Island3DOptions {
   container: HTMLElement
   spec: IslandModelSpec
@@ -123,6 +186,10 @@ export interface Island3DOptions {
   onHover?: (entityId: string | null) => void
   /** 每 100ms 一次的标签投影（HTML 层跟随 3D 位置） */
   onLabels?: (anchors: IslandLabelAnchor[]) => void
+  /** 标签显示名（缺省用 entity.title）。视图层用它做本地化 / 占位名替换，
+   *  投影层则用同一份文案估算胶囊宽度——两处必须同源，否则估算宽度与实际渲染不一致，
+   *  边缘标签会重新出现「差几像素被裁一半」。 */
+  labelTitle?: (entity: IslandEntity) => string
   /** WebGL 上下文丢失（上层应切到 2D 降级并提示） */
   onContextLost?: () => void
   /** 施工地块落点（让装饰道具别在脚手架底下种树；缺省为空） */
@@ -159,6 +226,7 @@ export class Island3D {
   private readonly onSelect?: (id: string | null) => void
   private readonly onHover?: (id: string | null) => void
   private readonly onLabels?: (anchors: IslandLabelAnchor[]) => void
+  private readonly labelTitle?: (entity: IslandEntity) => string
   private readonly onContextLost?: () => void
 
   private renderer: THREE.WebGLRenderer
@@ -196,7 +264,7 @@ export class Island3D {
 
   private cameraState: OrbitCamera
   private cameraGoal: OrbitCamera
-  private clock = new THREE.Clock()
+  private lastFrameAt = 0
   private elapsed = 0
   private timeOfDay: number
   private autoDayNight = true
@@ -233,6 +301,7 @@ export class Island3D {
     this.onSelect = opts.onSelect
     this.onHover = opts.onHover
     this.onLabels = opts.onLabels
+    this.labelTitle = opts.labelTitle
     this.onContextLost = opts.onContextLost
     this.constructionKeepOuts = (opts.constructionKeepOuts ?? []).map((p) => ({ x: p.x, z: p.z, radius: p.radius }))
 
@@ -249,7 +318,9 @@ export class Island3D {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.budget.maxPixelRatio))
     this.renderer.setSize(width, height)
     this.renderer.shadowMap.enabled = this.budget.shadows
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    // PCFSoftShadowMap 在 three r18x 已弃用（内部会回退成 PCFShadowMap 并打弃用警告），
+    // 直接写 PCFShadowMap：视觉等价、控制台干净。
+    this.renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer.domElement.style.cssText = 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;'
     this.renderer.domElement.addEventListener('webglcontextlost', this.handleContextLost)
     this.container.appendChild(this.renderer.domElement)
@@ -407,7 +478,7 @@ export class Island3D {
     if (enabled) {
       // 从当前时刻继续，避免切回自动时跳变
       this.elapsed = this.timeOfDay
-      this.clock.getDelta()
+      this.lastFrameAt = performance.now()
     } else {
       this.timeOfDay = (this.elapsed % this.spec.lighting.dayLength + this.spec.lighting.dayLength) % this.spec.lighting.dayLength
     }
@@ -483,7 +554,7 @@ export class Island3D {
     this.paused = paused
     if (!paused) {
       // 恢复时重置计时，避免一次巨大的 dt
-      this.clock.getDelta()
+      this.lastFrameAt = performance.now()
       this.lastRender = 0
     }
   }
@@ -640,10 +711,18 @@ export class Island3D {
 
   /* ── 帧循环 ── */
 
+  /** 帧间隔（秒）。用 `performance.now()` 而不是 `THREE.Clock`：r18x 起 Clock 已弃用。 */
+  private takeDelta(): number {
+    const now = performance.now()
+    const dt = this.lastFrameAt === 0 ? 0 : (now - this.lastFrameAt) / 1000
+    this.lastFrameAt = now
+    return dt
+  }
+
   private tick = (): void => {
     if (!this.alive) return
     this.rafId = requestAnimationFrame(this.tick)
-    const dt = Math.min(this.clock.getDelta(), 0.05)
+    const dt = Math.min(this.takeDelta(), 0.05)
     if (this.paused) return
     this.elapsed += dt
 
@@ -913,17 +992,24 @@ export class Island3D {
     const width = this.container.clientWidth
     const height = this.container.clientHeight
     const anchors: IslandLabelAnchor[] = []
+    const boxes = new Map<string, LabelBox>()
     for (const [id, handle] of this.entities) {
       const point = new THREE.Vector3(handle.entity.plot.x, handle.topY, handle.entity.plot.z).project(this.camera)
+      const px = (point.x * 0.5 + 0.5) * width
+      const py = (-point.y * 0.5 + 0.5) * height
+      const box = estimateLabelBox(this.labelTitle?.(handle.entity) ?? handle.entity.title)
+      boxes.set(id, box)
       anchors.push({
         id,
-        x: (point.x * 0.5 + 0.5) * width,
-        y: (-point.y * 0.5 + 0.5) * height,
-        visible: point.z < 1 && Math.abs(point.x) < 1.2 && Math.abs(point.y) < 1.2,
+        x: px,
+        y: py,
+        // 只在标签能整块落在画布内时显示：贴着画布上沿的锚点会把胶囊切掉一半，
+        // 而画布外（聚焦后建筑顶部已在视口上方）的锚点会变成不可见的幽灵按钮。
+        visible: point.z < 1 && anchorFitsCanvas(px, py, width, height, box),
         selected: id === this.selectedId,
       })
     }
-    this.onLabels(anchors)
+    this.onLabels(separateLabelAnchors(anchors, boxes, width, height))
   }
 
   private emptySky(): IslandSkyState {

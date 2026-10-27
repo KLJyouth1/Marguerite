@@ -148,8 +148,23 @@ export function useChatRunModeController(
     void sandboxSetupRecovery.refresh()
   }
 
+  /**
+   * 安全模式不可安装时的可操作提示：说清「为什么 + 去哪里重试」，
+   * 而不是静默把用户的选择压回 full（旧行为的「点了没反应」）。
+   */
+  function safeSetupUnavailableNotice(): string {
+    const status = sandboxSetupStatus.value
+    const reason = (status?.message || status?.detail || '').trim()
+    return reason
+      ? t('settings.sandbox.safeMode.unavailableToastWithReason', { reason })
+      : t('settings.sandbox.safeMode.unavailableToast')
+  }
+
   async function setComposerRunMode(mode: SandboxRunMode): Promise<void> {
-    if (runModeLocked.value) return
+    if (runModeLocked.value) {
+      pushToast(t('chat.composer.runModeLocked'), { tone: 'warn' })
+      return
+    }
     sandboxSetupStore.noteRunModeSelection(mode)
     const action = composerRunModeSelectionAction(
       mode,
@@ -157,8 +172,14 @@ export function useChatRunModeController(
       composerSafeSetupAvailable.value,
       sandboxSetupRecovery.resolved.value,
     )
-    if (action === 'ignore') return
     if (action === 'setup') {
+      // 先落盘用户选择：安装取消/失败时仍保留「安全（待安装）」，
+      // 不回退成 full（旧实现只开对话框、选择被丢弃）。
+      try {
+        await persistComposerRunMode('safe')
+      } catch (cause) {
+        reportRunModePersistenceError(cause)
+      }
       sandboxSetupStore.resetOutcome()
       composerSandboxSetupOpen.value = true
       return
@@ -167,6 +188,10 @@ export function useChatRunModeController(
       await persistComposerRunMode(mode)
     } catch (cause) {
       reportRunModePersistenceError(cause)
+      return
+    }
+    if (action === 'notice') {
+      pushToast(safeSetupUnavailableNotice(), { tone: 'warn' })
     }
   }
 

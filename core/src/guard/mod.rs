@@ -13,6 +13,7 @@ pub mod escalation;
 pub mod escalation_registry;
 pub mod fact;
 pub mod gateway;
+pub mod permission_matrix;
 pub mod repair;
 pub mod semantic;
 pub mod syntax;

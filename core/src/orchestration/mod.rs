@@ -12,6 +12,8 @@
 //! - [`Orchestrator::analyze`] 为纯规则分析，**不调用 LLM**，可在离线 / 无 API Key 环境下运行，
 //!   供前端只读展示「agent 将为这条输入选择何种编排」。
 
+pub mod cancel;
+pub mod member_registry;
 pub mod dag;
 pub mod deliverable;
 
@@ -26,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::agent::runtime::{AgentRuntime, AgentState};
 use crate::agent::stream_loop::AgentEvent;
-use crate::agent::subagent::{SubAgentConfig, SubAgentManager};
+use crate::agent::subagent::{SubAgentConfig, SubAgentManager, SubAgentStatus};
 use crate::agent::team::Team;
 use crate::agent::tool_cycle::ToolResult;
 use crate::automation::{Automation, AutomationManager, JobKind};
@@ -100,8 +102,12 @@ fn qa_pass(result: &str) -> bool {
 /// 一个子 Agent 的规格（角色人设 + 任务 + 路由意图/复杂度）。
 #[derive(Debug, Clone)]
 pub struct SubtaskSpec {
-    /// 角色名（人类可读，用于事件与综合上下文）
-    pub role: &'static str,
+    /// 角色名（人类可读，用于事件与综合上下文；同时是 `Team` 的成员键，必须唯一）
+    ///
+    /// 用 `String` 而非 `&'static str`：蜂群规模 / 名册长度由用户选择决定，
+    /// 角色名必须能按数量动态生成（`蜂群 17/24 号·风险反例` 这类），
+    /// 静态字符串表无法覆盖任意多个成员（旧实现 >16 会重名 → 信箱串台）。
+    pub role: String,
     /// 该子 Agent 的系统人设提示
     pub system_prompt: String,
     /// 具体子任务描述
@@ -213,6 +219,17 @@ pub struct Orchestrator {
     automation: Arc<Mutex<AutomationManager>>,
     events: Option<Arc<EventBus>>,
     session: Option<String>,
+    /// 最近一次编排的 runId（`orch-<ms>-<uuid8>`）。
+    ///
+    /// 为什么必须记在这里：后台蜂群失败/超时时的兜底终态帧（gateway/team.rs）原本
+    /// 用 long_running 的 taskId 当 runId，与 run_started/成员帧的 `orch-*` 不一致，
+    /// 前端 `findRun` 永远匹配不上 —— 失败场景的卡片必然永久「运行中」。
+    /// 这里把 `begin_orchestration` 生成的 id 记下来，兜底帧复用同一个 id。
+    last_run_id: std::sync::Mutex<Option<String>>,
+    /// 本轮编排的取消句柄（「停止」按钮经网关调 [`cancel::cancel_session`] 命中它）。
+    ///
+    /// 句柄 drop 时自动从进程级注册表注销；成员任务通过 `signal()` 协作式退出。
+    cancel_guard: std::sync::Mutex<Option<cancel::CancelGuard>>,
     /// 当前运行模式（Plan / Agent / Bloom）。
     ///
     /// [`dispatch`] 按此路由：`Bloom` → Captain+Copilot 双模型并行编排；
@@ -243,6 +260,11 @@ pub struct Orchestrator {
     /// 「自动编排决策 / Bloom 并行编排」叙述，就会在同一轮里 ×N 重复（A3），并与
     /// 方案卡已声明的交付流水线决策互斥并置（A2）。置 true 时子步骤只执行、不再复述决策。
     plan_step: bool,
+    /// 本轮编排起点（完成门禁的时间压力检测需要真实耗时）。
+    ///
+    /// 此前 `finish_dispatch` 恒传 `duration: None`，于是「两秒就说全部完成」的
+    /// 时间压力检查**从未执行** —— 这是虚假完成能通过门禁的一个直接原因。
+    turn_started: Option<std::time::Instant>,
 }
 
 /// 模型名是否具备视觉（多模态）能力（启发式关键词匹配）。
@@ -300,9 +322,12 @@ fn vision_from_config(config: &Config) -> Arc<VisionCapability> {
         base_url: m.base_url.clone(),
         max_tokens: 2048,
         temperature: 0.2,
-        timeout_secs: 30,
+        // 视觉模型描述整屏截图时 reasoning 阶段可能长时间不吐字节；30s 读超时
+        // 会让「截图→VLM→坐标」链路频繁假超时，取与主模型同源的默认值。
+        timeout_secs: crate::model::llm::default_timeout_secs(),
         thinking: crate::model::thinking::ThinkingEffort::Off,
         context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+        wire_api: m.wire_api,
     };
     cap.set_transport(Box::new(LlmVisionTransport::new(llm)));
     cap.set_resolver(Box::new(VisionModelResolver(m.model_name.clone())));
@@ -318,6 +343,10 @@ fn connect_configured_mcp_clients(
 ) -> Vec<std::sync::Arc<crate::mcp::client::McpClient>> {
     let mut clients = Vec::new();
     for srv in &config.mcp.servers {
+        // 停用的服务器不参与运行期连接（与 mcp.servers.setEnabled 的语义一致）
+        if !srv.enabled {
+            continue;
+        }
         let url = srv
             .url
             .as_deref()
@@ -477,6 +506,32 @@ impl Orchestrator {
         )
     }
 
+    /// 多根装配（P2-9 多项目工作区）：`roots[0]` 为主根。
+    ///
+    /// 文件域工具拿到**完整根集合**（可跨根读写检索），编排/提示/产物归因仍以主根为准。
+    pub fn new_with_workspace_roots(
+        config: Config,
+        roots: Vec<std::path::PathBuf>,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+        cache: Option<Arc<crate::cache::PrefixCache>>,
+    ) -> Self {
+        let primary = roots
+            .first()
+            .cloned()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let extra: Vec<std::path::PathBuf> = roots.into_iter().skip(1).collect();
+        Self::assemble(
+            config,
+            crate::workspace::Workspace::with_roots(
+                primary,
+                extra,
+                crate::workspace::WorkspaceSource::Bound,
+            ),
+            credentials,
+            cache,
+        )
+    }
+
     /// 装配编排器（所有公开构造函数唯一汇聚点）。
     ///
     /// `ws` 一次性携带「根 + 绑定状态」：工具注册表用 `ws.root`，lead 运行时收
@@ -490,12 +545,65 @@ impl Orchestrator {
     ) -> Self {
         // 工具/自动化/字段一律以解析后的根为准（与 lead 看到的是同一个）。
         let workspace = ws.root.clone();
+        // 多根：文件域工具注册用完整根集合（主根在首位）
+        let tool_roots: Vec<std::path::PathBuf> = ws.roots().to_vec();
         // 先基于 &config 构造模型路由器（借用立即结束），再 move config 进 lead。
-        let model_router = Arc::new(ModelRouter::new_with_credentials_and_cache(
-            &config,
-            credentials,
-            cache,
-        ));
+        let mut model_router =
+            ModelRouter::new_with_credentials_and_cache(&config, credentials.clone(), cache);
+
+        /// 本次会话的档位治理参数（M3 → M2 接线的**单一来源**）。
+        ///
+        /// 生效档 = 会话持久态（用户锁定档 + 预算熔断）× 本编排器身份（agent 模式）。
+        /// 档案表读不到（`models.json` 损坏）→ 返回 None，保持 `chain_for_call` 退化为
+        /// 历史行为：绝不因为档位治理读盘失败而阻断启动（fail-safe）。
+        fn tier_governance_of_session() -> Option<(
+            crate::model::tier::ModelTier,
+            Arc<crate::model::registry::ModelRegistry>,
+            Vec<String>,
+        )> {
+            let sel = crate::model::selector::ModelSelector::load().ok()?;
+            let state = crate::model::tier::SessionState::load();
+            // 预算剩余比例必须取**实测**：会话态里的 `tokens_used/usd_used` 全仓无人写入
+            // （恒 0），只有 `usage` 台账里才有真实用量。不接这一步，预算降档永不触发
+            // （advisory）；用户已配置预算时，此处据实降档。
+            let measured = crate::usage::tightest_budget_snapshot()
+                .map(|b| b.remaining_ratio);
+            let decision = state.resolve_tier_with(
+                crate::model::tier::TierRequest {
+                    mode_hint: Some("agent".to_string()),
+                    ..Default::default()
+                },
+                measured,
+            );
+            Some((
+                decision.tier,
+                Arc::new(sel.registry().clone()),
+                decision.why,
+            ))
+        }
+
+        // ── 档位治理接线（M3 → M2）──
+        // 历史缺陷（已实测确认）：`with_auto_tier` / `with_tier_governance` 在本仓
+        // **零调用点**，于是 `chain_for_call` 恒走 `None` 分支，
+        // `registry.tier_chain()` / `filter_chain()` 在运行时**从不执行** ——
+        // 档位准入只活在单测与 doctor 审计里：用户在控制台锁「旗舰档」，
+        // 实际只改了一个显示字符串，候选链分毫未变。
+        // 这里在**唯一装配点**接线，使「档内候选必须过准入线」真正治理候选链。
+        if let Some((tier, registry, why)) = tier_governance_of_session() {
+            tracing::info!(
+                tier = tier.as_str(),
+                why = ?why,
+                "档位治理已接线：候选链将按该档准入线过滤"
+            );
+            model_router = model_router
+                .with_tier_governance(tier, registry, credentials)
+                // 用户显式排序（model_routing.candidate_models）：只改候选链顺序，
+                // 不放行被准入线拒绝的档案 —— 见 TierGovernance 的字段注释。
+                .with_preferred_candidates(
+                    config.model_routing.candidate_models.clone(),
+                );
+        }
+        let model_router = Arc::new(model_router);
         // D 期接入：把 20 个原生工具 + 命令护栏 + SSRF 防护注册进工具注册表，
         // 让自动编排（dispatch）下的 lead / 子 Agent 真正能调用工具（而非空注册）。
         let mut tool_registry = ToolRegistry::new();
@@ -514,9 +622,9 @@ impl Orchestrator {
             eprintln!("[orchestration] 内置自动化注册失败：{e}");
         }
         let automation: Arc<Mutex<AutomationManager>> = Arc::new(Mutex::new(automation_mgr));
-        if let Err(e) = crate::tools::register_builtin_tools(
+        if let Err(e) = crate::tools::register_builtin_tools_with_roots(
             &mut tool_registry,
-            &workspace,
+            &tool_roots,
             Some(research.clone()),
             Some(vision.clone()),
             Some(automation.clone()),
@@ -530,8 +638,15 @@ impl Orchestrator {
         }
         // 技能工具：list_skills / use_skill / create_skill
         // 让 LLM 在工具循环中能发现、调用、创建技能（YAML prompt 模板）。
-        let skills_dir = crate::tools::skill_tools::resolve_skills_dir(&config.skills.skills_dir);
+        let skills_dir =
+            crate::tools::skill_tools::resolve_skills_dir(&config.skills.skills_dir);
+        // 子代理 / 团队成员拿不到 Config，用只写一次的登记点共享同一份技能索引，
+        // 否则它们的提示里只有「可用工具名」而没有任何技能线索。
+        crate::agent::tool_catalog::register_skills_dir(skills_dir.clone());
         crate::tools::register_skill_tools(&mut tool_registry, skills_dir);
+        // 远程 SSH 工具（P2-10）：把 SSH 协同页已登记的主机接到工具面，
+        // 让 Agent 在长任务里能自行做远程构建 / 看远端日志 / 部署。
+        crate::tools::register_ssh_tools(&mut tool_registry);
         // 工具面 patch 层（热启停）：把 `tool_patch.json` 里被禁用的本地工具从本编排器的
         // 工具集中移除。网关聊天路径**每轮请求都新建 Orchestrator**，所以补丁写盘后
         // **下一轮即生效**，无需重启守护进程；正在执行的轮次不受影响（不中途夺工具）。
@@ -579,6 +694,8 @@ impl Orchestrator {
             automation,
             events: None,
             session: None,
+            last_run_id: std::sync::Mutex::new(None),
+            cancel_guard: std::sync::Mutex::new(None),
             mode: ModeKind::Agent,
             force_solo: false,
             solo_with_tools: false,
@@ -586,6 +703,7 @@ impl Orchestrator {
             anchor: None,
             message_source: "user".to_string(),
             plan_step: false,
+            turn_started: None,
         }
     }
 
@@ -598,6 +716,25 @@ impl Orchestrator {
         self.subagents.set_session(session.clone());
         self.events = Some(bus);
         self.session = Some(session);
+    }
+
+    /// 最近一次编排的 runId（未开始过编排 / 无事件总线时为 `None`）。
+    ///
+    /// 供网关的兜底终态帧复用同一 id（见 `gateway/team.rs`），保证失败路径也能被前端卡片认领。
+    pub fn last_run_id(&self) -> Option<String> {
+        self.last_run_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// 本轮编排是否已被用户取消（未开始过编排 / 已取消 / 状态锁中毒时为 `false`）。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_guard
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|guard| guard.signal().is_cancelled()))
+            .unwrap_or(false)
     }
 
     /// 设置当前运行模式（决定 [`dispatch`] 的编排路由）。
@@ -999,6 +1136,8 @@ impl Orchestrator {
     /// 双模型 `tokio::join!` 真并行，过程经事件总线下发前端）；其余模式走下方
     /// 分析驱动的编排，并由模式偏置抬升形态下界（见 `plan`）。
     pub async fn dispatch(&mut self, text: &str) -> Result<OrchestrationOutcome> {
+        // 记录本轮起点：完成门禁的时间压力检测依赖真实耗时（此前恒为 None → 该检查从未生效）。
+        self.turn_started = Some(std::time::Instant::now());
         // 模式路由（MSC-2）：按运行时模式分流到编排入口，使模式切换**真实**改变执行路径。
         // DeepParallel / OmniSpectrum → 并行编排入口（其自带同一套治理门与完成门禁，
         // 因此这里在门禁之前分流，避免重复裁决）。
@@ -1050,30 +1189,10 @@ impl Orchestrator {
                     }
                 }
                 let reply = if self.solo_with_tools && !self.tool_defs().is_empty() {
-                    if self.plan_step {
-                        // 计划子步骤：保留既有非流式回路（需注入 PLAN_SUBSTEP_OUTPUT_CONTRACT）。
-                        self.run_solo_tool_loop(text).await?
-                    } else {
-                        // 普通 Solo（含桌面 UI 主路径）：带工具执行。
-                        // 这里刻意沿用**非流式**回路：真流式 `run_tool_loop_stream` 对
-                        // 非 SSE（一次性 JSON）响应解析为空文本，会让不支持流式的提供方
-                        // 静默返回空答复（实测 `gateway::chat::tests::
-                        // test_send_runs_turn_and_publishes_enriched_done` 因此变红）。
-                        // 与改动前相比文本行为一致（原本也是非流式 `process_input`），
-                        // 差别仅在「现在真的会调用工具」。
-                        let reply = self.run_solo_tool_loop(text).await?;
-                        // 事件契约：非流式工具回路自身不发事件，须补齐 `Done`，
-                        // 否则 TUI/网关等按 `EventType::Done` 收尾的消费方永远等不到完成。
-                        if let (Some(bus), Some(sess)) = (&self.events, &self.session) {
-                            crate::context::session::clear_partial(sess);
-                            bus.publish(Envelope::new(
-                                EventType::Done,
-                                json!({ "summary": reply.clone() }),
-                                sess.clone(),
-                            ));
-                        }
-                        reply
-                    }
+                    // 普通 Solo（含桌面 UI 主路径）在 `run_solo_tool_loop` 内部二选一：
+                    // 有事件总线 → 真流式（思考/正文/工具实时可见，Done 由其转发器下发）；
+                    // 无事件总线（CLI/测试）→ 非流式（Done 由同一函数收尾下发）。
+                    self.run_solo_tool_loop(text).await?
                 } else {
                     self.lead.process_input(text).await?.to_string()
                 };
@@ -1149,9 +1268,53 @@ impl Orchestrator {
                 },
             );
         }
-        self.lead
+        // 桌面主路径（普通 Solo）走真流式：思考、正文、工具调用/结果实时可见。
+        // 计划子步骤保留非流式（其 Done 会提前结束整轮计划），CLI/测试无事件总线时
+        // 也保持非流式。两条分支都在此收尾发布一次 Done，避免上层重复发。
+        let stream_ui = !self.plan_step
+            && self.events.is_some()
+            && self.session.is_some()
+            && !tools.is_empty();
+        if stream_ui {
+            let (tx, rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+            let forward = tokio::spawn(Self::forward_agent_events(
+                rx,
+                self.events.clone(),
+                self.session.clone().unwrap_or_default(),
+            ));
+            let result = self
+                .lead
+                .run_tool_loop_stream(
+                    &mut history,
+                    self.tool_registry.clone(),
+                    &tools,
+                    tx,
+                    crate::agent::budget_policy::resolve(text, 0, tools.len()).tool_rounds as u32,
+                )
+                .await;
+            // 通道关闭后 forward 自然收尾（Done 已在其内部下发）。
+            let _ = forward.await;
+            return result;
+        }
+        let reply = self
+            .lead
             .run_tool_loop(&mut history, self.tool_registry.clone(), &tools)
-            .await
+            .await?;
+        if !self.plan_step {
+            if let (Some(bus), Some(sess)) = (&self.events, &self.session) {
+                crate::context::session::clear_partial(sess);
+                let mut payload = json!({ "summary": reply.clone() });
+                // 非流式回路的思考只进了落盘缓冲；Done 带回一份，保证回合结束后
+                // 「思考」折叠块有正文可看（与流式转发器的 Done 契约一致）。
+                if let Some(thought) =
+                    crate::persistence::session::peek_pending_thinking(sess)
+                {
+                    payload["reasoning_content"] = json!(thought);
+                }
+                bus.publish(Envelope::new(EventType::Done, payload, sess.clone()));
+            }
+        }
+        Ok(reply)
     }
 
     /// 交付流水线执行体（P0-1）：按契约 DAG 顺序逐步执行子交付物。
@@ -1288,6 +1451,10 @@ impl Orchestrator {
     /// 设计：Bloom 是推理层优化（并行/多轮），**不**放宽沙箱与工具权限；
     /// 工具调用仍走 AgentRuntime 白名单（见 mode/privileges.rs）。
     pub async fn dispatch_bloom(&mut self, text: &str) -> Result<OrchestrationOutcome> {
+        // 从 `dispatch` 分流进来时已经记过起点；直接调用（CLI/蜂群）也要有起点。
+        if self.turn_started.is_none() {
+            self.turn_started = Some(std::time::Instant::now());
+        }
         // 治理门（破甲）：只审计、不阻断（与 `dispatch` 同源）。
         let decision = self.evaluate_dispatch(text);
         self.gate_auto_approve(&decision, "Bloom 并行编排");
@@ -1311,6 +1478,10 @@ impl Orchestrator {
         // 都会被 `is_web_search_intent`（匹配 搜索/新闻/今天/最新）短路成一次纯检索，
         // HTML/PPT 交付步骤永不落盘（用户「4 秒已完成却无产物」的更深根因）。
         let pipeline_substep = matches!(analysis.strategy, AgentMode::Pipeline);
+        // 形态分派同样必须依据**分析结果**：`analysis.strategy` 下面会被统一改写成
+        // DualLeader（叙述口径），若用改写后的值做分派，Cluster/ExpertTeam 分支
+        // 就成了自己写死的死分支（蜂群形同虚设）。见下方「判定顺序」注释。
+        let analyzed_strategy = analysis.strategy;
         let analyzed_rationale = analysis.rationale.clone();
         analysis.strategy = AgentMode::DualLeader;
         // A2/A3：决策叙述必须自洽且不重复。计划子步骤（决策已由方案卡呈现）不再复述；
@@ -1357,18 +1528,34 @@ impl Orchestrator {
         ));
 
         // 统一 Bloom（无 submode 开关）：按任务分析自动选用编排形态，
-        // 全部能力内建，不再有 manual 子模式切换：
-        // - 复杂/并行任务（Cluster/ExpertTeam）→ 双领队蜂群（swarm）
-        // - 目标型实现任务（实现/构建/重构类）→ 自主闭环（auto）：执行→QA→自动修复
-        // - 其余 → 双模型深度推理（deep），保持既有 complexity 路由，向后兼容
-        match analysis.strategy {
+        // 全部能力内建，不再有 manual 子模式切换。
+        //
+        // 【判定顺序：目标型优先，其次 fan-out】—— 这一步顺序是刻意的，不是笔误：
+        // - 目标型实现任务（命中 `is_bloom_goal_task`）→ 自主闭环（auto）：执行→QA→自动修复。
+        // - 复杂/并行扇出任务（`analyze` 得出 Cluster/ExpertTeam，且非目标型）→ 双领队蜂群（swarm）。
+        // - 其余 → 双模型深度推理（deep），保持既有 complexity 路由，向后兼容。
+        //
+        // 为什么把 auto 放前面：`analyze` 对「实现登录并写测试」这类聚焦实现任务是判
+        // ExpertTeam（代码+测试两角色），同时它也命中 `is_bloom_goal_task`——两者本来就
+        // 冲突。若让 Cluster/ExpertTeam 先命中，聚焦实现任务会被改道去多成员扇出，
+        // 比「执行→QA→自动修复」更贵也更难收敛；而扇出信号（批量/枚举）恰恰不是
+        // 目标型任务的形态。故取「强目标信号优先」，扇出只在非目标型任务上生效。
+        if Self::is_bloom_goal_task(text) {
+            return self.dispatch_bloom_auto(text, analysis).await;
+        }
+        // 用**分析结果**分派，而非上面被改写成 DualLeader 的叙述口径 ——
+        // 否则此分支永不命中（历史缺陷：Cluster/ExpertTeam 路径完全不可达）。
+        //
+        // 可达性取决于模式矩阵（`gateway::mode_route`）：
+        // - `DeepParallel`（Bloom）把形态**钉**为 DualLeader ⇒ 蜂群分支在 Bloom 下不可达，
+        //   走下面的 deep 双领队（与 `bias_strategy` 文档一致）；
+        // - `OmniSpectrum`（OmniTranscend）把形态**钉**为 Cluster ⇒ 非目标型任务进蜂群，
+        //   这正是该模式自述的 S5「DEEP 双模型 + SWARM 蜂群 + AUTO 闭环」里的 SWARM 段。
+        match analyzed_strategy {
             AgentMode::Cluster | AgentMode::ExpertTeam => {
                 return self.dispatch_bloom_swarm(text, analysis).await;
             }
             _ => {}
-        }
-        if Self::is_bloom_goal_task(text) {
-            return self.dispatch_bloom_auto(text, analysis).await;
         }
 
         // 联网检索快路径：搜索 / 新闻类意图且内置 web 工具可用 → 直接检索 + 综合，
@@ -1640,28 +1827,44 @@ impl Orchestrator {
     async fn run_bloom_swarm(&mut self, text: &str) -> Result<(String, Vec<String>)> {
         let mut team = Team::new();
         let bloom = current_bloom_spec();
-        for s in cluster_specs(text)
-            .into_iter()
-            .take(crate::mode::swarm::effective_shards(bloom.max_swarm_shards))
-        {
+        let shard_cap = crate::mode::swarm::effective_shards(bloom.max_swarm_shards);
+        let shard_specs = cluster_specs(text);
+        let shard_total = shard_specs.len();
+        for s in shard_specs.into_iter().take(shard_cap) {
             team = team.member(
-                s.role,
+                &s.role,
                 &s.system_prompt,
                 &s.task,
                 s.intent.clone(),
                 s.complexity.clone(),
             );
         }
-        for s in team_specs(detect_roles(text)).into_iter().take(
-            crate::mode::swarm::effective_sub_experts(bloom.max_sub_experts),
-        ) {
+        // 若分片数超过配置规模，**如实播报**截断了多少（不静默）。
+        if shard_total > shard_cap {
+            self.emit_thinking(&format!(
+                "> 蜂群分片：生成了 {shard_total} 个，按配置保留前 {shard_cap} 个\
+                 （truncatedBy={}）。",
+                shard_total - shard_cap
+            ));
+        }
+        let expert_cap = crate::mode::swarm::effective_sub_experts(bloom.max_sub_experts);
+        let expert_specs = team_specs(detect_roles(text));
+        let expert_total = expert_specs.len();
+        for s in expert_specs.into_iter().take(expert_cap) {
             team = team.member(
-                s.role,
+                &s.role,
                 &s.system_prompt,
                 &s.task,
                 s.intent.clone(),
                 s.complexity.clone(),
             );
+        }
+        if expert_total > expert_cap {
+            self.emit_thinking(&format!(
+                "> 子专家：检测到 {expert_total} 个，按配置保留前 {expert_cap} 个\
+                 （truncatedBy={}）。",
+                expert_total - expert_cap
+            ));
         }
         let outcome = team.run(&self.subagents, text).await;
         let summaries: Vec<String> = outcome
@@ -1715,6 +1918,162 @@ impl Orchestrator {
         anyhow::bail!("自主闭环迭代上限（{auto_max_iterations}）耗尽，仍未通过 QA")
     }
 
+    /// 把 agent 回路的 [`AgentEvent`] 翻译成总线事件并下发（Solo / Bloom 共用）。
+    ///
+    /// 关键契约：`Thinking` 帧是**模型真实推理**（`reasoning_content`），必须原样下发；
+    /// 回合收尾的 `Done` 同时带上本轮累积的 `reasoning_content`，供前端在错过流式帧时
+    /// 回填思考正文（此前 Done 只有 `summary`，思考折叠块在回合结束后仍是空的）。
+    async fn forward_agent_events(
+        mut rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+        bus: Option<Arc<EventBus>>,
+        sess: String,
+    ) {
+        let mut partial = String::new();
+        // 本轮真实推理累积：仅用于 Done 回填，不参与任何事件拼接。
+        let mut thinking = String::new();
+        // P2-10：tool_call → tool_result 配对计时，给结果帧补 `elapsed_ms`
+        // （历史工具卡此前完全没有耗时数据）。
+        let mut tool_started_at: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        while let Some(ev) = rx.recv().await {
+            let (etype, payload) = match ev {
+                AgentEvent::Thinking { text } => {
+                    thinking.push_str(&text);
+                    (EventType::Thinking, json!({ "text": text }))
+                }
+                AgentEvent::TextDelta { text } => {
+                    // F1：增量持久化流式 partial_text，前端切走再切回可恢复
+                    partial.push_str(&text);
+                    crate::context::session::record_partial(&sess, &partial);
+                    (
+                        EventType::TextDelta,
+                        json!({ "text": text, "presentation": "answer" }),
+                    )
+                }
+                AgentEvent::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    approval,
+                } => {
+                    let input: Value =
+                        serde_json::from_str(&arguments).unwrap_or(json!(arguments));
+                    let started_at = chrono::Utc::now().timestamp_millis();
+                    let key = id.clone().unwrap_or_else(|| name.clone());
+                    tool_started_at.insert(key, started_at);
+                    let autonomy =
+                        crate::guard::permission_matrix::classify_tool_autonomy(&name);
+                    let mut payload = json!({
+                        // 模型给出的调用 id：前端据此精确配对该次调用的结果，
+                        // 不再靠「工具名 + 时钟」猜身份（同毫秒同名会互相吞并）。
+                        "id": id, "tool_use_id": id,
+                        "name": name, "input": input,
+                        "started_at": started_at,
+                        "autonomy": autonomy.as_key(),
+                    });
+                    // 引擎真实裁决（approved / pending / denied）；面外工具不带该字段。
+                    if let Some(a) = approval {
+                        payload["approval"] = json!(a);
+                    }
+                    (EventType::ToolCall, payload)
+                }
+                AgentEvent::ToolResult {
+                    id,
+                    name,
+                    output,
+                    ok,
+                    approval,
+                } => {
+                    // P2-10：以同名/同 id 的最近一次调用起点算耗时。
+                    let key = id.clone().unwrap_or_else(|| name.clone());
+                    let elapsed_ms = tool_started_at.remove(&key).map(|started| {
+                        (chrono::Utc::now().timestamp_millis() - started).max(0) as u64
+                    });
+                    let mut payload = json!({
+                        "id": id, "tool_use_id": id,
+                        "name": name, "result": output, "is_error": !ok,
+                        "elapsed_ms": elapsed_ms,
+                        "execution_status": { "status": if ok { "success" } else { "error" } },
+                    });
+                    if let Some(a) = approval {
+                        payload["approval"] = json!(a);
+                    }
+                    (EventType::ToolResult, payload)
+                }
+                AgentEvent::StepStart { round } => {
+                    (EventType::StepStart, json!({ "round": round }))
+                }
+                AgentEvent::StepFinish { round, reason } => (
+                    EventType::StepFinish,
+                    json!({
+                        "round": round, "reason": reason,
+                    }),
+                ),
+                AgentEvent::Done { text } => {
+                    crate::context::session::clear_partial(&sess);
+                    let mut payload = json!({ "summary": text });
+                    if !thinking.trim().is_empty() {
+                        payload["reasoning_content"] = json!(thinking);
+                    }
+                    (EventType::Done, payload)
+                }
+                AgentEvent::Error { message, code } => {
+                    // R65/B1：带上**稳定错误码**（有归类时，如 AUTH_FAILED），
+                    // 前端按码本地化；无码时前端回退到服务端 `message`。
+                    // 真机现象：此前本帧只有 `message`（形如
+                    // `AUTH_FAILED: The model provider rejected the API key…`），
+                    // 前端拿不到码 → 只能原样展示英文正文。现与 plan_runner 同构。
+                    let mut payload = json!({ "message": message });
+                    if let (Some(code), Some(obj)) = (code, payload.as_object_mut()) {
+                        obj.insert("code".to_string(), Value::String(code));
+                    }
+                    (EventType::Error, payload)
+                }
+                AgentEvent::DoomLoop { tool, repeats } => (
+                    EventType::Error,
+                    json!({
+                        "message": format!("工具 {tool} 连续调用 {repeats} 次，疑似死循环，已中断"),
+                    }),
+                ),
+                AgentEvent::OutputSuppressed { repeated_line } => (
+                    EventType::Thinking,
+                    json!({
+                        "text": format!("> 输出去冗余：抑制重复行「{}」", repeated_line),
+                    }),
+                ),
+                AgentEvent::BudgetExhausted {
+                    kind,
+                    limit,
+                    used,
+                    remaining,
+                    partial_text,
+                } => {
+                    // P2-9：预算硬熔断事件——给前端可识别的 budget_exhausted 状态，
+                    // 而非静默截断（与非流式回体、pyengine 终态同构）。
+                    partial.push_str(&partial_text);
+                    crate::context::session::clear_partial(&sess);
+                    (
+                        EventType::Error,
+                        json!({
+                            "code": "budget_exhausted",
+                            "budget": {
+                                "kind": kind,
+                                "limit": limit,
+                                "used": used,
+                                "remaining": remaining,
+                            },
+                            "partial_text": partial_text,
+                            "message": format!("本轮{kind}预算已耗尽（{used}/{limit}）"),
+                        }),
+                    )
+                }
+            };
+            if let Some(b) = &bus {
+                b.publish(Envelope::new(etype, payload, sess.clone()));
+            }
+        }
+    }
+
     /// 单工具回路（Captain 直接带工具，简单任务最省）；失败降级为 Bloom 双模型文本。
     /// 使用真流式回路：模型思考增量、正文增量、工具调用/结果实时经事件总线下发前端。
     async fn run_tool_loop_or_bloom(&self, text: &str, tool_defs: &[ToolDef]) -> Result<String> {
@@ -1726,116 +2085,21 @@ impl Orchestrator {
             content: text.to_string(),
             timestamp: Utc::now(),
         }];
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let bus = self.events.clone();
         let sess = self.session.clone().unwrap_or_default();
         // 事件转发：AgentEvent → 事件总线 → WebSocket → 前端卡片/动效
-        let forward = tokio::spawn(async move {
-            let mut partial = String::new();
-            // P2-10：tool_call → tool_result 配对计时，给结果帧补 `elapsed_ms`
-            // （历史工具卡此前完全没有耗时数据）。
-            let mut tool_started_at: std::collections::HashMap<String, i64> =
-                std::collections::HashMap::new();
-            while let Some(ev) = rx.recv().await {
-                let (etype, payload) = match ev {
-                    AgentEvent::Thinking { text } => (EventType::Thinking, json!({ "text": text })),
-                    AgentEvent::TextDelta { text } => {
-                        // F1：增量持久化流式 partial_text，前端切走再切回可恢复
-                        partial.push_str(&text);
-                        crate::context::session::record_partial(&sess, &partial);
-                        (
-                            EventType::TextDelta,
-                            json!({ "text": text, "presentation": "answer" }),
-                        )
-                    }
-                    AgentEvent::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    } => {
-                        let input: Value =
-                            serde_json::from_str(&arguments).unwrap_or(json!(arguments));
-                        let started_at = chrono::Utc::now().timestamp_millis();
-                        let key = id.clone().unwrap_or_else(|| name.clone());
-                        tool_started_at.insert(key, started_at);
-                        (
-                            EventType::ToolCall,
-                            json!({
-                                // 模型给出的调用 id：前端据此精确配对该次调用的结果，
-                                // 不再靠「工具名 + 时钟」猜身份（同毫秒同名会互相吞并）。
-                                "id": id, "tool_use_id": id,
-                                "name": name, "input": input,
-                                "started_at": started_at,
-                            }),
-                        )
-                    }
-                    AgentEvent::ToolResult {
-                        id,
-                        name,
-                        output,
-                        ok,
-                    } => {
-                        // P2-10：以同名/同 id 的最近一次调用起点算耗时。
-                        let key = id.clone().unwrap_or_else(|| name.clone());
-                        let elapsed_ms = tool_started_at.remove(&key).map(|started| {
-                            (chrono::Utc::now().timestamp_millis() - started).max(0) as u64
-                        });
-                        (
-                            EventType::ToolResult,
-                            json!({
-                                "id": id, "tool_use_id": id,
-                                "name": name, "result": output, "is_error": !ok,
-                                "elapsed_ms": elapsed_ms,
-                                "execution_status": { "status": if ok { "success" } else { "error" } },
-                            }),
-                        )
-                    }
-                    AgentEvent::StepStart { round } => {
-                        (EventType::StepStart, json!({ "round": round }))
-                    }
-                    AgentEvent::StepFinish { round, reason } => (
-                        EventType::StepFinish,
-                        json!({
-                            "round": round, "reason": reason,
-                        }),
-                    ),
-                    AgentEvent::Done { text } => {
-                        crate::context::session::clear_partial(&sess);
-                        (EventType::Done, json!({ "summary": text }))
-                    }
-                    AgentEvent::Error { message, code } => {
-                        // R65/B1：带上**稳定错误码**（有归类时，如 AUTH_FAILED），
-                        // 前端按码本地化；无码时前端回退到服务端 `message`。
-                        // 真机现象：此前本帧只有 `message`（形如
-                        // `AUTH_FAILED: The model provider rejected the API key…`），
-                        // 前端拿不到码 → 只能原样展示英文正文。现与 plan_runner 同构。
-                        let mut payload = json!({ "message": message });
-                        if let (Some(code), Some(obj)) = (code, payload.as_object_mut()) {
-                            obj.insert("code".to_string(), Value::String(code));
-                        }
-                        (EventType::Error, payload)
-                    }
-                    AgentEvent::DoomLoop { tool, repeats } => (
-                        EventType::Error,
-                        json!({
-                            "message": format!("工具 {tool} 连续调用 {repeats} 次，疑似死循环，已中断"),
-                        }),
-                    ),
-                    AgentEvent::OutputSuppressed { repeated_line } => (
-                        EventType::Thinking,
-                        json!({
-                            "text": format!("> 输出去冗余：抑制重复行「{}」", repeated_line),
-                        }),
-                    ),
-                };
-                if let Some(b) = &bus {
-                    b.publish(Envelope::new(etype, payload, sess.clone()));
-                }
-            }
-        });
+        let forward = tokio::spawn(Self::forward_agent_events(rx, bus, sess));
         let result = self
             .lead
-            .run_tool_loop_stream(&mut history, self.tool_registry.clone(), tool_defs, tx, 20)
+            .run_tool_loop_stream(
+                &mut history,
+                self.tool_registry.clone(),
+                tool_defs,
+                tx,
+                // 主智能体的工具轮数同样按任务自适应（模型可写 `[[budget:deep]]`）。
+                crate::agent::budget_policy::resolve(text, 0, tool_defs.len()).tool_rounds as u32,
+            )
             .await;
         // 确保转发任务结束（通道关闭后 rx.recv() 返回 None）
         let _ = forward.await;
@@ -2206,17 +2470,25 @@ impl Orchestrator {
     /// 这是「§6 团队 spawn 落地收尾」的核心：把 [`crate::agent::team::Team`] 这一真实执行体
     /// 暴露为用户可直接触发的表面，区别于 DAG 分层版 `subagent team`（`dispatch_team_dag`）。
     pub async fn dispatch_team(&mut self, goal: &str) -> Result<OrchestrationOutcome> {
-        // 1) 治理门（破甲）：只审计、不阻断（与 dispatch / dispatch_team_dag 同源）
-        let decision = self.evaluate_dispatch(goal);
-        self.gate_auto_approve(&decision, "专家团队");
-        self.ensure_ready();
+        self.dispatch_team_sized(goal, 0).await
+    }
 
-        // 2) 复用自动角色检测（与 dispatch ExpertTeam 分支同源），强制团队形态
+    /// 团队执行 + 用户选定的并行规模。
+    ///
+    /// `members`（0/1 = 按自动角色检测）来自对话输入框的「并行规模」。此前该档位
+    /// 只改了一句提示文案，后端依旧按自动检测决定成员数 —— 用户选 6 路，实际可能
+    /// 只跑 1 个成员，确认框与对话页卡片自相矛盾（真机可见）。
+    pub async fn dispatch_team_sized(
+        &mut self,
+        goal: &str,
+        members: usize,
+    ) -> Result<OrchestrationOutcome> {
+        // 复用自动角色检测（与 dispatch ExpertTeam 分支同源），强制团队形态。
         let analysis = self.analyze(goal);
         let specs: Vec<SubtaskSpec> = if analysis.subtasks.is_empty() {
             // 未检测到专精角色：退化为单成员通用团队，至少有一次真实 spawn。
             vec![SubtaskSpec {
-                role: "执行者",
+                role: "执行者".to_string(),
                 system_prompt: "你是通用执行者。聚焦把用户目标拆为可执行步骤，并交付明确结论。"
                     .to_string(),
                 task: goal.to_string(),
@@ -2227,14 +2499,90 @@ impl Orchestrator {
         } else {
             analysis.subtasks.clone()
         };
+        self.run_team_specs(goal, specs, members, None, None).await
+    }
+
+    /// 按**用户选定的团队 / 专家团名册**执行（每个成员的角色与职责来自名册）。
+    ///
+    /// 为什么需要单独入口：`dispatch_team_sized` 靠关键词自动检测角色。用户在输入框
+    /// 选了「全栈应用工程专家团」，如果目标里没有「代码 / 测试」等关键词，检测结果为空
+    /// → 退化为单个通用「执行者」。真机卡片写着「专家团队」却只有 1 名成员、两个
+    /// 不同专家团跑出几乎一样的结论，根因就在这里。
+    ///
+    /// 名册模式下**不再按并行规模重排分工**：名册本身就是分工，扇出规模由名册长度决定。
+    pub async fn dispatch_team_with_roster(
+        &mut self,
+        goal: &str,
+        roster: &[(String, String)],
+        members: usize,
+        form_hint: &str,
+    ) -> Result<OrchestrationOutcome> {
+        let specs = match plan_roster(goal, roster, members) {
+            Some(specs) => specs,
+            // 名册解析不出来（空名册 / 全是空标签）→ 回落自动角色检测。
+            None => return self.dispatch_team_sized(goal, members).await,
+        };
+        self.run_team_specs(goal, specs, members, Some("按所选团队名册"), Some(form_hint))
+            .await
+    }
+
+    async fn run_team_specs(
+        &mut self,
+        goal: &str,
+        specs: Vec<SubtaskSpec>,
+        members: usize,
+        roster_note: Option<&str>,
+        form_hint: Option<&str>,
+    ) -> Result<OrchestrationOutcome> {
+        // 1) 治理门（破甲）：只审计、不阻断（与 dispatch / dispatch_team_dag 同源）
+        let decision = self.evaluate_dispatch(goal);
+        self.gate_auto_approve(&decision, "专家团队");
+        self.ensure_ready();
+
+        // 2) 名册已在 `plan_roster` 里按「名册成员一个不丢 + 规模是下限」展开完毕，
+        //    这里不再重排；自动模式（无名册）才按规模纯扇出。
+        let specs = match roster_note {
+            Some(_) => specs,
+            None => expand_swarm_specs(specs, goal, members),
+        };
+        // 用户选定并行规模时如实标注「按并行规模 N」，避免卡片写成「自动角色检测」误导。
+        let size_note = match roster_note {
+            Some(note) if members >= 2 => format!("{note} · 并行规模 ≥{members}"),
+            Some(note) => note.to_string(),
+            None if members >= 2 => format!("按并行规模 {members}"),
+            None => "自动角色检测".to_string(),
+        };
         self.emit_thinking(&format!(
-            "> 专家团队（自动角色检测）：{} 名成员，依赖感知分波 spawn（Team::run_p2p）。",
+            "> 专家团队（{size_note}）：{} 名成员，依赖感知分波 spawn（Team::run_p2p）。",
             specs.len()
         ));
+
+        // 2.5) 编排可见性：把「谁在干什么」回流到调用方会话（对话页泳道 + 工具行）。
+        // 没有这一步，团队 / 蜂群只在结束时写一条台账，用户在对话页看到的就是黑盒。
+        let form_hint = match form_hint {
+            Some(hint) => hint,
+            None if members >= 2 => "swarm",
+            None => "team",
+        };
+        let reporter = self.begin_orchestration(form_hint, goal, specs.len());
+        if let Some(r) = &reporter {
+            self.subagents.set_progress(r.clone());
+        }
+
+        // 综合阶段需要 analysis（自动角色检测是确定性纯函数，重复调用无副作用）。
+        let analysis = self.analyze(goal);
 
         // 3) 依赖感知分波调度并经 Team 真实执行（run_p2p：无依赖时等价于 run）
         let team = build_team(&specs);
         let outcome = team.run_p2p(&self.subagents, goal).await;
+        // 用户点了「停止」：成员已在协作式取消下退出，这里直接收口为失败，
+        // 不再花一次模型调用去做综合（否则「已停止」仍会继续烧 token）。
+        if self.is_cancelled() {
+            if let Some(r) = &reporter {
+                r.emit("run_failed", json!({ "ok": false, "error": "已取消" }));
+            }
+            return Err(anyhow!("编排已被用户取消"));
+        }
         let summaries: Vec<String> = outcome.member_results.into_iter().map(|(_, r)| r).collect();
         let parts: Vec<String> = summaries
             .iter()
@@ -2243,15 +2591,172 @@ impl Orchestrator {
             .collect();
 
         // 4) lead 综合（复用同一份 analysis，离线幂等）+ 完成门禁
-        let reply = self.synthesize(goal, &parts, &analysis).await?;
-        self.finish_dispatch(
+        if let Some(r) = &reporter {
+            r.emit("lead_synthesizing", json!({ "members": summaries.len() }));
+        }
+        let reply = match self.synthesize(goal, &parts, &analysis).await {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(r) = &reporter {
+                    r.emit("run_failed", json!({ "error": e.to_string() }));
+                }
+                return Err(e);
+            }
+        };
+        let completed_reply = reply.clone();
+        let completed_summaries: Vec<String> =
+            summaries.iter().map(|s| clip_text(s, 800)).collect();
+        let outcome = self.finish_dispatch(
             goal,
             analysis,
             AgentMode::ExpertTeam,
             reply,
             summaries,
             None,
-        )
+        )?;
+        if let Some(r) = &reporter {
+            r.emit(
+                "run_completed",
+                json!({
+                    "ok": true,
+                    "reply": clip_text(&completed_reply, 8000),
+                    "summaries": completed_summaries,
+                }),
+            );
+        }
+        Ok(outcome)
+    }
+
+    /// 开始一次编排并立即播报 `run_started`。
+    ///
+    /// 返回 `None` 表示没有事件总线或会话键（CLI / 离线单测），此时行为与旧实现一致。
+    fn begin_orchestration(
+        &self,
+        form: &str,
+        goal: &str,
+        member_estimate: usize,
+    ) -> Option<crate::agent::subagent::ProgressReporter> {
+        let bus = self.events.clone()?;
+        let session = self.session.clone()?;
+        let run_id = format!(
+            "orch-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        let reporter =
+            crate::agent::subagent::ProgressReporter::for_run(bus, &session, &run_id);
+        // 记下本轮 runId：网关的兜底 run_failed 必须复用同一个 id，否则前端无法认领。
+        if let Ok(mut guard) = self.last_run_id.lock() {
+            *guard = Some(run_id.clone());
+        }
+        // 登记取消句柄：用户点「停止」（chat.abort / sessions.abort）时按会话命中它。
+        // 成员任务会在 select! 里等这个信号，从而真正中断执行而不是只改 UI。
+        let cancel_guard = cancel::register(&session, &run_id);
+        self.subagents.set_cancel_signal(cancel_guard.signal());
+        if let Ok(mut slot) = self.cancel_guard.lock() {
+            *slot = Some(cancel_guard);
+        }
+        reporter.emit(
+            "run_started",
+            json!({
+                "form": form,
+                "goal": clip_text(goal, 400),
+                "memberEstimate": member_estimate,
+            }),
+        );
+        Some(reporter)
+    }
+
+    /// 并行子智能体形态：把用户多选的子智能体**全部**真实启动（而不是只跑第一个）。
+    ///
+    /// 复用 [`Self::assemble`] 装配好的完整工具面：`orchestrate.run` 曾自建
+    /// `ToolRegistry::new()`（空表）+ 裸 `ModelRouter`，子智能体因此什么工具都没有
+    /// （用户看到「没有文件写入 / 没有 Office / 没有浏览器」）。
+    ///
+    /// 缺陷背景：`orchestrate.run` 的 subagent 形态此前只取 `agents.first()` —— 用户勾了
+    /// 3 个角色，实际只启动 1 个，卡片与答复都像「多选没生效」。这里按选中顺序全部启动
+    /// （调用方负责上限钳制），逐个等待终态；某个成员启动/执行失败只记在该成员名下，
+    /// 不拖垮其余成员，也不冒充成功。
+    ///
+    /// 返回 `(已启动的 agentId 列表, [(角色, 结论或失败原因)])`。
+    pub async fn spawn_subagents_parallel(
+        &mut self,
+        task: &str,
+        role_prompts: &[(String, String)],
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        let reporter = self.begin_orchestration("subagent", task, role_prompts.len());
+        if let Some(r) = &reporter {
+            self.subagents.set_progress(r.clone());
+        }
+        let mut ids: Vec<String> = Vec::new();
+        let mut started: Vec<(String, String)> = Vec::new();
+        let mut summaries: Vec<(String, String)> = Vec::new();
+        for (role, prompt) in role_prompts {
+            match self
+                .subagents
+                .spawn_with_spec(
+                    task,
+                    "",
+                    prompt,
+                    IntentType::General,
+                    Complexity::Medium,
+                )
+                .await
+            {
+                Ok(id) => {
+                    ids.push(id.clone());
+                    started.push((role.clone(), id));
+                }
+                Err(e) => summaries.push((
+                    role.clone(),
+                    format!("[成员启动失败] 子智能体未启动：{e}"),
+                )),
+            }
+        }
+        for (role, id) in started {
+            let text = match self.subagents.wait_for(&id).await {
+                Ok(SubAgentStatus::Completed { result }) => result,
+                Ok(SubAgentStatus::Failed { error }) => format!("[成员执行失败] {error}"),
+                Ok(SubAgentStatus::TimedOut) => "[成员执行超时]".to_string(),
+                Ok(SubAgentStatus::Pending) | Ok(SubAgentStatus::Running) => {
+                    "[成员未完成]".to_string()
+                }
+                Err(e) => format!("[成员状态读取失败] {e}"),
+            };
+            summaries.push((role, text));
+        }
+        if let Some(r) = &reporter {
+            let failed = summaries
+                .iter()
+                .filter(|(_, text)| text.starts_with("[成员"))
+                .count();
+            if summaries.is_empty() {
+                r.emit(
+                    "run_failed",
+                    json!({ "ok": false, "error": "没有可启动的子智能体" }),
+                );
+            } else if failed == 0 {
+                // `summaries` 必须回传：前端在缺 `member_completed` 帧时靠它补齐成员结论，
+                // 否则卡片头写「已完成」、展开后成员行仍是空的。
+                let texts: Vec<String> = summaries
+                    .iter()
+                    .map(|(_, text)| clip_text(text, 8000))
+                    .collect();
+                r.emit(
+                    "run_completed",
+                    json!({ "ok": true, "members": summaries.len(), "summaries": texts }),
+                );
+            } else {
+                r.emit(
+                    "run_failed",
+                    json!({
+                        "ok": false,
+                        "error": format!("{failed}/{} 名子智能体未成功", summaries.len()),
+                    }),
+                );
+            }
+        }
+        (ids, summaries)
     }
 
     /// 由 lead 综合子结论为最终答复。
@@ -2310,7 +2815,10 @@ impl Orchestrator {
         subagent_summaries: Vec<String>,
         reflect_verdict: Option<dag::Reflection>,
     ) -> Result<OrchestrationOutcome> {
-        let verdict = self.evaluate_completion(text, &lead_reply, &[], None);
+        // 真实耗时交给门禁：没有它，时间压力检测（「几秒就说全部完成」）永远不会触发，
+        // 虚假完成只靠回复文本是拦不住的。
+        let elapsed = self.turn_started.map(|t| t.elapsed().as_secs_f64());
+        let verdict = self.evaluate_completion(text, &lead_reply, &[], elapsed);
         if !verdict.allowed {
             self.emit_thinking(&format!(
                 "> 完成门禁提示：本次产出存在 {} 项可疑（{}），产出可能未经验证，请人工复核。",
@@ -2425,13 +2933,16 @@ impl Orchestrator {
 /// 最安全的失败模式：最多「没串行化」，绝不会「出错」）。规则图天然无环，叠加 `run_p2p` 的
 /// 环硬化，构成双重保险。
 fn assign_dependencies(subtasks: &mut [SubtaskSpec]) {
-    let roles: Vec<&str> = subtasks.iter().map(|s| s.role).collect();
+    // 先克隆角色名：下面要对 `subtasks` 做可变借用，不能同时持有它的不可变借用。
+    let roles: Vec<String> = subtasks.iter().map(|s| s.role.clone()).collect();
     for s in subtasks.iter_mut() {
-        let prereqs = prereq_keywords(s.role);
+        let prereqs = prereq_keywords(&s.role);
         s.deps = roles
             .iter()
-            .filter(|&&other| other != s.role && prereqs.iter().any(|kw| other.contains(kw)))
-            .map(|&r| r.to_string())
+            .filter(|other| {
+                other.as_str() != s.role.as_str() && prereqs.iter().any(|kw| other.contains(kw))
+            })
+            .cloned()
             .collect();
         s.deps.dedup();
     }
@@ -2467,6 +2978,192 @@ fn prereq_keywords(role: &str) -> &'static [&'static str] {
     }
 }
 
+/// 按字符截断（事件载荷用）：保留可读前缀，避免超长结论把 WS 帧撑大。
+fn clip_text(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+/// 蜂群切面（分工表）。
+///
+/// # 为什么不再让所有成员拿同一个 goal
+///
+/// 旧实现的并行成员只有一句「从你独有的视角给出结论」，模型没有可依据的切面，
+/// 结果就是 N 份几乎相同的回答（卡片上三张「并行执行者」内容一模一样）。
+/// 这里给每个成员一个**明确、互斥**的切面：只做一件事、必须交证据、必须报未决问题。
+///
+/// 切面是确定性的（不额外花一次模型调用），并允许成员在「切面不适用」时说明并改做
+/// 自己判断更需要的切面 —— 这样既不假装智能体自己规划过，也不会把分工钉死成噪音。
+const SWARM_FACETS: [(&str, &str); 8] = [
+    (
+        "事实核查",
+        "只核对事实：读代码/文档/配置/日志，列出与目标直接相关的事实、文件路径与行号；不做方案设计。",
+    ),
+    (
+        "结构分析",
+        "只讲结构与依赖：模块边界、调用链、数据流、状态归属；指出耦合点与改动会波及的范围。",
+    ),
+    (
+        "风险反例",
+        "只找风险与反例：边界条件、失败模式、安全隐患、竞态与兼容性坑；每条都要给出触发条件。",
+    ),
+    (
+        "方案设计",
+        "只给方案与取舍：至少两条可选路径、各自代价与推荐项；不写具体代码。",
+    ),
+    (
+        "落地实施",
+        "只做落地：直接改代码/跑命令把事做成，产出可复现的步骤与关键 diff 摘要。",
+    ),
+    (
+        "验证验收",
+        "只做验证：设计能证伪结论的检查（测试/复现脚本/度量），给出通过的判据与实际结果。",
+    ),
+    (
+        "性能资源",
+        "只看性能与资源：时延、内存、并发、token/成本；给出可量化的现状与改后预期。",
+    ),
+    (
+        "兼容迁移",
+        "只看兼容与迁移：对既有接口、数据、配置、用户习惯的影响，以及回滚路径。",
+    ),
+];
+
+/// 蜂群成员的角色名（**必须唯一**）：`Team` 以角色名做成员键，重名会互相覆盖/串台。
+///
+/// 前 16 个沿用既有静态命名（保持既有测试与既有会话卡片可读性不变）；
+/// 超过 16 的规模按 `蜂群 {i}/{n} 号·{facet}` 动态生成 —— 用户选多少就生成多少个，
+/// 不再有「>16 会重名」的隐性上限。
+fn swarm_role(i: usize, total: usize) -> String {
+    const ROLES: [&str; 16] = [
+        "1 号·事实核查", "2 号·结构分析", "3 号·风险反例", "4 号·方案设计",
+        "5 号·落地实施", "6 号·验证验收", "7 号·性能资源", "8 号·兼容迁移",
+        "9 号·事实核查", "10 号·结构分析", "11 号·风险反例", "12 号·方案设计",
+        "13 号·落地实施", "14 号·验证验收", "15 号·性能资源", "16 号·兼容迁移",
+    ];
+    if i < ROLES.len() {
+        return ROLES[i].to_string();
+    }
+    let facet = SWARM_FACETS[i % SWARM_FACETS.len()].0;
+    format!("蜂群 {}/{} 号·{facet}", i + 1, total.max(i + 1))
+}
+
+/// 按用户选定的并行规模扩展成员（蜂群语义）。
+///
+/// 规则：
+/// - `members < 2`：保持自动角色检测的结果（团队形态不强制扇出）；
+/// - `members` 与现有规格数不同：重建为**正好 `members`** 个成员（用户选的规模即执行规模，
+///   不再有 16 / 200 之类的隐性上限）；
+/// - 自动检测少于 N：用检测到的角色做轮转补足 N 个成员，但**每个成员分到不同切面**
+///   （见 [`SWARM_FACETS`]），并在提示里写明「只做这一切面、不要输出综合报告」。
+///
+/// 成员名（`role`）必须唯一：`Team` 以角色名做成员键，重名会互相覆盖。
+fn expand_swarm_specs(specs: Vec<SubtaskSpec>, goal: &str, members: usize) -> Vec<SubtaskSpec> {
+    if members < 2 || specs.len() == members {
+        return specs;
+    }
+    let mut templates = specs;
+    if templates.is_empty() {
+        templates.push(SubtaskSpec {
+            role: "执行者".to_string(),
+            system_prompt: "你是通用执行者。聚焦把用户目标拆为可执行步骤，并交付明确结论。"
+                .to_string(),
+            task: goal.to_string(),
+            intent: IntentType::General,
+            complexity: Complexity::Medium,
+            deps: Vec::new(),
+        });
+    }
+    let mut out = Vec::with_capacity(members);
+    for i in 0..members {
+        let t = &templates[i % templates.len()];
+        let (facet, instruction) = SWARM_FACETS[i % SWARM_FACETS.len()];
+        out.push(SubtaskSpec {
+            role: swarm_role(i, members),
+            // 泳道标签取人设首句：把切面写进首句，卡片上才能看出分工。
+            system_prompt: format!(
+                "你是蜂群第 {}/{} 号成员，只负责「{facet}」这一切面：{instruction}\
+                 不要输出整篇综合报告，也不要替其他成员下结论。{base}",
+                i + 1,
+                members,
+                base = t.system_prompt,
+            ),
+            task: format!(
+                "{goal}\n\n【蜂群切面 {}/{}：{facet}】\n\
+                 {instruction}\n\
+                 - 只交你这一切面的结论，不要重复其他成员的完整分析；\n\
+                 - 结论必须带证据（文件路径/行号/命令输出/数值）；\n\
+                 - 末尾列出「未决问题」与你建议由谁接手；\n\
+                 - 若判断本任务没有该切面内容，直接说明，并改做你认为更需要的切面（写清改成了什么）。",
+                i + 1,
+                members,
+            ),
+            intent: t.intent.clone(),
+            complexity: t.complexity.clone(),
+            // 并行规模要求同时起跑：清掉依赖，避免被自动检测串成流水线。
+            deps: Vec::new(),
+        });
+    }
+    out
+}
+
+/// 名册（专家团队）× 蜂群规模的合并扩展。
+///
+/// 为什么需要单独的 seam：名册定义「谁参与、各自职责」，蜂群规模定义「至少要几路并行」。
+/// 两者同时开启时：
+/// - **名册成员一个都不能丢**（每个都是用户显式勾选的专家）；
+/// - 规模不足时补足到 `members` 路，多出来的席位按名册人设轮转 + 蜂群切面拆分工，
+///   角色名带序号/切面，保证 `Team` 的成员键唯一；
+/// - 名册本身就比 `members` 多时保留全部名册成员（规模只是下限，不是截断上限）。
+pub(crate) fn expand_roster_specs(
+    specs: Vec<SubtaskSpec>,
+    goal: &str,
+    members: usize,
+) -> Vec<SubtaskSpec> {
+    if specs.is_empty() || members <= specs.len() {
+        return specs;
+    }
+    let base_len = specs.len();
+    let mut out = specs;
+    for i in base_len..members {
+        // 克隆一份模板：`out` 在循环里持续 push，不能同时持有它的借用。
+        let t = out[i % base_len].clone();
+        let (facet, instruction) = SWARM_FACETS[i % SWARM_FACETS.len()];
+        out.push(SubtaskSpec {
+            role: format!(
+                "{}·蜂群 {}/{} 号·{facet}",
+                t.role,
+                i + 1,
+                members
+            ),
+            system_prompt: format!(
+                "你是蜂群第 {}/{} 号成员（承接「{}」这一专家席位），只负责「{facet}」切面：{instruction}\
+                 不要输出整篇综合报告，也不要替其他成员下结论。{base}",
+                i + 1,
+                members,
+                t.role,
+                base = t.system_prompt,
+            ),
+            task: format!(
+                "{goal}\n\n【蜂群切面 {}/{}：{facet}】\n\
+                 {instruction}\n\
+                 - 只交你这一切面的结论，不要重复其他成员的完整分析；\n\
+                 - 结论必须带证据（文件路径/行号/命令输出/数值）；\n\
+                 - 末尾列出「未决问题」与你建议由谁接手。",
+                i + 1,
+                members,
+            ),
+            intent: t.intent.clone(),
+            complexity: t.complexity.clone(),
+            deps: Vec::new(),
+        });
+    }
+    out
+}
+
 /// 统一团队构建 seam：按 [`SubtaskSpec`]（含 deps）构造 [`Team`]，依赖感知成员走 `member_dep`。
 ///
 /// 这是把 `Team::run` 切换为 `run_p2p` 的唯一改动点——编排层只换这一处 seam，
@@ -2476,7 +3173,7 @@ fn build_team(specs: &[SubtaskSpec]) -> Team {
     for s in specs {
         if s.deps.is_empty() {
             team = team.member(
-                s.role,
+                &s.role,
                 &s.system_prompt,
                 &s.task,
                 s.intent.clone(),
@@ -2485,7 +3182,7 @@ fn build_team(specs: &[SubtaskSpec]) -> Team {
         } else {
             let d: Vec<&str> = s.deps.iter().map(|x| x.as_str()).collect();
             team = team.member_dep(
-                s.role,
+                &s.role,
                 &s.system_prompt,
                 &s.task,
                 s.intent.clone(),
@@ -2802,7 +3499,7 @@ fn dual_leader_specs() -> Vec<SubtaskSpec> {
     };
     vec![
         SubtaskSpec {
-            role: planner.label,
+            role: planner.label.to_string(),
             system_prompt: planner.prompt.to_string(),
             task: String::new(),
             intent: planner.intent,
@@ -2810,7 +3507,7 @@ fn dual_leader_specs() -> Vec<SubtaskSpec> {
             deps: Vec::new(),
         },
         SubtaskSpec {
-            role: executor.label,
+            role: executor.label.to_string(),
             system_prompt: executor.prompt.to_string(),
             task: String::new(),
             intent: executor.intent,
@@ -2839,7 +3536,7 @@ fn team_specs(roles: Vec<RoleKey>) -> Vec<SubtaskSpec> {
             let system_prompt = crate::agent::expertise::expert_prompt(d.label)
                 .unwrap_or_else(|| d.prompt.to_string());
             SubtaskSpec {
-                role: d.label,
+                role: d.label.to_string(),
                 system_prompt,
                 task: String::new(),
                 intent: d.intent,
@@ -2848,6 +3545,224 @@ fn team_specs(roles: Vec<RoleKey>) -> Vec<SubtaskSpec> {
             }
         })
         .collect()
+}
+
+/// 名册标签 → 可复用的内建专家标签（能力感知匹配）。
+///
+/// 匹配顺序（确定性、离线可测）：
+/// 1. **强同义词表**：历史已支持的常见叫法（架构师 / 工程师 / 安全审计 …）直接收敛，
+///    保证既有团队的卡片文案与人设不漂移；
+/// 2. **专家库精确同名**：TRAE 专项专家（前端架构 / API 测试 / DevOps …）直接命中；
+/// 3. **能力感知打分**：标签与候选角色的 `label + 角色 prompt + expertise.rs 的能力描述`
+///    做去空白字符二元组重叠打分，取最高分且 ≥ [`CAPABILITY_MATCH_THRESHOLD`] 者。
+///
+/// 都不达标返回 `None` —— 调用方按标签现造一条「职责边界 + 证据要求」的人设，
+/// 不再退回通用「执行者」（旧实现只要没命中 8 个精确同义词就丢掉全部专精）。
+fn match_role_label(label: &str) -> Option<&'static str> {
+    let l = label.trim();
+    if l.is_empty() {
+        return None;
+    }
+    // 1) 强同义词（历史行为保留）
+    let key = match l {
+        "调研" | "研究" | "研究员" => Some(RoleKey::Research),
+        "架构设计" | "架构" | "架构师" => Some(RoleKey::Design),
+        "编码实现" | "编码" | "实现" | "工程师" => Some(RoleKey::Code),
+        "测试验证" | "测试" | "测试工程师" => Some(RoleKey::Test),
+        "文档" | "文档工程师" => Some(RoleKey::Doc),
+        "缺陷修复" | "修复" => Some(RoleKey::Fix),
+        "重构优化" | "重构" => Some(RoleKey::Refactor),
+        "安全" | "安全审计" | "安全与质量工程师" => Some(RoleKey::Security),
+        _ => None,
+    };
+    if let Some(k) = key {
+        return Some(role_table(k).label);
+    }
+    // 2/3) 专家库精确同名 + 能力打分
+    let lower = l.to_lowercase();
+    let mut best: Option<(u32, &'static str)> = None;
+    for p in crate::agent::expertise::experts_list() {
+        if p.label.eq_ignore_ascii_case(l) {
+            return Some(p.label);
+        }
+        let descriptor = format!(
+            "{} {} {} {}",
+            builtin_role_prompt(p.label),
+            p.mindset,
+            p.expertise.join(" "),
+            p.skills.join(" ")
+        );
+        let score = capability_score(&lower, p.label, &descriptor);
+        if score >= CAPABILITY_MATCH_THRESHOLD && best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, p.label));
+        }
+    }
+    best.map(|(_, label)| label)
+}
+
+/// 能力匹配的接受阈值：≥4 分（见 [`capability_score`]）。
+///
+/// 计分权重（二元组 ×2 + 共享汉字 ×1）下，4 分约等于「2 个连续双字重叠」或
+/// 「1 个连续双字 + 2 个共享汉字」。取 4 的理由：单个二元组（如「分析」「设计」）
+/// 在中文里过于泛化，1-3 分会把「产品经理」误配到「调研」；达到 4 分要求至少两处
+/// 实质重叠（实测「性能调优→性能优化」「接口测试→测试」命中，而「自定义审计员」
+/// 与「产品经理」保持不匹配 → 走兜底人设）。
+const CAPABILITY_MATCH_THRESHOLD: u32 = 4;
+
+/// 内建八人设的 prompt（供能力打分使用；非八人设返回空串）。
+fn builtin_role_prompt(label: &str) -> &'static str {
+    match label {
+        "架构设计" => role_table(RoleKey::Design).prompt,
+        "编码实现" => role_table(RoleKey::Code).prompt,
+        "测试" => role_table(RoleKey::Test).prompt,
+        "文档" => role_table(RoleKey::Doc).prompt,
+        "缺陷修复" => role_table(RoleKey::Fix).prompt,
+        "重构优化" => role_table(RoleKey::Refactor).prompt,
+        "安全" => role_table(RoleKey::Security).prompt,
+        "调研" => role_table(RoleKey::Research).prompt,
+        _ => "",
+    }
+}
+
+/// 去空白字符二元组（中英文通用；单字符标签退化为单字）。
+fn bigrams(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if chars.len() < 2 {
+        return chars.iter().map(|c| c.to_string()).collect();
+    }
+    chars.windows(2).map(|w| w.iter().collect()).collect()
+}
+
+/// 标签 × 候选角色的能力重叠打分（纯函数）。
+///
+/// - 与候选 label 完全相同：+100；
+/// - 与候选 label 互相包含：+60（如「测试工程师」⊃「测试」）；
+/// - **候选 label 本身**的共享二元组 +3 / 共享汉字 +1（身份优先于描述）；
+/// - 描述面（`prompt + mindset + expertise + skills`）共享二元组 +2 / 汉字 +1。
+///
+/// 为什么要给 label 单独加权：`mindset` 里一句「性能最后优化」会让**编码实现**
+/// 在「性能调优」上拿到与「性能优化」相同的描述分；label 权重保证角色名命中的
+/// 候选优先，避免泛化描述抢走专精角色。
+fn capability_score(label_lower: &str, candidate_label: &str, descriptor: &str) -> u32 {
+    let mut score = 0u32;
+    if candidate_label.eq_ignore_ascii_case(label_lower) {
+        score += 100;
+    } else if label_lower.contains(candidate_label) || candidate_label.contains(label_lower) {
+        score += 60;
+    }
+    let hay = format!("{candidate_label}{descriptor}").to_lowercase();
+    let mut seen_bigrams = std::collections::HashSet::new();
+    for bg in bigrams(label_lower) {
+        if seen_bigrams.insert(bg.clone()) && hay.contains(&bg) {
+            score += 2;
+            if candidate_label.to_lowercase().contains(&bg) {
+                score += 3;
+            }
+        }
+    }
+    let mut seen_chars = std::collections::HashSet::new();
+    for ch in label_lower.chars() {
+        if is_cjk(ch) && hay.contains(ch) && seen_chars.insert(ch) {
+            score += 1;
+            if candidate_label.contains(ch) {
+                score += 1;
+            }
+        }
+    }
+    score
+}
+
+/// 是否中日韩统一表意文字（能力打分的「汉字」口径）。
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
+}
+
+/// 角色名去重：同名角色追加 `#n`，保证 `Team` 成员键 / 信箱不串台。
+fn unique_role(used: &mut std::collections::HashMap<String, usize>, base: &str) -> String {
+    let n = used.entry(base.to_string()).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        base.to_string()
+    } else {
+        format!("{base}#{n}")
+    }
+}
+
+/// 用户选定的名册 → 子任务规格。
+///
+/// 角色标签先经 [`match_role_label`] 做能力感知匹配（命中即复用蒸馏后的完整专家提示）；
+/// 对不上就按标签现造一条「只交本职责 + 必须带证据」的人设。
+/// `role` 由 [`unique_role`] 保证唯一（同义标签映射到同一人设时追加序号）。
+/// 名册长度**不再截断**（旧实现 `.take(8)` 会静默丢弃用户勾选的专家）。
+fn roster_specs(goal: &str, roster: &[(String, String)]) -> Vec<SubtaskSpec> {
+    let mut used: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    roster
+        .iter()
+        .map(|(role, brief)| {
+            let label = role.trim();
+            let display = if label.is_empty() { "执行者" } else { label };
+            let matched = match_role_label(label);
+            let base_prompt = match matched {
+                Some(expert_label) => crate::agent::expertise::expert_prompt(expert_label)
+                    .unwrap_or_else(|| role_table_prompt_for_label(expert_label)),
+                None => crate::agent::expertise::expert_prompt(label).unwrap_or_else(|| {
+                    format!(
+                        "你是{display}专家。只负责自己的职责边界，结论必须带证据，\
+                         不要替其他成员下结论。"
+                    )
+                }),
+            };
+            SubtaskSpec {
+                role: unique_role(&mut used, matched.unwrap_or(display)),
+                // 席位身份写在人设**末尾**：泳道卡片取人设首行做标签，若把「本席位角色」
+                // 放首行，所有成员会共用同一个标签（真机实测：6 张卡全叫「本席位角色」）。
+                // 放末尾同样让人设文本互不相同，但保留可辨认的真实角色名。
+                system_prompt: format!(
+                    "{base_prompt}\n\n【本席位角色：{display}】只承担该席位职责，\
+                     不要替其他成员下结论。"
+                ),
+                task: format!(
+                    "{goal}\n\n【团队分工：{display}】{brief}\n\
+                     - 只交你这一份职责的结论，不要重复其他成员的完整分析；\n\
+                     - 结论必须带证据（文件路径/行号/命令输出/数值）；\n\
+                     - 末尾列出「未决问题」与你建议由谁接手。",
+                    brief = brief.trim()
+                ),
+                intent: IntentType::General,
+                complexity: Complexity::Medium,
+                deps: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+/// 名册执行规划（`dispatch_team_with_roster` 的唯一分支判定点）。
+///
+/// - 名册为空 → `None`，调用方**回落**到自动角色检测（`dispatch_team_sized`）；
+/// - 名册非空 → `Some(specs)`，按名册执行，并把并行规模当作「至少几路」的下限扩展
+///   （名册成员一个不丢，见 [`expand_roster_specs`]）。
+///
+/// 抽成纯函数是为了让「名册/规模组合」可离线矩阵测试，不必真的打模型。
+pub(crate) fn plan_roster(
+    goal: &str,
+    roster: &[(String, String)],
+    members: usize,
+) -> Option<Vec<SubtaskSpec>> {
+    let specs = roster_specs(goal, roster);
+    if specs.is_empty() {
+        return None;
+    }
+    Some(expand_roster_specs(specs, goal, members))
+}
+
+/// 内建角色标签 → 其 prompt（`expertise` 库缺档时的兜底来源）。
+fn role_table_prompt_for_label(label: &str) -> String {
+    let prompt = builtin_role_prompt(label);
+    if prompt.is_empty() {
+        format!("你是{label}专家。只负责自己的职责边界，结论必须带证据。")
+    } else {
+        prompt.to_string()
+    }
 }
 
 /// 集群：把 fan-out 任务分片到并行 Worker（无枚举列表时退化为多视角并行）。
@@ -2864,7 +3779,9 @@ fn cluster_specs(text: &str) -> Vec<SubtaskSpec> {
             .into_iter()
             .enumerate()
             .map(|(i, c)| SubtaskSpec {
-                role: "Worker",
+                // 角色名必须唯一（`Team`/信箱以角色为键）：旧实现所有分片都叫
+                // 「Worker」，多分片时会互相覆盖成员键。
+                role: format!("Worker {}", i + 1),
                 system_prompt: "你是并行集群中的一个 Worker。独立、确定性地完成分配到的子任务，输出结构化结论，不依赖其他 Worker 的输出。".to_string(),
                 task: format!("集群并行子任务（第 {} 批，共 {} 项）：\n- {}", i + 1, c.len(), c.join("\n- ")),
                 intent: IntentType::General,
@@ -2882,7 +3799,7 @@ fn cluster_specs(text: &str) -> Vec<SubtaskSpec> {
         views
             .iter()
             .map(|(label, focus)| SubtaskSpec {
-                role: "Worker",
+                role: format!("Worker·{label}"),
                 system_prompt: format!(
                     "你是并行集群中的一个 Worker，从「{}」角度独立处理整个任务：{}",
                     label, focus
@@ -2964,7 +3881,7 @@ fn infer_plan_actions(analysis: &TaskAnalysis, text: &str) -> Vec<ActionIntent> 
 
     let mut actions = Vec::new();
     for s in &analysis.subtasks {
-        let (tool, op): (&str, &str) = match s.role {
+        let (tool, op): (&str, &str) = match s.role.as_str() {
             "编码实现" | "编码" => ("write_file", "写/改源码文件"),
             "测试" => ("shell_exec", "运行测试套件"),
             "文档" => ("write_file", "生成文档文件"),
@@ -3277,6 +4194,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **接线守卫**：档位治理必须在生产装配点真正开启。
+    ///
+    /// 历史缺陷：`with_auto_tier` / `with_tier_governance` 在全仓**零调用点**，
+    /// 于是 `registry.tier_chain()` / `filter_chain()` 在运行时从不执行 ——
+    /// 档位准入只活在单测与 doctor 审计里。若哪天这段接线被删掉，本用例立即失败，
+    /// 而不是等用户发现"锁了旗舰档却毫无变化"。
+    #[test]
+    fn assembled_orchestrator_actually_enables_tier_governance() {
+        let o = Orchestrator::new(cfg());
+        assert!(
+            o.model_router.tier_governance().is_some(),
+            "装配点必须开启档位治理（否则档位准入在生产中永不生效）"
+        );
+    }
+
     #[test]
     fn test_analyze_solo_explain() {
         let o = Orchestrator::new(cfg());
@@ -3303,7 +4235,7 @@ mod tests {
         assert_eq!(a.strategy, AgentMode::ExpertTeam, "代码+测试应走专家团队");
         assert!(a.subtasks.len() >= 2, "专家团队至少 2 个子 Agent");
         // 子任务应角色感知（编码 + 测试）
-        let roles: Vec<&str> = a.subtasks.iter().map(|s| s.role).collect();
+        let roles: Vec<&str> = a.subtasks.iter().map(|s| s.role.as_str()).collect();
         assert!(roles.contains(&"编码实现"), "应包含编码实现角色");
         assert!(roles.contains(&"测试"), "应包含测试角色");
     }
@@ -3313,7 +4245,7 @@ mod tests {
         let o = Orchestrator::new(cfg());
         let a = o.analyze("重构这个模块并生成文档");
         assert_eq!(a.strategy, AgentMode::ExpertTeam);
-        let roles: Vec<&str> = a.subtasks.iter().map(|s| s.role).collect();
+        let roles: Vec<&str> = a.subtasks.iter().map(|s| s.role.as_str()).collect();
         assert!(roles.contains(&"重构优化"), "应包含重构角色");
         assert!(roles.contains(&"文档"), "应包含文档角色");
     }
@@ -3338,7 +4270,15 @@ mod tests {
         let a = o.analyze("分别处理以下任务：\n1. 重写登录模块\n2. 修复支付 bug\n3. 补充 API 文档");
         assert_eq!(a.strategy, AgentMode::Cluster, "枚举 fan-out 应走集群");
         assert!(a.subtasks.len() >= 2, "集群应分片为多个 Worker");
-        assert!(a.subtasks.iter().all(|s| s.role == "Worker"));
+        assert!(
+            a.subtasks.iter().all(|s| s.role.starts_with("Worker")),
+            "集群成员角色应带 Worker 前缀：{:?}",
+            a.subtasks.iter().map(|s| s.role.as_str()).collect::<Vec<_>>()
+        );
+        // 角色名必须唯一（旧实现所有分片都叫「Worker」，Team 成员键会互相覆盖）。
+        let unique: std::collections::HashSet<&str> =
+            a.subtasks.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(unique.len(), a.subtasks.len(), "集群成员角色名必须唯一");
     }
 
     #[test]
@@ -3897,6 +4837,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
                 timeout_secs: 0,
+                    wire_api: crate::model::wire::WireApi::Chat,
             },
             ..Default::default()
         }
@@ -4048,6 +4989,121 @@ mod tests {
         assert!(
             thinking.iter().any(|t| t.contains("蜂群")),
             "统一 Bloom 复杂任务应走双领队蜂群，实际：{thinking:?}"
+        );
+    }
+
+    /// **入口级护栏（P0 死分支）**：蜂群分派必须经由真实入口 `dispatch_bloom` 可达。
+    ///
+    /// 历史缺陷：`dispatch_bloom` 在分派前把 `analysis.strategy` 强制改写成
+    /// `DualLeader`，随后 `match analysis.strategy { Cluster | ExpertTeam => swarm }`
+    /// 永不命中——**蜂群从来没有被真实入口触发过**。上面那条用例直接调用
+    /// `dispatch_bloom_swarm`，绕过了分派逻辑，所以永远发现不了这个死分支。
+    /// 本用例走真实入口，任何把它改回死分支的改动都会变红。
+    ///
+    /// 用 OmniTranscend 而非 Bloom：`mode_route` 把 Bloom(DeepParallel) 的形态钉为
+    /// DualLeader（蜂群在设计上就不该在 Bloom 下触发），把 OmniTranscend(OmniSpectrum)
+    /// 钉为 Cluster —— 蜂群的真实触发口在 OmniTranscend。
+    #[tokio::test]
+    async fn dispatch_bloom_entry_routes_non_goal_fanout_to_swarm() {
+        // 非目标型任务（不含实现/修复等目标动词）。
+        const FANOUT: &str = "批量处理这 50 个日志文件并提取错误";
+        assert!(
+            !Orchestrator::is_bloom_goal_task(FANOUT),
+            "前置条件：本轮只验「非目标型」路径"
+        );
+
+        let bus = Arc::new(EventBus::default());
+        let mut rx = bus.subscribe("**");
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_event_bus(bus.clone(), "ws.omni".to_string());
+        o.set_mode(ModeKind::OmniTranscend);
+        // 前置条件：该模式下形态偏置把形态钉为 Cluster（否则本护栏空转）。
+        assert_eq!(
+            o.analyze(FANOUT).strategy,
+            AgentMode::Cluster,
+            "OmniSpectrum 路由应把形态钉为 Cluster"
+        );
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            o.dispatch_bloom(FANOUT),
+        )
+        .await;
+
+        let events = drain_bus(&mut rx);
+        let thinking = thinking_texts(&events);
+        assert!(
+            thinking.iter().any(|t| t.contains("Bloom 蜂群子模式")),
+            "真实入口必须把 Cluster 形态送进蜂群（死分支回归），实际：{thinking:?}"
+        );
+    }
+
+    /// 入口级护栏（判定顺序）：目标型实现任务走**自主闭环**而不是蜂群。
+    ///
+    /// 「实现登录并写测试」同时命中 `is_bloom_goal_task` 与 ExpertTeam（代码+测试两角色），
+    /// 两者本就冲突。此用例把顺序钉死：聚焦实现任务不接受多成员扇出
+    /// （更贵、更难收敛），而是「执行→QA→自动修复」。任何把 swarm 调回优先的改动都会变红。
+    #[tokio::test]
+    async fn dispatch_bloom_entry_keeps_goal_task_on_auto_loop_not_swarm() {
+        const GOAL: &str = "实现登录并写测试";
+        let probe = Orchestrator::new(offline_cfg());
+        assert!(
+            Orchestrator::is_bloom_goal_task(GOAL),
+            "前置条件：该文本必须是目标型任务"
+        );
+        assert_eq!(
+            probe.analyze(GOAL).strategy,
+            AgentMode::ExpertTeam,
+            "前置条件：该文本确实也判 ExpertTeam（冲突样本），否则用例空转"
+        );
+
+        let bus = Arc::new(EventBus::default());
+        let mut rx = bus.subscribe("**");
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_event_bus(bus.clone(), "ws.bloom".to_string());
+        o.set_mode(ModeKind::Bloom);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), o.dispatch_bloom(GOAL))
+            .await;
+
+        let events = drain_bus(&mut rx);
+        let thinking = thinking_texts(&events);
+        assert!(
+            thinking.iter().any(|t| t.contains("自主闭环")),
+            "目标型实现任务必须走自主闭环，实际：{thinking:?}"
+        );
+        assert!(
+            !thinking.iter().any(|t| t.contains("Bloom 蜂群子模式")),
+            "目标型实现任务不得被改道到蜂群扇出，实际：{thinking:?}"
+        );
+    }
+
+    /// 入口级护栏（向后兼容）：既非目标型、也非扇出的普通提问仍走 deep 双领队路径，
+    /// 不被蜂群/自主闭环截胡。
+    #[tokio::test]
+    async fn dispatch_bloom_entry_keeps_plain_question_on_deep_path() {
+        let bus = Arc::new(EventBus::default());
+        let mut rx = bus.subscribe("**");
+        let mut o = Orchestrator::new(offline_cfg());
+        o.set_event_bus(bus.clone(), "ws.bloom".to_string());
+        o.set_mode(ModeKind::Bloom);
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            o.dispatch_bloom("解释一下闭包是什么"),
+        )
+        .await;
+
+        let events = drain_bus(&mut rx);
+        let thinking = thinking_texts(&events);
+        assert!(
+            !thinking.iter().any(|t| t.contains("Bloom 蜂群子模式")),
+            "普通提问不得进蜂群，实际：{thinking:?}"
+        );
+        assert!(
+            !thinking.iter().any(|t| t.contains("自主闭环")),
+            "普通提问不得进自主闭环，实际：{thinking:?}"
+        );
+        assert!(
+            thinking.iter().any(|t| t.contains("Bloom 并行编排")),
+            "普通提问仍应走双领队 deep 路径，实际：{thinking:?}"
         );
     }
 
@@ -4358,7 +5414,7 @@ mod tests {
         // 离线、确定性的角色依赖检测：测试依赖实现、文档依赖设计与实现、设计者无前置。
         let mut subs = vec![
             SubtaskSpec {
-                role: "架构设计",
+                role: "架构设计".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4366,7 +5422,7 @@ mod tests {
                 deps: Vec::new(),
             },
             SubtaskSpec {
-                role: "编码实现",
+                role: "编码实现".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4374,7 +5430,7 @@ mod tests {
                 deps: Vec::new(),
             },
             SubtaskSpec {
-                role: "测试验证",
+                role: "测试验证".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4382,7 +5438,7 @@ mod tests {
                 deps: Vec::new(),
             },
             SubtaskSpec {
-                role: "文档",
+                role: "文档".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4412,7 +5468,7 @@ mod tests {
         // build_team 把带 deps 的 spec 接到 member_dep（而非 member），无依赖走 member。
         let subs = vec![
             SubtaskSpec {
-                role: "编码实现",
+                role: "编码实现".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4420,7 +5476,7 @@ mod tests {
                 deps: vec![],
             },
             SubtaskSpec {
-                role: "测试验证",
+                role: "测试验证".to_string(),
                 system_prompt: String::new(),
                 task: String::new(),
                 intent: IntentType::General,
@@ -4446,6 +5502,357 @@ mod tests {
             .find(|m| m.role == "编码实现")
             .expect("应有实现成员");
         assert!(code_m.deps.is_empty(), "无依赖成员走 member()");
+    }
+
+    /// 名册 → 规格：角色保留、任务带职责边界，且不同成员的 task 必须不同。
+    #[test]
+    fn roster_specs_keep_roles_and_scope_each_task() {
+        let roster = vec![
+            ("架构设计".to_string(), "画接口与数据模型".to_string()),
+            ("编码实现".to_string(), "实现并给出文件清单".to_string()),
+        ];
+        let specs = roster_specs("做一个登录页", &roster);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].role, "架构设计");
+        assert_eq!(specs[1].role, "编码实现");
+        assert!(specs[0].task.contains("【团队分工：架构设计】"));
+        assert!(specs[1].task.contains("【团队分工：编码实现】"));
+        assert_ne!(specs[0].task, specs[1].task, "成员职责必须互斥且可辨认");
+        assert!(!specs[0].system_prompt.is_empty(), "必须命中内建专家人设或兜底人设");
+    }
+
+    /// 能力感知匹配：同义标签复用同一专家人设但角色名唯一；无关联标签走兜底人设。
+    #[test]
+    fn roster_capability_matching_keeps_roles_and_personas_distinct() {
+        let roster = vec![
+            ("编码实现".to_string(), "实现核心逻辑".to_string()),
+            // 同义标签 → 同一专家人设（编码实现），但角色名必须追加序号。
+            ("工程师".to_string(), "独立席位的实现职责".to_string()),
+            // 与内建八人设无实质重叠 → 按标签现造人设（不再退化成通用「执行者」）。
+            ("自定义审计员".to_string(), "审计既有实现".to_string()),
+        ];
+        let specs = roster_specs("目标", &roster);
+        assert_eq!(specs.len(), 3, "名册长度不再被截断");
+
+        let roles: std::collections::HashSet<&str> =
+            specs.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(roles.len(), 3, "角色名必须唯一（信箱/成员键不串台）：{:?}", roles);
+        assert_eq!(specs[0].role, "编码实现");
+        assert!(
+            specs[1].role.starts_with("编码实现#"),
+            "同义标签应复用同一人设并追加序号：{}",
+            specs[1].role
+        );
+        assert_eq!(specs[2].role, "自定义审计员");
+
+        let prompts: std::collections::HashSet<&str> = specs
+            .iter()
+            .map(|s| s.system_prompt.as_str())
+            .collect();
+        assert_eq!(prompts.len(), 3, "三人设互不相同（席位身份写进人设首行）");
+        assert!(
+            specs[2].system_prompt.contains("自定义审计员"),
+            "兜底人设必须写明职责边界：{}",
+            specs[2].system_prompt
+        );
+        assert!(
+            specs[2].system_prompt.contains("证据"),
+            "兜底人设必须要求证据：{}",
+            specs[2].system_prompt
+        );
+    }
+
+    /// 能力打分必须真的按 `expertise.rs` 的能力描述命中，而不是只认精确同义词。
+    #[test]
+    fn capability_score_matches_related_capabilities_not_unrelated_labels() {
+        // 「性能调优」与内建「性能优化」有两处实质重叠（性能 + 优化/调优）→ 命中。
+        assert_eq!(match_role_label("性能调优"), Some("性能优化"));
+        // 「接口测试」包含「测试」→ 命中内建测试角色。
+        assert_eq!(match_role_label("接口测试"), Some("测试"));
+        // 无实质重叠 → 不误配（走兜底人设）。
+        assert_eq!(match_role_label("自定义审计员"), None);
+        assert_eq!(match_role_label("产品经理"), None);
+        // 专家库精确同名优先（TRAE 专项专家）。
+        assert_eq!(match_role_label("DevOps"), Some("DevOps"));
+    }
+
+    /// 名册 × 并行规模：名册成员一个不丢，规模是**下限**（不是截断上限）。
+    #[test]
+    fn plan_roster_never_drops_members_and_treats_size_as_lower_bound() {
+        let roster: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("编码实现{i}"), format!("职责{i}")))
+            .collect();
+        // 空名册 → None（调用方回落自动角色检测）。
+        assert!(plan_roster("目标", &[], 8).is_none());
+        // 规模小于名册 → 保留全部名册成员。
+        assert_eq!(plan_roster("目标", &roster, 2).unwrap().len(), 5);
+        // 规模大于名册 → 补足到规模，角色名仍唯一。
+        let widened = plan_roster("目标", &roster, 9).unwrap();
+        assert_eq!(widened.len(), 9);
+        let names: std::collections::HashSet<&str> =
+            widened.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(names.len(), 9, "扩展后的角色名必须唯一");
+        // 规模未指定（0/1）→ 名册原样执行。
+        assert_eq!(plan_roster("目标", &roster, 0).unwrap().len(), 5);
+    }
+
+    /// 蜂群全量配置联动矩阵：form ∈ {team, expert, swarm} × teams ∈ {0,1,6}
+    /// × agents ∈ {0,1,3} × members ∈ {0,2,8,17}。
+    ///
+    /// 断言：不 panic；`build_team` 成员数 == 规格数；`run_p2p` 收集数 == 规格数；
+    /// 名册非空按名册执行、名册为空回落自动检测。
+    #[tokio::test]
+    async fn full_switch_matrix_combines_form_teams_agents_members() {
+        const ROLES: [&str; 3] = ["架构设计", "编码实现", "测试验证"];
+
+        // 与 `gateway::team::selected_rosters` 同语义：teams 个团队、每团 3 个角色。
+        // 跨团同角色由 `roster_specs` 的序号去重处理（不在这里折叠，保持组合真实）。
+        let roster_for = |teams: usize| -> Vec<(String, String)> {
+            (0..teams)
+                .flat_map(|t| {
+                    ROLES.iter().enumerate().map(move |(i, role)| {
+                        (
+                            (*role).to_string(),
+                            format!("团队{t} 的第 {i} 项职责"),
+                        )
+                    })
+                })
+                .collect()
+        };
+
+        for form in ["team", "expert", "swarm"] {
+            for teams in [0usize, 1, 6] {
+                for agents in [0usize, 1, 3] {
+                    for members in [0usize, 2, 8, 17] {
+                        let goal = format!("实现登录并写测试（form={form} agents={agents}）");
+                        let roster = roster_for(teams);
+                        // 名册为空 → 回落自动检测（`plan_roster` = None）。
+                        let auto = if roster.is_empty() {
+                            assert!(
+                                plan_roster(&goal, &roster, members).is_none(),
+                                "空名册必须回落自动检测"
+                            );
+                            let detected = team_specs(detect_roles(&goal));
+                            expand_swarm_specs(detected, &goal, members)
+                        } else {
+                            plan_roster(&goal, &roster, members)
+                                .expect("非空名册必须按名册执行")
+                        };
+                        // 无论 name/agents/form，规格都不得为空（用户全开时也必须真执行）。
+                        assert!(
+                            !auto.is_empty(),
+                            "form={form} teams={teams} agents={agents} members={members} 规格不得为空"
+                        );
+                        // 规模语义：名册非空时 = max(名册, members)；自动模式 = members（>=2 时）。
+                        let expect_len = if roster.is_empty() {
+                            if members >= 2 { members } else { auto.len() }
+                        } else {
+                            roster.len().max(members)
+                        };
+                        assert_eq!(
+                            auto.len(),
+                            expect_len,
+                            "form={form} teams={teams} agents={agents} members={members} 规模不符"
+                        );
+                        let names: std::collections::HashSet<&str> =
+                            auto.iter().map(|s| s.role.as_str()).collect();
+                        assert_eq!(names.len(), auto.len(), "角色名必须唯一");
+
+                        let team = build_team(&auto);
+                        assert_eq!(
+                            team.members.len(),
+                            auto.len(),
+                            "build_team 不得合并/丢弃成员"
+                        );
+                        // `run_p2p` 是真实 spawn/wait 链路（离线也会走一次注定失败的模型调用），
+                        // 取代表性子集执行，避免 100+ 组合把测试拖成数分钟：
+                        // agents 不影响成员规格；members=2 与 8 的行为已由 8/17 覆盖。
+                        if agents == 0 && members != 2 {
+                            let outcome = team.run_p2p(&offline_subagents_wide(), &goal).await;
+                            assert_eq!(
+                                outcome.member_results.len(),
+                                auto.len(),
+                                "form={form} teams={teams} agents={agents} members={members} \
+                                 run_p2p 不得吞掉成员"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 用户选定的并行规模必须真的扇出到该规模（回归「并行规模是假旋钮」）。
+    #[test]
+    fn expand_swarm_specs_fans_out_to_requested_parallel_size() {
+        let base = vec![SubtaskSpec {
+            role: "执行者".to_string(),
+            system_prompt: "你是通用执行者。".to_string(),
+            task: "目标".to_string(),
+            intent: IntentType::General,
+            complexity: Complexity::Medium,
+            deps: vec![],
+        }];
+        let out = expand_swarm_specs(base, "目标", 6);
+        assert_eq!(out.len(), 6, "选了 6 路就必须有 6 个成员");
+        let names: std::collections::HashSet<&str> =
+            out.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(names.len(), 6, "成员名必须唯一，否则 Team 成员键互相覆盖");
+        assert!(out.iter().all(|s| s.deps.is_empty()), "并行扇出不得保留依赖");
+        // 泳道标签取人设首句：切面与序号必须写在首句里，卡片上才能看出分工。
+        assert!(out[2].system_prompt.starts_with("你是蜂群第 3/6 号成员"), "{}", out[2].system_prompt);
+        assert!(out[2].system_prompt.contains("风险反例"), "第 3 个成员应分到第 3 个切面");
+        assert!(out[5].task.contains("【蜂群切面 6/6：验证验收】"), "{}", out[5].task);
+        // 分工必须互斥：不同成员拿到不同切面，任务文本不得完全相同。
+        let tasks: std::collections::HashSet<&str> = out.iter().map(|s| s.task.as_str()).collect();
+        assert_eq!(tasks.len(), 6, "每个成员的切面描述必须不同（旧实现是 6 份同一 goal）");
+        // 未指定规模时保持自动检测结果（团队形态不强制扇出）。
+        assert!(expand_swarm_specs(Vec::new(), "目标", 0).is_empty());
+        // 检测结果多于规模时截断到用户选定的上限。
+        let many: Vec<SubtaskSpec> = (1..=8)
+            .map(|i| SubtaskSpec {
+                role: format!("成员{i}"),
+                system_prompt: "你是成员。".to_string(),
+                task: format!("任务{i}"),
+                intent: IntentType::General,
+                complexity: Complexity::Medium,
+                deps: vec![],
+            })
+            .collect();
+        assert_eq!(expand_swarm_specs(many, "目标", 3).len(), 3);
+        // 规模超过 16（旧静态名表上限）时角色名仍必须唯一。
+        let wide = expand_swarm_specs(Vec::new(), "目标", 24);
+        assert_eq!(wide.len(), 24);
+        let names: std::collections::HashSet<&str> =
+            wide.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(names.len(), 24, ">16 名成员的角色名也必须唯一");
+        assert!(
+            wide[17].role.starts_with("蜂群 18/24 号·"),
+            "超过 16 号应使用动态命名：{}",
+            wide[17].role
+        );
+    }
+
+    /// 任意开关组合都不得把团队「扇成空」或「扇丢成员」。
+    ///
+    /// 用户硬要求：不管开关缺少、多选、全开还是全关，协调联动与分工都必须照常完成。
+    /// 这里覆盖「自动检测到的角色数 × 用户选的并行规模」的完整矩阵：
+    /// - `members < 2` 保持检测结果（团队形态不强制扇出），但**永远不得为空**；
+    /// - `members >= 2` 必须正好扇出到该规模（含检测结果为 0 的兜底路径）；
+    /// - 成员角色名必须唯一，否则 Team 的成员键 / 信箱按角色路由会串台。
+    #[test]
+    fn switch_matrix_never_yields_empty_or_collapsed_team() {
+        fn spec(role: &str, i: usize) -> SubtaskSpec {
+            SubtaskSpec {
+                role: role.to_string(),
+                system_prompt: format!("你是{role}。"),
+                task: format!("任务{i}"),
+                intent: IntentType::General,
+                complexity: Complexity::Medium,
+                deps: vec![],
+            }
+        }
+        let bases: Vec<Vec<SubtaskSpec>> = vec![
+            Vec::new(),
+            vec![spec("调研", 0)],
+            vec![spec("调研", 0), spec("编码实现", 1), spec("测试", 2)],
+            (0..8)
+                .map(|i| spec(&format!("执行者{i}"), i))
+                .collect(),
+        ];
+        for base in &bases {
+            for members in [0usize, 1, 2, 3, 4, 8, 16] {
+                let out = expand_swarm_specs(base.clone(), "目标", members);
+                if base.is_empty() && members < 2 {
+                    // 唯一允许为空的情形：自动检测为空且用户没要求并行（调用方
+                    // `dispatch_team_sized` 会先兜出一条「执行者」，不会走到这里）。
+                    assert!(out.is_empty(), "base=0 members={members} 应保持空");
+                    continue;
+                }
+                let expect = if members >= 2 && base.len() != members {
+                    members
+                } else {
+                    base.len()
+                };
+                assert_eq!(
+                    out.len(),
+                    expect,
+                    "base={} members={members} 扇出规模不符",
+                    base.len()
+                );
+                assert!(!out.is_empty(), "base={} members={members} 不得扇成空", base.len());
+                let names: std::collections::HashSet<&str> =
+                    out.iter().map(|s| s.role.as_str()).collect();
+                assert_eq!(
+                    names.len(),
+                    out.len(),
+                    "base={} members={members} 成员名必须唯一（键冲突会串台）",
+                    base.len()
+                );
+                // 规模必须与 Team 实际成员数一致（build_team 不得合并成员）。
+                assert_eq!(build_team(&out).members.len(), out.len());
+            }
+        }
+    }
+
+    /// 离线端到端：名册（空 / 单 / 多 / 同义重复角色）× 并行规模的组合，
+    /// `run_p2p` 收集到的成员数必须与规格数逐一相等 —— 不静默丢成员、不冒充成功。
+    #[tokio::test]
+    async fn switch_matrix_offline_team_runs_never_drop_members() {
+        let rosters: Vec<Vec<(String, String)>> = vec![
+            vec![],
+            vec![("编码实现".to_string(), "实现核心逻辑".to_string())],
+            vec![
+                ("调研".to_string(), "背景与约束".to_string()),
+                ("编码实现".to_string(), "实现".to_string()),
+                ("测试验证".to_string(), "验收".to_string()),
+            ],
+            vec![
+                // 同义标签会映射到同一个人设标签：成员数仍必须保留（索引调度不折叠）。
+                ("编码实现".to_string(), "实现".to_string()),
+                ("工程师".to_string(), "同义角色的独立职责".to_string()),
+                ("自定义角色".to_string(), "自由分工".to_string()),
+                ("".to_string(), "空标签也要有兜底分工".to_string()),
+            ],
+        ];
+        for roster in &rosters {
+            for members in [0usize, 2, 8] {
+                let specs = if roster.is_empty() {
+                    // 与 `dispatch_team_sized` 的兜底同口径：至少一名通用执行者。
+                    vec![SubtaskSpec {
+                        role: "执行者".to_string(),
+                        system_prompt: "你是通用执行者。聚焦把用户目标拆为可执行步骤，并交付明确结论。"
+                            .to_string(),
+                        task: "目标".to_string(),
+                        intent: IntentType::General,
+                        complexity: Complexity::Medium,
+                        deps: vec![],
+                    }]
+                } else {
+                    roster_specs("目标", roster)
+                };
+                // 名册模式不再按规模重排（与 `run_team_specs` 同口径）；自动模式才扇出。
+                let specs = if roster.is_empty() {
+                    expand_swarm_specs(specs, "目标", members)
+                } else {
+                    specs
+                };
+                assert!(
+                    !specs.is_empty(),
+                    "roster={} members={members} 规格不得为空",
+                    roster.len()
+                );
+                let team = build_team(&specs);
+                assert_eq!(team.members.len(), specs.len());
+                let outcome = team.run_p2p(&offline_subagents(), "目标").await;
+                assert_eq!(
+                    outcome.member_results.len(),
+                    specs.len(),
+                    "roster={} members={members} 不得吞掉成员",
+                    roster.len()
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -4478,12 +5885,44 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
                 timeout_secs: 0,
+                    wire_api: crate::model::wire::WireApi::Chat,
             },
             ..Default::default()
         };
         let router = std::sync::Arc::new(ModelRouter::new(&cfg));
         let reg = std::sync::Arc::new(ToolRegistry::new());
         SubAgentManager::new(SubAgentConfig::default(), reg, router)
+    }
+
+    /// 与 [`offline_subagents`] 同源，但放大并发闸门并收紧单成员超时。
+    ///
+    /// 仅用于高组合数的矩阵测试：`run_p2p` 的分波数与并发闸门相关，默认 5 并发
+    /// 会让 100+ 组合的离线矩阵跑数分钟（每个成员都要走一次注定失败的模型调用）。
+    /// 生产默认不变（仍由 `budget_policy` 决定）。
+    fn offline_subagents_wide() -> SubAgentManager {
+        let cfg = crate::persistence::config::Config {
+            model: crate::persistence::config::ModelConfig {
+                provider: "custom".to_string(),
+                model_name: "offline-model".to_string(),
+                api_key: "offline".to_string(),
+                base_url: "http://127.0.0.1:1".to_string(),
+                copilot_model: None,
+                timeout_secs: 0,
+                wire_api: crate::model::wire::WireApi::Chat,
+            },
+            ..Default::default()
+        };
+        let router = std::sync::Arc::new(ModelRouter::new(&cfg));
+        let reg = std::sync::Arc::new(ToolRegistry::new());
+        SubAgentManager::new(
+            SubAgentConfig {
+                max_concurrent: 64,
+                default_timeout: std::time::Duration::from_secs(2),
+                model: None,
+            },
+            reg,
+            router,
+        )
     }
 
     #[test]

@@ -72,6 +72,8 @@ export interface RawSessionItem {
   /** 会话所属项目根目录（sessions.db project_path 下发）；用于把会话归类到项目下 */
   projectPath?: string
   project_path?: string
+  /** 会话绑定的全部项目目录（P2-9 多根；首项与 projectPath 一致） */
+  projectPaths?: string[]
   updatedAt?: number | string
   updated_at?: number | string
   lastActivityAt?: number | string
@@ -380,6 +382,10 @@ export interface ToolUsePayload extends SessionEventPayload {
   // restarting from a fresh local clock on remount (issue #329). 0/absent => use
   // the local clock.
   started_at?: number
+  /** 引擎真实审批裁决（approved / pending / denied）。仅高自主本机工具会带。 */
+  approval?: string
+  /** 该工具的自主档位（readonly / mutating / high_autonomy）。 */
+  autonomy?: string
 }
 
 export interface ToolDeltaPayload extends ToolUsePayload {
@@ -448,6 +454,9 @@ export interface SessionMessagesSubscribeResponse extends SessionEventPayload {
     source?: string
   }
   workspaceId?: string
+  /** 会话级全部项目目录（多根，首项为主根；后端有的版本只发 snake_case）。 */
+  projectPaths?: string[]
+  project_paths?: string[]
   projectWorkspace?: SessionProjectWorkspaceSnapshot | null
   collaboration?: import('./plans').CollaborationSnapshot
   currentPlan?: import('./plans').PlanRevisionSnapshot | null
@@ -466,9 +475,35 @@ export interface ChatSendAttachmentPayload {
   file_uuid?: string
 }
 
+/**
+ * 输入框编排简报（用户当前选择）。随每轮 chat.send 上行，后端把它渲染成系统提示
+ * 「本轮调度简报」，要求主智能体先产出分工/调度计划再执行。
+ * 缺省字段不出现（不写「未选择」占位）。
+ */
+export interface ChatDispatchBrief {
+  /** 3×3 档位键，如 `standard_doit` */
+  mode?: string
+  /** 主智能体 id */
+  agent?: string
+  /** single / subagent / team / expert / swarm */
+  form?: string
+  /** 子智能体角色 id 列表 */
+  agents?: string[]
+  /** 专家团 / 团队 id（多选；旧后端只认单值时可取首个） */
+  teams?: string[]
+  /** @deprecated 单团队字段，保留一版供旧侧车读取 */
+  team?: string
+  swarmOn?: boolean
+  swarmSize?: number
+  /** 能力勾选 id */
+  capabilities?: string[]
+}
+
 export interface ChatSendParams {
   message: string
   sessionKey: string
+  /** 本轮的编排简报（模式/智能体/蜂群/团队/能力），后端注入为「调度计划」纪律。 */
+  dispatch?: ChatDispatchBrief
   /** Stable idempotency key for one logical send attempt. */
   clientRequestId?: string
   /** Stable client identity for reconciling the optimistic user row. */
@@ -476,10 +511,18 @@ export interface ChatSendParams {
   _source?: { elevated?: string; runMode?: 'safe' | 'full' }
   intent?: string
   workspaceId?: string
+  /** 会话级多根（P2-9）：主根在首位，其余为附加项目；单根时不发该字段。 */
+  workspaceIds?: string[]
   collaborationMode?: import('./plans').CollaborationMode
   forkBeforeMessageId?: string
   displayText?: string
   attachments?: ChatSendAttachmentPayload[]
+  /**
+   * 本轮「@」引用（文件/目录/规则/历史会话）。
+   * 后端 `gateway/context_refs.rs` 把材料拼在**用户消息尾部**（仅本轮生效），
+   * 落库的用户消息仍是原文，避免把整份文件内容写进会话台账。
+   */
+  contextRefs?: Array<{ kind: string; id: string; label?: string; path?: string }>
   /**
    * 深度思考开关（DeepSeek thinking/reasoning 模式）。
    * 为 true 时请求编排层开启模型推理链，并在多轮对话中回传 reasoning_content
@@ -489,10 +532,14 @@ export interface ChatSendParams {
    */
   thinking?: boolean
   /**
-   * 思考强度档位（'off'|'normal'|'deep'|'max'，chat.send 的 effort 参数）。
-   * 与 thinking 兼容：显式传档位时优先，缺省回落 thinking/会话持久化配置。
+   * 推理等级 —— **这是服务端真正读取的字段名**（`gateway/chat.rs` 读 `params["effort"]`）。
+   *
+   * 历史坑：本类型曾声明一个 `reasoningEffort` 字段，但发送侧从未填过它、
+   * 服务端也从不读它 —— 一个「声明了却永远为空」的死字段，让 UI 以为
+   * 四档能力已接通，实际只发得出 `thinking: true`。故此处改回真实 wire 名，
+   * 类型与后端参数名一一对应，避免下次再有人照着一个假字段写代码。
    */
-  reasoningEffort?: 'off' | 'normal' | 'deep' | 'max' | (string & {})
+  effort?: 'off' | 'normal' | 'deep' | 'max' | (string & {})
   [key: string]: unknown
 }
 

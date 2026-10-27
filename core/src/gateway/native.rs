@@ -108,8 +108,15 @@ pub(crate) fn poker_auto(params: &Value) -> Value {
                 Some(r) => r,
                 None => return json!({ "ok": false, "error": "房间不存在" }),
             };
-            let idx = room.current_seat as usize;
-            let p = &room.players[idx];
+            // 座位越界必须返回错误而不是 panic：网关是常驻进程，一次下标越界
+            // 会把整个 daemon 带走（房间状态损坏时 `current_seat` 可能指向空位）。
+            let Some(p) = room.players.get(room.current_seat as usize) else {
+                return json!({
+                    "ok": false,
+                    "code": "SEAT_OUT_OF_RANGE",
+                    "error": "当前座位越界（房间状态异常）",
+                });
+            };
             let has_pair = match (p.hole[0], p.hole[1]) {
                 (Some(a), Some(b)) => evaluate_7([a, b], &room.board).category >= 1,
                 _ => false,
@@ -190,5 +197,33 @@ pub(crate) fn games_play(params: &Value) -> Value {
             "render": render,
         }),
         Err(e) => json!({ "ok": false, "error": e, "game": game, "moves": moves }),
+    }
+}
+
+#[cfg(test)]
+mod poker_auto_guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 空房 / 损坏的 current_seat 曾让 `room.players[idx]` 直接 panic ——
+    /// 网关是常驻进程，一次下标越界会把整个 daemon 带走。这里钉住「回错误、不 panic」。
+    #[test]
+    fn auto_on_an_empty_room_returns_an_error_instead_of_panicking() {
+        let room_id = {
+            let mut hub = crate::poker::global_hub().lock().expect("hub lock");
+            hub.create_room("guard-test".into(), 5, 10)
+        };
+        let out = poker_auto(&json!({ "roomId": room_id }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["code"], "SEAT_OUT_OF_RANGE");
+        // 失败不得毒化 hub：后续调用仍能拿到锁。
+        assert!(crate::poker::global_hub().lock().is_ok());
+    }
+
+    #[test]
+    fn auto_on_a_missing_room_still_reports_not_found() {
+        let out = poker_auto(&json!({ "roomId": "room_does_not_exist" }));
+        assert_eq!(out["ok"], false);
+        assert!(out["error"].as_str().unwrap_or("").contains("不存在"));
     }
 }

@@ -21,6 +21,28 @@ use crate::proc::SilentCommand;
 /// tools/call 无限阻塞（HTTP 路径早已有超时，stdio 此前没有）。
 pub const STDIO_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `tools/call` 的读超时。
+///
+/// 控制面（握手 / `tools/list`）30s 合理，但 `tools/call` 可能是一次真实长任务
+/// （浏览器自动化、抓取、构建、媒体处理）——30s 会把正常调用误判成超时。
+/// 默认取自适应预算的 Standard 档单步超时；`MARGUERITE_MCP_TOOL_TIMEOUT_SECS`
+/// 可覆盖，仍钳制在 30s..30 分钟。
+fn tool_call_read_timeout() -> Duration {
+    let secs = std::env::var("MARGUERITE_MCP_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or_else(|| {
+            crate::agent::budget_policy::resolve("[[budget:standard]]", 1, 0)
+                .step_timeout
+                .as_secs()
+        });
+    Duration::from_secs(secs.clamp(
+        STDIO_READ_TIMEOUT.as_secs(),
+        crate::agent::budget_policy::MAX_STEP_SECS,
+    ))
+}
+
 /// 把 MCP 工具名清洗为 LLM function-calling 允许的字符集（字母数字 / `_` / `-`）。
 ///
 /// ⚠️ 这是**单一事实源**：`describe_mcp_tools`（对外广告的名字）与
@@ -215,7 +237,7 @@ impl McpClient {
             },
         });
         Self::stdio_send(&mut stdin, &init).await?;
-        let _resp = Self::stdio_read(&mut reader, 0).await?;
+        let _resp = Self::stdio_read(&mut reader, 0, STDIO_READ_TIMEOUT).await?;
         let notif = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         Self::stdio_send(&mut stdin, &notif).await?;
         Ok((child, stdin, reader))
@@ -232,6 +254,7 @@ impl McpClient {
     async fn stdio_read<R: tokio::io::AsyncBufRead + Unpin>(
         reader: &mut R,
         expected_id: u64,
+        timeout: Duration,
     ) -> Result<serde_json::Value> {
         let mut line = String::new();
         loop {
@@ -239,17 +262,13 @@ impl McpClient {
             // ⚠️ stdio 读必须有超时：一个挂死/不回包的 MCP server 会让 `read_line`
             // 永久阻塞，进而卡死握手、tools/list 与每一次 tools/call（HTTP 路径早有
             // 超时，stdio 此前没有）。超时后返回错误，让上层能放弃该 server。
-            let n = match tokio::time::timeout(
-                STDIO_READ_TIMEOUT,
-                reader.read_line(&mut line),
-            )
-            .await
-            {
+            // 超时值由调用方给出：控制面 30s，`tools/call` 按自适应预算放宽。
+            let n = match tokio::time::timeout(timeout, reader.read_line(&mut line)).await {
                 Ok(res) => res?,
                 Err(_) => {
                     return Err(anyhow!(
                         "stdio MCP 读取超时（{}s，等待 id={expected_id}）",
-                        STDIO_READ_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ))
                 }
             };
@@ -385,7 +404,7 @@ impl McpClient {
             Self::stdio_send(&mut stdin, &request)
                 .await
                 .map_err(McpCallError::Transport)?;
-            let json = Self::stdio_read(&mut reader, 1)
+            let json = Self::stdio_read(&mut reader, 1, STDIO_READ_TIMEOUT)
                 .await
                 .map_err(McpCallError::Transport)?;
             let _ = child.kill().await;
@@ -507,7 +526,7 @@ impl McpClient {
             Self::stdio_send(&mut stdin, &request)
                 .await
                 .map_err(McpCallError::Transport)?;
-            let json = Self::stdio_read(&mut reader, 1)
+            let json = Self::stdio_read(&mut reader, 1, tool_call_read_timeout())
                 .await
                 .map_err(McpCallError::Transport)?;
             let _ = child.kill().await;

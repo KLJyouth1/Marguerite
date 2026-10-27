@@ -37,7 +37,8 @@ pub(crate) fn diff_tool() -> Box<dyn ToolExecutor> {
     )
 }
 
-pub(crate) fn count_lines_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn count_lines_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "count_lines",
         "统计文件行数。参数: path",
@@ -46,7 +47,7 @@ pub(crate) fn count_lines_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
             let ws = workspace.clone();
             Box::pin(async move {
                 let p = args.get("path").ok_or_else(|| anyhow!("missing 'path'"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 if !abs.is_file() {
                     return err(format!("not a file: {}", p), "NOT_FOUND");
                 }

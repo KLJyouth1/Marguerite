@@ -125,6 +125,44 @@ describe('rpc link-token bootstrap', () => {
     expect(window.location.href).toBe('http://localhost:3000/control/sessions')
   })
 
+  it('does not reconnect when the URL carries the token already in use', () => {
+    // 回归（2026-10-21 实测根因）：vue-router 在 createWebHistory() 时捕获了
+    // 含 `?token=` 的初始 URL，首次导航 finalize 又把它写回地址栏。于是
+    // afterEach → applyLinkTokenFromUrl 再次读到**同一个** token。旧实现无条件
+    // disconnect+connect，造成：①每次带 token 进入多一次 WS 握手（实测 2 open/1 close）；
+    // ②disconnect 把 in-flight 请求 reject 成 Disconnected（/channels 首载
+    // sessions.list 偶发失败即此因）；③已清理的 token 被重新暴露在地址栏。
+    sessionStorage.setItem('marguerite.wsToken', 'same-token')
+
+    const store = useRpcStore()
+    store.init()
+    expect(connectCalls).toEqual([{ url: 'ws://localhost:3000/ws', token: 'same-token' }])
+
+    window.history.replaceState(null, '', '/control/channels?token=same-token')
+    // 返回值语义：本次是否"切换了连接身份"。同 token = 没切换。
+    expect(store.applyLinkTokenFromUrl()).toBe(false)
+
+    expect(connectCalls).toHaveLength(1)
+    expect(clients[0].disconnect).not.toHaveBeenCalled()
+    // 但地址栏必须仍被清理：跳过重连不等于把 token 留在 URL 里。
+    expect(window.location.href).toBe('http://localhost:3000/control/channels')
+  })
+
+  it('still switches identity when a different token arrives', () => {
+    // 上一条的对照组：不能为了"不重连"把"换链接换身份"的能力一起干掉。
+    sessionStorage.setItem('marguerite.wsToken', 'old-token')
+    const store = useRpcStore()
+    store.init()
+
+    window.history.replaceState(null, '', '/control/channels?token=brand-new-token')
+    expect(store.applyLinkTokenFromUrl()).toBe(true)
+    expect(connectCalls[connectCalls.length - 1]).toEqual({
+      url: 'ws://localhost:3000/ws',
+      token: 'brand-new-token',
+    })
+    expect(clients[0].disconnect).toHaveBeenCalledTimes(1)
+  })
+
   it('clears stale identity state before reconnecting with a URL token', () => {
     const store = useRpcStore()
     store.init()

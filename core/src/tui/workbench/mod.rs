@@ -36,6 +36,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use serde_json::json;
+use serde_json::Value;
 use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
 
@@ -133,6 +134,8 @@ pub struct RealEngine {
     route_decision: Option<RouteDecision>,
     /// 项目工作区根目录（可选）：设置后工具/终端/文件沙箱根随项目目录切换。
     workspace: Option<PathBuf>,
+    /// 多根工作区（P2-9；首项为主根）。设置后文件域工具可跨根读写检索。
+    workspaces: Option<Vec<PathBuf>>,
     /// 模式提示段（可选）：显式注入时优先于「按当前模式规格取 prompt_section」
     /// （Plan 模式的 DSH 规则段走此通道）。
     mode_section: Option<String>,
@@ -157,6 +160,7 @@ impl RealEngine {
             stable_prefix: None,
             route_decision: None,
             workspace: None,
+            workspaces: None,
             mode_section: None,
             credentials: None,
             cache: None,
@@ -195,6 +199,13 @@ impl RealEngine {
     /// 注入项目工作区根目录（工具/终端/文件沙箱根随之切换；None 用默认）
     pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Self {
         self.workspace = workspace;
+        self
+    }
+
+    /// 注入多根工作区（P2-9）：首项为主根；空列表等价于未注入。
+    /// 与 [`Self::with_workspace`] 同时存在时以多根为准。
+    pub fn with_workspaces(mut self, workspaces: Option<Vec<PathBuf>>) -> Self {
+        self.workspaces = workspaces.filter(|v| !v.is_empty());
         self
     }
 
@@ -253,6 +264,9 @@ impl RealEngine {
         let evolution = self.evolution.clone();
         // 经验抽取配置（在 config 被 move 进 Orchestrator 前取得）
         let extract_cfg = llm_config_for_extraction(&config);
+        // 自动捕获总开关：关闭后禁止「每轮自动抽取写入」。
+        // 显式 `memory.save` / 工具 `memory_save` 不受影响（显式意图优先）。
+        let auto_capture = config.memory.auto_capture_enabled;
         // 自进化：执行前召回相关经验，注入系统提示
         let hint = recall_hint(&evolution, &text);
         // 跨项目记忆：与自进化经验合并注入（同一系统提示片段）
@@ -263,14 +277,20 @@ impl RealEngine {
         };
         // 自动编排器：每条输入由它离线分析并自动选定 Solo / MAX 双带队 / 专家团队 / 集群形态，
         // 用户（及本 TUI）不手动选择编排形态——形态只能由编排内核自动得出。
-        let mut orch = match &self.workspace {
-            Some(ws) => Orchestrator::new_with_workspace_credentials_cache(
+        let mut orch = match (&self.workspaces, &self.workspace) {
+            (Some(roots), _) if !roots.is_empty() => Orchestrator::new_with_workspace_roots(
+                config,
+                roots.clone(),
+                self.credentials.clone(),
+                self.cache.clone(),
+            ),
+            (_, Some(ws)) => Orchestrator::new_with_workspace_credentials_cache(
                 config,
                 ws.clone(),
                 self.credentials.clone(),
                 self.cache.clone(),
             ),
-            None => Orchestrator::new_with_credentials_and_cache(
+            _ => Orchestrator::new_with_credentials_and_cache(
                 config,
                 self.credentials.clone(),
                 self.cache.clone(),
@@ -325,7 +345,7 @@ impl RealEngine {
         // 必须**脱离回合的关键路径**：它是一次额外的 LLM 调用，若在这里 await，
         // 网关要等它返回才发布 Done / sessions.changed(idle)，前端就表现为
         // 「任务已经做完，界面还一直显示思考中」，并且答完之后仍持续有网络动作。
-        if let Some(evo) = evolution {
+        if let Some(evo) = evolution.filter(|_| auto_capture) {
             let reply = outcome.lead_reply.clone();
             tokio::spawn(async move {
                 extract_experiences(evo, extract_cfg, text, reply).await;
@@ -357,6 +377,7 @@ impl EngineRunner for RealEngine {
                 stable_prefix: None,
                 route_decision: None,
                 workspace: None,
+                workspaces: None,
                 mode_section,
                 credentials,
                 cache,
@@ -394,6 +415,7 @@ fn llm_config_for_extraction(config: &Config) -> LLMConfig {
         timeout_secs: 60,
         thinking: crate::model::thinking::ThinkingEffort::Off,
         context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+        wire_api: config.model.wire_api,
     }
 }
 
@@ -623,6 +645,11 @@ impl WorkbenchApp {
                 app.state.copilot_model = p.label.clone();
             }
         }
+        // 首帧即显示档位/预算（不能等第一次 Tick，否则启动瞬间是空白）。
+        app.state.refresh_tier_ledger();
+        // 模型面板首帧快照：等到用户按 Ctrl+M 再读也行，但状态栏/顶栏的模型名
+        // 本来就取自 models.json，启动即对齐可省掉一次"显示旧模型"的错觉。
+        app.state.refresh_model_panel();
         Ok(app)
     }
 
@@ -632,6 +659,10 @@ impl WorkbenchApp {
         let bus = Arc::new(EventBus::default());
         let mode = Arc::new(RwLock::new(ModeManager::new()));
         let gate = Arc::new(ApprovalGate::default());
+        // 让 agent 工具回路与本工作台共用**同一个**审批门：否则智能体主链抬起的
+        // 高危操作审批（P0-4）会落在另一个门上，`UiEffect::ResolveApproval` 按 id
+        // 找不到它（也就裁不掉），只能等超时按拒绝收场。
+        crate::guard::gateway::install_agent_gate(gate.clone());
         let sandbox = Arc::new(Sandbox::new(&Config::config_dir()));
         let engine: Arc<dyn EngineRunner> = Arc::new(RealEngine::from_config(config.clone()));
         // H5：加载模型选择器（与 CLI/GUI 共用同一份 models.json；缺失则种子默认值）
@@ -738,7 +769,12 @@ impl WorkbenchApp {
                     self.state.interaction = InteractionState::Idle;
                 }
                 UiEffect::Quit => self.should_quit = true,
-                UiEffect::ModelAction(op) => self.apply_model_action(op),
+                UiEffect::ModelAction(op) => {
+                    self.apply_model_action(op);
+                    // 模型操作后重投影面板（激活/删除/新增都会改变列表与当前项）。
+                    // 放在 effect 层而不是每个分支里 = 单一刷新点，不会漏。
+                    self.state.refresh_model_panel();
+                }
                 UiEffect::DeployAction(op) => self.apply_deploy(op),
                 UiEffect::CollabAction(op) => self.apply_collab(op),
                 UiEffect::Render
@@ -761,7 +797,132 @@ impl WorkbenchApp {
     ///
     /// 锁定共享 `ModelSelector` 执行持久化，并将结果显示回写到顶栏状态
     /// （`state.model` / `state.copilot_model` / `state.notice`），`/model list` 回显到聊天。
+    /// 副作用执行：模型服务（P2·A）——deploy/ollama/activate/routing/system 走
+    /// gateway 同一 engine/store 路径（与 CLI/桌面 models.local.* 同构）。
+    ///
+    /// 必须在 selector 锁**外**执行：`local_deploy`/`activate_profile_by_id` 内部
+    /// 会自行 `ModelSelector::load()`，若此处先持锁会死锁。
+    fn apply_model_service(&mut self, op: ModelOp) {
+        let cfg = crate::persistence::config::Config::load().unwrap_or_default();
+        let ctx = crate::gateway::methods::GatewayContext {
+            config: cfg,
+            token: "tui".into(),
+            started_at: std::time::Instant::now(),
+            bus: self.bus.clone(),
+        };
+        let set_notice = |s: &mut Self, msg: String| s.state.notice = Some(msg);
+        match op {
+            ModelOp::Deploy(id, activate) => {
+                let out = crate::gateway::local_models::local_deploy(
+                    &ctx,
+                    &serde_json::json!({ "id": id, "activate": activate }),
+                );
+                if out.get("ok").and_then(Value::as_bool) == Some(true) {
+                    let pid = out.get("profile_id").and_then(Value::as_str).unwrap_or("");
+                    let activated = out.get("activated").and_then(Value::as_bool).unwrap_or(false);
+                    set_notice(
+                        self,
+                        format!("已部署本地模型 {id} → {pid} (activated={activated})"),
+                    );
+                } else {
+                    set_notice(
+                        self,
+                        format!(
+                            "部署失败: {}",
+                            out.get("error").and_then(Value::as_str).unwrap_or("未知错误")
+                        ),
+                    );
+                }
+            }
+            ModelOp::OllamaDeploy(tag, activate) => {
+                let out = self.rt.block_on(crate::gateway::local_models::local_ollama_deploy(
+                    &ctx,
+                    &serde_json::json!({ "model": tag, "activate": activate }),
+                ));
+                if out.get("ok").and_then(Value::as_bool) == Some(true) {
+                    let pid = out.get("profile_id").and_then(Value::as_str).unwrap_or("");
+                    let activated = out.get("activated").and_then(Value::as_bool).unwrap_or(false);
+                    set_notice(
+                        self,
+                        format!("已部署 Ollama 模型 {tag} → {pid} (activated={activated})"),
+                    );
+                } else {
+                    set_notice(
+                        self,
+                        format!(
+                            "Ollama 部署失败: {}",
+                            out.get("error").and_then(Value::as_str).unwrap_or("未知错误")
+                        ),
+                    );
+                }
+            }
+            ModelOp::Activate(profile_id) => {
+                match crate::gateway::llm_profile::activate_profile_by_id(&ctx, &profile_id) {
+                    Ok(()) => {
+                        let _ = crate::gateway::llm_profile::reconcile_routing_candidates(&ctx);
+                        set_notice(self, format!("已激活模型档案: {profile_id}"));
+                    }
+                    Err(e) => set_notice(self, format!("激活失败: {e}")),
+                }
+            }
+            ModelOp::Routing(mode) => match mode {
+                None => {
+                    let out = crate::gateway::mode::models_routing_get(&ctx);
+                    set_notice(
+                        self,
+                        format!(
+                            "当前路由模式: {}",
+                            out.get("mode").and_then(Value::as_str).unwrap_or("direct")
+                        ),
+                    );
+                }
+                Some(m) => {
+                    let out = self.rt.block_on(crate::gateway::mode::models_routing_set(
+                        &ctx,
+                        &serde_json::json!({ "mode": m }),
+                    ));
+                    match out {
+                        Ok(v) => set_notice(
+                            self,
+                            format!(
+                                "已设置路由模式: {}",
+                                v.get("mode").and_then(Value::as_str).unwrap_or("")
+                            ),
+                        ),
+                        Err(e) => set_notice(self, format!("设置路由模式失败: {}", e.message)),
+                    }
+                }
+            },
+            ModelOp::System => {
+                let out = crate::gateway::local_models::local_system(&serde_json::Value::Null);
+                set_notice(
+                    self,
+                    format!(
+                        "主机规格: {} | RAM {} GB | 核心 {} | GPU {}",
+                        out.get("os").and_then(Value::as_str).unwrap_or("—"),
+                        out.get("ram_gb").and_then(Value::as_u64).unwrap_or(0),
+                        out.get("cores").and_then(Value::as_u64).unwrap_or(0),
+                        out.get("gpu_name").and_then(Value::as_str).unwrap_or("—")
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn apply_model_action(&mut self, op: ModelOp) {
+        // P2·A：网关类操作不进 selector 锁（内部自行 load），避免死锁
+        match op {
+            ModelOp::Deploy(..)
+            | ModelOp::OllamaDeploy(..)
+            | ModelOp::Activate(..)
+            | ModelOp::Routing(..)
+            | ModelOp::System => {
+                self.apply_model_service(op);
+                return;
+            }
+            _ => {}
+        }
         let mut sel = match self.selector.lock() {
             Ok(g) => g,
             Err(_) => {
@@ -800,7 +961,7 @@ impl WorkbenchApp {
                     Err(e) => self.state.notice = Some(format!("设置副模型失败: {e}")),
                 }
             }
-            ModelOp::Add(p) => match sel.add(p.clone()) {
+            ModelOp::Add(p) => match sel.add((*p).clone()) {
                 Ok(_) => self.state.notice = Some(format!("已添加模型: {}", p.label)),
                 Err(e) => self.state.notice = Some(format!("添加模型失败: {e}")),
             },
@@ -839,6 +1000,12 @@ impl WorkbenchApp {
                     content: lines,
                 });
             }
+            // 已在上方 `apply_model_service` 提前处理并 return，这里不可达
+            ModelOp::Deploy(..)
+            | ModelOp::OllamaDeploy(..)
+            | ModelOp::Activate(..)
+            | ModelOp::Routing(..)
+            | ModelOp::System => {}
         }
     }
 

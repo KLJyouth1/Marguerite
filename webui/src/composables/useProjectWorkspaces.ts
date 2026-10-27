@@ -9,12 +9,19 @@ import type {
 
 export type { ProjectWorkspaceItem } from '@/types/rpc'
 
+/** 后端 `workspaces.list` 行 + 「最近打开」时间（RFC3339；旧数据为空串）。 */
+export type NormalizedProjectWorkspace = ProjectWorkspaceItem & { lastOpenedAt: string }
+
 const workspaces = ref<ProjectWorkspaceItem[]>([])
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 const hasLoaded = ref(false)
 
-function normalizeWorkspace(value: unknown): ProjectWorkspaceItem | null {
+function textField(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+export function normalizeWorkspace(value: unknown): NormalizedProjectWorkspace | null {
   if (!value || typeof value !== 'object') return null
   const row = value as Record<string, unknown>
   const id = typeof row.id === 'string' ? row.id.trim() : ''
@@ -29,10 +36,31 @@ function normalizeWorkspace(value: unknown): ProjectWorkspaceItem | null {
     taskCount: Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0,
     pinned: row.pinned === true,
     available: row.available !== false,
+    // 新网关同时下发驼峰与 snake_case 两个别名；只认识旧字段的前端也兼容。
+    lastOpenedAt: textField(row.lastOpenedAt) || textField(row.last_opened_at),
     ...(typeof row.availabilityReason === 'string' && row.availabilityReason
       ? { availabilityReason: row.availabilityReason }
       : {}),
   }
+}
+
+/**
+ * 「最近打开」排序：pinned 优先，其次 lastOpenedAt 倒序（空值排最后），
+ * 完全并列时保持后端顺序（Array#sort 稳定）。后端已排好序，这里再排一次
+ * 只是让「打开后立刻刷新」与旧网关（无该字段）两种来源都落在同一规则上。
+ */
+export function sortWorkspacesByRecent<T extends { pinned: boolean; lastOpenedAt?: string }>(
+  items: T[],
+): T[] {
+  return [...items].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+    const left = a.lastOpenedAt || ''
+    const right = b.lastOpenedAt || ''
+    if (left === right) return 0
+    if (!left) return 1
+    if (!right) return -1
+    return left < right ? 1 : -1
+  })
 }
 
 export function useProjectWorkspaces() {
@@ -70,7 +98,7 @@ export function useProjectWorkspaces() {
         : await rpc.call<ProjectWorkspacesResponse>('workspaces.list')
       workspaces.value = (response?.workspaces || [])
         .map(normalizeWorkspace)
-        .filter((item): item is ProjectWorkspaceItem => item !== null)
+        .filter((item): item is NormalizedProjectWorkspace => item !== null)
       hasLoaded.value = true
       return workspaces.value
     } catch (cause) {
@@ -95,10 +123,15 @@ export function useProjectWorkspaces() {
 
   async function openWorkspace(path: string): Promise<ProjectWorkspaceItem | null> {
     requireOwnerMethod('workspaces.open')
-    const response = await rpc.call<{ workspace?: unknown }>('workspaces.open', {
+    const response = await rpc.call<{ workspace?: unknown; error?: unknown }>('workspaces.open', {
       path,
       trusted: true,
     })
+    // 老网关把失败放在成功信封里（`{ok:true, ...}` + `{error}`）：只看
+    // `workspace` 会拿到 null，调用方于是静默当成功。把原因抛出去，让上层
+    // 的 toast/错误态如实显示「目录不存在」之类的原因。
+    const failure = typeof response?.error === 'string' ? response.error.trim() : ''
+    if (failure) throw new Error(failure)
     await loadWorkspaces()
     return normalizeWorkspace(response?.workspace)
   }

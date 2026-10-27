@@ -54,9 +54,54 @@ pub fn py_sidecar() -> Option<&'static Arc<PyEngineSidecar>> {
     PY_SIDECAR_REG.get()
 }
 
+/// 侧车启动阶段。
+///
+/// # 为什么需要它（2026-10-22 实测的「一启动就报错、点重试才连上」）
+///
+/// 启动顺序是：Tauri 拉起 Rust 网关（**立刻**监听 18790）→ Rust 网关**异步**启动
+/// Python 侧车（冷启动约 6 秒，日志 `startup_elapsed_ms=5991`）→ 侧车就绪。
+///
+/// 而 WebView 在网关一监听上就加载并连上 WS，于是那 6 秒内前端发起的每个
+/// Python 方法都落到 `RpcError::not_implemented` —— 前端把它当**错误**展示，
+/// 用户看到"报错"，点重试时侧车已就绪，于是"重试就好了"。
+///
+/// 有了这个阶段标记，dispatch 就能区分：
+/// - `Starting` → 回 `SIDECAR_STARTING`（前端据此显示"初始化中"并自动重试，**不弹错误**）
+/// - `Ready` / `Failed` → 仍回 `NOT_IMPLEMENTED`（此时它是真的不可用，必须如实报错）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarPhase {
+    /// 正在启动（进程已拉起或尚未拉起，健康探测未完成）
+    Starting,
+    /// 已就绪，WS 客户端可转发
+    Ready,
+    /// 启动失败 / 握手失败 —— 已降级纯 Rust 模式
+    Failed,
+}
+
+static SIDECAR_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn sidecar_phase() -> SidecarPhase {
+    match SIDECAR_PHASE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => SidecarPhase::Ready,
+        2 => SidecarPhase::Failed,
+        _ => SidecarPhase::Starting,
+    }
+}
+
+fn set_sidecar_phase(phase: SidecarPhase) {
+    let v = match phase {
+        SidecarPhase::Starting => 0,
+        SidecarPhase::Ready => 1,
+        SidecarPhase::Failed => 2,
+    };
+    SIDECAR_PHASE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
 async fn set_py_registry(sidecar: Arc<PyEngineSidecar>, client: Arc<PyGatewayClient>) {
     let _ = PY_SIDECAR_REG.set(sidecar);
     let _ = PY_CLIENT_REG.set(client);
+    // 注册即就绪：此后 Python 方法可正常转发。
+    set_sidecar_phase(SidecarPhase::Ready);
 }
 
 /// 网关共享状态
@@ -66,6 +111,9 @@ pub struct GatewayState {
     pub token: String,
     pub started_at: Instant,
     pub webui_dir: PathBuf,
+    /// 生产限流令牌桶（W3.4）。只作用于 `/api/*` REST；`/api/health` 与 WS 豁免。
+    pub rate_limiter: Arc<crate::gateway::rate_limit::RateLimiter>,
+    pub rate_limit_enabled: bool,
 }
 
 impl GatewayState {
@@ -82,6 +130,12 @@ impl GatewayState {
             .or_else(|| std::env::var_os("MARGUERITE_WEBUI_DIST").map(PathBuf::from))
             .or(detect_webui_dir())
             .unwrap_or(PathBuf::from("webui/dist"));
+        let bucket = crate::gateway::rate_limit::BucketConfig::new(
+            config.gateway.rate_limit_capacity(),
+            config.gateway.rate_limit_refill(),
+        );
+        let rate_limiter = Arc::new(crate::gateway::rate_limit::RateLimiter::new(bucket, bucket));
+        let rate_limit_enabled = config.gateway.rate_limit_is_enabled();
         Ok(Self {
             config,
             bus: {
@@ -94,6 +148,8 @@ impl GatewayState {
             token,
             started_at: Instant::now(),
             webui_dir,
+            rate_limiter,
+            rate_limit_enabled,
         })
     }
 }
@@ -110,6 +166,7 @@ pub async fn maybe_bootstrap_pyengine(state: Arc<GatewayState>) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(err = %e, "侧车自动探测失败：已降级纯 Rust 模式，全部 Python 方法（logs.tail / config.get / onboarding.* …）将回 NOT_IMPLEMENTED");
+            set_sidecar_phase(SidecarPhase::Failed);
             return;
         }
     };
@@ -123,14 +180,23 @@ pub async fn maybe_bootstrap_pyengine(state: Arc<GatewayState>) {
     // 把 404 也算「活着」——用探活挑端口会挑错。
     let mut reused: Option<(Arc<PyEngineSidecar>, Arc<PyGatewayClient>)> = None;
     for cand in crate::pyengine::sidecar::candidate_sidecars(&cfg) {
-        // 传入 pid：复用路径靠它判活并采集退出证据（S5）。拿不到 pid 时
-        // `attach` 内部不启守护——降级而不是猜测，见 `SidecarCandidate::pid`。
-        let attached = Arc::new(PyEngineSidecar::attach(
-            cfg.clone().with_port(cand.port),
-            cand.pid,
-        ));
-        match PyGatewayClient::connect(&attached.base_url(), &state.token).await {
+        // P1-7 修复（实测双侧车根因）：先做**轻量可达性探测**（只握手，不建
+        // 监督任务），**只有**真实可连的候选才 `attach`（attach 会立刻 spawn
+        // `run_sidecar_supervisor`）。旧写法对每个候选先 `attach` 再 connect，
+        // connect 失败时 `attached` 被 drop 但 tokio `JoinHandle` 不会被 abort，
+        // 那个 Attached 监督任务继续跑：发现附着 pid 已死就 `spawn_once` 接管，
+        // 在候选端口上偷偷拉起第二个侧车——随后 `start()` 又在新端口拉起自有侧车，
+        // 于是出现「两个 python 进程 / 一个孤儿不在注册表」。
+        let probe_url = format!("http://127.0.0.1:{}", cand.port);
+        match PyGatewayClient::connect(&probe_url, &state.token).await {
             Ok(c) => {
+                // 可达：此刻才 attach（spawn 监督任务，传入 cand.pid 靠它判活并
+                // 采集退出证据）。拿不到 pid 时 `attach` 内部不启守护——降级而不
+                // 是猜测，见 `SidecarCandidate::pid`。
+                let attached = Arc::new(PyEngineSidecar::attach(
+                    cfg.clone().with_port(cand.port),
+                    cand.pid,
+                ));
                 tracing::info!(
                     port = cand.port,
                     pid = ?cand.pid,
@@ -140,7 +206,7 @@ pub async fn maybe_bootstrap_pyengine(state: Arc<GatewayState>) {
                 break;
             }
             Err(e) => {
-                tracing::debug!(err = %e, port = cand.port, "候选端口不是可用网关，继续尝试下一个");
+                tracing::debug!(err = %e, port = cand.port, "候选端口不是可用网关，继续尝试下一个（未建监督任务）");
             }
         }
     }
@@ -155,6 +221,7 @@ pub async fn maybe_bootstrap_pyengine(state: Arc<GatewayState>) {
                         err = %e,
                         "侧车启动失败：已降级纯 Rust 模式；全部 Python 方法（logs.tail / logs.status / config.get / onboarding.* / channels.* …）会返回 NOT_IMPLEMENTED"
                     );
+                    set_sidecar_phase(SidecarPhase::Failed);
                     return;
                 }
             };
@@ -162,6 +229,7 @@ pub async fn maybe_bootstrap_pyengine(state: Arc<GatewayState>) {
                 Ok(c) => (s, Arc::new(c)),
                 Err(e) => {
                     tracing::error!(err = %e, "Python WS 握手失败：已降级纯 Rust 模式");
+                    set_sidecar_phase(SidecarPhase::Failed);
                     return;
                 }
             }
@@ -222,13 +290,24 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         // axum 通配符 `{*path}` 不匹配空路径，根路径单独注册
         .route("/control", get(control_root))
         .route("/control/", get(control_root))
-        .route("/control/{*path}", get(control_assets))
-        .route("/control/static/{*path}", get(control_assets))
+        .route("/control/{*path}", get(control_spa_assets))
+        .route("/control/static/{*path}", get(control_static_assets))
         .fallback(fallback)
-        .with_state(state)
+        .with_state(state.clone())
+        // W3.4 生产限流：只限 /api/* REST（/api/health 与 WS/静态资源豁免）。
+        // 超限回 HTTP 429 + JSON-RPC 错误体；缺这一层时占位实现的 rate_limit
+        // 模块有测试、有实现，却对真实流量零作用（"模块完整但零引用"）。
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            api_rate_limit_layer,
+        ))
         // Control UI 安全响应头（CSP / X-Frame-Options / nosniff / Referrer-Policy）：
         // 挂在最外层，覆盖静态托管**与** SPA fallback 两条产出路径。
         .layer(axum::middleware::from_fn(control_ui_security_headers_layer))
+        // 路径穿越入口闸（F-T4-02）：在路由匹配前按**解码后**路径拒绝。
+        // 必须在路由前：`/control/static/../x` 可能被路由归一成 `/control/x`，
+        // 到了 handler 已看不出原始 `..`；更不能用「SPA 回退 200」掩盖。
+        .layer(axum::middleware::from_fn(control_traversal_guard_layer))
 }
 
 /// 启动网关：绑定 127.0.0.1:<port> 并运行至进程结束
@@ -287,6 +366,11 @@ async fn api_health(State(state): State<Arc<GatewayState>>) -> impl IntoResponse
     axum::Json(serde_json::json!({
         "status": "ok",
         "engine": "rust",
+        // R14：桌面壳在「端口已被占用」时要判断占用者是**本产品的网关**还是别的程序
+        // （决定「复用现有网关」还是「报错退出」）。只靠 `engine` 字段无法判断版本是否
+        // 兼容，故这里如实上报构建版本，让附着方能把「版本不一致」告知用户，
+        // 而不是静默连上一个旧版网关、再让界面出现无法解释的契约错误。
+        "version": env!("CARGO_PKG_VERSION"),
         "uptime_ms": state.started_at.elapsed().as_millis(),
     }))
 }
@@ -370,6 +454,8 @@ async fn ws_handler(
             origin = origin.unwrap_or(""),
             "WS 握手被拒绝：Origin 不在白名单（默认白名单 + gateway.origin_allowlist 配置扩展）"
         );
+        // 审计只记 Origin 字符串（非敏感），便于追溯恶意页面来源。
+        audit_ws_rejection("ws.handshake", origin.unwrap_or("(no-origin)"), "origin_not_allowed");
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -598,8 +684,10 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<GatewayState>) {
 ///
 /// 把慢方法的 dispatch 放到独立 runtime 后，两者互不影响：WS 循环的 tick /
 /// ping / 事件推送始终按节奏走，慢方法爱跑多久跑多久。
+#[cfg(not(test))]
 static SLOW_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
 
+#[cfg(not(test))]
 fn slow_runtime() -> &'static tokio::runtime::Runtime {
     SLOW_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -623,7 +711,7 @@ fn spawn_slow_dispatch(
     resp_tx: mpsc::UnboundedSender<String>,
     inflight: Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    slow_runtime().spawn(async move {
+    let task = async move {
         // 守卫必须活在整个 dispatch 期间：任务结束（含 panic）时才递减。
         let _guard = InflightGuard(inflight);
         let resp = match dispatch(&ctx, &method, params).await {
@@ -632,7 +720,18 @@ fn spawn_slow_dispatch(
         };
         // 通道随连接存活；发送失败说明循环已退出，无需处理。
         let _ = resp_tx.send(resp);
-    });
+    };
+    // **单测不切独立 runtime**：测试的配置目录隔离是 `thread_local`
+    // （`persistence::OVERRIDE_CONFIG_DIR`），只在当前线程可见。若把 dispatch
+    // 丢到 `SLOW_RUNTIME` 的 worker 线程，隔离目录立刻丢失 —— 会话入口
+    // `apply_effective_model` 会读开发者本机 `~/.marguerite/models.json`，
+    // 把用例注入的本地 mock 端点覆盖成真实云端端点（e2e_fusion_methods_over_ws
+    // 的真实现场：mock 从未被访问、真实请求成功、等不到 `.error` 事件）。
+    // 生产仍走独立 runtime：避免长任务卡住 WS 事件循环（见 `SLOW_RUNTIME` 注释）。
+    #[cfg(test)]
+    tokio::spawn(task);
+    #[cfg(not(test))]
+    slow_runtime().spawn(task);
 }
 
 /// 发送文本帧（统一错误处理 + 写超时保护）。
@@ -843,6 +942,7 @@ async fn await_connect(socket: &mut WebSocket, state: &GatewayState) -> bool {
                     let frame = err_frame(&id, &err).to_string();
                     let _ = send_text(socket, &frame).await;
                     tracing::warn!("网关连接被拒绝：token 校验失败");
+                    audit_ws_rejection("ws.connect", "loopback", "unauthorized");
                     return false;
                 }
                 // 握手成功：回 HelloOk
@@ -862,17 +962,51 @@ async fn await_connect(socket: &mut WebSocket, state: &GatewayState) -> bool {
 
 /// `/control` 与 `/control/` 根入口（空路径无 Path 参数，axum 通配符不匹配空路径）
 async fn control_root(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
-    serve_rel(&state, "", request_accept_language(&headers)).await
+    serve_rel(
+        &state,
+        "",
+        request_accept_language(&headers),
+        false,
+        request_range(&headers),
+    )
+    .await
 }
 
-/// `/control/{*path}` 与 `/control/static/{*path}` 通配处理器
-async fn control_assets(
+/// `/control/{*path}` 通配处理器（SPA 页面与产物；未知路径走 index 回退）
+async fn control_spa_assets(
     AxumPath(path): AxumPath<String>,
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
 ) -> Response {
-    let rel = path.strip_prefix("static/").unwrap_or(&path);
-    serve_rel(&state, rel, request_accept_language(&headers)).await
+    serve_rel(
+        &state,
+        &path,
+        request_accept_language(&headers),
+        false,
+        request_range(&headers),
+    )
+    .await
+}
+
+/// `/control/static/{*path}` 通配处理器（后端资产面）。
+///
+/// **必须单独注册 handler**：axum 的 `{*path}` 不包含路由前缀，若与 SPA 路由
+/// 共用一个 handler，就无法区分「资产」与「SPA 深链」，资产缺失会被 index
+/// 回退成 200 + text/html（前端把 HTML 当 GLB 解析 → 恒报「资产校验失败」）。
+/// 资产面缺失/越界一律 404，绝不回 SPA。
+async fn control_static_assets(
+    AxumPath(path): AxumPath<String>,
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    serve_rel(
+        &state,
+        &path,
+        request_accept_language(&headers),
+        true,
+        request_range(&headers),
+    )
+    .await
 }
 
 /// 取请求的 `Accept-Language`（首屏语言解析的输入；非 UTF-8 头按「没给」处理）
@@ -882,53 +1016,219 @@ fn request_accept_language(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
 }
 
-/// 相对 `webui_dir` 的静态文件服务 + SPA history fallback + index 注入
-async fn serve_rel(state: &GatewayState, rel: &str, accept_language: Option<&str>) -> Response {
+/// 取请求的 `Range` 头（仅媒体资源会用到）。
+///
+/// 非 UTF-8 / 非法头按「没给」处理：让请求退回完整 200 响应，
+/// 而不是因为一个畸形头就 416 —— 播放器能播总比报错好。
+fn request_range(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// 宽松百分号解码（只处理合法 `%XX`；非法序列原样保留）。
+///
+/// 为什么不直接用 String::from_utf8_lossy(percent_decode)：
+/// 攻击串可能是非 UTF-8 字节序列，**必须在字节层判断** `..`；先解码成
+/// lossy 字符串会把无效字节替换成 U+FFFD，从而丢失真实分隔符。
+fn percent_decode_bytes(s: &str) -> Vec<u8> {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 字节级路径穿越判定：按 `/` 与 `\` 分段，任一段为 `..` 即拒绝。
+fn decoded_has_traversal(path: &str) -> bool {
+    let decoded = percent_decode_bytes(path);
+    decoded
+        .split(|b| *b == b'/' || *b == b'\\')
+        .any(|seg| seg == b"..")
+}
+
+/// `/control*` 的路径穿越入口闸（F-T4-02）。
+///
+/// 覆盖：明文 `..`、百分号编码（`%2e%2e%2f`）、反斜杠（Windows 分隔符）。
+/// 仅作用于控制台路径；`/api/*` 与 WS 不受影响。
+async fn control_traversal_guard_layer(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    if path.starts_with("/control") && decoded_has_traversal(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(req).await
+}
+
+/// 认证/准入失败落审计（F-T4-03：入侵必须可追溯）。
+///
+/// 只记录**判定结果**与来源，不记录 token/密钥；审计库独立 append-only
+/// （`Config::data_dir()/audit.db`，SHA-256 链式校验）。写入失败仅告警，
+/// 绝不阻塞拒绝路径（安全优先：日志失败不能变成放行）。
+///
+/// 测试构建下为空实现：网关单测会故意制造大量拒绝，若写真实用户审计库会
+/// 污染 `~/.marguerite/audit.db`（破坏测试隔离）；append-only 语义本身由
+/// `audit_store` 的专项测试覆盖。
+#[cfg(not(test))]
+fn audit_ws_rejection(method: &str, target: &str, reason: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    match crate::audit_store::AuditStore::open_default() {
+        Ok(store) => {
+            if let Err(e) = store.append(crate::audit_store::AuditRecord::new(
+                ts,
+                "gateway",
+                method,
+                target,
+                reason,
+            )) {
+                tracing::warn!(err = %e, "安全审计落盘失败（拒绝仍生效）");
+            }
+        }
+        Err(e) => tracing::warn!(err = %e, "安全审计库打开失败（拒绝仍生效）"),
+    }
+}
+
+#[cfg(test)]
+fn audit_ws_rejection(_method: &str, _target: &str, _reason: &str) {}
+
+/// 把 `rel` 解析成 `webui_dir` 内**真实存在**的文件路径（F-T4-02 修复）。
+///
+/// 为什么不能只做字符串检测：`Path::join` 在 Windows 上遇到绝对路径
+/// （如 `C:/Windows/win.ini`）或 rooted path 会**替换**基路径；符号链接也能
+/// 指到根目录之外。字符串层面能挡 `..`/`\`，挡不住这两类。这里统一用
+/// canonicalize 后的前缀校验，返回 `None` 表示「越界或不存在」。
+async fn resolve_under_root(state: &GatewayState, rel: &str) -> Option<std::path::PathBuf> {
     if has_traversal(rel) {
+        return None;
+    }
+    let root = tokio::fs::canonicalize(&state.webui_dir).await.ok()?;
+    let candidate = if rel.is_empty() {
+        root.join("index.html")
+    } else {
+        root.join(rel)
+    };
+    let resolved = tokio::fs::canonicalize(&candidate).await.ok()?;
+    resolved.starts_with(&root).then_some(resolved)
+}
+
+/// 相对 `webui_dir` 的静态文件服务 + SPA history fallback + index 注入。
+///
+/// `static_only=true`（`/control/static/*` 资产面）时，缺失/越界一律 404，
+/// 不做 SPA 回退——避免「404 资产返回 index.html + 200」污染前端解析。
+async fn serve_rel(
+    state: &GatewayState,
+    rel: &str,
+    accept_language: Option<&str>,
+    static_only: bool,
+    range: Option<&str>,
+) -> Response {
+    if let Some(file) = resolve_under_root(state, rel).await {
+        let Ok(bytes) = tokio::fs::read(&file).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let mime = content_type(&file);
+        // Range 只对媒体生效：视频播放器会先用 `bytes=0-` 探测，
+        // 不支持 206 时部分 WebView 会拒绝进入播放（只显示首帧或直接 error）。
+        // 对 html/js/css 走 Range 没有意义，也会让 index 注入逻辑复杂化。
+        let is_media = mime.starts_with("video/") || mime.starts_with("audio/");
+        if is_media {
+            if let Some(raw) = range {
+                match parse_byte_range(raw, bytes.len()) {
+                    Some((start, end)) => {
+                        let slice = bytes[start..=end].to_vec();
+                        let content_range = format!("bytes {start}-{end}/{}", bytes.len());
+                        let Ok(cr) = HeaderValue::from_str(&content_range) else {
+                            return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+                        };
+                        let mut resp = (
+                            StatusCode::PARTIAL_CONTENT,
+                            [
+                                (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+                                (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                                (header::CONTENT_RANGE, cr),
+                            ],
+                            slice,
+                        )
+                            .into_response();
+                        set_cache_policy(&mut resp, &file);
+                        return resp;
+                    }
+                    None => {
+                        // 无法满足：按 RFC 7233 回 416 + `Content-Range: bytes */len`
+                        let cr = format!("bytes */{}", bytes.len());
+                        let Ok(cr) = HeaderValue::from_str(&cr) else {
+                            return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+                        };
+                        return (
+                            StatusCode::RANGE_NOT_SATISFIABLE,
+                            [(header::CONTENT_RANGE, cr)],
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+        let mut resp = (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+                // 声明可分段：播放器据此决定是否走渐进式播放。
+                (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+            ],
+            bytes,
+        )
+            .into_response();
+        set_cache_policy(&mut resp, &file);
+        maybe_inject_index(&mut resp, state, accept_language);
+        return resp;
+    }
+
+    if static_only {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let file = if rel.is_empty() {
-        state.webui_dir.join("index.html")
-    } else {
-        state.webui_dir.join(rel)
-    };
-
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => {
-            let mime = content_type(&file);
-            let mut resp = (
-                [(header::CONTENT_TYPE, HeaderValue::from_static(mime))],
-                bytes,
-            )
-                .into_response();
-            set_cache_policy(&mut resp, &file);
-            maybe_inject_index(&mut resp, state, accept_language);
-            resp
-        }
-        Err(_) => {
-            // SPA history fallback：未知路径回退到 index.html（注入 data）
-            let index = state.webui_dir.join("index.html");
-            match tokio::fs::read(&index).await {
-                Ok(bytes) => {
-                    let mut resp = (
-                        [(
-                            header::CONTENT_TYPE,
-                            HeaderValue::from_static("text/html; charset=utf-8"),
-                        )],
-                        bytes,
-                    )
-                        .into_response();
-                    resp.headers_mut()
-                        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-                    maybe_inject_index(&mut resp, state, accept_language);
-                    resp
-                }
-                // WebUI 产物整体缺失（index.html 都读不到）：**不再回空白 404**，
-                // 而是回自包含诊断页 + 503，让桌面窗口显示可执行的修复指引。
-                Err(_) => webui_missing_page(state),
+    // SPA history fallback：未知路由回退到 index.html（注入 data）。
+    // index.html 同样走 canonicalize + 前缀校验（防 dist 内符号链接外逃）。
+    match resolve_under_root(state, "index.html").await {
+        Some(index) => match tokio::fs::read(&index).await {
+            Ok(bytes) => {
+                let mut resp = (
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    )],
+                    bytes,
+                )
+                    .into_response();
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                maybe_inject_index(&mut resp, state, accept_language);
+                resp
             }
-        }
+            // WebUI 产物整体缺失（index.html 都读不到）：**不再回空白 404**，
+            // 而是回自包含诊断页 + 503，让桌面窗口显示可执行的修复指引。
+            Err(_) => webui_missing_page(state),
+        },
+        None => webui_missing_page(state),
     }
 }
 
@@ -1246,6 +1546,29 @@ async fn control_ui_security_headers_layer(
     resp
 }
 
+/// 限流作用面（纯函数，便于单测）：只限 `/api/*` REST。
+///
+/// - `/api/health` 永远豁免：限流不得影响存活探测（生存性优先，见 R61 的看门狗教训）；
+/// - WS 升级（`/ws`）与 `/control/*` 静态资源根本不走该中间件的路径集合。
+fn rate_limit_applies(path: &str) -> bool {
+    path.starts_with("/api") && path != "/api/health"
+}
+
+/// W3.4：生产限流。超限回 HTTP 429 + `rate_limit::RateLimitError` 的 JSON-RPC 错误体。
+async fn api_rate_limit_layer(
+    State(state): State<Arc<GatewayState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.rate_limit_enabled && rate_limit_applies(req.uri().path()) {
+        if let Err(err) = state.rate_limiter.check("loopback") {
+            return (StatusCode::TOO_MANY_REQUESTS, axum::Json(err.json_rpc_error()))
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// 注入 `<base href="{base_path}/">`，让 `base: './'` 构建出的**相对资源路径**在任意
 /// 深度的文档路径下都解析到同一处（见 `maybe_inject_index` 的深链白屏说明）。
 ///
@@ -1304,8 +1627,66 @@ fn content_type(path: &Path) -> &'static str {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         "ogg" => "audio/ogg",
+        // 视频：启动动画（splash）与桌面端媒体预览都靠这几条。
+        //
+        // 【2026-10-22 修】此前只有音频、没有视频类型，`.mp4` / `.webm` 一律落到
+        // `application/octet-stream`；再叠加本文件统一注入的
+        // `X-Content-Type-Options: nosniff`，Chromium **拒绝**把该响应当作视频解码
+        // （nosniff 的语义就是"不许猜"）。实测：`/control/splash/bg-v2-h264.mp4`
+        // 返回 200 + application/octet-stream + nosniff ⇒ `<video>` 立刻 error
+        // ⇒ 启动动画只剩极光与字幕，用户"没看见视频"。
+        //
+        // 注意这是同一条链上的**第三层**问题：编码（HEVC→H.264）→ MIME → Range。
+        // 只修前两层仍然不播，所以三者必须一起成立。
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        "m4a" => "audio/mp4",
         _ => "application/octet-stream",
     }
+}
+
+/// 解析 `Range: bytes=start-end`（单区间）。
+///
+/// 只支持单区间：浏览器对 `<video>` 的探测就是单区间请求；多区间（`bytes=0-1,5-6`）
+/// 需要 multipart/byteranges 响应，收益为零、复杂度不低，故不支持（返回 None → 416）。
+///
+/// 支持三种形态：
+/// - `bytes=100-200` 闭区间
+/// - `bytes=100-`    到结尾
+/// - `bytes=-100`    末尾 100 字节（suffix）
+fn parse_byte_range(raw: &str, len: usize) -> Option<(usize, usize)> {
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (s, e) = spec.split_once('-')?;
+    let s = s.trim();
+    let e = e.trim();
+    if len == 0 {
+        return None;
+    }
+    let (start, end) = if s.is_empty() {
+        // suffix：最后 N 字节
+        let n: usize = e.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (len.saturating_sub(n), len - 1)
+    } else {
+        let start: usize = s.parse().ok()?;
+        let end = if e.is_empty() {
+            len - 1
+        } else {
+            e.parse::<usize>().ok()?.min(len - 1)
+        };
+        (start, end)
+    };
+    if start > end || start >= len {
+        return None;
+    }
+    Some((start, end))
 }
 
 async fn fallback(State(state): State<Arc<GatewayState>>) -> Response {
@@ -1329,6 +1710,18 @@ mod tests {
         assert!(!has_traversal("static/img/m.png"));
     }
 
+    /// F-T4-02 回归：入口闸必须在**解码后**判断，覆盖编码与反斜杠变体。
+    #[test]
+    fn test_decoded_traversal_guard_variants() {
+        assert!(decoded_has_traversal("/control/static/../secret"));
+        assert!(decoded_has_traversal("/control/static/%2e%2e%2fsecret"));
+        assert!(decoded_has_traversal("/control/static/%2E%2E%5Csecret"));
+        assert!(decoded_has_traversal(r"/control/static\..\secret"));
+        assert!(decoded_has_traversal("/control/static/%2e%2e/secret"));
+        assert!(!decoded_has_traversal("/control/assets/app.js"));
+        assert!(!decoded_has_traversal("/control/static/island3d/code_crystal.glb"));
+    }
+
     #[test]
     fn test_content_type_subset() {
         assert_eq!(
@@ -1341,6 +1734,43 @@ mod tests {
         );
         assert_eq!(content_type(Path::new("m.svg")), "image/svg+xml");
         assert_eq!(content_type(Path::new("a.bin")), "application/octet-stream");
+    }
+
+    /// 视频必须映射到 `video/*`，否则叠加 `X-Content-Type-Options: nosniff` 后
+    /// Chromium 拒绝解码 —— 实测导致启动动画的视频一帧都不播（2026-10-22）。
+    #[test]
+    fn video_assets_map_to_video_mime_types() {
+        assert_eq!(content_type(Path::new("bg-v2-h264.mp4")), "video/mp4");
+        assert_eq!(content_type(Path::new("bg-v2.webm")), "video/webm");
+        assert_eq!(content_type(Path::new("clip.mov")), "video/quicktime");
+        // 大小写不敏感（Windows 产物可能带大写扩展名）
+        assert_eq!(content_type(Path::new("A.MP4")), "video/mp4");
+    }
+
+    #[test]
+    fn parse_byte_range_handles_the_three_forms_players_use() {
+        // 闭区间
+        assert_eq!(parse_byte_range("bytes=0-99", 1000), Some((0, 99)));
+        // 开区间到结尾
+        assert_eq!(parse_byte_range("bytes=900-", 1000), Some((900, 999)));
+        // suffix：最后 100 字节
+        assert_eq!(parse_byte_range("bytes=-100", 1000), Some((900, 999)));
+        // 末端越界被夹到 len-1（RFC 允许）
+        assert_eq!(parse_byte_range("bytes=990-5000", 1000), Some((990, 999)));
+    }
+
+    #[test]
+    fn parse_byte_range_rejects_unsatisfiable_and_multi_range() {
+        // 起点越界
+        assert_eq!(parse_byte_range("bytes=1000-", 1000), None);
+        // 起点大于终点
+        assert_eq!(parse_byte_range("bytes=500-100", 1000), None);
+        // 多区间：不支持（需 multipart/byteranges），退回整文件
+        assert_eq!(parse_byte_range("bytes=0-1,5-6", 1000), None);
+        // 非法/空文件
+        assert_eq!(parse_byte_range("items=0-1", 1000), None);
+        assert_eq!(parse_byte_range("bytes=0-1", 0), None);
+        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
     }
 
     #[test]
@@ -1369,6 +1799,11 @@ mod tests {
             token: "api-probe-token".to_string(),
             started_at: Instant::now(),
             webui_dir: test_webui_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         });
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1379,8 +1814,12 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
 
+        // 未带 token 的代理调用必须 401（否则本机进程可借侧车通道零凭据操作）
+        let unauth = http_request(addr, "POST", "/api/elevated-mode", Some("{}")).await;
+        assert!(unauth.starts_with("HTTP/1.1 401"), "代理无 token 应 401: {unauth}");
+
         // POST 到未实现端点 -> 501 且响应体是 JSON（不是 HTML）
-        let raw = http_request(addr, "POST", "/api/elevated-mode", Some("{}")).await;
+        let raw = http_request_auth(addr, "POST", "/api/elevated-mode", Some("{}"), "api-probe-token").await;
         assert!(raw.starts_with("HTTP/1.1 501"), "应为 501，实际: {raw}");
         assert!(
             raw.contains("\"error\":\"not_implemented\""),
@@ -1580,12 +2019,22 @@ mod tests {
             axum::serve(listener, build_router(state)).await.unwrap();
         });
 
-        // 空快照基线：必须 200（此前是 501）
-        // 注：注册表是**进程级**的，并行跑的链式执行器用例也可能挂起审批，故此处只断言
-        // 状态码与本用例自己的 id 缺席/在场，不断言整个数组为空。
-        let before = http_request(addr, "GET", "/api/approvals", None).await;
+        // 未带 token 必须 401（Phase 0：审批 REST 不再接受本机无凭据调用）
+        let unauth = http_request(addr, "GET", "/api/approvals", None).await;
+        assert!(unauth.starts_with("HTTP/1.1 401"), "无 token 应 401: {unauth}");
+        assert!(!unauth.contains("\"id\":\"ap_"), "未授权不得泄露挂起项: {unauth}");
+
+        // 基线：必须 200 且是结构化的 `{pending: [...]}`（此前是 501）。
+        //
+        // 注：注册表是**进程级**的，并行跑的链式执行器用例此刻可能正持有挂起审批 ——
+        // 所以这里**不能**断言「整个数组为空」（那是对全局状态的无根据断言，
+        // 实测已因此误报）。只锚定契约形状，本用例自己的 id 在场/缺席在下面断言。
+        let before = http_request_auth(addr, "GET", "/api/approvals", None, "e2e-test-token").await;
         assert!(before.starts_with("HTTP/1.1 200"), "快照应 200: {before}");
-        assert!(!before.contains("\"id\":\"ap_"), "此时还没有本用例的挂起项: {before}");
+        assert!(
+            before.contains("\"pending\":["),
+            "快照必须是结构化的 pending 数组: {before}"
+        );
 
         // 注册一个真实挂起审批（与 chain/executor.rs 抬升路径同一注册表）
         let gate = Arc::new(ApprovalGate::new(Duration::from_secs(60)));
@@ -1594,7 +2043,7 @@ mod tests {
             .expect("挂起审批");
         global_registry().register(gate.clone(), &pending);
 
-        let listed = http_request(addr, "GET", "/api/approvals", None).await;
+        let listed = http_request_auth(addr, "GET", "/api/approvals", None, "e2e-test-token").await;
         assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
         assert!(listed.contains(&format!("\"id\":\"{}\"", pending.id)), "{listed}");
         assert!(listed.contains("\"toolName\":\"shell\""), "{listed}");
@@ -1602,11 +2051,12 @@ mod tests {
         assert!(listed.contains("rm -rf build"), "{listed}");
 
         // 裁决：批准 → 200 {resolved:true,approved:true}，且门控真的放行、注册表清空
-        let resolved = http_request(
+        let resolved = http_request_auth(
             addr,
             "POST",
             "/api/approvals/resolve",
             Some(&format!(r#"{{"id":"{}","approved":true}}"#, pending.id)),
+            "e2e-test-token",
         )
         .await;
         assert!(resolved.starts_with("HTTP/1.1 200"), "{resolved}");
@@ -1620,7 +2070,7 @@ mod tests {
         assert!(!global_registry().pending_ids().contains(&pending.id));
 
         // 复查：本用例的挂起项已从快照消失
-        let after = http_request(addr, "GET", "/api/approvals", None).await;
+        let after = http_request_auth(addr, "GET", "/api/approvals", None, "e2e-test-token").await;
         assert!(
             !after.contains(&format!("\"id\":\"{}\"", pending.id)),
             "裁决后应从快照消失: {after}"
@@ -1642,21 +2092,22 @@ mod tests {
             axum::serve(listener, build_router(state)).await.unwrap();
         });
 
-        let no_id = http_request(addr, "POST", "/api/approvals/resolve", Some("{}")).await;
+        let no_id = http_request_auth(addr, "POST", "/api/approvals/resolve", Some("{}"), "e2e-test-token").await;
         assert!(no_id.starts_with("HTTP/1.1 400"), "{no_id}");
         assert!(no_id.contains("id is required"), "{no_id}");
 
-        let unknown = http_request(
+        let unknown = http_request_auth(
             addr,
             "POST",
             "/api/approvals/resolve",
             Some(r#"{"id":"ap_missing","approved":true}"#),
+            "e2e-test-token",
         )
         .await;
         assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
         assert!(unknown.contains("approval is missing or does not match"), "{unknown}");
 
-        let bad_json = http_request(addr, "POST", "/api/approvals/resolve", Some("{oops")).await;
+        let bad_json = http_request_auth(addr, "POST", "/api/approvals/resolve", Some("{oops"), "e2e-test-token").await;
         assert!(bad_json.starts_with("HTTP/1.1 400"), "{bad_json}");
     }
 
@@ -1695,7 +2146,12 @@ mod tests {
             .expect("产物已登记");
         let encoded = urlencoding(&entry.id);
 
-        let served = http_request(addr, "GET", &format!("/api/v1/artifacts/{encoded}"), None).await;
+        // 未带 token 必须 401（产物字节不允许本机无凭据读取）
+        let unauth = http_request(addr, "GET", &format!("/api/v1/artifacts/{encoded}"), None).await;
+        assert!(unauth.starts_with("HTTP/1.1 401"), "无 token 应 401: {unauth}");
+        assert!(!unauth.contains("artifact payload"), "401 绝不能回文件本体: {unauth}");
+
+        let served = http_request_auth(addr, "GET", &format!("/api/v1/artifacts/{encoded}"), None, "e2e-test-token").await;
         assert!(served.starts_with("HTTP/1.1 200"), "已登记产物应 200: {served}");
         assert!(served.contains("artifact payload"), "应回文件本体: {served}");
         assert!(
@@ -1709,12 +2165,12 @@ mod tests {
 
         // 关键否定面：同目录下的**未登记**文件不能靠猜 id 读到（否则就是任意文件读取）
         let unregistered = urlencoding(&format!("artifact:any:{}", secret_path.display()));
-        let guess = http_request(addr, "GET", &format!("/api/v1/artifacts/{unregistered}"), None).await;
+        let guess = http_request_auth(addr, "GET", &format!("/api/v1/artifacts/{unregistered}"), None, "e2e-test-token").await;
         assert!(guess.starts_with("HTTP/1.1 404"), "未登记路径必须 404: {guess}");
         assert!(!guess.contains("top secret"), "绝不能回未登记文件的内容: {guess}");
 
         // 不存在的 id → 404（不是 501、不是 500）
-        let missing = http_request(addr, "GET", "/api/v1/artifacts/artifact:nope:nope", None).await;
+        let missing = http_request_auth(addr, "GET", "/api/v1/artifacts/artifact:nope:nope", None, "e2e-test-token").await;
         assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1764,6 +2220,29 @@ mod tests {
         String::from_utf8_lossy(&buf).to_string()
     }
 
+    /// 带本地 token 的 REST 请求（Phase 0 收口后 `/api/*` 全部要求认证）。
+    async fn http_request_auth(
+        addr: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: &str,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = body.unwrap_or("");
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nAuthorization: Bearer {token}\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
     fn test_webui_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("marguerite-gw-e2e-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1784,6 +2263,11 @@ mod tests {
             token: "e2e-test-token".to_string(),
             started_at: Instant::now(),
             webui_dir: test_webui_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         })
     }
 
@@ -2346,6 +2830,21 @@ mod tests {
         // 路径穿越防护 → 404
         let traversal = read_http("/control/static/../secret").await;
         assert!(traversal.contains("404"), "穿越应 404: {traversal}");
+        // 编码变体也要挡（axum 解码 %2e%2e%2f → ../）
+        let encoded = read_http("/control/static/%2e%2e%2fsecret").await;
+        assert!(encoded.contains("404"), "编码穿越应 404: {encoded}");
+
+        // 资产面缺失必须 404，不能回 SPA 的 index.html + 200
+        // （回归：曾因回落 HTML 让前端把 .glb 当模型解析，恒显示「资产校验失败」）
+        let missing_asset = read_http("/control/static/island3d/not-there.glb").await;
+        assert!(
+            missing_asset.contains("404"),
+            "缺失资产必须 404 而非 index fallback: {missing_asset}"
+        );
+        assert!(
+            !missing_asset.contains(r#"<div id="app">"#),
+            "资产 404 不应包含 SPA 页面: {missing_asset}"
+        );
     }
 
     /// 首屏语言契约（与 pyengine `control_ui._resolve_locale` 逐条对齐）
@@ -2564,6 +3063,25 @@ mod tests {
     #[tokio::test]
     async fn e2e_fusion_methods_over_ws() {
         use std::time::Duration;
+        // **隔离配置目录**（与 chat.rs::ctx_with_bus 同因同治，不可省）：
+        // `run_turn` 在会话入口调用 `apply_effective_model`，会读 `config_dir/models.json`
+        // 的 active 档案并覆盖 provider/model/base_url/key。若读到开发者本机档案库，
+        // 下面就指向本地 400 mock 的 base_url 会被换回真实云端端点 —— 用例不仅会红
+        // （真实请求可能成功，永远不会发 `.error`），还会真的把测试请求发到云端。
+        // 空隔离目录里没有 `models.json`，`apply_effective_model` 原样返回注入配置。
+        // 注：`OVERRIDE_CONFIG_DIR` 是 thread_local，只在当前线程可见。单测下
+        // `spawn_slow_dispatch` 固定用 `tokio::spawn`（不切 `SLOW_RUNTIME`），
+        // 故 dispatch 与 `run_turn` 都留在本测试线程，覆盖可见（详见其注释）。
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let isolated = std::env::temp_dir().join(format!(
+            "mgt-e2e-fusion-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&isolated);
+        let _ = std::fs::remove_file(isolated.join("models.json")); // 目录名复用时的防御
+        Config::set_config_dir_override(isolated);
+
         // 自建网关：配置注入「本地 400 mock」的 LLM 端点（400 不可重试），
         // 使 chat.send 后台引擎快速失败 → Error 事件确定回流，不依赖外部网络。
         // 不用「127.0.0.1:1 连接拒绝」——宿主开系统代理时该端口会被代答 502
@@ -2577,6 +3095,11 @@ mod tests {
             token: "e2e-test-token".to_string(),
             started_at: Instant::now(),
             webui_dir: test_webui_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         });
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -2831,5 +3354,23 @@ mod tests {
         let raw = ws2.next().await.unwrap().unwrap();
         let ev: serde_json::Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
         assert_eq!(ev["seq"], 1, "重连后 seq 应从 1 重新计数: {ev}");
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_surface_tests {
+    use super::rate_limit_applies;
+
+    #[test]
+    fn limiter_covers_api_rest_but_never_liveness_or_static() {
+        assert!(rate_limit_applies("/api/config"));
+        assert!(rate_limit_applies("/api/v1/files/upload"));
+        assert!(rate_limit_applies("/api/approvals"));
+        // 生存性优先：健康检查永不被限流（R61 的看门狗教训）。
+        assert!(!rate_limit_applies("/api/health"));
+        // WS 升级与静态资源不在作用面内。
+        assert!(!rate_limit_applies("/ws"));
+        assert!(!rate_limit_applies("/control/"));
+        assert!(!rate_limit_applies("/control/static/app.js"));
     }
 }

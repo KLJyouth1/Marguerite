@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildConstructionEntities,
   constructionDayRange,
+  constructionTitle,
   loadConstructionPlots,
   sampleConstructionPlots,
   type ConstructionPlotsFile,
@@ -9,6 +10,26 @@ import {
 import { BUILDING_STAGES } from './buildingGrowth'
 
 const PLOTS = sampleConstructionPlots()
+
+/**
+ * 真机截图缺陷（2026-10-23）：浮层标签直接显示 `construction:workshop-tower`
+ * 这种带命名空间的原始 id，既长又不像建筑名。
+ */
+describe('constructionWorld — 地块展示名', () => {
+  it('优先使用配置里的 name（配置源可给本地化名字）', () => {
+    expect(constructionTitle({ ...PLOTS[0], name: '瞭望塔工地' })).toBe('瞭望塔工地')
+    // 空白的 name 视为未命名，回落到 id 推导
+    expect(constructionTitle({ ...PLOTS[0], name: '   ' })).toBe('Workshop tower')
+  })
+
+  it('没有 name 时把 id 的 slug 还原成可读文本', () => {
+    expect(constructionTitle(PLOTS[0])).toBe('Workshop tower')
+    expect(constructionTitle(PLOTS[1])).toBe('Depot annex')
+    expect(constructionTitle({ ...PLOTS[0], id: 'plot:lighthouse_v2' })).toBe('Lighthouse v2')
+    // 只有命名空间、没有实义 slug 时保留原 id，不返回空串
+    expect(constructionTitle({ ...PLOTS[0], id: 'plot:' })).toBe('plot:')
+  })
+})
 
 describe('constructionWorld — 样例地块加载与合法性', () => {
   it('样例 JSON 全部通过校验（坏配置不进渲染器）', () => {

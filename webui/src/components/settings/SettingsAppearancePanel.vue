@@ -20,6 +20,8 @@ import {
 } from '@/composables/useChatFontScale'
 import { useRouterVisualEffectsPreference } from '@/composables/useRouterVisualEffectsPreference'
 import { useComposerFloatingPreference } from '@/composables/useComposerFloatingPreference'
+import { ambience, ambienceState } from '@/composables/useAmbience'
+import GlassLab from '@/components/settings/GlassLab.vue'
 import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -73,6 +75,23 @@ function pickTheme(mode: ThemeMode) {
   appStore.setTheme(mode)
 }
 
+// 只有"液态玻璃 · 流光"在选中态时才展示玻璃参数面板（别的主题没有这套参数）
+const glassThemeActive = computed(() => appStore.resolvedTheme === 'liquid-glass')
+
+/**
+ * 环境音开关。`setEnabled` 会真实尝试创建 Web Audio 图：
+ * 浏览器不支持 / 上下文被拒时返回 false，并**自动把开关回滚**，
+ * 不会出现「开关是开的，但一点声音也没有」的假状态。
+ */
+async function onAmbienceToggle(next: boolean): Promise<void> {
+  await ambience.setEnabled(next)
+}
+
+function onAmbienceVolume(event: Event): void {
+  const value = Number((event.target as HTMLInputElement).value)
+  ambience.setVolume(value / 100)
+}
+
 function pickLocale(code: LocaleCode) {
   void appStore.setLocale(code)
 }
@@ -103,8 +122,9 @@ function pickBootAnimation(mode: BootAnimationMode) {
   appStore.setBootAnimation(mode)
 }
 
-// Background-music feature gate (off by default). Same singleton the topbar
-// control and the command palette read, so all three surfaces stay in lockstep.
+// Background-music feature gate (default ON for fresh profiles; an explicit
+// persisted off stays off). Same singleton the topbar control and the command
+// palette read, so all three surfaces stay in lockstep.
 const { enabled: bgmEnabled, setEnabled: setBgmEnabled } = useBgm()
 
 const {
@@ -297,6 +317,37 @@ onBeforeUnmount(stopCustomStepRepeat)
         </div>
       </div>
     </div>
+
+    <div class="control-row">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('settings.appearance.ambienceLabel') }}</span>
+        <span class="control-row__desc">{{ t('settings.appearance.ambienceDesc') }}</span>
+      </div>
+      <div class="control-row__control appearance-ambience">
+        <ControlSwitch
+          :checked="ambienceState.enabled"
+          :aria-label="t('settings.appearance.ambienceLabel')"
+          data-testid="settings-ambience-switch"
+          @change="onAmbienceToggle"
+        />
+        <label v-if="ambienceState.enabled" class="appearance-ambience__volume">
+          <span>{{ t('settings.appearance.ambienceVolume') }}</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="Math.round(ambienceState.volume * 100)"
+            :aria-label="t('settings.appearance.ambienceVolume')"
+            data-testid="settings-ambience-volume"
+            @input="onAmbienceVolume"
+          >
+        </label>
+      </div>
+    </div>
+
+    <!-- 液态玻璃：把该主题的所有尺寸/材质参数集中成一个可调面板（改了立刻生效并记住） -->
+    <GlassLab v-if="glassThemeActive" />
 
     <div class="control-row control-row--stack">
       <div class="control-row__label-block">
@@ -809,5 +860,24 @@ onBeforeUnmount(stopCustomStepRepeat)
     outline: 2px dashed Highlight;
     outline-offset: 2px;
   }
+}
+
+/* 环境音：开关 + 音量。音量只在开启时出现，避免关着时还留一条无效控件。 */
+.appearance-ambience {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.appearance-ambience__volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.appearance-ambience__volume input[type='range'] {
+  width: 132px;
+  accent-color: var(--accent-secondary);
 }
 </style>

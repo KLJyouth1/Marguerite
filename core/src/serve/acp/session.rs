@@ -348,21 +348,19 @@ impl AcpSession {
             // 而非「本进程一切执行路径都受保护」。任何未列入 `enforced_at` 的执行面
             // 都必须在 `uncovered_surfaces` 里显式声明——宁可暴露缺口，
             // 也不给出覆盖不到的安全承诺（F-07 的教训：声明与接线必须一致）。
-            "scope": "仅覆盖 ACP 工具管线（tools::builtin::*）与 terminal::TerminalSession",
-            "uncovered_surfaces": [
-                {
-                    "surface": "gateway RPC: sandbox.terminal.spawn/input/read/kill/list",
-                    "impl": "tools::terminal (PTY 会话)",
-                    "enforced": false,
-                    "note": "该通道直接向持久 shell stdin 写入，未过 L1/L2/L3，亦无审计；\
-                             与本表所列防护层无关，勿据本表推断其安全性"
-                }
-            ],
+            "scope": "覆盖 ACP 工具管线（tools::builtin::*）、terminal::TerminalSession 与 \
+                      gateway 的 sandbox.terminal.* 常驻 PTY 通道",
+            // 2026-10-25：`tools::terminal` 早已接入 L1/L2/L3 + JSONL 审计
+            // （write() 内的 security_check，见该模块文档），此前这里的
+            // enforced:false 是过期声明，已按事实删除。
+            "uncovered_surfaces": [],
             "layers": [
                 {"id": "L1", "name": "command_guard", "enforced": true,
-                 "enforced_at": ["security::exec::sandboxed_exec", "terminal::TerminalSession::security_check"]},
+                 "enforced_at": ["security::exec::exec_with", "security::exec::sandboxed_exec",
+                                 "terminal::TerminalSession::security_check"]},
                 {"id": "L1", "name": "exec_sandbox", "enforced": true,
-                 "enforced_at": ["tools::builtin::shell_exec"]},
+                 "enforced_at": ["tools::builtin::shell_exec",
+                                 "tools::terminal::TerminalSession::security_check"]},
                 {"id": "L1", "name": "ssrf_guard", "enforced": true,
                  "enforced_at": ["tools::builtin::web_fetch", "tools::builtin::http_request"]},
                 {"id": "L2", "name": "malware_static_scan", "enforced": true,
@@ -852,14 +850,13 @@ mod tests {
         }
     }
 
-    /// 声明必须自曝覆盖边界：`enforced: true` 只对 `enforced_at` 所列调用点成立。
+    /// 声明必须与接线一致：`enforced: true` 只对 `enforced_at` 所列调用点成立。
     ///
-    /// 背景：`gateway` 的 `sandbox.terminal.*` RPC 由 `tools::terminal` 实现，
-    /// 直接向持久 shell stdin 写数据，不过 L1/L2/L3 也不落审计。该文件不在本次
-    /// 修复的所有权范围内，但若 `permissions.list` 只报「三层已启用」而不声明这个
-    /// 缺口，调用方就会得到一个覆盖不到的安全承诺——正是 F-07 的同类错误。
+    /// 2026-10-25：`tools::terminal` 已接入 L1/L2/L3 + 审计，故
+    /// `uncovered_surfaces` 必须为空；若将来又出现无护栏通道，改回在
+    /// `uncovered_surfaces` 里如实声明 `enforced:false` 并同步改本断言。
     #[tokio::test]
-    async fn session_discloses_uncovered_execution_surfaces() {
+    async fn session_declares_no_uncovered_execution_surfaces() {
         let (s, _) = session();
         let resp = s
             .handle(r#"{"jsonrpc":"2.0","id":116,"method":"permissions.list"}"#)
@@ -868,25 +865,16 @@ mod tests {
         let result = &resp["result"];
 
         assert!(
-            result["scope"].as_str().is_some_and(|s| !s.is_empty()),
-            "必须声明 scope，说明 enforced 的适用范围"
+            result["scope"].as_str().is_some_and(|s| s.contains("sandbox.terminal")),
+            "scope 必须写明覆盖 sandbox.terminal.*（否则调用方会误以为它不受保护）"
         );
 
         let uncovered = result["uncovered_surfaces"]
             .as_array()
             .expect("必须存在 uncovered_surfaces 字段（可为空数组，但不能缺失）");
-
-        // 只要 tools::terminal 仍未接入护栏，就必须在此如实披露。
-        // 将来该通道接线完成后，请删除这条声明并同步删除本断言。
-        let discloses_pty = uncovered.iter().any(|u| {
-            u["surface"]
-                .as_str()
-                .is_some_and(|s| s.contains("sandbox.terminal"))
-                && u["enforced"].as_bool() == Some(false)
-        });
         assert!(
-            discloses_pty,
-            "sandbox.terminal.* 仍是无护栏执行通道，必须在 uncovered_surfaces 中声明 enforced:false"
+            uncovered.is_empty(),
+            "终端通道已接入护栏，不应再声明无护栏执行面：{uncovered:?}"
         );
 
         // 缺口声明不得混进 layers（避免被误读成"已启用的一层"）

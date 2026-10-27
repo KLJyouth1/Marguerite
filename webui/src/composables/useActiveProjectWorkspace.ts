@@ -20,6 +20,8 @@ export interface ActiveProjectWorkspaceSnapshot {
 
 export interface SessionProjectWorkspaceMetadata {
   workspaceId?: string
+  /** 会话级全部项目目录（多根；首项为主根，缺省 = 后端未下发）。 */
+  projectPaths?: string[]
   projectWorkspace?: ActiveProjectWorkspaceSnapshot | null
 }
 

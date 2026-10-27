@@ -25,6 +25,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // S5：宿主（Python 侧车）退出结构化证据（exit_code + uptime_ms + stderr tail）。
     // Rust 原生实现，**永不代理到侧车**——侧车可能就是已经死掉的那个。
     "host.exit_evidence",
+    // P1-6：宿主（Python 侧车）资源采样（RSS）。Rust 原生采集，永不代理。
+    "host.metrics",
     // 运维只读：由 transport-neutral ops adapter 接入
     "ops.list_hosts",
     "ops.status",
@@ -44,11 +46,33 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "onboarding.llmProfile.activate",
     "onboarding.llmProfile.active.remove",
     "config.get",
+    // 计划执行配置的专用读写口（Rust-first，写 `~/.marguerite/config.yaml`）：
+    // `config.get/patch` 在线时由 Python 侧车应答（写它自己的 config.toml），而计划
+    // 执行器读的是 config.yaml —— 不给出同源读写口，设置页的开关就是「读到 A、改到 B」。
+    "config.plan.get",
+    "config.plan.set",
     // P1-6 补登记：已实现但此前未声明，UI supportsMethod 探测不到而功能静默
     "models.list",
     "mcp.list",
     "sessions.create",
     "sessions.delete",
+    // 会话可移植性：导出（json/markdown 分享）与导入（不覆盖既有会话）
+    "sessions.export",
+    "sessions.import",
+    // 任务复盘：按会话聚合任务类型/工具调度/思考正文（只读 sessions.db）
+    "sessions.insights",
+    // 文件改动 diff / 团队成员动向：只有 Rust 侧有数据源
+    "sessions.fileChanges",
+    "team.members",
+    // 交付回执：把一回合的改动 / 产物 / 验证 / 用量合成一条可核验的回执
+    "task.receipt",
+    // 用户规则：个人/项目规则的读写（纯本地 Markdown，注入 System 前缀）
+    "rules.list",
+    "rules.get",
+    "rules.save",
+    "rules.delete",
+    // `@` 上下文引用：按查询返回文件/目录/规则/历史会话候选
+    "context.references",
     "sessions.get",
     "sandbox.status",
     "sessions.list",
@@ -75,8 +99,12 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "agents.update",
     "agents.delete",
     // 专家团队（行业领军人经验蒸馏档案库）+ 用户画像抽取
+    // 一句话许愿解析（规则引擎，零 LLM）：口语 → 六要素契约 + 任务 DAG
+    "wish.parse",
     "experts.list",
     "agent.profile.analyze",
+    // 主智能体能力自检（真实工具/MCP/技能/内置面/人设来源）；前端 supportsMethod 门控它
+    "agent.selfcheck",
     "cron.list",
     "usage.status",
     "usage.query",
@@ -102,11 +130,24 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "skills.install",
     "skills.uninstall",
     "skills.create",
+    "skills.update",
+    "skills.setEnabled",
+    // 技能覆盖报告：递归扫描 `.yaml` + 目录型 `SKILL.md` 后，如实列出已加载/跳过数与原因。
+    // 此前 `SkillLoader` 只扫顶层 YAML，`skills/trae/**`、`skills/codebuddy/**` 等
+    // 415 个目录型技能对产品完全不可见（用户能看到技能页却找不到它们）。
+    "skills.coverage",
     // 记忆层
     "memory.search",
     "memory.save",
     "memory.list",
+    // 记忆治理（可验证 / 可删除 / 管理面只读列表）
+    "memory.validate",
+    "memory.delete",
+    "memory.entries",
+    "memory.stats",
     "memory.layers.status",
+    "memory.layers.switches.get",
+    "memory.layers.switches.set",
     "memory.sensory.search",
     "memory.short_term.search",
     "memory.long_term.search",
@@ -128,6 +169,22 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "selfevolve.rollback",
     // 联想记忆网络（突触图）状态
     "memory.synapse.status",
+    // 分层稀疏记忆（flyhash + tiered）只读观测面（W-O3）
+    "memory.tiered.status",
+    // 上一轮记忆注入快照（命中/各层贡献/注入 token/预算裁剪）
+    "memory.inject.last",
+    // Harness 运行台账（SQLite：runs / items 追加写 + 确定性回放摘要）
+    // 数据链路：session → run → item(seq)，字段对齐 Codex 的 thread/turn/item 三级事件。
+    "harness.ledger.status",
+    "harness.ledger.query",
+    "harness.ledger.replay",
+    // 验收结论写入（passed / failed / unverified / unknown）：完成门禁与人工复核共用
+    "harness.ledger.verdict",
+    // harness 运行面快照：钩子注册情况 / 能力成熟度 / 路由策略 / 子代理预算 /
+    // 工作区与数据目录可用性 / 台账健康 + problems[]（只读，不触发任何模型调用）
+    "harness.status",
+    // 3×3 权限矩阵只读观测面（W-O3）
+    "guard.permission_matrix.status",
     // 上下文管理 / 压缩（compact 走 async LLM 分支；rollback 恢复预压缩快照）
     "context.status",
     "context.compact",
@@ -176,6 +233,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "sandbox.path.pick",
     "sandbox.path.list",
     "sandbox.path.create-directory",
+    // 文件名搜索（Ctrl+P 快速打开）：有界、不跟随链接，结果只在 basePath 之内
+    "sandbox.path.search",
     // AI 智能融合路由
     "router.decision",
     "router.selflearning.status",
@@ -187,6 +246,10 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // 内置工作区编辑器（多文件）RPC：读取/写入工作区文本文件
     "workspace.file.read",
     "workspace.file.write",
+    // 项目树上下文菜单：重命名 / 删除 / 在文件管理器中定位（2026-10-24）
+    "workspace.file.rename",
+    "workspace.file.delete",
+    "workspace.file.reveal",
     // 企业协同与 SSH：主机台账 + 连接探测（部署/终端工具链复用）
     "collab.ssh.list",
     "collab.ssh.add",
@@ -201,7 +264,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // Epic C：桌面自动化（Rust 原生：启动 / 动作 / 录制 / 闸门）
     "desktop.list_apps",
     "desktop.launch",
+    // W6.2：附着已打开的应用（返回可复用句柄；handle 可省略）
+    "desktop.attach",
+    // W6.5：桌面侧 RPC 对齐浏览器。
+    // `desktop.a11y` / `desktop.action` / `desktop.windows` 是阻塞 UIA 调用，
+    // 只由异步 dispatch（spawn_blocking）提供，并列入 `ASYNC_ONLY_METHODS`。
     "desktop.action",
+    "desktop.windows",
+    "desktop.a11y",
     "desktop.snapshots",
     "desktop.stop",
     "workspaces.update",
@@ -238,6 +308,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "browser.a11y",
     "browser.click",
     "browser.close",
+    "browser.control.get",
+    "browser.control.set",
     // 引导目录 / 状态（Rust 离线回退：侧车不可用时返回内置 provider 目录）
     "onboarding.catalog",
     "onboarding.status",
@@ -253,6 +325,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "models.profiles.set_copilot",
     "models.profiles.add",
     "models.profiles.remove",
+    "models.profiles.set_capabilities",
+    "model.deepseek.render",
+    "model.tokenizer.status",
+    // 上一次请求实际发出的思考参数（只读进程级快照）。前端 `supportsMethod` 门控它，
+    // 不登记就等于该提示永不显示 —— check-rpc-contract 会拦下这种"写了 UI 没接线"。
+    "model.effort.last",
+    // DeepSeek 原始输出解析（render 的反向诊断口）
+    "model.deepseek.parse",
     // 本地模型中心（聚合下载源 + 智能推荐 + 一键部署/启停 + 本地/云路由标记）
     "models.local.catalog",
     "models.local.recommend",
@@ -268,18 +348,36 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "models.local.finetune.list",
     "models.local.finetune.status",
     "models.local.finetune.cancel",
+    // 实时 Ollama 枚举 live tag / 一键部署为 kind=Local 路由档案（可选激活）
+    "models.local.ollama",
+    "models.local.ollama.deploy",
     "models.gate.check",
     // MCP 服务器管理（Rust 配置持久化 + URL 探测；stdio 桥为下一阶段）
     "mcp.servers.list",
     "mcp.servers.add",
+    "mcp.servers.update",
     "mcp.servers.remove",
     "mcp.servers.probe",
+    "mcp.servers.setEnabled",
     "mcp.tools.list",
     // 自进化历史
     "evolve.history",
     // 插件槽位
     "plugins.list",
     "plugins.status",
+    // 插件二次增强（2026-10-24）：统一覆盖率 + 热启停 + 热重载。
+    // 全部 Rust 原生（plugins. 不是 Python 代理前缀），不经侧车。
+    "plugins.coverage",
+    "plugins.setEnabled",
+    "plugins.reload",
+    // 插件详情 / 删除（管理页 CRUD：清单原文 + 注册表状态 + 适配映射）
+    "plugins.detail",
+    "plugins.delete",
+    // 插件原生加载（MCP 子进程，async-only）：真启动/停止/列工具/调用
+    "plugins.mcp.start",
+    "plugins.mcp.stop",
+    "plugins.mcp.list",
+    "plugins.mcp.call",
     // ── Rust 原生实现但长期漏声明的四组（前端 supportsMethod() 因此判 false、
     //    功能入口被隐藏；已由 every_dispatch_arm_is_declared_in_supported_methods 守卫）──
     // 信任校准（trust_rpc.rs）
@@ -298,6 +396,10 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "queue.resume",
     "queue.cancel",
     "queue.move",
+    // ── P2-11 长任务 checkpoint（Rust 侧本地实现，侧车离线也可用）──
+    "tasks.checkpoint.list",
+    "tasks.checkpoint.abandon",
+    "tasks.checkpoint.replay",
     // ── 原生功能（Game Hall / 知识图谱 / 鲸鱼娘 / 用量日聚合）──
     "usage.daily",
     "usage.cost",
@@ -310,6 +412,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "model.ledger",
     "session.budget.get",
     "session.budget.set",
+    // 会话推理等级（输入框拖动条）：不声明的话前端 `supportsMethod` 判为不支持，
+    // 滑块会静默退回「只在本地记一个值」——功能看似有、实际不落盘。
+    "session.thinking.get",
+    "session.thinking.set",
+    // P3 单一事实源：能力注册表（capabilities_groups）下发给能力中心 /
+    // 对话编排能力面板 / 舰队页探测；不声明则前端 supportsMethod 判 false、
+    // 能力中心拿不到全量注册表（契约守卫每个 dispatch 臂都必须声明）。
+    "capabilities.groups",
     // ── M3-D1 行为事件：最近活动时间线 ──
     "activity.recent",
     "games.list",
@@ -367,6 +477,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // 插件市场（检索 / 安装 / 批量安装 / 升级 / 审计 / 导入导出 / 源管理 / harness 生态）
     "market.list",
     "market.search",
+    "market.remote.search",
+    "market.install_url",
     "market.install",
     "market.install.batch",
     "market.upgrade",
@@ -380,10 +492,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "pages.add",
     "pages.list",
     "pages.search",
-    // 沙箱终端（真实 PTY：spawn / read / input / kill / list）+ 运行上下文与环境准备
+    // 沙箱终端（真实 PTY：spawn / read / input / key / resize / status / shells / kill / list）
     "sandbox.terminal.spawn",
     "sandbox.terminal.read",
     "sandbox.terminal.input",
+    "sandbox.terminal.key",
+    "sandbox.terminal.resize",
+    "sandbox.terminal.status",
+    "sandbox.terminal.shells",
     "sandbox.terminal.kill",
     "sandbox.terminal.list",
     "sandbox.run_context.set",
@@ -398,6 +514,10 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "team.compositions.remove",
     "team.run",
     "team.run.background",
+    // 对话编排统一入口（P2·E）：chat composer 提交编排 JSON，按 form 分发
+    "orchestrate.run",
+    // 编排终态对账：每会话最后一条进度帧（前端重连 / 长静默后拉取纠正卡片状态）
+    "orchestration.status",
     // ── P0 契约补齐（R5：前端调用但后端完全缺失的 23 个不可达方法）──
     // 借鉴 wemux packages/shared 模式：所有跨端方法必须在 SUPPORTED_METHODS 声明，
     // 确保 supportsMethod() 返回 true → UI 功能入口可见
@@ -482,6 +602,12 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "meta.runs.replay",
     "commands.list_for_surface",
     "channels.pairing.approve",
+    // 内容更新源（Rust 原生，**不经 Python 侧车**）：GitHub Release 检查 +
+    // update-manifest.json 内容同步（技能/插件）。前端 supportsMethod 门控这 4 个方法。
+    "update.config.get",
+    "update.config.set",
+    "update.check",
+    "update.syncContent",
     // WP1 设备总线（devices.*：list/status/call；L2/L3 经审批队列抬升，fail-closed）
     "devices.list",
     "devices.status",
@@ -502,8 +628,11 @@ pub const SUPPORTED_EVENTS: &[&str] = &[
 pub struct RpcError {
     pub code: String,
     pub message: String,
+    /// 结构化 details（装箱：`RpcError` 是 72 个 `Result` 签名的 Err 变体，
+    /// 直接把 32 字节的 `Value` 内联会让整个 Result 超过 clippy 128 字节阈值；
+    /// `Box` 不改变 JSON 线格式，只把错误体压到阈值以下）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
+    pub details: Option<Box<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -541,7 +670,7 @@ impl RpcError {
 
     /// 附加结构化 details（webui `currentPolicyFromConflict` 等消费）
     pub fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 

@@ -14,6 +14,7 @@
 
 pub mod cdp;
 pub mod collect;
+pub mod control;
 pub mod gateway;
 
 use std::path::PathBuf;
@@ -386,6 +387,14 @@ impl BrowserBridge {
         // 复用浏览器连接作为目标会话（带 sessionId）
         let mut page = CdpSession::from_existing(browser, session_id);
         page.enable_domains().await?;
+
+        // 显式导航（P0 根因修复，2026-10-23 实测）：
+        // `Target.createTarget` 的 `url` 参数在本机 Chrome（--headless=new）**不会真正导航**，
+        // 目标停在 `about:blank`（probe: url=about:blank / nodes=3 / html=39）。
+        // 后果是整条内置浏览器通道静默失效：`browser_search` 永远 0 结果、
+        // `collect_page` 永远空正文 —— 子智能体以为抓取失败，反复换 URL 重试白烧预算。
+        // 导航放在 `Page.enable` 之后发，保证 Page 域已生效。
+        page.navigate(url).await?;
         Ok(PageSession {
             endpoint: Some(ep),
             session: page,

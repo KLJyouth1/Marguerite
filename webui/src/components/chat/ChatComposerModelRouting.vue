@@ -3,12 +3,13 @@
     ref="rootRef"
     tabindex="-1"
     class="composer-model-routing"
-    role="dialog"
+    :class="{ 'is-inline': inline }"
+    :role="inline ? undefined : 'dialog'"
     :aria-label="t('chat.composer.modelRouting')"
     :aria-busy="busy ? 'true' : 'false'"
     @keydown.esc.stop="$emit('close')"
   >
-    <div class="composer-model-routing__head">
+    <div v-if="!inline" class="composer-model-routing__head">
       <span>{{ t('chat.composer.modelRouting') }}</span>
       <button type="button" class="composer-model-routing__close" :aria-label="t('chat.closeComposerSettings')" @click="$emit('close')">
         <Icon name="x" :size="14" />
@@ -49,10 +50,14 @@ import { normalizeModelRoutingMode } from '@/types/modelRouting'
 
 const { t } = useI18n()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelRoutingMode: ModelRoutingMode
   busy: boolean
-}>()
+  /** 内联模式：嵌在 `RunModePanel` 的滚动面板里，不再自弹一层浮窗。 */
+  inline?: boolean
+}>(), {
+  inline: false,
+})
 
 const emit = defineEmits<{
   close: []
@@ -96,7 +101,10 @@ function selectMode(mode: ModelRoutingMode) {
 }
 
 const rootRef = ref<HTMLElement | null>(null)
-onMounted(() => rootRef.value?.focus())
+onMounted(() => {
+  // 同 ChatComposerRunMode：内联时抢焦点会把父面板滚到这一段。
+  if (!props.inline) rootRef.value?.focus()
+})
 </script>
 
 <style scoped>
@@ -111,6 +119,18 @@ onMounted(() => rootRef.value?.focus())
   background: var(--bg-surface);
   box-shadow: var(--shadow-xl);
   z-index: 30;
+}
+
+/* 内联：不再是一层浮窗，只是父面板里的一组选项 */
+.composer-model-routing.is-inline {
+  position: static;
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  z-index: auto;
 }
 
 .composer-model-routing__head {

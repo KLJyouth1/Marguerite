@@ -1,84 +1,95 @@
 <template>
   <template v-for="(message, index) in messages" :key="chatMessageKey(message, index)">
-    <slot
-      v-if="message.isRouterStrip"
-      name="router-strip"
-      :message="message"
-      :index="index"
-    />
-    <UserMessage
-      v-else-if="message.displayRole === 'user'"
-      :id="`chat-turn-${index}`"
-      :data-chat-turn-key="chatMessageKey(message, index)"
-      tabindex="-1"
-      :message="message"
-      :share-mode="shareMode"
-      :share-selected="selectedMessageIds.has(chatMessageKey(message, index))"
-      :share-message-id="chatMessageKey(message, index)"
-      :strip-time-prefix="stripTimePrefix"
-      :copy-message="copyMessage"
-      :download-attachment="downloadAttachment"
-      :show-turn-outcome="isTurnTip(index)"
-      :is-streaming="isStreaming"
-      @edit="$emit('editMessage', $event)"
-      @toggle-share="$emit('toggleShareMessage', $event)"
-    />
-    <CompactionEvent
-      v-else-if="message.displayRole === 'maintenance' && message.maintenance?.kind === 'context_compaction'"
-      :message="message"
-    />
-    <AssistantMessage
-      v-else-if="message.displayRole === 'assistant'"
-      :message="message"
-      :index="index"
-      :share-mode="shareMode"
-      :share-selected="selectedMessageIds.has(chatMessageKey(message, index))"
-      :share-message-id="chatMessageKey(message, index)"
-      :render-markdown="renderMarkdown"
-      :fmt-tok="fmtTok"
-      :tool-call-groups="toolCallGroups"
-      :is-tool-group-open="isToolGroupOpen"
-      :is-tool-item-open="isToolItemOpen"
-      :tool-group-status-text="toolGroupStatusText"
-      :tool-status-text="toolStatusText"
-      :tool-secondary-text="toolSecondaryText"
-      :session-key="sessionKey"
-      :auth-token="authToken"
-      :workbench-enabled="workbenchEnabled"
-      :artifact-navigation-items="artifactNavigationItems"
-      :copy-message="copyMessage"
-      :is-tip="isForkableAssistant(index)"
-      :fork-busy="forkBusy"
-      :plan-action-pending="planActionPending"
-      :plan-actions-disabled="planActionsDisabled"
-      :show-turn-outcome="isTurnTip(index)"
-      @fork="$emit('forkConversation', forkThroughTurnId(index))"
-      @regenerate="$emit('regenerateMessage', $event)"
-      @toggle-share="$emit('toggleShareMessage', $event)"
-      @download-artifact="$emit('downloadArtifact', $event)"
-      @open-artifact="$emit('openArtifact', $event)"
-      @toggle-tool-group="$emit('toggleToolGroup', $event)"
-      @toggle-tool-item="$emit('toggleToolItem', $event)"
-      @show-tool-result="(content, title, context) => $emit('showToolResult', content, title, context)"
-      @resolve-interrupt="(id, decision) => $emit('resolveInterrupt', id, decision)"
-      @extend-interrupt="id => $emit('extendInterrupt', id)"
-      @clarify-submit="(fields, request) => $emit('clarifySubmit', fields, request)"
-      @clarify-dismiss="$emit('clarifyDismiss')"
-      @plan-implement-current="$emit('planImplementCurrent', $event)"
-      @plan-implement-new="$emit('planImplementNew', $event)"
-      @plan-replan="$emit('planReplan', $event)"
-      @plan-reuse-last="$emit('planReuseLast', $event)"
-    />
-    <SystemMessage
-      v-else
-      :message="message"
-      :can-replan="canReplan"
-      @resume="$emit('resumeSandbox')"
-      @open-settings="$emit('openAuthSettings')"
-      @retry="$emit('retryAuthFailure')"
-      @replan="$emit('replanFailedTurn')"
-      @view-logs="$emit('viewTurnLogs')"
-    />
+    <!-- 单一阅读列：历史水合与实时气泡共用同一行容器。子组件不再各自用
+         `margin: 0 auto` 居中 —— 宽面板上 --chat-col 有上限，auto 外边距会把
+         整段对话缩到屏幕中间（任务结束后尤其明显）。 -->
+    <div
+      class="chat-turn-row"
+      :data-chat-turn-row="chatMessageKey(message, index)"
+    >
+      <slot
+        v-if="message.isRouterStrip"
+        name="router-strip"
+        :message="message"
+        :index="index"
+      />
+      <UserMessage
+        v-else-if="message.displayRole === 'user'"
+        :id="`chat-turn-${index}`"
+        :data-chat-turn-key="chatMessageKey(message, index)"
+        tabindex="-1"
+        :message="message"
+        :share-mode="shareMode"
+        :share-selected="selectedMessageIds.has(chatMessageKey(message, index))"
+        :share-message-id="chatMessageKey(message, index)"
+        :strip-time-prefix="stripTimePrefix"
+        :copy-message="copyMessage"
+        :download-attachment="downloadAttachment"
+        :show-turn-outcome="isTurnTip(index)"
+        :is-streaming="isStreaming"
+        @edit="$emit('editMessage', $event)"
+        @toggle-share="$emit('toggleShareMessage', $event)"
+      />
+      <CompactionEvent
+        v-else-if="message.displayRole === 'maintenance' && message.maintenance?.kind === 'context_compaction'"
+        :message="message"
+      />
+      <AssistantMessage
+        v-else-if="message.displayRole === 'assistant'"
+        :message="message"
+        :index="index"
+        :share-mode="shareMode"
+        :share-selected="selectedMessageIds.has(chatMessageKey(message, index))"
+        :share-message-id="chatMessageKey(message, index)"
+        :render-markdown="renderMarkdown"
+        :fmt-tok="fmtTok"
+        :tool-call-groups="toolCallGroups"
+        :is-tool-group-open="isToolGroupOpen"
+        :is-tool-item-open="isToolItemOpen"
+        :tool-group-status-text="toolGroupStatusText"
+        :tool-status-text="toolStatusText"
+        :tool-secondary-text="toolSecondaryText"
+        :session-key="sessionKey"
+        :auth-token="authToken"
+        :workbench-enabled="workbenchEnabled"
+        :artifact-navigation-items="artifactNavigationItems"
+        :copy-message="copyMessage"
+        :is-tip="isForkableAssistant(index)"
+        :fork-busy="forkBusy"
+        :plan-action-pending="planActionPending"
+        :plan-actions-disabled="planActionsDisabled"
+        :show-turn-outcome="isTurnTip(index)"
+        :turn-started-at="turnStartTs(index)"
+        @fork="$emit('forkConversation', forkThroughTurnId(index))"
+        @regenerate="$emit('regenerateMessage', $event)"
+        @toggle-share="$emit('toggleShareMessage', $event)"
+        @download-artifact="$emit('downloadArtifact', $event)"
+        @open-artifact="$emit('openArtifact', $event)"
+        @toggle-tool-group="$emit('toggleToolGroup', $event)"
+        @toggle-tool-item="$emit('toggleToolItem', $event)"
+        @show-tool-result="(content, title, context) => $emit('showToolResult', content, title, context)"
+        @resolve-interrupt="(id, decision) => $emit('resolveInterrupt', id, decision)"
+        @extend-interrupt="id => $emit('extendInterrupt', id)"
+        @clarify-submit="(fields, request) => $emit('clarifySubmit', fields, request)"
+        @clarify-dismiss="$emit('clarifyDismiss')"
+        @plan-implement-current="$emit('planImplementCurrent', $event)"
+        @plan-implement-new="$emit('planImplementNew', $event)"
+        @plan-replan="$emit('planReplan', $event)"
+        @plan-reuse-last="$emit('planReuseLast', $event)"
+        @show-full-message="$emit('showFullMessage', $event)"
+      />
+      <SystemMessage
+        v-else
+        :message="message"
+        :can-replan="canReplan"
+        @resume="$emit('resumeSandbox')"
+        @open-settings="$emit('openAuthSettings')"
+        @retry="$emit('retryAuthFailure')"
+        @replan="$emit('replanFailedTurn')"
+        @view-logs="$emit('viewTurnLogs')"
+        @focus-subagent="$emit('focusSubagent', $event)"
+      />
+    </div>
   </template>
 </template>
 
@@ -135,6 +146,7 @@ defineEmits<{
   toggleToolGroup: [groupId: string]
   toggleToolItem: [renderKey: string]
   showToolResult: [content: string, title: string, context?: ToolResultContext]
+  showFullMessage: [message: ChatRenderedMessage]
   forkConversation: [throughTurnId?: string]
   resolveInterrupt: [id: string, decision: 'allow-once' | 'allow-always' | 'deny']
   extendInterrupt: [id: string]
@@ -146,6 +158,7 @@ defineEmits<{
   /** B2：失败轮次的次级出口 —— 改计划 / 看日志。 */
   replanFailedTurn: []
   viewTurnLogs: []
+  focusSubagent: [payload: { key: string }]
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
@@ -195,4 +208,42 @@ function isTurnTip(index: number): boolean {
   }
   return true
 }
+
+/**
+ * 本回合的起始时间：向前找最近一条用户消息的时间戳。
+ * 交付回执用它作为证据窗口左界——没有它就退回整会话聚合（后端会标 degraded）。
+ */
+function turnStartTs(index: number): string | number | null {
+  for (let i = index; i >= 0; i--) {
+    const candidate = props.messages[i]
+    if (candidate?.displayRole === 'user') return candidate.ts ?? null
+  }
+  return null
+}
 </script>
+
+<style>
+/* ── 会话阅读列（唯一定义）─────────────────────────────────────────────
+   历史水合（本组件包裹的 .chat-turn-row）与实时气泡（ChatView 直接渲染的
+   .msg-ai）必须共享同一个左对齐列：
+   · 宽度上限来自 `--chat-col`，但绝不再用 `margin: 0 auto` 居中；
+   · 左侧固定 24px 起排，宽屏多出来的空间留在右侧。
+   根因行是 AssistantMessage 的 `.msg-ai { width: var(--chat-col); margin: 0 auto }`
+   —— 宽面板上上限列被两侧 auto 外边距居中，整段历史看起来缩在屏幕中间。 */
+.chat .chat-thread > .msg-ai:not(.msg-ai--share-mode),
+.chat .chat-thread > .msg-user:not(.msg-user--share-mode),
+.chat .chat-turn-row > .msg-ai:not(.msg-ai--share-mode),
+.chat .chat-turn-row > .msg-user:not(.msg-user--share-mode) {
+  width: min(calc(100% - 48px), var(--chat-col, 980px));
+  max-width: calc(100% - 48px);
+  margin-inline: 24px auto;
+  text-align: start;
+}
+
+.chat-turn-row {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+</style>

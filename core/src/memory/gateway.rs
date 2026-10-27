@@ -222,11 +222,60 @@ pub fn synapse_status(_params: &Value) -> Value {
     })
 }
 
+/// `memory.tiered.status`：分层稀疏记忆（flyhash + tiered）只读观测面。
+///
+/// # 为什么需要它（W-O3）
+///
+/// `memory::flyhash` 与 `memory::tiered` 是**执行侧**真实在用的一层（第六路召回，
+/// 见 [`crate::memory::inject`]），但此前**没有任何观测入口**：用户在界面上无法
+/// 判断「这一层到底有没有数据、开关是否打开、索引与长时池是否一致」，出问题只能
+/// 翻日志。本 RPC 只读、无副作用，暴露四类事实：
+///
+/// 1. **开关**：`memory.tiered_enabled`（默认 false，属静默注入，必须可查）；
+/// 2. **计数**：三层条目数 + flyhash 索引条目数；
+/// 3. **健全性**：`indexConsistent` = 索引条目数 == 长时池条目数
+///    （两者只由 `insert`/`promote`/`trim_pool` 同时改动，不等即漏建/漏删）；
+/// 4. **参数**：每层容量上限、门控阈值、FLY_DIM/WTA_ROUNDS（决定粗排分辨率）。
+///
+/// 隐私红线：**只返回计数与参数**，不含任何记忆正文。
+pub fn tiered_status(_params: &Value) -> Value {
+    let enabled = match Config::load() {
+        Ok(c) => c.memory.tiered_enabled,
+        Err(_) => false,
+    };
+    let (sensory, short, long, fly) = crate::memory::inject::tier_counts();
+    let (max_per_tier, sim_threshold) = crate::memory::inject::tier_limits();
+    json!({
+        "ok": true,
+        "enabled": enabled,
+        "total": sensory + short + long,
+        "tiers": {
+            "sensory": sensory,
+            "shortTerm": short,
+            "longTerm": long,
+        },
+        "flyhash": {
+            "indexed": fly,
+            "dim": crate::memory::flyhash::FLY_DIM,
+            "wtaRounds": crate::memory::flyhash::WTA_ROUNDS,
+            // 索引与长时池必须一一对应；不相等就是漏建/漏删（trim/promote 是唯一改动点）
+            "indexConsistent": fly == long,
+        },
+        "maxPerTier": max_per_tier,
+        "simThreshold": sim_threshold,
+    })
+}
+
 /// `memory.layers.status`：7 层记忆端到端审计视图（真实计数 + RPC 可达性）。
 ///
 /// sensory / short_term / long_term / recall 四层返回真实计数（本轮补齐的 RPC）；
 /// experience / behavior / cross_project 此前已暴露 RPC，此处标注可达性。
 pub fn layers_status(_params: &Value) -> Value {
+    // 自动捕获开关的真实生效值（关闭后：每轮抽取 / tiered remember / 长期短期沉淀全部停写，
+    // 但显式 memory.save / memory_save 仍允许）。放在这里供设置页核对「开关确实生效」。
+    let auto_capture_enabled = crate::persistence::config::Config::load()
+        .map(|c| c.memory.auto_capture_enabled)
+        .unwrap_or(true);
     let sensory_count = context_file_count();
     let st_count = short_term()
         .lock()
@@ -254,6 +303,7 @@ pub fn layers_status(_params: &Value) -> Value {
     };
 
     json!({
+        "autoCaptureEnabled": auto_capture_enabled,
         "layers": [
             layer("sensory", "感知记忆", "memory::sensory", &["memory.sensory.search"], Some(sensory_count)),
             layer("short_term", "短期记忆", "memory::short_term", &["memory.short_term.search"], Some(st_count)),
@@ -269,6 +319,16 @@ pub fn layers_status(_params: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 自动捕获开关必须出现在状态里（核对「关闭后是否真的停写」的唯一观测面）。
+    #[test]
+    fn layers_status_reports_auto_capture_flag() {
+        let v = layers_status(&Value::Null);
+        assert!(
+            v["autoCaptureEnabled"].is_boolean(),
+            "layers.status 必须回报 autoCaptureEnabled: {v}"
+        );
+    }
 
     #[test]
     fn layers_status_marks_all_seven_reachable_after_this_round() {
@@ -327,6 +387,43 @@ mod tests {
             "cross_project",
         ] {
             assert!(ids.contains(&expected), "缺少层 id `{expected}`（前端标签键会落空）");
+        }
+    }
+
+    /// 契约守卫：`memory.tiered.status` 字段齐全、`indexConsistent` 为布尔、
+    /// 且**绝不泄露记忆正文**（只允许计数与参数）。
+    #[test]
+    fn tiered_status_is_privacy_safe() {
+        let v = tiered_status(&Value::Null);
+        for key in [
+            "ok",
+            "enabled",
+            "total",
+            "tiers",
+            "flyhash",
+            "maxPerTier",
+            "simThreshold",
+        ] {
+            assert!(v.get(key).is_some(), "memory.tiered.status 缺少字段 `{key}`");
+        }
+        assert_eq!(v["ok"], true);
+        for key in ["sensory", "shortTerm", "longTerm"] {
+            assert!(v["tiers"][key].is_u64(), "tiers.{key} 必须是计数");
+        }
+        let fly = &v["flyhash"];
+        assert_eq!(fly["dim"], crate::memory::flyhash::FLY_DIM);
+        assert_eq!(fly["wtaRounds"], crate::memory::flyhash::WTA_ROUNDS);
+        assert!(
+            fly["indexConsistent"].is_boolean(),
+            "indexConsistent 必须是布尔（前端据此染色）"
+        );
+        // 隐私红线：不得出现任何正文承载字段
+        let dumped = v.to_string();
+        for forbidden in ["\"text\"", "\"content\"", "\"snippet\""] {
+            assert!(
+                !dumped.contains(forbidden),
+                "tiered.status 不得含字段 {forbidden}：{dumped}"
+            );
         }
     }
 

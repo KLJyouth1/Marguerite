@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw, RouteLocationNormalized } from 'vue-router'
 import { getPlatform } from '@/platform'
-import i18n from '@/i18n'
+import i18n, { isI18nReady } from '@/i18n'
 import { desktopRoutes } from './desktopRoutes'
 import { sharedRoutes } from './sharedRoutes'
 import { webRoutes } from './webRoutes'
@@ -25,7 +25,12 @@ const NotFoundView = () => import('@/views/NotFoundView.vue')
 export const routes: RouteRecordRaw[] = [
   ...sharedRoutes,
   ...(platform.capabilities.hasWebConfig ? webRoutes : []),
-  ...(platform.capabilities.hasDesktopOnboarding ? desktopRoutes : []),
+  // 桌面专属路由（目前只有 /pet-overlay 悬浮窗）按 **isDesktop** 注册，而不是
+  // `hasDesktopOnboarding`：后者是「桥是否实现了 onboarding 三个命令」的能力位，
+  // 与悬浮窗毫无关系。真机缺陷（2026-10-23）：桥是部分实现时 hasDesktopOnboarding
+  // 为 false ⇒ 悬浮窗窗口加载 /control/pet-overlay 落到 NotFound，
+  // 360×420 的透明窗口里显示「未找到」+ 整条侧栏。
+  ...(platform.capabilities.isDesktop ? desktopRoutes : []),
   { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView, meta: { title: 'Not Found', platforms: ['web', 'desktop'] } },
 ]
 
@@ -80,11 +85,26 @@ export function routeTitle(route: RouteLocationNormalized): string {
   return (route.meta?.title as string) || 'Marguerite'
 }
 
+/**
+ * 写入页面标题。i18n 未就绪时返回 false 并且**不碰** document.title：
+ * 首屏导航常常早于语言包加载完成，此时 routeTitle() 只有英文 meta.title 可回退，
+ * 写了就会在语言包就绪后再跳成中文。留白由 App.vue 在 whenI18nReady() 后补写。
+ * `ready` 显式传入以便单测覆盖两条分支。
+ */
+export function applyRouteTitle(
+  route: RouteLocationNormalized,
+  ready: boolean = isI18nReady(),
+): boolean {
+  if (!ready) return false
+  document.title = `${routeTitle(route)} — Marguerite`
+  return true
+}
+
 router.afterEach((to, _from, failure) => {
   if (failure || !isChatRoutePath(to.path)) {
     clearPrimedSessionBootstrapAdmission()
   }
-  document.title = `${routeTitle(to)} — Marguerite`
+  applyRouteTitle(to)
   // Remember the current view (path only) so the next launch reopens here.
   saveLastRoute(to.path)
 })

@@ -23,6 +23,7 @@ export type WorkbenchPanelKind =
   | 'goal'
   | 'task'
   | 'island'
+  | 'runtime'
   | 'view'
 
 export type WorkbenchRetention = 'dispose-on-suspend' | 'keep-alive'

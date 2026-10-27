@@ -7,9 +7,38 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::gateway::_helpers::param_str;
-use crate::gateway::sandbox_paths;
 use crate::mcp::registry::{ToolInfo, ToolRegistry};
 use crate::tools::builtin::register_builtin_tools;
+
+/// `workspace.file.*` 的工作区根：与文件工具面**同一个**权威解析器。
+///
+/// 调用方可显式传 `projectPath` / `project_path` 与会话绑定对齐；缺省回落
+/// [`crate::workspace::Workspace::resolve`] 的默认根（应用数据目录 → 进程 cwd）。
+///
+/// # 为什么不能用 HOME
+///
+/// 这里曾经直接用 `sandbox_paths::sandbox_path_root()`（`USERPROFILE`/`HOME`）当根，
+/// 于是「内置工作区编辑器」实际能打开 `~/.ssh/id_rsa` 与 `~/.marguerite/gateway-token`
+/// —— 后者正是本网关自己的鉴权凭据，等于把「控制台读写文件」放大成「整机凭据读取」。
+/// 同仓的 `workspace.rs` 头注释早已把这种「各写一半的根」列为 P0-1b 要收敛的问题。
+fn workspace_file_root(params: &Value) -> PathBuf {
+    let explicit = param_str(params, "projectPath", "project_path", "")
+        .trim()
+        .to_string();
+    let explicit = (!explicit.is_empty()).then_some(explicit.as_str());
+    crate::workspace::resolve_for_session(explicit).root
+}
+
+/// 把入参路径解析到工作区内（fail-closed）。
+///
+/// 统一委托 [`crate::tools::fs_path::safe_resolve`]：它同时处理 `..` 归一化、
+/// 绝对路径前缀校验、以及「根内软链指向根外」的存在性感知 canonicalize ——
+/// 手写判定容易漏掉其中一项（旧写入实现正是用 `&&` 串了两个半判定）。
+fn resolve_workspace_file(root: &std::path::Path, raw: &str) -> Result<PathBuf, String> {
+    crate::tools::fs_path::safe_resolve(root, raw).map_err(|e| {
+        format!("路径超出工作区（根 {}）：{e}", root.display())
+    })
+}
 
 /// `workspace.file.read`：读取工作区文本文件。
 pub fn workspace_file_read(params: &Value) -> Value {
@@ -17,18 +46,15 @@ pub fn workspace_file_read(params: &Value) -> Value {
     if raw.is_empty() {
         return json!({ "ok": false, "error": "缺少 path" });
     }
-    let root = sandbox_paths::sandbox_path_root();
-    let p = PathBuf::from(raw);
-    let abs = if p.is_absolute() { p } else { root.join(&p) };
-    let rootc = root.canonicalize().unwrap_or_else(|_| root.clone());
-    let absc = abs.canonicalize().unwrap_or_else(|_| abs.clone());
-    if !absc.starts_with(&rootc) {
-        return json!({ "ok": false, "error": "路径超出工作区" });
-    }
-    match std::fs::read_to_string(&absc) {
+    let root = workspace_file_root(params);
+    let abs = match resolve_workspace_file(&root, raw) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    match std::fs::read_to_string(&abs) {
         Ok(content) => json!({
             "ok": true,
-            "path": absc.to_string_lossy(),
+            "path": abs.to_string_lossy(),
             "content": content,
             "bytes": content.len(),
         }),
@@ -43,18 +69,14 @@ pub fn workspace_file_write(params: &Value) -> Value {
         return json!({ "ok": false, "error": "缺少 path" });
     }
     let content = params.get("content").and_then(Value::as_str).unwrap_or("");
-    let root = sandbox_paths::sandbox_path_root();
-    let p = PathBuf::from(raw);
-    let abs = if p.is_absolute() { p } else { root.join(&p) };
-    let rootc = root.canonicalize().unwrap_or_else(|_| root.clone());
-    let parent_ok = abs
-        .parent()
-        .and_then(|d| d.canonicalize().ok())
-        .map(|d| d.starts_with(&rootc))
-        .unwrap_or(false);
-    if !parent_ok && !abs.starts_with(&rootc) {
-        return json!({ "ok": false, "error": "路径超出工作区" });
-    }
+    let root = workspace_file_root(params);
+    // 越界即拒绝，且**必须先于**任何 `create_dir_all`：旧实现用
+    // `!parent_ok && !abs.starts_with(root)` 串判定，`root/../escape.txt` 这类
+    // 「词法前缀命中、真实落点在根外」的路径两个条件恰好一真一假 → 放行 → 越界写盘。
+    let abs = match resolve_workspace_file(&root, raw) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
     if let Some(parent) = abs.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return json!({ "ok": false, "error": format!("创建父目录失败: {e}") });
@@ -63,6 +85,131 @@ pub fn workspace_file_write(params: &Value) -> Value {
     match std::fs::write(&abs, content.as_bytes()) {
         Ok(()) => json!({ "ok": true, "path": abs.to_string_lossy(), "bytes": content.len() }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// `workspace.file.rename`：重命名/移动工作区内文件或目录。
+///
+/// 只接受「同目录改名」而不接受任意新相对路径：树上的重命名语义就是改名，
+/// 允许挪目录会让「右键重命名」变成隐蔽的移动操作（用户无法撤销）。
+pub fn workspace_file_rename(params: &Value) -> Value {
+    let raw = param_str(params, "path", "path", "").trim();
+    let new_name = param_str(params, "newName", "new_name", "").trim();
+    if raw.is_empty() || new_name.is_empty() {
+        return json!({ "ok": false, "error": "缺少 path 或 newName" });
+    }
+    // 名字只能是单段：带分隔符 = 移动，带 `..` = 越界尝试。
+    if new_name.contains('/') || new_name.contains('\\') || new_name.contains("..") {
+        return json!({ "ok": false, "error": "newName 只能是文件名，不能包含路径分隔符" });
+    }
+    let root = workspace_file_root(params);
+    let abs = match resolve_workspace_file(&root, raw) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    if !abs.exists() {
+        return json!({ "ok": false, "error": "目标不存在" });
+    }
+    let Some(parent) = abs.parent() else {
+        return json!({ "ok": false, "error": "无法解析父目录" });
+    };
+    let target = parent.join(new_name);
+    if target.exists() {
+        return json!({ "ok": false, "error": "同名文件或目录已存在" });
+    }
+    // 目标路径仍须落在工作区内（父目录已由 safe_resolve 校验，这里再兜一次）
+    if let Err(e) = resolve_workspace_file(&root, &target.to_string_lossy()) {
+        return json!({ "ok": false, "error": e });
+    }
+    match std::fs::rename(&abs, &target) {
+        Ok(()) => json!({
+            "ok": true,
+            "path": target.to_string_lossy(),
+            "renamedFrom": abs.to_string_lossy(),
+        }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// `workspace.file.delete`：删除工作区内文件或目录。
+///
+/// 目录必须显式 `recursive=true` 才递归删除 —— 一次误点的代价不可逆，
+/// 非空目录默认拒绝并把原因说清楚。
+pub fn workspace_file_delete(params: &Value) -> Value {
+    let raw = param_str(params, "path", "path", "").trim();
+    if raw.is_empty() {
+        return json!({ "ok": false, "error": "缺少 path" });
+    }
+    let recursive = params
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let root = workspace_file_root(params);
+    let abs = match resolve_workspace_file(&root, raw) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let meta = match std::fs::symlink_metadata(&abs) {
+        Ok(m) => m,
+        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+    };
+    let outcome = if meta.is_dir() {
+        if recursive {
+            std::fs::remove_dir_all(&abs)
+        } else {
+            std::fs::remove_dir(&abs).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+                    std::io::Error::new(
+                        std::io::ErrorKind::DirectoryNotEmpty,
+                        "目录非空：如需递归删除请传 recursive=true",
+                    )
+                } else {
+                    e
+                }
+            })
+        }
+    } else {
+        std::fs::remove_file(&abs)
+    };
+    match outcome {
+        Ok(()) => json!({ "ok": true, "path": abs.to_string_lossy(), "recursive": recursive }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// `workspace.file.reveal`：在系统文件管理器中定位文件/目录。
+///
+/// 不走 shell 拼接（路径里的空格/引号会被解释）：Windows 用
+/// `explorer /select,<path>` 参数数组；其它平台打开父目录。
+pub fn workspace_file_reveal(params: &Value) -> Value {
+    let raw = param_str(params, "path", "path", "").trim();
+    if raw.is_empty() {
+        return json!({ "ok": false, "error": "缺少 path" });
+    }
+    let root = workspace_file_root(params);
+    let abs = match resolve_workspace_file(&root, raw) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    if !abs.exists() {
+        return json!({ "ok": false, "error": "目标不存在" });
+    }
+    #[cfg(windows)]
+    let spawned = {
+        use std::process::Command;
+        Command::new("explorer")
+            .arg(format!("/select,{}", abs.display()))
+            .spawn()
+    };
+    #[cfg(not(windows))]
+    let spawned = {
+        use std::process::Command;
+        let dir = abs.parent().map(|p| p.to_path_buf()).unwrap_or(abs.clone());
+        Command::new("xdg-open").arg(dir).spawn()
+    };
+    match spawned {
+        Ok(_) => json!({ "ok": true, "path": abs.to_string_lossy() }),
+        Err(e) => json!({ "ok": false, "error": format!("无法打开文件管理器: {e}") }),
     }
 }
 
@@ -310,6 +457,171 @@ fn tools_patch_set_at(
     match crate::tools::patch::write_patch_at(path, &disabled.into_iter().collect()) {
         Ok(patch) => patch_view(&patch, None, path, workspace),
         Err(e) => json!({ "ok": false, "code": "PATCH_WRITE_FAILED", "error": e }),
+    }
+}
+
+#[cfg(test)]
+mod file_access_tests {
+    use super::*;
+
+    /// 独立工作区 fixture：根目录由参数注入（`projectPath`），不碰进程环境。
+    struct WsFixture {
+        base: PathBuf,
+        root: PathBuf,
+    }
+
+    impl WsFixture {
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let base = std::env::temp_dir().join(format!(
+                "mgt_gw_wsfile_{}_{}_{}",
+                std::process::id(),
+                tag,
+                seq
+            ));
+            let root = base.join("ws");
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&root).unwrap();
+            Self { base, root }
+        }
+
+        fn params(&self, extra: Value) -> Value {
+            let mut obj = extra.as_object().cloned().unwrap_or_default();
+            obj.insert(
+                "projectPath".to_string(),
+                Value::String(self.root.to_string_lossy().to_string()),
+            );
+            Value::Object(obj)
+        }
+    }
+
+    impl Drop for WsFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// 工作区内相对路径读写往返正常（功能不许因加固而丢）。
+    #[test]
+    fn read_write_roundtrip_inside_workspace() {
+        let f = WsFixture::new("roundtrip");
+        let w = workspace_file_write(&f.params(json!({
+            "path": "notes/a.md",
+            "content": "hello",
+        })));
+        assert_eq!(w["ok"], json!(true), "工作区内写入应成功: {w}");
+        assert!(f.root.join("notes/a.md").exists());
+
+        let r = workspace_file_read(&f.params(json!({ "path": "notes/a.md" })));
+        assert_eq!(r["ok"], json!(true));
+        assert_eq!(r["content"], json!("hello"));
+    }
+
+    /// 旧实现的越界写漏洞：`<root>/../escape.txt` 词法前缀命中工作区、
+    /// 真实落点却在根外，`&&` 串判定会放行。必须彻底堵死。
+    #[test]
+    fn write_must_not_escape_via_parent_dir() {
+        let f = WsFixture::new("escape");
+        for evil in ["../escape.txt", "..\\escape.txt", "a/../../escape.txt"] {
+            let w = workspace_file_write(&f.params(json!({
+                "path": evil,
+                "content": "pwned",
+            })));
+            assert_eq!(w["ok"], json!(false), "{evil} 必须被拒绝: {w}");
+            assert!(
+                w["error"].as_str().is_some_and(|e| e.contains("路径超出工作区")),
+                "拒绝理由必须可诊断: {w}"
+            );
+        }
+        assert!(
+            !f.base.join("escape.txt").exists(),
+            "绝不能在技能/工作区之外落盘"
+        );
+    }
+
+    /// 根外的绝对路径（含 `~/.ssh/id_rsa` 这类凭据文件）一律拒绝。
+    #[test]
+    fn read_write_reject_absolute_paths_outside_workspace() {
+        let f = WsFixture::new("absolute");
+        let secret = f.base.join("id_rsa");
+        std::fs::write(&secret, "PRIVATE KEY").unwrap();
+
+        let r = workspace_file_read(&f.params(json!({
+            "path": secret.to_string_lossy(),
+        })));
+        assert_eq!(r["ok"], json!(false), "根外绝对路径读取必须拒绝: {r}");
+
+        let w = workspace_file_write(&f.params(json!({
+            "path": f.base.join("evil.txt").to_string_lossy(),
+            "content": "x",
+        })));
+        assert_eq!(w["ok"], json!(false));
+        assert!(!f.base.join("evil.txt").exists());
+
+        // 根内的绝对路径仍应放行（编辑器会回传绝对路径）
+        let inside = f.root.join("ok.txt");
+        std::fs::write(&inside, "ok").unwrap();
+        let r2 = workspace_file_read(&f.params(json!({
+            "path": inside.to_string_lossy(),
+        })));
+        assert_eq!(r2["ok"], json!(true), "根内绝对路径必须可用: {r2}");
+    }
+
+    /// 项目树「重命名」：只改同一目录下的名字，且不得覆盖已有文件。
+    #[test]
+    fn rename_stays_in_place_and_refuses_overwrite() {
+        let f = WsFixture::new("rename");
+        std::fs::write(f.root.join("a.md"), "hello").unwrap();
+        std::fs::write(f.root.join("b.md"), "exists").unwrap();
+
+        let ok = workspace_file_rename(&f.params(json!({ "path": "a.md", "newName": "c.md" })));
+        assert_eq!(ok["ok"], json!(true), "同目录改名应成功: {ok}");
+        assert!(!f.root.join("a.md").exists());
+        assert!(f.root.join("c.md").exists());
+
+        let clash = workspace_file_rename(&f.params(json!({ "path": "c.md", "newName": "b.md" })));
+        assert_eq!(clash["ok"], json!(false), "不得静默覆盖: {clash}");
+
+        let escape = workspace_file_rename(&f.params(json!({ "path": "c.md", "newName": "../x.md" })));
+        assert_eq!(escape["ok"], json!(false), "带路径的名字必须拒绝: {escape}");
+        assert!(!f.base.join("x.md").exists());
+    }
+
+    /// 项目树「删除」：非空目录默认拒绝，显式 recursive 才递归删。
+    #[test]
+    fn delete_refuses_non_empty_dir_unless_recursive() {
+        let f = WsFixture::new("delete");
+        std::fs::create_dir_all(f.root.join("dir")).unwrap();
+        std::fs::write(f.root.join("dir/inner.md"), "x").unwrap();
+
+        let refuse = workspace_file_delete(&f.params(json!({ "path": "dir" })));
+        assert_eq!(refuse["ok"], json!(false), "非空目录必须要求 recursive: {refuse}");
+        assert!(f.root.join("dir/inner.md").exists());
+
+        let forced = workspace_file_delete(&f.params(json!({ "path": "dir", "recursive": true })));
+        assert_eq!(forced["ok"], json!(true), "显式递归应成功: {forced}");
+        assert!(!f.root.join("dir").exists());
+    }
+
+    /// 默认根**不得**是 HOME：否则 `~/.marguerite/gateway-token` 与 `~/.ssh/*`
+    /// 都会被控制台读写。这条直接钉住「根 = 工件区解析器」这个契约。
+    #[test]
+    fn default_root_is_not_user_home() {
+        let root = workspace_file_root(&json!({}));
+        for h in [
+            std::env::var("USERPROFILE").ok(),
+            std::env::var("HOME").ok(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let h = PathBuf::from(h);
+            assert_ne!(
+                root, h,
+                "默认工作区根不得等于 HOME/USERPROFILE（会暴露 ~/.ssh 与网关 token）"
+            );
+        }
     }
 }
 

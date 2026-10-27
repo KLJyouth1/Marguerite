@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { walkFiles } from './lib/fs-walk.mjs'
 
 // Every control-UI surface must move with the shared motion vocabulary defined in
-// src/assets/base.css: durations --dur-fast/base/enter/pulse and easings
+// src/assets/foundation.css: durations --dur-fast/base/enter/slow/pulse and easings
 // --ease-standard/out/in/spring. Raw millisecond/second literals and the bare
 // `ease`/`ease-in`/`ease-out`/`ease-in-out` keywords inside transition/animation
 // declarations are violations — route them through the tokens so timing and feel
@@ -84,7 +84,7 @@ for (const file of files) {
       .filter((v) => !isZero(v))
     if (durations.length > 0) {
       failures.push(
-        `${rel}:${index + 1}: raw duration ${durations.join(', ')}; use var(--dur-fast|base|enter|pulse). ${line.trim()}`,
+        `${rel}:${index + 1}: raw duration ${durations.join(', ')}; use var(--dur-fast|base|enter|slow|pulse). ${line.trim()}`,
       )
     }
     if (easingKeyword.test(code)) {

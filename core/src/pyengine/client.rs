@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time::{timeout, Instant};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -61,13 +61,23 @@ impl PyGatewayClient {
 
         // 事件扇出与命令入口在**重连之间保持不变**：重连只换 WS 半部，
         // 不换消费者，否则 event_bridge 会订阅到一个再也不产出的信道。
-        let (event_tx, event_rx) = mpsc::channel::<Value>(256);
+        //
+        // P1-8：事件信道用 broadcast 而非 mpsc——event_bridge 是慢消费者
+        // （每个 event 都要 emit 到 EventBus + 推给 WS 订阅者），mpsc 满时
+        // `event_tx.send().await` 会**阻塞整个 WS 驱动循环**（req/res 都走
+        // 同一个 select!），侧车一洪峰事件，RPC 全部停摆。broadcast::Sender::send
+        // 是同步非阻塞的：消费者落后超过容量即收到 `Lagged` 自愈——语义正是
+        // 「丢最旧事件帧、保控制/响应帧」。
+        let (event_tx, event_rx) = broadcast::channel::<Value>(EVENT_CHANNEL_CAP);
         let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(32);
         let cmd_tx_arc = Arc::new(Mutex::new(cmd_tx));
+        // P2-10：跨重连跟踪已转发的最大事件 seq。断线重连后按它向新会话发
+        // `events.resync` 补回缺口、去重，杜绝重复执行与丢事件。
+        let last_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let (writer, reader) = Self::open_session(&ws_url).await?;
         tokio::spawn(async move {
-            Self::supervise_ws(ws_url, writer, reader, event_tx, cmd_rx).await;
+            Self::supervise_ws(ws_url, writer, reader, event_tx, cmd_rx, last_seq).await;
         });
         // event_rx 暴露到全局静态注册表：通过 EVENTS_BUS 转发在 event_bridge.rs
         set_event_sink(event_rx);
@@ -186,15 +196,16 @@ impl PyGatewayClient {
         ws_url: String,
         mut writer: WsWriter,
         mut reader: WsReader,
-        event_tx: mpsc::Sender<Value>,
+        event_tx: broadcast::Sender<Value>,
         mut cmd_rx: mpsc::Receiver<ClientCmd>,
+        last_seq: Arc<std::sync::atomic::AtomicU64>,
     ) {
     const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        drive_ws_loop(writer, reader, event_tx.clone(), &mut cmd_rx).await;
+        drive_ws_loop(writer, reader, event_tx.clone(), &mut cmd_rx, last_seq.clone()).await;
 
         // 断连 → 重连，直到成功。期间保持对 cmd_rx 的服务（fail-fast）。
         loop {
@@ -218,6 +229,17 @@ impl PyGatewayClient {
                             writer = w;
                             reader = r;
                             backoff = INITIAL_BACKOFF;
+                            // P2-10：重连成功后、进入驱动循环前，按 last_seq 对账：
+                            // 向新会话发 events.resync 补回断线期间的事件缺口（去重），
+                            // 杜绝重复执行与丢事件。失败（侧车不支持/超时）则安全跳过，
+                            // 后续 live 事件照常处理。
+                            resync_after_reconnect(
+                                &mut writer,
+                                &mut reader,
+                                &event_tx,
+                                &last_seq,
+                            )
+                            .await;
                             // info 而非 debug：重连成功是**生命周期事件**，
                             // 默认 `warn` 过滤下若不可见，运维就无法区分
                             // 「已自愈」与「一直没连上」。
@@ -298,16 +320,19 @@ fn build_ws_url(base_url: &str) -> String {
 // 事件转发桥的 sink（全局共享，event_bridge.rs 拿出来 consume）
 // ---------------------------------------------------------------------------
 
-static EVENT_SINK: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<Value>>>> =
+/// P1-8：事件信道容量。洪峰时消费者落后超过此数即丢最旧（broadcast Lagged）。
+pub(crate) const EVENT_CHANNEL_CAP: usize = 256;
+
+static EVENT_SINK: std::sync::OnceLock<Mutex<Option<broadcast::Receiver<Value>>>> =
     std::sync::OnceLock::new();
 
-fn set_event_sink(rx: mpsc::Receiver<Value>) {
+fn set_event_sink(rx: broadcast::Receiver<Value>) {
     EVENT_SINK
         .set(Mutex::new(Some(rx)))
         .unwrap_or_else(|_| panic!("EVENT_SINK 已初始化"));
 }
 
-pub async fn take_event_sink() -> Option<mpsc::Receiver<Value>> {
+pub async fn take_event_sink() -> Option<broadcast::Receiver<Value>> {
     EVENT_SINK.get()?.lock().await.take()
 }
 
@@ -318,8 +343,9 @@ pub async fn take_event_sink() -> Option<mpsc::Receiver<Value>> {
 async fn drive_ws_loop<S, R>(
     mut writer: futures_util::stream::SplitSink<S, Message>,
     mut reader: futures_util::stream::SplitStream<R>,
-    event_tx: mpsc::Sender<Value>,
+    event_tx: broadcast::Sender<Value>,
     cmd_rx: &mut mpsc::Receiver<ClientCmd>,
+    last_seq: Arc<std::sync::atomic::AtomicU64>,
 ) where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     R: futures_util::Stream<
@@ -351,7 +377,7 @@ async fn drive_ws_loop<S, R>(
                                                 Err(RpcError {
                                                     code: code.to_string(),
                                                     message: msg.to_string(),
-                                                    details: err.cloned(),
+                                                    details: err.cloned().map(Box::new),
                                                     retryable: Some(err.and_then(|e| e.get("retryable").and_then(Value::as_bool)).unwrap_or(false)),
                                                     retry_after_ms: None,
                                                     accepted: Some(false),
@@ -362,7 +388,11 @@ async fn drive_ws_loop<S, R>(
                                     }
                                 }
                                 Some("event") => {
-                                    let _ = event_tx.send(frame).await;
+                                    // P1-8：broadcast::Sender::send 同步非阻塞——
+                                    // 慢消费者落后时丢最旧（Lagged），绝不 await 堵驱动循环。
+                                    // 没有接收者（event_bridge 未启动）时 Err 直接忽略。
+                                    // P2-10：按 seq 去重（resync 已补过的事件不再重发）。
+                                    forward_event_dedup(frame, &event_tx, &last_seq);
                                 }
                                 Some("tick") => { /* tick 帧不处理 */ }
                                 Some("ping") => {
@@ -434,6 +464,123 @@ async fn drive_ws_loop<S, R>(
             .reply
             .send(Err(RpcError::internal("Python WS 已断开，调用未完成")));
     }
+}
+
+// ---------------------------------------------------------------------------
+// P2-10：断线重连 seq 对账（resync 补帧 + 去重）
+// ---------------------------------------------------------------------------
+
+/// 重连后对账：向新会话发 `events.resync(last_seq)`，把断线期间缺口事件按 seq
+/// 去重后重新经 `event_tx` 转发。任何失败（侧车不支持 / 超时 / 写失败）都安全
+/// 跳过，不阻塞后续 live 事件——绝不为了补帧把界面挂住。
+async fn resync_after_reconnect(
+    writer: &mut WsWriter,
+    reader: &mut WsReader,
+    event_tx: &broadcast::Sender<Value>,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    let current = last_seq.load(std::sync::atomic::Ordering::Acquire);
+    let req = json!({
+        "type": "req",
+        "id": RECONNECT_RESYNC_ID,
+        "method": "events.resync",
+        "params": { "last_seq": current },
+    });
+    if writer.send(Message::Text(req.to_string())).await.is_err() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match timeout(remaining, reader.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                let Ok(frame) = serde_json::from_str::<Value>(&t.to_string()) else {
+                    continue;
+                };
+                match frame.get("type").and_then(Value::as_str) {
+                    Some("res") | Some("result")
+                        if frame.get("id").and_then(Value::as_str) == Some(RECONNECT_RESYNC_ID) =>
+                    {
+                        if frame.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                            let payload = frame.get("payload").cloned().unwrap_or(Value::Null);
+                            forward_resync_payload(&payload, event_tx, last_seq);
+                        }
+                        // 无论 ok 与否，对账结束
+                        return;
+                    }
+                    Some("event") => {
+                        // 对账期间到达的 live 事件：去重后转发（可能与 replay 重叠）。
+                        forward_event_dedup(frame, event_tx, last_seq);
+                    }
+                    Some("ping") => {
+                        let _ = writer.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Some(Ok(Message::Ping(b)))) => {
+                let _ = writer.send(Message::Pong(b)).await;
+            }
+            // 关闭 / 错误 / 超时：放弃对账（交给下一轮重连）。
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => return,
+            Err(_) => return,
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+}
+
+const RECONNECT_RESYNC_ID: &str = "reconnect-resync";
+
+/// 转发 events.resync 回包里的事件帧；`to_seq` 用于在快照模式下把水位推进到快照点。
+fn forward_resync_payload(
+    payload: &Value,
+    event_tx: &broadcast::Sender<Value>,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    if let Some(events) = payload.get("events").and_then(Value::as_array) {
+        for ev in events {
+            forward_event_dedup(ev.clone(), event_tx, last_seq);
+        }
+    }
+    if let Some(to_seq) = payload.get("to_seq").and_then(Value::as_u64) {
+        last_seq.fetch_max(to_seq, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// 按 seq 去重后转发单个事件帧：seq 已转发过（≤ last_seq）则跳过；否则推进
+/// 水位并经 broadcast 同步发送（无接收者时 Err 忽略）。
+fn forward_event_dedup(
+    frame: Value,
+    event_tx: &broadcast::Sender<Value>,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
+        let prev = last_seq.load(std::sync::atomic::Ordering::Acquire);
+        if seq <= prev {
+            return; // 已在 resync 或上一轮转发过
+        }
+        last_seq.fetch_max(seq, std::sync::atomic::Ordering::AcqRel);
+    }
+    let _ = event_tx.send(frame);
+}
+
+/// 纯函数：从已排序事件中挑出 seq 严格大于 `last_seq` 的（保持原顺序）。
+/// 供单测钉住去重语义；无 seq 的帧（控制帧）一律保留。
+#[cfg(test)]
+fn filter_new_events(events: &[Value], last_seq: u64) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|ev| {
+            ev.get("seq")
+                .and_then(Value::as_u64)
+                .map(|s| s > last_seq)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -571,5 +718,109 @@ mod tests {
         assert!(apply_cancel(&mut pending, "c1"));
         assert!(!pending.contains_key("c1"));
         assert!(!apply_cancel(&mut pending, "missing"));
+    }
+
+    /// P1-8：事件洪峰 + 慢消费者不得阻塞发送方（broadcast 同步 send；落后丢最旧）。
+    ///
+    /// 旧实现 `event_tx.send(frame).await` 是 mpsc——event_bridge 一旦慢，
+    /// 整个 WS 驱动循环（req/res 都在同一个 select!）跟着停摆。这里钉住
+    /// 「洪峰瞬时入队 + 消费者恢复时 Lagged 自愈 + 拿到的是尾部新帧」三条。
+    #[tokio::test]
+    async fn event_flood_never_blocks_sender_and_drops_oldest() {
+        let (tx, mut rx) = broadcast::channel::<Value>(4);
+        // 消费者先取走一条，然后停住（模拟 event_bridge 慢）。
+        assert_eq!(tx.send(json!({"seq": 1})).unwrap(), 1);
+        // 洪峰：连续 send 必须全部同步返回（不 await、不阻塞驱动循环）。
+        let started = Instant::now();
+        for i in 2..=200 {
+            assert!(tx.send(json!({"seq": i})).is_ok(), "有接收者时 send 不应失败");
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "洪峰 200 条必须瞬时入队（broadcast 不阻塞发送方），实际 {:?}",
+            started.elapsed()
+        );
+        // 消费者恢复：第一条 recv 必须拿到 Lagged（最旧事件被丢），随后拿到新帧。
+        let lagged = rx.recv().await;
+        assert!(
+            matches!(lagged, Err(broadcast::error::RecvError::Lagged(_))),
+            "慢消费者恢复后第一条必须是 Lagged（丢最旧），实际 {lagged:?}"
+        );
+        let next = rx.recv().await.expect("恢复后应能继续收到新帧");
+        let seq = next["seq"].as_u64().unwrap();
+        assert!(seq > 100, "丢的是最旧，应拿到洪峰尾部的新帧，实际 seq={seq}");
+    }
+
+    // ----- P2-10：seq 去重纯函数 -----
+    #[test]
+    fn filter_new_events_keeps_only_seq_above_watermark() {
+        let events = vec![
+            json!({"seq": 1}),
+            json!({"seq": 2}),
+            json!({"seq": 3}),
+            json!({"seq": 4}),
+            json!({"control": "no-seq"}),
+        ];
+        let kept = filter_new_events(&events, 2);
+        let seqs: Vec<u64> = kept
+            .iter()
+            .filter_map(|e| e.get("seq").and_then(Value::as_u64))
+            .collect();
+        // seq>2 的是 3、4；无 seq 的控制帧保留。
+        assert_eq!(seqs, vec![3, 4]);
+        assert_eq!(kept.len(), 3);
+    }
+
+    // ----- P2-10：forward_event_dedup 去重 + 水位推进 -----
+    #[tokio::test]
+    async fn forward_event_dedup_skips_already_delivered_seq() {
+        let (tx, mut rx) = broadcast::channel::<Value>(16);
+        let last_seq = Arc::new(std::sync::atomic::AtomicU64::new(5));
+        // seq=5 已转发 → 跳过
+        forward_event_dedup(json!({"seq": 5, "type": "event"}), &tx, &last_seq);
+        // seq=8 新 → 转发，水位推进到 8
+        forward_event_dedup(json!({"seq": 8, "type": "event"}), &tx, &last_seq);
+        // seq=6 落后 → 跳过
+        forward_event_dedup(json!({"seq": 6, "type": "event"}), &tx, &last_seq);
+        let got = rx.recv().await.expect("应收到 seq=8");
+        assert_eq!(got["seq"].as_u64(), Some(8));
+        assert_eq!(
+            last_seq.load(std::sync::atomic::Ordering::Acquire),
+            8,
+            "水位应推进到 8"
+        );
+        // 无更多事件
+        assert!(timeout(Duration::from_millis(100), rx.recv()).await.is_err());
+    }
+
+    // ----- P2-10：forward_resync_payload 重放 + to_seq 推进 -----
+    #[tokio::test]
+    async fn forward_resync_payload_replays_and_advances_watermark() {
+        let (tx, mut rx) = broadcast::channel::<Value>(32);
+        let last_seq = Arc::new(std::sync::atomic::AtomicU64::new(10));
+        let payload = json!({
+            "resync_mode": "replay",
+            "to_seq": 13,
+            "events": [
+                {"seq": 11, "type": "event"},
+                {"seq": 12, "type": "event"},
+                {"seq": 10, "type": "event"} // 重复（≤水位），应去重
+            ],
+        });
+        forward_resync_payload(&payload, &tx, &last_seq);
+        let mut got_seqs = Vec::new();
+        for _ in 0..2 {
+            let ev = timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .expect("应收到两条去重后的事件")
+                .expect("event");
+            got_seqs.push(ev["seq"].as_u64().unwrap());
+        }
+        assert_eq!(got_seqs, vec![11, 12]);
+        assert_eq!(
+            last_seq.load(std::sync::atomic::Ordering::Acquire),
+            13,
+            "to_seq 应把水位推进到 13"
+        );
     }
 }

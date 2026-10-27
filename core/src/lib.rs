@@ -4,6 +4,7 @@
 
 pub mod agent;
 /// v3.4 PSI 意识引擎（Aris Brain）：量子认知循环 + 八维情感 + GWT 广播
+pub mod rules;
 pub mod aris_brain;
 pub mod audit_store;
 pub mod automation;

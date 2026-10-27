@@ -39,9 +39,13 @@ test.describe('Computer Use（/control/computer-use）', () => {
     await page.getByTestId('cu-action-cursor_pos').click()
     await page.getByTestId('cu-execute').click()
     const output = page.getByTestId('cu-output')
-    // 轮询到出现真实读数为止（坐标必然含数字；「执行中」与失败文案都不满足）
+    // 轮询到出现真实读数为止（坐标必然含数字；「执行中」与失败文案都不满足）。
+    // 75s 而非 30s：每个原生动作都是一次 PowerShell 5.1 + Add-Type，满负载
+    // （4 worker 的 WebGL 用例同跑）实测会超过网关 30s 的内部超时；若真超时，
+    // 输出会出现「失败」并被下面的断言判红 —— 延长等待只是不再把「慢」误判成
+    // 「测试轮询超时」，不会放过真实失败。
     await expect.poll(async () => (await output.textContent()) ?? '', {
-      timeout: 30000,
+      timeout: 75000,
       message: 'cursor_pos 未返回坐标读数',
     }).toMatch(/\d/)
     const text = (await output.textContent()) ?? ''

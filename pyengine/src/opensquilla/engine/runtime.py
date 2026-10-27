@@ -3077,6 +3077,11 @@ class TurnRunner:
         # Captured on first prompt assembly so bootstrap-source edits do not
         # churn the cacheable prefix mid-session.
         self._bootstrap_snapshots: dict[tuple[str, str, str], BootstrapSnapshot] = {}
+        # Last-seen capability-state snapshot for the built-in main agent, used
+        # to diff plugin/skill/MCP/setting changes turn-over-turn and surface
+        # them in the per-turn volatile prompt block. Process-local; resets on
+        # restart (first turn after restart has no previous baseline).
+        self._last_capability_state: dict | None = None
         self._compaction_failures: dict[str, _CompactionFailureState] = {}
         self._turn_compaction_attempted_sessions: set[str] = set()
         self._turn_compacted_sessions: set[str] = set()
@@ -7389,7 +7394,14 @@ class TurnRunner:
             if isinstance(base, str) and base:
                 cache_breakpoints = [{"text": base, "cache": "true"}]
         elif isinstance(final_prompt, tuple):
-            final_prompt = "\n\n".join(final_prompt)
+            # 即使没有显式 cache_control（`prompt_cache` 关闭，或 provider 只支持
+            # 隐式前缀缓存，如 DeepSeek / OpenAI），逐轮变化的动态块也**不能**拼进
+            # system。拼进 system 会让每条请求的 system 都不同，缓存只能命中到
+            # system 的稳定部分，整段历史每轮全 miss —— 真机表现就是「命中率低得
+            # 吓人」（约 10%）。拆开后动态块落在当前轮附近，历史前缀保持逐字节稳定。
+            base, dynamic = final_prompt
+            final_prompt = base
+            request_context_prompt = dynamic
 
         return final_prompt, cache_breakpoints, request_context_prompt
 

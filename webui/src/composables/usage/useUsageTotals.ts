@@ -5,6 +5,26 @@ import type { SessionRow, UsageTotals } from '@/types/usage'
 
 const t = i18n.global.t
 
+/**
+ * 会话/汇总级缓存命中率：`cache_read / (prompt_tokens + cache_read)`。
+ *
+ * 口径刻意只取台账里的 prompt 与 cache_read 两列，**不**读
+ * `cache.status.client_hit_rate`（那是进程级语义缓存采样，混算会得到假的
+ * 会话命中率）。分母为 0 或从未观测到 cache_read 时返回 null（显示「—」），
+ * 不拿 0% 冒充「真实命中 0」。
+ */
+export function cacheHitRate(inputTokens: number, cacheReadTokens: number): number | null {
+  const input = Number(inputTokens) || 0
+  const cached = Number(cacheReadTokens) || 0
+  const denominator = input + cached
+  if (!(denominator > 0) || !(cached > 0)) return null
+  return Math.round(Math.min(1, cached / denominator) * 100)
+}
+
+export function cacheHitRateDisplay(pct: number | null): string {
+  return pct == null ? '—' : `${pct}%`
+}
+
 export function useUsageTotals(options: {
   visibleSessions: ComputedRef<SessionRow[]>
   serverTotals?: ComputedRef<UsageTotals | null>
@@ -66,6 +86,21 @@ export function useUsageTotals(options: {
     if (t.cacheRead) parts.push({ label: i18n.global.t('usageLogs.tokenParts.cacheRead'), value: t.cacheRead.toLocaleString() })
     if (t.cacheWrite) parts.push({ label: i18n.global.t('usageLogs.tokenParts.cacheWrite'), value: t.cacheWrite.toLocaleString() })
     return parts
+  })
+
+  const cacheHitRatePct = computed(() => cacheHitRate(
+    usageTotals.value.input,
+    usageTotals.value.cacheRead,
+  ))
+
+  const cacheHitRateDisplayValue = computed(() => cacheHitRateDisplay(cacheHitRatePct.value))
+
+  const cacheHitRateHint = computed(() => {
+    if (cacheHitRatePct.value == null) return t('usageLogs.cache.hitRateUnavailable')
+    return t('usageLogs.cache.hitRateHint', {
+      cached: usageTotals.value.cacheRead.toLocaleString(),
+      prompt: usageTotals.value.input.toLocaleString(),
+    })
   })
 
   const nativeDisplay = computed(() => nativeBillingDisplay(
@@ -142,6 +177,9 @@ export function useUsageTotals(options: {
     usageTotals,
     totalTokensDisplay,
     tokensBreakdownParts,
+    cacheHitRatePct,
+    cacheHitRateDisplay: cacheHitRateDisplayValue,
+    cacheHitRateHint,
     totalCostDisplay,
     costHintText,
     costHintTitle,

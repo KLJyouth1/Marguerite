@@ -8,7 +8,7 @@ import { useRpcStore } from '@/stores/rpc'
  *  枚举（与 Rust `PetSkinId` / `PetMood` / `PetKind` / `PetAction` 对齐）
  *  ─────────────────────────────────────────────────────────────── */
 
-export const PET_SKIN_IDS = ['cat', 'blue', 'pink', 'purple', 'green'] as const
+export const PET_SKIN_IDS = ['cat', 'blue', 'pink', 'purple', 'green', 'princess'] as const
 export type PetSkinId = (typeof PET_SKIN_IDS)[number]
 
 export const PET_MOODS = ['normal', 'happy', 'sleepy', 'working', 'excited', 'sad'] as const
@@ -71,8 +71,8 @@ export interface TriggerActionResponse {
  *  契约守卫：运行时字段对称性断言（R5：字段漂移动态捕获）
  *  ─────────────────────────────────────────────────────────────── */
 
-/** 皮肤目录应正好 5 款（猫 + 4 精灵） */
-export const PET_EXPECTED_SKIN_COUNT = 5
+/** 皮肤目录应正好 6 款（猫 + 5 精灵，含「玛格丽特公主」） */
+export const PET_EXPECTED_SKIN_COUNT = 6
 
 /** 校验后端返回 `pet.status` 字段集合与 TS 契约对称；缺失则抛出，
  *  用于 R5 契约三同步门禁 & Playwright e2e 握手断言。 */

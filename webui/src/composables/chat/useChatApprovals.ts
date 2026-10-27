@@ -867,6 +867,17 @@ export function useChatApprovals(options: UseChatApprovalsOptions) {
     })
   }
 
+  /** 重新挂上在屏的审批帧（未裁决 + 已裁决的 outcome 行）。
+   *
+   * 实时快照会重置 live turn：审批不是流事件，不重挂就会「卡片/结果行凭空消失」
+   * （badge 仍显示 pending，用户却无从裁决）。fold 按 approvalId 去重，重复挂安全；
+   * 已裁决项依赖 `interruptState` 里的 resolution 渲染成折叠结果行。 */
+  function appendPendingInterrupts() {
+    for (const entry of approvalEntries.value) {
+      appendApprovalInterrupt(approvalItemToInterruptData(entry.approval))
+    }
+  }
+
   function handleToolResult(payload: ToolResultPayload) {
     if (!payload || typeof payload !== 'object') return
     if (!isCurrentSessionPayload(payload, sessionKey.value)) return
@@ -1082,6 +1093,7 @@ export function useChatApprovals(options: UseChatApprovalsOptions) {
     clarifyBusy,
     clarifyError,
     resolveApproval,
+    appendPendingInterrupts,
     resolveInterrupt,
     extendInterrupt,
     submitClarify,

@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { createPinia } from 'pinia'
 import i18n from '@/i18n'
 import ChatComposer from './ChatComposer.vue'
 
@@ -36,6 +37,7 @@ describe('ChatComposer AI disclaimer', () => {
       voiceRecording: false,
       voiceReady: true,
     })
+    app.use(createPinia())
     app.use(i18n)
     app.mount(el)
     await nextTick()

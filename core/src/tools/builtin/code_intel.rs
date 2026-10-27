@@ -4,10 +4,11 @@
 
 use super::*;
 
-pub(crate) fn code_intel_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn code_intel_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "code_intel",
-        "项目代码智能：增量索引 + 符号/文本混合检索。action: index(建索引)/symbols(按名查符号)/search(混合检索)。参数: action, query(可选), workspace(可选,缺省工作区根), max(可选)",
+        "项目代码智能：增量索引 + 符号/文本混合检索。action: index(建索引)/symbols(按名查符号)/search(混合检索)。参数: action, query(可选), workspace(可选,缺省主根), max(可选)",
         json!({"type":"object","properties":{
             "action":{"type":"string"},
             "query":{"type":"string"},
@@ -19,8 +20,8 @@ pub(crate) fn code_intel_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
             Box::pin(async move {
                 let action = args.get("action").map(|s| s.as_str()).unwrap_or("search");
                 let ws_path = match args.get("workspace").filter(|s| !s.trim().is_empty()) {
-                    Some(p) => safe_resolve(&ws, p)?,
-                    None => ws.clone(),
+                    Some(p) => ws.resolve(p)?,
+                    None => ws.primary().to_path_buf(),
                 };
                 let max: usize = args.get("max").and_then(|m| m.parse().ok()).unwrap_or(20);
                 let query = args.get("query").cloned().unwrap_or_default();

@@ -1,7 +1,11 @@
 <template>
   <div class="empty-state">
-    <p class="empty-state__greeting">{{ greeting }}</p>
-    <p class="empty-state__lead">{{ t('chat.emptyLead') }}</p>
+    <p v-if="showIntro" class="empty-state__greeting">{{ greeting }}</p>
+    <p v-if="agentName" class="empty-state__agent">
+      <span class="empty-state__agent-dot" aria-hidden="true"></span>
+      {{ t('chat.mainAgent') }} · {{ agentName }}
+    </p>
+    <p v-if="showIntro" class="empty-state__lead">{{ t('chat.emptyLead') }}</p>
     <ul class="empty-state__constellation" aria-hidden="true">
       <li v-for="node in orbitNodes" :key="node">{{ node }}</li>
     </ul>
@@ -21,13 +25,40 @@
         @click="emit('pick', chip.prompt)"
       >{{ chip.label }}</button>
     </div>
+    <!-- W8.4: reopen a recent project straight from the landing page. Data and
+         action reuse the shared project-workspace store (`workspaces.list` +
+         `workspaces.open`), so no new RPC surface is introduced here. -->
+    <div
+      v-if="!suppressed && recentWorkspaces.length > 0"
+      class="empty-state__recent"
+      role="group"
+      :aria-label="t('workspaces.recentTitle')"
+    >
+      <span class="empty-state__recent-label">{{ t('workspaces.recentTitle') }}</span>
+      <button
+        v-for="workspace in recentWorkspaces"
+        :key="workspace.id"
+        type="button"
+        class="empty-state__recent-chip"
+        :title="workspace.path"
+        :disabled="disabled || switchingWorkspaceId === workspace.id"
+        @click="selectRecentWorkspace(workspace)"
+      >{{ workspace.name }}</button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, getCurrentInstance, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRpcCall } from '@/composables/useRpc'
+import { useRpcStore } from '@/stores/rpc'
+import { useFreshTaskDraft } from '@/composables/useFreshTaskDraft'
+import {
+  sortWorkspacesByRecent,
+  useProjectWorkspaces,
+} from '@/composables/useProjectWorkspaces'
+import { useToasts } from '@/composables/useToasts'
 import { optionalSessionRpcCallOptions } from '@/composables/chat/sessionBootstrapAdmission'
 
 const { t } = useI18n()
@@ -38,18 +69,111 @@ interface CapabilityStatus {
   imageGenerationEnabled?: boolean
 }
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   agentId: string
+  /**
+   * 当前主智能体展示名（由 ChatView 注入）。
+   * 有意做成 prop 而非在本组件里读 `useAgentOptions()`：本组件是纯展示层，
+   * 一旦自己连 store，所有只挂载它的单测都必须补 Pinia 与 RPC mock——
+   * 这正是本次改动踩到的回归（4 个用例因 `getActivePinia()` 全红）。
+   */
+  agentName?: string
   suppressed?: boolean
   disabled?: boolean
+  /** 落地页 hero 已承担标题与副句时置 false，避免两段大标题互相竞争。 */
+  showIntro?: boolean
 }>(), {
+  agentName: '',
   suppressed: false,
   disabled: false,
+  showIntro: true,
 })
 
 const emit = defineEmits<{
   pick: [text: string]
 }>()
+
+// ---------------------------------------------------------------------------
+// W8.4 recent-workspace shortcut.
+//
+// Deliberately lazy and guarded: this component stays renderable without any
+// app context (its unit tests mount it standalone), so the store wiring is only
+// created when an app-level Pinia exists. Both calls reuse the shared project
+// workspace store — no new RPC methods — and ChatView already reacts to the
+// `freshTaskDraft` signal, so no prop/event plumbing is needed here.
+// ---------------------------------------------------------------------------
+const RECENT_WORKSPACE_LIMIT = 3
+const recentWorkspaces = ref<Array<{ id: string; name: string; path: string }>>([])
+const switchingWorkspaceId = ref('')
+
+// The guard checks the *mounted app's* installed Pinia (`app.use(pinia)`), not
+// the ambient active one: unit tests mount this component standalone and a
+// module-global active Pinia left by another suite must not make it warn about
+// a missing injection.
+const appPinia = getCurrentInstance()?.appContext.config.globalProperties.$pinia
+const workspaceApi = appPinia
+  ? (() => {
+      const rpc = useRpcStore()
+      const projectWorkspaces = useProjectWorkspaces()
+      const freshTaskDraft = useFreshTaskDraft()
+      const { pushToast } = useToasts()
+
+      async function load() {
+        // `canChooseProject` = local owner + `workspaces.list` + `workspaces.open`;
+        // without it the shortcut could not actually switch anywhere.
+        if (!rpc.canChooseProject || !rpc.supportsMethod('workspaces.list')) return
+        try {
+          const list = await projectWorkspaces.loadWorkspaces()
+          recentWorkspaces.value = sortWorkspacesByRecent(list).slice(0, RECENT_WORKSPACE_LIMIT)
+        } catch (err) {
+          // A failed list must not take the suggestion chips down with it; the
+          // project picker surfaces the actionable error.
+          console.warn('[EmptyStateChips] workspaces.list failed:', err)
+        }
+      }
+
+      async function select(workspace: { id: string; name: string; path: string }) {
+        if (switchingWorkspaceId.value) return
+        switchingWorkspaceId.value = workspace.id
+        try {
+          // Same "open project" path the palette and picker use; idempotent for
+          // an already-registered folder and records `last_opened_at`.
+          await projectWorkspaces.openWorkspace(workspace.path)
+          freshTaskDraft.requestFreshTask(props.agentId || 'main', workspace.id)
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err)
+          pushToast(t('shared.cmdp.workspaceSwitchFailed', { error: detail }), { tone: 'danger' })
+        } finally {
+          switchingWorkspaceId.value = ''
+        }
+      }
+
+      return { load, select, rpc }
+    })()
+  : null
+
+// The capability table arrives with the WS handshake; a landing mounted while
+// still "connecting" must pick the list up once the gateway is ready instead of
+// staying empty until the next navigation.
+if (workspaceApi) {
+  watch(
+    () => [workspaceApi.rpc.state, workspaceApi.rpc.canChooseProject] as const,
+    ([state, canChoose]) => {
+      if (state === 'connected' && canChoose && recentWorkspaces.value.length === 0) {
+        void workspaceApi.load()
+      }
+    },
+  )
+}
+
+function selectRecentWorkspace(workspace: { id: string; name: string; path: string }) {
+  if (!workspaceApi) return
+  void workspaceApi.select(workspace)
+}
+
+onMounted(() => {
+  if (workspaceApi) void workspaceApi.load()
+})
 
 interface SuggestionChip {
   label: string
@@ -93,6 +217,20 @@ const orbitNodes = computed(() => [
 ])
 
 const chips = computed(() => {
+  // 主智能体（`main` = 高级开发工程师「严工」）用专家包自带的三个入口，
+  // 而不是通用的「做个游戏 / 总结网页 / 规划一周」。
+  //
+  // 为什么：人设换了、落地页却在推荐写作/游戏任务，用户第一眼看到的引导与
+  // 智能体的实际专长不一致 —— 这是「专家包接进来了但没接完」。三条提示词
+  // 直接取自专家包 `quickPrompts`（与桌面端人设同源），措辞保持"你要干什么"
+  // 而不是"我能干什么"，让用户一点就进入该专家的工作模式。
+  if (props.agentId === 'main') {
+    return [
+      { label: t('chat.chips.diagnoseProject'), prompt: t('chat.chips.diagnoseProjectPrompt') },
+      { label: t('chat.chips.auditEdgeCases'), prompt: t('chat.chips.auditEdgeCasesPrompt') },
+      { label: t('chat.chips.researchFirst'), prompt: t('chat.chips.researchFirstPrompt') },
+    ]
+  }
   const status = capabilityStatus.data.value
   if (!status) return FALLBACK_CHIPS.value
   const derived: SuggestionChip[] = []
@@ -145,6 +283,26 @@ const chips = computed(() => {
   font-weight: 600;
   letter-spacing: var(--track-display);
   color: var(--text);
+}
+
+.empty-state__agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  animation: empty-state-greeting-reveal calc(var(--dur-base) * 2.5) var(--ease-out) both;
+  animation-delay: 30ms;
+}
+.empty-state__agent-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .empty-state__lead {
@@ -242,6 +400,59 @@ const chips = computed(() => {
 }
 
 .empty-state__chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* W8.4 recent projects: a quieter row than the suggestion chips — it is a
+   resume affordance, not the primary call to action. */
+.empty-state__recent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.empty-state__recent-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.empty-state__recent-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: var(--radius-full);
+  background: transparent;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.empty-state__recent-chip:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  color: var(--text);
+}
+
+.empty-state__recent-chip:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.empty-state__recent-chip:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }

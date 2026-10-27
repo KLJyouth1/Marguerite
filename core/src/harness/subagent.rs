@@ -283,15 +283,19 @@ pub struct IsolatedSpec {
 }
 
 impl IsolatedSpec {
-    /// 以任务与角色构造（默认 `General` / `Medium` / 120s）
+    /// 以任务与角色构造（路由 `General` / `Medium`，超时按任务体量自适应）
     pub fn new(task: impl Into<String>, role_prompt: impl Into<String>) -> Self {
+        let task = task.into();
+        // 不再一律 120s：同一个 120s 对「统计文件数」够用，对「实现一个模块并验证」
+        // 必然截断。按任务信号解析（Standard 档通常 30 分钟），仍受硬护栏约束。
+        let timeout = crate::agent::budget_policy::resolve(&task, 1, 0).run_timeout;
         Self {
-            task: task.into(),
+            task,
             context: String::new(),
             role_prompt: role_prompt.into(),
             intent: IntentType::General,
             complexity: Complexity::Medium,
-            timeout: Duration::from_secs(120),
+            timeout,
         }
     }
 

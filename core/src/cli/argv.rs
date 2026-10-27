@@ -133,6 +133,12 @@ const SUBCOMMAND_FLAGS_WITH_VALUE: &[&str] = &[
     "--targets",
     "--env",
     "--output",
+    // model tier/budget/ledger 的旗标（handler 自行解析；解析器必须透传，否则
+    // `marguerite model tier --effort deep` 会在 argv 层被误判为未知选项）。
+    "--effort",
+    "--tokens",
+    "--usd",
+    "--limit",
 ];
 
 /// 子命令后置旗标（布尔）：无值，仅透传给 handler。
@@ -144,6 +150,9 @@ const SUBCOMMAND_BOOL_FLAGS: &[&str] = &[
     "--add-panel",
     "--reflect",
     "--trellis",
+    // model deploy/ollama deploy 的「部署后立即激活」旗标（P2·A：与桌面
+    // models.local.deploy 的 activate 参数对齐，CLI 侧仅透传由 handler 消费）。
+    "--activate",
 ];
 
 fn subcommand_flag_with_value(flag: &str) -> bool {
@@ -579,6 +588,35 @@ mod tests {
         let dep = parse_args_with(&["marguerite", "deploy", "--target", "ssh://h", "--dry-run"]);
         assert_eq!(dep.sub_args, vec!["--target", "ssh://h", "--dry-run"]);
         assert!(dep.unknown_flags.is_empty());
+    }
+
+    #[test]
+    fn test_model_tier_budget_ledger_flags_pass_through() {
+        // 回归：这些旗标此前不在白名单，argv 层直接报「未知选项」，
+        // 导致 `model tier --effort` / `model budget --tokens` / `model ledger --limit` 全部不可用。
+        let t = parse_args_with(&["marguerite", "model", "tier", "flagship", "--effort", "deep"]);
+        assert_eq!(t.sub_args, vec!["tier", "flagship", "--effort", "deep"]);
+        assert!(t.unknown_flags.is_empty());
+
+        let b = parse_args_with(&["marguerite", "model", "budget", "--tokens", "1000", "--usd", "2.5"]);
+        assert_eq!(b.sub_args, vec!["budget", "--tokens", "1000", "--usd", "2.5"]);
+        assert!(b.unknown_flags.is_empty());
+
+        let l = parse_args_with(&["marguerite", "model", "ledger", "--limit", "5"]);
+        assert_eq!(l.sub_args, vec!["ledger", "--limit", "5"]);
+        assert!(l.unknown_flags.is_empty());
+
+        // P2·A：model deploy/ollama deploy 的 `--activate` 必须透传（布尔旗标，无值）
+        let d = parse_args_with(&["marguerite", "model", "deploy", "qwen3.8-27b", "--activate"]);
+        assert_eq!(d.sub_args, vec!["deploy", "qwen3.8-27b", "--activate"]);
+        assert!(d.unknown_flags.is_empty());
+        let o = parse_args_with(&["marguerite", "model", "ollama", "deploy", "qwen3:8b", "--activate"]);
+        assert_eq!(o.sub_args, vec!["ollama", "deploy", "qwen3:8b", "--activate"]);
+        assert!(o.unknown_flags.is_empty());
+        // 不带 --activate 时只透传位置参数
+        let dn = parse_args_with(&["marguerite", "model", "deploy", "qwen3.8-27b"]);
+        assert_eq!(dn.sub_args, vec!["deploy", "qwen3.8-27b"]);
+        assert!(dn.unknown_flags.is_empty());
     }
 
     #[test]

@@ -76,8 +76,11 @@ export interface HostExitEvidenceState {
   readonly payload: Ref<HostExitEvidencePayload | null>
   /** True while a fetch is in flight. */
   readonly loading: Ref<boolean>
-  /** True when a structured exit was recorded. */
+  /** True when a structured exit was recorded (memory OR on-disk history). */
   readonly hasEvidence: ComputedRef<boolean>
+  /** Where the evidence came from: `memory` = 本次运行观测到的退出；
+   *  `record` = 跨重启保留的历史记录。 */
+  readonly source: ComputedRef<'memory' | 'record' | null>
   /** True when a sidecar instance is currently registered — the exit card must
    *  NOT show a stale "exited" record while a healthy sidecar is running. */
   readonly sidecarPresent: ComputedRef<boolean>
@@ -127,6 +130,12 @@ function createHostExitEvidence(): HostExitEvidenceState {
   const stopWatch = watch(() => rpc.state, () => { void fetchEvidence() }, { flush: 'post' })
 
   const hasEvidence = computed(() => payload.value?.exited === true)
+  // 证据来源决定「它是不是此刻的故障」：
+  // - `memory`：本次进程内观测到的退出 → 是当前事实；
+  // - `record`：落盘的历史记录（跨重启保留）→ 只说明"以前退出过"。
+  // 真机现象（2026-10-23）：一进应用就弹出「宿主进程已退出，存活 56m 21s」，
+  // 那 56 分钟是**上一次运行**的存活时长，属于历史记录被当成当前状态渲染。
+  const source = computed<'memory' | 'record' | null>(() => payload.value?.source ?? null)
   // `exited` is a diagnostic RECORD ("it exited once"); `sidecar_present` is the
   // LIVE fact ("a sidecar is registered right now"). The card keys its
   // visibility off both so a transient exit that has since been healed — the
@@ -159,6 +168,7 @@ function createHostExitEvidence(): HostExitEvidenceState {
     payload,
     loading,
     hasEvidence,
+    source,
     sidecarPresent,
     exitCode,
     uptimeMs,

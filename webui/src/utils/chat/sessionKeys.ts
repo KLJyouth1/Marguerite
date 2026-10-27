@@ -30,3 +30,12 @@ export function canonicalSessionKey(key: string): string {
   if (value.startsWith('sess-')) return 'agent:main:webchat:' + value.slice('sess-'.length)
   return value
 }
+
+/**
+ * Side-chat sessions are real gateway sessions but belong to the right-side panel,
+ * not the main task list. Hide exactly the generated `agent:<id>:webchat:side-*`
+ * shape so a side conversation cannot pollute recents or steal the running badge.
+ */
+export function isSideChatSessionKey(key: unknown): boolean {
+  return typeof key === 'string' && /^agent:[^:]+:webchat:side-[A-Za-z0-9_-]+$/.test(key)
+}

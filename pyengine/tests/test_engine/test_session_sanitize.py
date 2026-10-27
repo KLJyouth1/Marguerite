@@ -1657,7 +1657,12 @@ def test_turn_runner_keeps_dynamic_prompt_out_of_system_when_cache_enabled() -> 
     assert request_context_prompt == "<memory_context>volatile recall</memory_context>"
 
 
-def test_turn_runner_preserves_joined_system_prompt_when_cache_disabled() -> None:
+def test_turn_runner_splits_dynamic_prompt_without_explicit_cache_mode() -> None:
+    """无显式 cache_control 时也必须把动态块移出 system。
+
+    否则每轮 system 都不同，隐式前缀缓存（DeepSeek/OpenAI）只能命中 system 的
+    稳定部分，历史全 miss —— 真机「缓存命中率低得吓人」的根因之一。
+    """
     from opensquilla.engine.runtime import TurnRunner
 
     runner = TurnRunner.__new__(TurnRunner)
@@ -1668,9 +1673,9 @@ def test_turn_runner_preserves_joined_system_prompt_when_cache_disabled() -> Non
 
     final_prompt, cache_breakpoints, request_context_prompt = runner._resolve_prompt_config(turn)
 
-    assert final_prompt == "stable base\n\n<memory_context>volatile recall</memory_context>"
+    assert final_prompt == "stable base"
     assert cache_breakpoints is None
-    assert request_context_prompt is None
+    assert request_context_prompt == "<memory_context>volatile recall</memory_context>"
 
 
 def test_agent_adjusts_request_context_indexes_after_compaction() -> None:

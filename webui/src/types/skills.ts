@@ -98,6 +98,9 @@ export interface Skill {
   provider_check_at_launch?: boolean
   layer?: string
   kind?: string
+  origin?: 'directory' | 'plugin'
+  plugin?: string
+  enabled?: boolean
   sub_skills?: string[]
   triggers?: string[]
   missing_bins?: string[]

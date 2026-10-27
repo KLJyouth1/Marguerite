@@ -57,6 +57,15 @@
             </button>
           </div>
         </section>
+        <!-- 与对话页同口径：设置页能选 safe，对话页也必须显示 safe（待安装），
+             不能一边可选、一边静默回退成完全访问。 -->
+        <p
+          v-if="defaultRunMode === 'safe' && capability?.isolation === 'not_bundled'"
+          class="sandbox-settings__note"
+          data-testid="sandbox-safe-pending-note"
+        >
+          {{ t('settings.sandbox.safeMode.pendingSettingsNote') }}
+        </p>
         <p
           v-if="sandboxSetupOutcomeMessage"
           class="sandbox-setup-result"

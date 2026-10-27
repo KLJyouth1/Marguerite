@@ -2,29 +2,30 @@
   <div class="control-stage editor-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">内置工作区编辑器</h1>
-        <p class="control-stage__subtitle">文件树 + 多标签文本编辑（workspace.file.read / write + sandbox.path.list）</p>
+        <h1 class="control-stage__title">{{ t('workspaceEditor.title') }}</h1>
+        <p class="control-stage__subtitle">{{ t('workspaceEditor.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
         <button class="btn btn--ghost" :disabled="busy" @click="loadTree(treePath)">
-          <Icon name="refresh" :size="16" /><span>刷新</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('workspaceEditor.refresh') }}</span>
         </button>
         <button class="btn btn--primary" :disabled="busy || tabs.every(t => !t.dirty)" @click="saveAll">
-          <Icon name="save" :size="16" /><span>保存全部</span>
+          <Icon name="save" :size="16" /><span>{{ t('workspaceEditor.saveAll') }}</span>
         </button>
       </div>
     </header>
 
-    <section v-if="error" class="editor-error">{{ error }}</section>
+    <!-- 统一错误态组件（含重试） -->
+    <ErrorState v-if="error" :message="error" :on-retry="() => loadTree(treePath)" />
 
     <div class="editor-layout">
       <!-- 文件树 -->
       <aside class="editor-tree">
         <div class="editor-tree__toolbar">
-          <button class="btn btn--sm btn--ghost" :disabled="treeStack.length === 0" @click="goUp">上级</button>
-          <span class="editor-tree__path">{{ treePath || '工作区根' }}</span>
+          <button class="btn btn--sm btn--ghost" :disabled="treeStack.length === 0" @click="goUp">{{ t('workspaceEditor.up') }}</button>
+          <span class="editor-tree__path">{{ treePath || t('workspaceEditor.root') }}</span>
         </div>
-        <div v-if="treeLoading" class="editor-empty">加载中…</div>
+        <div v-if="treeLoading" class="editor-empty">{{ t('workspaceEditor.loading') }}</div>
         <ul v-else class="editor-tree__list">
           <li v-for="e in treeEntries" :key="e.path" class="editor-tree__item">
             <button class="editor-tree__row" :class="{ 'editor-tree__row--file': e.kind === 'file' }" @click="onEntry(e)">
@@ -34,14 +35,14 @@
             </button>
           </li>
         </ul>
-        <div v-if="!treeLoading && treeEntries.length === 0" class="editor-empty">（空目录）</div>
+        <div v-if="!treeLoading && treeEntries.length === 0" class="editor-empty">{{ t('workspaceEditor.emptyDir') }}</div>
       </aside>
 
       <!-- 多标签编辑器 -->
       <section class="editor-main">
         <div v-if="tabs.length === 0" class="editor-empty editor-empty--big">
           <Icon name="fileText" :size="34" />
-          <p>从左侧文件树打开文件开始编辑（多标签）</p>
+          <p>{{ t('workspaceEditor.openHint') }}</p>
         </div>
         <template v-else>
           <div class="editor-tabs">
@@ -64,8 +65,8 @@
           ></textarea>
           <div class="editor-status">
             <span>{{ activePath }}</span>
-            <span>{{ activeLines }} 行 · {{ activeContent.length }} 字符</span>
-            <button class="btn btn--sm btn--primary" :disabled="busy || !activeDirty" @click="saveTab(activePath)">保存</button>
+            <span>{{ t('workspaceEditor.status', { lines: activeLines, chars: activeContent.length }) }}</span>
+            <button class="btn btn--sm btn--primary" :disabled="busy || !activeDirty" @click="saveTab(activePath)">{{ t('common.save') }}</button>
           </div>
         </template>
       </section>
@@ -74,11 +75,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
+import ErrorState from '@/components/ErrorState.vue'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 
+const { t } = useI18n()
+
 const rpc = useRpcStore()
+const route = useRoute()
 
 interface TreeEntry { path: string; name: string; kind: 'file' | 'directory'; hidden?: boolean }
 interface ReadResult { ok: boolean; path?: string; content?: string; bytes?: number; error?: string }
@@ -88,6 +95,7 @@ interface EditorTab { path: string; name: string; content: string; dirty: boolea
 const error = ref('')
 const busy = ref(false)
 const treePath = ref('')
+const treeRoot = ref('')
 const treeEntries = ref<TreeEntry[]>([])
 const treeStack = ref<string[]>([])
 const treeLoading = ref(false)
@@ -106,6 +114,9 @@ async function loadTree(path: string) {
   treeLoading.value = true
   error.value = ''
   try {
+    // 冷加载竞态守卫：WS 仍处于 connecting 时先等连接就绪，避免把「未就绪」
+    // 当成加载失败，把 `not connected (state: connecting)` 裸串渲染给用户。
+    if (!rpc.isConnected) await rpc.waitForConnection(10_000)
     const res = await rpc.call<{ entries: TreeEntry[] }>('sandbox.path.list', { path })
     treeEntries.value = (res.entries || []).filter(e => !e.hidden)
     treePath.value = path
@@ -136,9 +147,12 @@ async function openFile(path: string) {
   busy.value = true
   error.value = ''
   try {
-    const r = await rpc.call<ReadResult>('workspace.file.read', { path })
-    if (!r.ok) { error.value = r.error ?? '读取失败'; return }
-    tabs.value.push({ path, name: path.split(/[\/]/).pop() || path, content: r.content ?? '', dirty: false })
+    // 快速打开来自一个已绑定项目：读写都必须带上同一个 projectPath，
+    // 否则后端会按应用数据目录解析，把项目内文件判成「路径超出工作区」。
+    const params = treeRoot.value ? { path, projectPath: treeRoot.value } : { path }
+    const r = await rpc.call<ReadResult>('workspace.file.read', params)
+    if (!r.ok) { error.value = r.error ?? t('workspaceEditor.readFailed'); return }
+    tabs.value.push({ path, name: path.split(/[\\/]/).pop() || path, content: r.content ?? '', dirty: false })
     activePath.value = path
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -148,8 +162,8 @@ async function openFile(path: string) {
 }
 
 function markDirty() {
-  const t = activeTab.value
-  if (t) t.dirty = true
+  const tab = activeTab.value
+  if (tab) tab.dirty = true
 }
 
 function isOpen(path: string) {
@@ -166,13 +180,16 @@ function closeTab(path: string) {
 }
 
 async function saveTab(path: string) {
-  const t = tabs.value.find(x => x.path === path)
-  if (!t) return
+  // 变量名刻意不用单字母 t：它会**遮蔽** useI18n 的 t，使下面那句 i18n 调用
+  // 变成「调用标签页对象」而在运行时炸掉（i18n 改造时极易踩到）。
+  const tab = tabs.value.find(x => x.path === path)
+  if (!tab) return
   busy.value = true
   try {
-    const r = await rpc.call<WriteResult>('workspace.file.write', { path, content: t.content })
-    if (r.ok) t.dirty = false
-    else error.value = r.error ?? '保存失败'
+    const params = treeRoot.value ? { path, content: tab.content, projectPath: treeRoot.value } : { path, content: tab.content }
+    const r = await rpc.call<WriteResult>('workspace.file.write', params)
+    if (r.ok) tab.dirty = false
+    else error.value = r.error ?? t('workspaceEditor.saveFailed')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -186,12 +203,73 @@ async function saveAll() {
   }
 }
 
-onMounted(() => loadTree(''))
+/**
+ * Absolute-looking path on either platform: `/unix/...`, `C:\...`, `C:/...` or
+ * a UNC `\\host\share`. Relative names are ignored so a hand-edited query can
+ * never make the editor read a path relative to the gateway's CWD.
+ */
+function looksAbsolutePath(path: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(path)
+}
+
+/** Containing directory, preserving the root itself (`/`, `C:\`). */
+function directoryOf(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  if (cut < 0) return ''
+  if (cut === 0) return trimmed.slice(0, 1)
+  const head = trimmed.slice(0, cut)
+  // A drive designator must keep its separator (`C:` → `C:\`), otherwise the
+  // gateway resolves it as "current directory on drive C".
+  return /^[A-Za-z]:$/.test(head) ? trimmed.slice(0, cut + 1) : head
+}
+
+/** 快速打开的深链：定位目录 + 打开文件；路径不合法时原样交给调用方回落。 */
+async function openPathFromQuery(raw: unknown, rawRoot?: unknown): Promise<boolean> {
+  const queryPath = typeof raw === 'string' ? raw.trim() : ''
+  if (!queryPath || !looksAbsolutePath(queryPath)) return false
+  const queryRoot = typeof rawRoot === 'string' ? rawRoot.trim() : ''
+  if (queryRoot && looksAbsolutePath(queryRoot)) treeRoot.value = queryRoot
+  const directory = directoryOf(queryPath)
+  treePath.value = directory
+  await loadTree(directory)
+  await openFile(queryPath)
+  return true
+}
+
+// 已经在 /editor 上再次快速打开另一个文件时，路由不会重挂载本视图，所以查询参数
+// 的变化必须自己接住；只响应 `?path=`，其余查询变化一概忽略。
+watch(
+  () => route.query.path,
+  (next) => {
+    if (next) void openPathFromQuery(next, route.query.root)
+  },
+)
+
+onMounted(async () => {
+  const queryRoot = typeof route.query.root === 'string' ? route.query.root.trim() : ''
+  const hasQueryRoot = !!queryRoot && looksAbsolutePath(queryRoot)
+  if (hasQueryRoot) treeRoot.value = queryRoot
+  else {
+    // 文件树以**工作区根**为起点，而不是平台根（HOME）：`workspace.file.read/write`
+    // 只接受工作区内的路径（越界读写会泄露 `~/.ssh` 与网关 token）。若此处仍从 HOME
+    // 起浏览，用户会看到一棵「能点但不能打开」的树。
+    try {
+      const s = await rpc.call<{ root?: string }>('workspace.status', {})
+      treeRoot.value = String(s.root || '')
+    } catch { /* 取不到根时退回平台根，只影响初始浏览位置 */ }
+  }
+
+  // 快速打开（Ctrl/⌘+P）的深链：`?path=<绝对文件路径>` 先把文件树定位到其所在
+  // 目录，再把该文件打开成标签页。没有该查询参数时保持原来的「工作区根」落地行为。
+  if (await openPathFromQuery(route.query.path, route.query.root)) return
+
+  void loadTree(treeRoot.value)
+})
 </script>
 
 <style scoped>
 .editor-stage { padding: 24px 28px; max-width: 1400px; margin: 0 auto; }
-.editor-error { margin: 12px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
 .editor-layout { display: grid; grid-template-columns: 280px 1fr; gap: 14px; margin-top: 16px; align-items: start; }
 .editor-tree { background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 10px; max-height: 74vh; overflow: auto; }
 .editor-tree__toolbar { display: flex; gap: 8px; align-items: center; padding-bottom: 8px; border-bottom: 1px solid var(--hairline); }

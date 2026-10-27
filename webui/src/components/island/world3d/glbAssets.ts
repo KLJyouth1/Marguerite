@@ -19,9 +19,15 @@
  *
  * ── 为什么 URL 解析与 useBgm.musicAssetUrl 同构 ────────────────────────
  * GLB 走 webui/public/ 静态资产目录（与 music/、pets/ 同模式），Vite 原样复制
- * 进 dist：DEV 直接取 /island3d/<file>；PROD 由网关从 <basePath>/static/dist/
+ * 进 dist：DEV 直接取 /island3d/<file>；PROD 由网关从 <basePath>/static/
  * 提供（basePath 取 #Marguerite-data 的 dataset.basePath）。两处保持一致，
  * 避免出现「音乐能放、模型 404」这类环境差异坑。
+ *
+ * ⚠ 2026-10-17 实测修正：网关的静态根是 `<basePath>/static/`，它**已指向 dist/**。
+ * 旧实现拼成 `<basePath>/static/dist/island3d/...`，网关会回落 SPA 的
+ * index.html（200 + text/html）→ GLTFLoader 解析失败 → 岛屿 HUD 恒显示
+ * 「资产：校验失败」。去掉多余的 `dist/` 后 `/control/static/island3d/
+ * code_crystal.glb` 返回真实 GLB（application/octet-stream）。
  */
 
 import manifestJson from './assets/manifest.json'
@@ -73,8 +79,9 @@ const DEFAULT_BASE_PATH = '/control'
  * 把 manifest 的登记名（`./<kind>.glb` 或裸名）解析成可 fetch 的真实 URL。
  *
  * - DEV：Vite 把 public/ 挂在站点根 → `/island3d/<file>`；
- * - PROD：打包 UI 由网关从 `<basePath>/static/dist/island3d/<file>` 提供，
+ * - PROD：打包 UI 由网关从 `<basePath>/static/island3d/<file>` 提供，
  *   basePath 取 #Marguerite-data 的 dataset.basePath（缺省 `/control`）；
+ *   （网关的 `/static/` 已映射到 dist 根，不再拼 `dist/`——见文件头实测修正。）
  * - node 测试环境无 document → 安全回退默认 basePath，绝不因缺 DOM 崩溃。
  */
 export function resolveGlbUrl(relOrName: string): string {
@@ -86,7 +93,7 @@ export function resolveGlbUrl(relOrName: string): string {
     typeof document !== 'undefined'
       ? document.getElementById('Marguerite-data')?.dataset.basePath || DEFAULT_BASE_PATH
       : DEFAULT_BASE_PATH
-  return `${base.replace(/\/$/, '')}/static/dist/${ISLAND_GLB_DIR}/${file}`
+  return `${base.replace(/\/$/, '')}/static/${ISLAND_GLB_DIR}/${file}`
 }
 
 // ───────────────────────── 登记 + 加载 ─────────────────────────

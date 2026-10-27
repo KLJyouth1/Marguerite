@@ -323,6 +323,23 @@ async fn run_tool_loop_for_strategy(
                 ToolResult::Error { message, code } => format!("[工具错误 {code}] {message}"),
                 ToolResult::Timeout { tool_name, .. } => format!("[工具超时] {tool_name}"),
             };
+            // E12：工具输出**真正进入模型上下文**的点就在这里（下面的 `Message::Tool`）。
+            // 本路径不发 ToolCall/ToolResult 事件（网关事件桥看不到），只能在入历史处
+            // 自记：按「入参 + 完整输出」计入上下文台账。正因不发事件，不存在与事件桥
+            // 重复计数的可能。
+            let ledger_session = crate::usage::SESSION
+                .try_with(|s| s.clone())
+                .ok()
+                .filter(|s| !s.is_empty());
+            if let Some(sess) = &ledger_session {
+                crate::context::session::record_tool_output_at_context(
+                    sess,
+                    tc.id.as_deref(),
+                    &tc.name,
+                    &output,
+                );
+                crate::context::session::record_tool_output(sess, &tc.name, &tc.arguments);
+            }
             // P2-10/T14：该路径未按单工具计时（多策略聚合），诚实置 None。
             messages.push(Message::Tool {
                 name: tc.name.clone(),

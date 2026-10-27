@@ -19,7 +19,9 @@ from pathlib import Path
 import pytest
 
 from opensquilla.router_runtime_diagnostics import (
+    REPAIRABLE_ROUTER_DEGRADATIONS,
     ROUTER_ASSETS_MISSING,
+    ROUTER_PYTHON_DEPENDENCY_MISSING,
     ROUTER_WEIGHTS_NOT_FETCHED,
     classify_router_runtime_error,
     router_runtime_hint,
@@ -42,18 +44,36 @@ def _make_unavailable_classifier(tmp_path):
 
 
 class _RecordingLog:
-    """Minimal structlog stand-in that records ``(event, kwargs)`` pairs."""
+    """Minimal structlog stand-in that records ``(event, kwargs)`` pairs.
+
+    2026-10-22：增加 ``levels`` —— 只记 event 名无法断言"可一条命令修复的降级
+    不该记 error"。启动日志的 ERROR 计数是用户判断"系统是否坏了"的主要信号，
+    所以级别本身就是契约的一部分，必须可测。
+    """
 
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
+        self.levels: list[str] = []
 
     def _record(self, event: str, **kwargs) -> None:
         self.events.append((event, kwargs))
+        self.levels.append(self._level)
 
-    error = _record
-    warning = _record
-    info = _record
-    debug = _record
+    def error(self, event: str, **kwargs) -> None:
+        self._level = "error"
+        self._record(event, **kwargs)
+
+    def warning(self, event: str, **kwargs) -> None:
+        self._level = "warning"
+        self._record(event, **kwargs)
+
+    def info(self, event: str, **kwargs) -> None:
+        self._level = "info"
+        self._record(event, **kwargs)
+
+    def debug(self, event: str, **kwargs) -> None:
+        self._level = "debug"
+        self._record(event, **kwargs)
 
     @property
     def names(self) -> list[str]:
@@ -199,6 +219,73 @@ def test_weights_not_fetched_logs_a_distinct_event(tmp_path, monkeypatch):
     assert recorder.names == ["v4_phase3.weights_not_fetched"], recorder.names
     assert strategy.status()["errorKind"] == ROUTER_WEIGHTS_NOT_FETCHED
     assert strategy.status()["available"] is False
+
+
+def test_repairable_degradations_are_not_logged_as_errors():
+    """「一条命令可修」的降级必须记 warning，不能记 error。
+
+    真实场景（2026-10-22 实测安装版启动日志）：
+
+        [ERROR] opensquilla.squilla_router.v4_phase3: v4_phase3.init_failed
+                error="No module named 'lightgbm'" ...
+        [WARNING] OpenSquilla router fallback active: ...
+                OpenSquilla can still run with safe router fallback ...
+
+    同一次启动里，ERROR 行说"初始化失败"，紧跟着的 WARNING 行说"仍可正常运行" ——
+    自相矛盾，用户只记住那 12 条 ERROR。而 ``RouterBundleDegraded`` 的 docstring
+    早已写明 ML 路由是可选增强、规则路由仍服务每一轮。
+
+    判据：``REPAIRABLE_ROUTER_DEGRADATIONS`` 里的种类 → warning；
+    其余（真损坏，如 bundle 布局缺失）→ 仍 error。
+    """
+
+    assert ROUTER_WEIGHTS_NOT_FETCHED in REPAIRABLE_ROUTER_DEGRADATIONS
+    assert ROUTER_PYTHON_DEPENDENCY_MISSING in REPAIRABLE_ROUTER_DEGRADATIONS
+    # 真损坏必须留在外面，否则会把"安装坏了"也降级成 warning
+    assert ROUTER_ASSETS_MISSING not in REPAIRABLE_ROUTER_DEGRADATIONS
+
+
+def test_python_dependency_missing_logs_deps_missing_warning(tmp_path, monkeypatch):
+    """``lightgbm`` 缺失 → event=deps_missing、级别=warning（而非 init_failed/error）。"""
+
+    recorder = _RecordingLog()
+    monkeypatch.setattr(v4mod, "log", recorder)
+
+    bundle = tmp_path / "bundle"
+    _write_bundle(bundle, {"lgbm_main.bin": b"not-a-real-model"})
+
+    # 让 _init_runtime 抛出 ImportError，走 classify → router_python_dependency_missing
+    def _raise_import_error(*_a, **_kw):
+        raise ImportError("No module named 'lightgbm'")
+
+    monkeypatch.setattr(V4Phase3Strategy, "_init_runtime", _raise_import_error)
+    strategy = V4Phase3Strategy(bundle_dir=bundle)
+
+    assert strategy.status()["errorKind"] == ROUTER_PYTHON_DEPENDENCY_MISSING
+    assert recorder.names == ["v4_phase3.deps_missing"], recorder.names
+    assert recorder.levels == ["warning"], recorder.levels
+    # 提示必须告诉用户怎么修（否则 warning 也只是噪音）
+    assert "recommended" in recorder.events[0][1]["hint"]
+
+
+def test_unrepairable_failure_still_logs_error(tmp_path, monkeypatch):
+    """真损坏（bundle 布局缺失）必须仍是 init_failed + error —— 不许被"降噪"带走。"""
+
+    recorder = _RecordingLog()
+    monkeypatch.setattr(v4mod, "log", recorder)
+
+    def _raise_runtime(*_a, **_kw):
+        raise RuntimeError("bundle layout is missing")
+
+    monkeypatch.setattr(V4Phase3Strategy, "_init_runtime", _raise_runtime)
+    V4Phase3Strategy(bundle_dir=tmp_path / "whatever")
+
+    # 分类结果取决于 classify_router_runtime_error；关键是它不能落进可修复集合
+    from opensquilla.router_runtime_diagnostics import REPAIRABLE_ROUTER_DEGRADATIONS
+
+    kind = recorder.events[0][1]["runtime_error_kind"]
+    assert kind not in REPAIRABLE_ROUTER_DEGRADATIONS
+    assert recorder.levels == ["error"], recorder.levels
 
 
 def test_status_surfaces_kind_and_hint(tmp_path):

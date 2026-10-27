@@ -6,7 +6,7 @@
 //! - 非交互路径（CLI 脚本/无确认通道）默认拒绝
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 风险等级
@@ -267,6 +267,69 @@ impl Default for ApprovalGate {
         };
         Self::new(timeout)
     }
+}
+
+// ───────────────────────── agent 工具回路专用审批门 ─────────────────────────
+//
+// 缺陷形态（P0-4）：链式执行器（`chain::executor`）在步骤分发前走
+// [`crate::mode::ModeManager::gate`] + `ApprovalGate`，但**智能体工具回路**
+// （`agent::tool_cycle::dispatch_cached` → `execute_tool_internal`）此前只有
+// 「Plan 模式硬拒」一道门，没有任何审批 —— 同一条聊天回合里，模型调 `shell_exec`
+// 删目录、调 `delete_file_permanent` 永久删文件、调桌面控制驱动本机 UI，
+// 都不会弹确认卡，直接执行。这不是「能力子集」，是同一产品内两条执行路径的安全
+// 口径不一致。
+//
+// 为什么用进程级单门而不是把 gate 塞进 `ToolCycle`：`ToolCycle` 是通用基础设施，
+// 有 6+ 处纯注册表构造点（runtime / stream_loop / subagent / multi_strategy），
+// 全都要传 gate 会改动面过大；而审批门本身就该是进程级「同一时刻一个挂起项」的语义。
+
+static AGENT_GATE: OnceLock<Arc<ApprovalGate>> = OnceLock::new();
+/// 宿主是否已领养 agent 回路审批门（见 [`install_agent_gate`]）。
+static AGENT_GATE_ADOPTED: AtomicBool = AtomicBool::new(false);
+
+/// agent 工具回路的进程级审批门（懒构造；宿主可用 [`install_agent_gate`] 替换）。
+pub fn agent_gate() -> Arc<ApprovalGate> {
+    AGENT_GATE
+        .get_or_init(|| {
+            // 测试进程内若真等到 60s 审批超时，会让同进程的其它用例被拖慢；
+            // 生产路径仍走配置的审批超时（`guard.approval_timeout_secs`，默认 60s）。
+            #[cfg(test)]
+            let gate = Arc::new(ApprovalGate::new(Duration::from_millis(10)));
+            #[cfg(not(test))]
+            let gate = Arc::new(ApprovalGate::default());
+            gate
+        })
+        .clone()
+}
+
+/// 宿主领养：把自己的 gate 交给 agent 回路使用，使挂起的审批与宿主的裁决通道
+/// 是**同一个门**（否则宿主拿到 approval_id 也裁不掉，只能等到超时）。
+///
+/// 首次调用生效（幂等）；后到者被忽略（返回 `false`），避免多宿主互相覆盖。
+/// TUI 的 `UiEffect::ResolveApproval` 走 `state.gate.resolve(id, …)`，故 TUI 必须在
+/// 启动时领养，否则智能体主链抬起的审批在 TUI 里无法裁决。
+pub fn install_agent_gate(gate: Arc<ApprovalGate>) -> bool {
+    let installed = AGENT_GATE.set(gate).is_ok();
+    // 测试进程里没有真实宿主终端（不会有人按「允许」），若跟着点亮「宿主在场」，
+    // 同进程内后续用例的高危工具调用就会白等一个审批超时（默认 60s）。
+    if installed && !cfg!(test) {
+        AGENT_GATE_ADOPTED.store(true, Ordering::SeqCst);
+    }
+    installed
+}
+
+/// agent 回路此刻是否存在**可裁决**该挂起项的宿主。
+///
+/// - 网关（WebUI / GUI 控制台）启动时经 `events::set_global_bus` 注册全局事件总线，
+///   控制台每 2s 轮询 `/api/approvals`（同一 `approval_registry`）→ 有；
+/// - TUI 经 [`install_agent_gate`] 领养同一门，内联审批框可裁决 → 有；
+/// - CLI 脚本 / 未启动宿主的库调用 / 单元测试：**没有人能裁决** → 没有。
+///
+/// 没有宿主时必须立即按拒绝处理（[`ApprovalGate::outcome`] 的非交互语义），
+/// 而不是让工具循环白等一个 60s 超时 —— 那对命令行用户就是「卡住一分钟」。
+/// 与 CLI 既有的「非交互 → 写命令 fail-closed」约定同口径。
+pub fn agent_approval_host_present() -> bool {
+    AGENT_GATE_ADOPTED.load(Ordering::SeqCst) || crate::events::global_bus().is_some()
 }
 
 #[cfg(test)]

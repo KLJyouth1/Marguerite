@@ -70,6 +70,10 @@ class AgentTaskStatus(StrEnum):
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
     ABANDONED = "abandoned"
+    # P2-9: a turn hard-aborted because an env-driven turn budget
+    # (steps / wall-clock / tokens) was reached. Distinct from TIMEOUT, which
+    # is a generic deadline; this carries a structured budget breach.
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 class InputProvenanceKind(StrEnum):

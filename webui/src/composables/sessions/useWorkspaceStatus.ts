@@ -20,6 +20,19 @@ import { useRpcStore } from '@/stores/rpc'
 /** Mirrors `WorkspaceSource::as_str()` in `core/src/workspace.rs`. */
 export type WorkspaceSourceKind = 'bound' | 'app_data' | 'process_cwd' | 'missing'
 
+/**
+ * 只读 Git 摘要（`core/src/workspace.rs::git_summary`）。
+ *
+ * 后端不执行 `git` 进程，只读 `.git/HEAD` 与 `refs`，因此这里**没有** dirty /
+ * ahead/behind 之类的状态 —— 不臆造，UI 只展示后端真实解析出的字段。
+ */
+export interface WorkspaceGitSummary {
+  branch: string | null
+  detached: boolean
+  branches: string[]
+  gitDir?: string
+}
+
 export interface WorkspaceStatus {
   ok: boolean
   root: string
@@ -27,6 +40,8 @@ export interface WorkspaceStatus {
   bound: boolean
   /** The exact system-prompt fragment the model receives for this root. */
   guidance: string
+  /** 非 Git 仓库时后端回传 `null`。 */
+  git?: WorkspaceGitSummary | null
 }
 
 export function useWorkspaceStatus() {

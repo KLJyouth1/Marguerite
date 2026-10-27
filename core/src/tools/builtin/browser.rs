@@ -62,9 +62,10 @@ pub(crate) fn js_string(s: &str) -> String {
 }
 
 pub(crate) fn browser_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     vision_cap: Option<Arc<VisionCapability>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "browser",
         "浏览器自动化（真实 Chromium，CDP）：Agent 可控有状态会话。双通道操控——视觉= screenshot（截图观察）/ vision（截图→视觉模型描述）/ vision_click（截图→VLM 定位坐标→真实点击）；非视觉= open/text/links/html（DOM 读取）+ a11y（无障碍语义快照：role/name/ref）+ click_ref（按 ref 语义点击）/ evaluate/click/type/scroll（DOM 操控）。relay=连接用户真实 Chrome（--remote-debugging-port，复用登录态/cookies）。参数: action(必填), url, js, selector, text, ref(a11y ref), hint(视觉定位目标描述), browser_id(复用会话), out(截图路径), max_chars, max(链接数), wait_ms, px, port(relay 调试端口,默认9222)。不传 browser_id 时每次新建会话。",
@@ -110,6 +111,13 @@ pub(crate) fn browser_tool(
                         browser_sessions().lock().await.remove(bid);
                     }
                     return ok("浏览器会话已关闭".into());
+                }
+
+                // 用户接管闸门（browser.control.set owner=user）：
+                // 「接管」必须是互斥的，否则用户点到一半就被智能体下一步带走。
+                // close / wait 不受限（收尾与等待不改变页面状态）。
+                if let Some(reason) = crate::browser::control::agent_block_reason() {
+                    return err(reason, "USER_IN_CONTROL");
                 }
 
                 // 需要页面的动作：一次性会话必须有 url（复用会话可不传）

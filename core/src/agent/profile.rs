@@ -241,6 +241,105 @@ pub fn apply_auto_profile(agent_id: &str, history: &[Message]) -> Result<Persona
     agent_store::update(&json!({ "id": agent_id, "system_prompt": sp })).map(|_| persona)
 }
 
+// ── 用户画像注入（此前只有 RPC 展示，从未真正注入对话）──────────────
+//
+// 诊断（2026-10-18）：`agent.profile.auto` 只把画像算出来返回给前端，聊天链路
+// 里**没有任何地方消费它**；而 ExpertCenterView 却写着「经 persona 注入主智能体」。
+// 这是「能跑但假的」典型：UI 承诺了一个不存在的链路。
+//
+// 修法不是删文案，而是把链路补真——但要守住两条边界：
+// 1. **只用 user 消息**：把 assistant 的措辞算进「用户是谁」会系统性偏移；
+// 2. **低置信度不注入**：样本不足或角色落回中性默认时不注入，宁可不猜也不误导。
+
+/// 用户画像注入的最小样本量（低于此数一律不注入）。
+pub const USER_PROFILE_MIN_SOURCES: usize = 20;
+
+/// 画像缓存有效期：画像由词法统计得出，无需每轮重算；5 分钟粒度同时保证
+/// 系统提示在窗口内**逐字节稳定**（避免每轮 prompt 前缀缓存全灭）。
+const PROFILE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+type ProfileCache = std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>;
+
+fn profile_cache() -> &'static ProfileCache {
+    static C: std::sync::OnceLock<ProfileCache> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 取（带缓存的）用户画像提示片段；不需要注入时返回 `None`。
+///
+/// 供 `gateway::chat::agent_personality_hint` 在**每一条**对话路径上调用
+/// （计划路径 / 编排路径 / 直连引擎路径共用同一入口，避免只修一条路径）。
+pub fn cached_user_profile_hint() -> Option<String> {
+    {
+        let guard = profile_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, cached)) = guard.as_ref() {
+            if at.elapsed() < PROFILE_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh = compute_user_profile_hint();
+    let mut guard = profile_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// 清空画像缓存（测试用：避免用例之间互相看到对方的上下文台账）。
+#[cfg(test)]
+pub fn reset_profile_cache_for_test() {
+    *profile_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn compute_user_profile_hint() -> Option<String> {
+    let mut user_messages: Vec<Message> = Vec::new();
+    for cs in crate::context::session::context_sessions()
+        .into_iter()
+        .take(20)
+    {
+        for entry in crate::context::session::context_entries(&cs.session)
+            .into_iter()
+            .take(20)
+        {
+            if entry.role != "user" {
+                continue;
+            }
+            if entry.text.trim().is_empty() {
+                continue;
+            }
+            user_messages.push(Message {
+                role: Role::User,
+                content: entry.text,
+                meta: None,
+            });
+        }
+    }
+    if user_messages.len() < USER_PROFILE_MIN_SOURCES {
+        return None;
+    }
+    render_profile_hint(&user_messages)
+}
+
+/// 纯函数：由 user 消息渲染画像提示（样本不足或角色中性时返回 `None`）。
+///
+/// 抽成纯函数是为了让「不注入」的边界可被单测直接钉住——此前这段逻辑只存在于
+/// RPC 展示层，没有任何断言守着「样本不足就不该注入」。
+fn render_profile_hint(user_messages: &[Message]) -> Option<String> {
+    if user_messages.len() < USER_PROFILE_MIN_SOURCES {
+        return None;
+    }
+    let persona = auto_profile(user_messages);
+    if persona.role == DEFAULT_ROLE || persona.expertise.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "用户画像（由历史对话确定性抽取，仅用于适配表达，不要主动复述或据此下判断）：\
+         角色倾向 {}；表达风格 {}；常用专长 {}。据此调整术语深度与举例，不必点明你在用画像。",
+        persona.role,
+        persona.tone,
+        persona.expertise.join("、")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +517,51 @@ mod tests {
         let h = vec![msg(Role::Assistant, "写代码 rust")];
         let err = apply_auto_profile("definitely-not-real-xyz", &h).unwrap_err();
         assert_eq!(err, "agent.not_found");
+    }
+
+    // ── 用户画像注入：低置信度必须「不注入」 ──────────────────────────
+
+    /// 样本不足（< USER_PROFILE_MIN_SOURCES）时绝不注入——宁可不懂你，也不误导。
+    #[test]
+    fn profile_hint_skipped_below_min_sources() {
+        let h: Vec<Message> = (0..USER_PROFILE_MIN_SOURCES - 1)
+            .map(|_| msg(Role::User, "写个 rust 函数并部署到后端"))
+            .collect();
+        assert!(
+            render_profile_hint(&h).is_none(),
+            "样本 {} < {} 时不得注入",
+            h.len(),
+            USER_PROFILE_MIN_SOURCES
+        );
+    }
+
+    /// 样本够但角色落回中性默认（无任何角色信号）时同样不注入。
+    #[test]
+    fn profile_hint_skipped_when_role_is_neutral() {
+        let h: Vec<Message> = (0..USER_PROFILE_MIN_SOURCES)
+            .map(|_| msg(Role::User, "嗯"))
+            .collect();
+        assert!(render_profile_hint(&h).is_none(), "中性角色不得注入");
+    }
+
+    /// 高置信度时注入，且内容包含角色与专长、并明确「不要复述画像」。
+    #[test]
+    fn profile_hint_injected_when_confident() {
+        let h: Vec<Message> = (0..USER_PROFILE_MIN_SOURCES)
+            .map(|_| msg(Role::User, "这个 rust 后端函数编译不过，帮我重构并加单测"))
+            .collect();
+        let hint = render_profile_hint(&h).expect("高置信度应注入");
+        assert!(hint.contains("工程师"), "实际：{hint}");
+        assert!(hint.contains("Rust"), "实际：{hint}");
+        assert!(hint.contains("不要主动复述"), "必须禁止复述画像：{hint}");
+    }
+
+    /// 缓存命中：同一次调用两次得到逐字节相同的文本（保证 prompt 前缀缓存不被抖掉）。
+    #[test]
+    fn profile_hint_cache_is_byte_stable() {
+        reset_profile_cache_for_test();
+        let a = cached_user_profile_hint();
+        let b = cached_user_profile_hint();
+        assert_eq!(a, b, "缓存窗口内两次调用必须逐字节一致");
     }
 }

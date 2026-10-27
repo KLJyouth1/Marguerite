@@ -16,7 +16,6 @@ use serde_json::json;
 
 use crate::agent::tool_cycle::ToolResult;
 use crate::proc::SilentCommand;
-use crate::tools::fs_path::safe_resolve;
 
 /// git 调用输出
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +156,7 @@ impl GitRunner for RecordingGitRunner {
 
 /// 解析工具参数，约束仓库路径在工作区内，返回 (subcommand, repo_root, extra)。
 fn resolve_invocation(
-    workspace: &Path,
+    workspace: &crate::tools::fs_path::RootSet,
     args: &HashMap<String, String>,
 ) -> Result<(String, PathBuf, Vec<String>)> {
     let subcommand = args
@@ -166,11 +165,12 @@ fn resolve_invocation(
         .cloned()
         .ok_or_else(|| anyhow!("缺少必填参数 op（git 子命令）"))?;
 
-    // 仓库根：相对工作区的路径经 safe_resolve 约束，缺省用工作区本身。
+    // 仓库根：相对路径可命中任一登记根（多根会话），缺省用主根。
     let repo = match args.get("path").or_else(|| args.get("repo")) {
-        Some(p) if !p.is_empty() => safe_resolve(workspace, p)
+        Some(p) if !p.is_empty() => workspace
+            .resolve(p)
             .with_context(|| format!("仓库路径解析失败（可能越界工作区）: {}", p))?,
-        _ => workspace.to_path_buf(),
+        _ => workspace.primary().to_path_buf(),
     };
 
     // 额外参数：以空白切分（git 参数无需 shell 解析，安全）。
@@ -193,9 +193,10 @@ fn resolve_invocation(
 
 /// 构造一个 `tool.git` 工具实例（注册进 ToolRegistry 用）。
 pub fn git_tool(
-    workspace: PathBuf,
+    workspace: impl Into<crate::tools::fs_path::RootSet>,
     runner: Arc<dyn GitRunner>,
 ) -> Box<dyn crate::mcp::registry::ToolExecutor> {
+    let workspace: crate::tools::fs_path::RootSet = workspace.into();
     let name = "git";
     let description = "版本控制：在限定工作区内执行白名单内的 git 子命令（status/diff/add/commit/log/branch/checkout/push/pull/clone/blame/init/worktree 等）。worktree 用于为并行子任务创建隔离工作树（git worktree add <path> <branch>）。";
     let schema = json!({
@@ -317,7 +318,7 @@ mod tests {
     /// commit 多词消息必须保持为**单个** argv 元素，不能被空白切散。
     #[test]
     fn commit_message_kept_as_single_argv_element() {
-        let ws = PathBuf::from("/work");
+        let ws = crate::tools::fs_path::RootSet::single(PathBuf::from("/work"));
         let mut args = HashMap::new();
         args.insert("op".to_string(), "commit".to_string());
         args.insert("message".to_string(), "fix: multi word message".to_string());
@@ -332,7 +333,7 @@ mod tests {
     /// 非 commit 子命令不注入 -m。
     #[test]
     fn non_commit_ignores_message() {
-        let ws = PathBuf::from("/work");
+        let ws = crate::tools::fs_path::RootSet::single(PathBuf::from("/work"));
         let mut args = HashMap::new();
         args.insert("op".to_string(), "status".to_string());
         args.insert("message".to_string(), "ignored".to_string());
@@ -378,12 +379,12 @@ mod tests {
 
     #[test]
     fn resolve_invocation_defaults_repo_to_workspace() {
-        let ws = PathBuf::from("/work");
+        let ws = crate::tools::fs_path::RootSet::single(PathBuf::from("/work"));
         let mut args = HashMap::new();
         args.insert("op".to_string(), "log".to_string());
         let (op, repo, extra) = resolve_invocation(&ws, &args).unwrap();
         assert_eq!(op, "log");
-        assert_eq!(repo, ws);
+        assert_eq!(repo, ws.primary().to_path_buf());
         assert!(extra.is_empty());
     }
 }

@@ -53,6 +53,16 @@ async fn p1_rm_rf_denied() {
     assert!(r.stderr.contains("rm"));
 }
 
+/// F-05 回归：cwd canonicalize 失败必须拒绝（不能回退原始路径比较）。
+#[test]
+fn p_cwd_canonicalize_failure_is_denied() {
+    let ws = std::env::temp_dir();
+    let ghost = ws.join("mgt_ghost_cwd_f05_should_not_exist");
+    let _ = std::fs::remove_dir_all(&ghost);
+    assert!(!super::validate_cwd(&ghost, &ws), "不存在的 cwd 必须拒绝");
+    assert!(super::validate_cwd(&ws, &ws), "工作区自身必须放行");
+}
+
 #[tokio::test]
 async fn p2_relative_rm_denied() {
     // ./rm 伪装 → basename=rm → Deny

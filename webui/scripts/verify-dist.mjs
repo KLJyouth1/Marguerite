@@ -58,7 +58,28 @@ const normalizedTextSuffixes = new Set([
 const ignoredSourceFileNames = new Set(['.DS_Store'])
 const forbiddenArtifactFileNames = new Set(['.ds_store', '.npmrc'])
 const forbiddenArtifactSuffixes = new Set(['.key', '.pem'])
-const officialMusicFiles = new Set(['music/README.md', 'music/playlist.json'])
+// Whitelisted official music assets. The four CC0 ambient tracks ship from
+// public/music/ and land in dist/music/; anything else under music/ in an
+// official build is still a personal/copyrighted upload and must be rejected.
+// Keep this platform-independent and mirrored in the Python verifier.
+const officialMusicFiles = new Set([
+  'music/README.md',
+  'music/playlist.json',
+  'music/dusk-pad.mp3',
+  'music/neon-arp.mp3',
+  'music/lofi-drift.mp3',
+  'music/focus-pulse.mp3',
+])
+// Whitelisted official boot/splash media. The splash ships ONE original CC0
+// program-synthesized track (`boot/boot.mp3`, copied from public/music).
+// The personal-use Hero footage (bg.mp4) and hero.mp3 are copyrighted, live
+// only on the author's machine outside the repo, and must never appear in an
+// official artifact; the splash degrades to the token-tinted aurora without them.
+const officialBootFiles = new Set(['boot/boot.mp3'])
+// Explicit copyrighted personal filenames that are unconditionally banned from
+// any shipped artifact (kept independent of the forbidPersonalBgm flag so a
+// regular build cannot quietly ship them).
+const bannedBootFiles = new Set(['boot/bg.mp4', 'boot/hero.mp3'])
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
@@ -243,6 +264,16 @@ export function verifyDist(
       `Web UI artifact contains forbidden metadata or sensitive files: ${forbidden.join(', ')}`,
     )
   }
+  // Unconditional hard ban: known copyrighted personal boot media must never ship
+  // (independent of the forbidPersonalBgm flag so a normal build cannot include them).
+  const bannedBoot = actualRecords
+    .map((record) => record.path)
+    .filter((path) => bannedBootFiles.has(path))
+  if (bannedBoot.length > 0) {
+    throw new Error(
+      `Copyrighted personal boot media must not be shipped: ${bannedBoot.join(', ')}`,
+    )
+  }
   const actual = JSON.stringify(actualRecords)
   if (actual !== expected) {
     throw new Error(
@@ -256,6 +287,16 @@ export function verifyDist(
     if (personalBgm.length > 0) {
       throw new Error(
         `Personal BGM content is forbidden in official Web UI artifacts: ${personalBgm.join(', ')}`,
+      )
+    }
+    // Release gate: only the CC0 boot.mp3 is allowed under boot/; any other
+    // personal video/audio (bg.mp4/hero.mp3/unknown uploads) is rejected.
+    const nonOfficialBoot = actualRecords
+      .map((record) => record.path)
+      .filter((path) => path.startsWith('boot/') && !officialBootFiles.has(path))
+    if (nonOfficialBoot.length > 0) {
+      throw new Error(
+        `Only boot/boot.mp3 (CC0) may ship under boot/; personal media forbidden: ${nonOfficialBoot.join(', ')}`,
       )
     }
     const playlistPath = resolve(root, 'music/playlist.json')
@@ -272,11 +313,27 @@ export function verifyDist(
         playlist === null ||
         typeof playlist !== 'object' ||
         Array.isArray(playlist) ||
-        !Array.isArray(playlist.tracks) ||
-        playlist.tracks.length !== 0
+        !Array.isArray(playlist.tracks)
       ) {
         throw new Error(
-          'Official music/playlist.json must keep its tracks list empty; use playlist.local.json only for private builds.',
+          'Official music/playlist.json must expose an object with a tracks array.',
+        )
+      }
+      // Each track src must be either an https:// stream (remote, not shipped)
+      // or one of the whitelisted CC0 files copied from public/music/. Any
+      // other relative filename is a personal/copyrighted upload — banned.
+      const badTracks = playlist.tracks
+        .map((track, index) => {
+          const src = typeof track === 'object' && track !== null ? track.src : undefined
+          if (typeof src !== 'string' || src.length === 0) return `track[${index}] missing src`
+          if (/^https?:\/\//i.test(src)) return null
+          const rel = src.replace(/^\.\//, '')
+          return officialMusicFiles.has(`music/${rel}`) ? null : `track[${index}]: ${src}`
+        })
+        .filter((entry) => entry !== null)
+      if (badTracks.length > 0) {
+        throw new Error(
+          `Official music/playlist.json tracks must use https:// streams or whitelisted CC0 files only (private local audio belongs in playlist.local.json): ${badTracks.join('; ')}`,
         )
       }
     }

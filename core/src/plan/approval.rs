@@ -6,6 +6,17 @@
 //!
 //! 纯逻辑状态机，离线可测；与 plan/mod.rs 的 PlanRun 状态机（queued→running）互补——
 //! 本模块是「执行前的人工审批闸门」，PlanRun 是「审批通过后的执行推进」。
+//!
+//! # 接线点（读这段再改代码）
+//!
+//! 本状态机由 [`crate::plan::runner::run_autonomous`] 的**计划审批闸门**驱动，
+//! 且仅在 `plan.require_approval = true` 时生效（默认 false：复杂任务拆解后直接执行，
+//! 即「长续航自主执行」这一产品主张）。闸门走的是**通用裁决面**
+//! （`guard::approval_registry` + 控制台轮询的 `/api/approvals`），因此控制台的审批
+//! 卡片无需任何新 UI 即可裁决计划审批；未批准时 runner **不启动运行实例**（fail-closed）。
+//!
+//! ⚠️ 在此之前本状态机**零调用点**：模块文档写着「审批闭环」，而执行链路上根本没有
+//! 审批。新增/调整计划执行路径时，务必确认这里仍被真实调用点驱动。
 
 use anyhow::{anyhow, Result};
 

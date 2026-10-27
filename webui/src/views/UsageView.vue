@@ -43,7 +43,14 @@
       :cost-hint-title="costHintTitle"
       :session-count="sessionCountDisplay"
       :avg-cost="avgCostDisplay"
+      :cache-hit-rate="cacheHitRateDisplay"
+      :cache-hit-rate-hint="cacheHitRateHint"
     />
+
+    <HeatGrid :points="heatmapPoints" :state="heatmapState" />
+
+    <!-- 三档模型分层 + 成本台账：与 CLI/TUI/桌面同源的档位与预算展示 -->
+    <TierLedgerPanel />
 
     <UsageChart
       v-model:chart-mode="chartMode"
@@ -106,13 +113,18 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import UsageSummaryStats from '@/components/usage/UsageSummaryStats.vue'
+import HeatGrid from '@/components/usage/HeatGrid.vue'
 import UsageChart from '@/components/usage/UsageChart.vue'
 import UsageModelCards from '@/components/usage/UsageModelCards.vue'
 import UsageSessionsTable from '@/components/usage/UsageSessionsTable.vue'
+import TaskCostPanel from '@/components/settings/TaskCostPanel.vue'
+import RecentActivityPanel from '@/components/settings/RecentActivityPanel.vue'
+import TierLedgerPanel from '@/components/settings/TierLedgerPanel.vue'
 import Icon from '@/components/Icon.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import { useUsageData } from '@/composables/usage/useUsageData'
+import { useToasts } from '@/composables/useToasts'
 
 const { t } = useI18n()
 
@@ -130,6 +142,8 @@ const {
   rangeHiddenHint,
   totalTokensDisplay,
   tokensBreakdownParts,
+  cacheHitRateDisplay,
+  cacheHitRateHint,
   totalCostDisplay,
   costHintText,
   costHintTitle,
@@ -137,6 +151,9 @@ const {
   avgCostDisplay,
   chartCaption,
   chartRows,
+  heatmapPoints,
+  heatmapState,
+  loadHeatmap,
   modelCards,
   modelsMeta,
   sortedRows,
@@ -168,12 +185,15 @@ const {
 
 // Manual refresh shows a busy state; loadData (also the poll/mount handler) now
 // returns the refresh promise, so a local flag spans just the user-driven load.
+const { pushToast } = useToasts()
 const refreshing = ref(false)
 async function refresh() {
   if (refreshing.value) return
   refreshing.value = true
   try {
-    await loadData()
+    await Promise.all([loadData(), loadHeatmap(true)])
+    // P3-3：按钮只变「刷新中」缺少终态反馈，用户无法区分「点到了」和「点空了」。
+    if (!usageError.value) pushToast('用量数据已刷新', { tone: 'ok' })
   } finally {
     refreshing.value = false
   }

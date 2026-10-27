@@ -32,6 +32,12 @@ pub struct FileChange {
     pub tool: String,
     /// unix 秒级时间戳
     pub ts: i64,
+    /// 归属会话 key（与 task-local `SESSION` 对齐；空串表示上下文不可用）
+    ///
+    /// 交付回执要回答「这一回合改了什么」，而旧台账只有时间窗可用 ——
+    /// 同一时间窗内两个会话并发跑工具时无法区分。这里记录真实会话键，
+    /// 让 `list_file_changes_for` 能按会话精确归因，而不是猜。
+    pub session_key: String,
 }
 
 #[derive(Default)]
@@ -49,25 +55,103 @@ fn ledger() -> &'static Mutex<Ledger> {
 }
 
 /// 记录一次文件变更（幂等追加，超上限淘汰最旧）。
+///
+/// 会话键取 task-local `SESSION`（网关回合、子代理、计划步骤都会 scope），
+/// 上下文不可用时记空串 —— 与 [`record_artifact`] 同一条回退规则，
+/// 绝不把一个不知道归属的改动塞进某个会话。
 pub fn record_file_change(path: &str, kind: &str, before: &str, after: &str, tool: &str) {
-    let mut l = ledger().lock().unwrap_or_else(|e| e.into_inner());
-    l.changes.push_back(FileChange {
-        path: path.to_string(),
-        kind: kind.to_string(),
-        before: before.to_string(),
-        after: after.to_string(),
-        tool: tool.to_string(),
-        ts: chrono::Utc::now().timestamp(),
-    });
-    while l.changes.len() > MAX_CHANGES {
-        l.changes.pop_front();
-    }
+    let session = crate::usage::SESSION
+        .try_with(|s| s.clone())
+        .unwrap_or_default();
+    record_file_change_for(&session, path, kind, before, after, tool);
 }
 
-/// 列出最近 `limit` 条变更（最新在前）。
+/// 记录一次文件变更并显式指定会话（测试 / 明确已知归属的调用方）。
+pub fn record_file_change_for(
+    session: &str,
+    path: &str,
+    kind: &str,
+    before: &str,
+    after: &str,
+    tool: &str,
+) {
+    let ts = chrono::Utc::now().timestamp();
+    {
+        let mut l = ledger().lock().unwrap_or_else(|e| e.into_inner());
+        l.changes.push_back(FileChange {
+            path: path.to_string(),
+            kind: kind.to_string(),
+            before: before.to_string(),
+            after: after.to_string(),
+            tool: tool.to_string(),
+            ts,
+            session_key: session.to_string(),
+        });
+        while l.changes.len() > MAX_CHANGES {
+            l.changes.pop_front();
+        }
+    }
+    // 写穿落盘：内存台账重启即失，而没有落盘就没有「回看历史改动」可言。
+    // IO 失败不阻断工具（改文件本身已成功），由 activity_store 内部吞掉错误。
+    crate::persistence::activity_store::persist_file_change(
+        &crate::persistence::activity_store::FileChangeRow {
+            session: session.to_string(),
+            path: path.to_string(),
+            kind: kind.to_string(),
+            tool: tool.to_string(),
+            ts,
+            before: before.to_string(),
+            after: after.to_string(),
+        },
+    );
+}
+
+/// 列出最近 `limit` 条变更（最新在前，不区分会话）。
 pub fn list_file_changes(limit: usize) -> Vec<FileChange> {
     let l = ledger().lock().unwrap_or_else(|e| e.into_inner());
     l.changes.iter().rev().take(limit).cloned().collect()
+}
+
+/// 列出指定会话最近 `limit` 条变更（最新在前）。
+///
+/// `session` 为空时返回空集：宁可显示「没有归因数据」，也不把别的会话的
+/// 改动算到这次交付头上。
+pub fn list_file_changes_for(session: &str, limit: usize) -> Vec<FileChange> {
+    if session.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut merged: Vec<FileChange> = {
+        let l = ledger().lock().unwrap_or_else(|e| e.into_inner());
+        l.changes
+            .iter()
+            .rev()
+            .filter(|c| c.session_key == session)
+            .take(limit)
+            .cloned()
+            .collect()
+    };
+    // 合并落盘历史：daemon 重启后内存为空，磁盘是唯一来源。
+    // 去重键 = (ts, path, kind)，避免同一条既在内存又被读回。
+    for row in crate::persistence::activity_store::load_file_changes(session, limit) {
+        if merged
+            .iter()
+            .any(|m| m.ts == row.ts && m.path == row.path && m.kind == row.kind)
+        {
+            continue;
+        }
+        merged.push(FileChange {
+            path: row.path,
+            kind: row.kind,
+            before: row.before,
+            after: row.after,
+            tool: row.tool,
+            ts: row.ts,
+            session_key: row.session,
+        });
+    }
+    merged.sort_by_key(|c| std::cmp::Reverse(c.ts));
+    merged.truncate(limit);
+    merged
 }
 
 /// 清空台账（测试辅助）。
@@ -338,6 +422,33 @@ pub fn list_artifacts(
     // 倒序：最新在前
     items.sort_by_key(|a| std::cmp::Reverse(a.ts));
     // 游标：取 ts 严格小于 cursor 的后续（避免与上一页末条重复）
+    if let Some(c) = cursor {
+        items.retain(|a| a.ts < c as i64);
+    }
+    let limit = limit.max(1);
+    let has_more = items.len() > limit;
+    let page: Vec<ArtifactEntry> = items.into_iter().take(limit).collect();
+    let next_cursor = if has_more {
+        page.last().map(|a| a.ts)
+    } else {
+        None
+    };
+    (page, has_more, next_cursor)
+}
+
+/// 跨会话列出产物（「我的文件」聚合面的数据源）：合并全部会话桶后按时间倒序。
+///
+/// 与 [`list_artifacts`] 的区别只在于不按 session 过滤；分页语义完全一致
+/// （游标取上一页末条 ts，严格小于它），这样前端两处可以共用同一套翻页逻辑。
+pub fn list_all_artifacts(
+    cursor: Option<u64>,
+    limit: usize,
+) -> (Vec<ArtifactEntry>, bool, Option<i64>) {
+    let mut items: Vec<ArtifactEntry> = {
+        let l = artifact_ledger().lock().unwrap_or_else(|e| e.into_inner());
+        l.by_session.values().flatten().cloned().collect()
+    };
+    items.sort_by_key(|a| std::cmp::Reverse(a.ts));
     if let Some(c) = cursor {
         items.retain(|a| a.ts < c as i64);
     }

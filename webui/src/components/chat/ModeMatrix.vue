@@ -15,6 +15,7 @@
 // mode.working.*），不再硬编码中文 —— 英文界面曾整块漏中文。
 import { computed } from 'vue'
 import { useActiveMode } from '@/composables/useActiveMode'
+import { useToasts } from '@/composables/useToasts'
 import { useI18n } from 'vue-i18n'
 import {
   USER_MODE_META,
@@ -25,6 +26,7 @@ import {
 import {
   userModeHint,
   userModeIntensityLabel,
+  userModeLabel,
   userModeWorkingLabel,
 } from '@/utils/userModeText'
 
@@ -40,6 +42,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const { activeUserMode, switching, switchError, switchUserMode } = useActiveMode()
+const { pushToast } = useToasts()
 
 const busy = computed(() => props.disabled === true || switching.value)
 
@@ -51,7 +54,19 @@ function cell(intensity: string, working: string): UserModeInfo | null {
 }
 
 async function pick(key: string) {
-  if (key && key !== currentKey.value) await switchUserMode(key)
+  if (key && key !== currentKey.value) {
+    const result = await switchUserMode(key)
+    // 后端 `from_user_mode` 对「咨询 / 方案」两列不区分强度（只按工作态派生执行档），
+    // 所以极简 / 极致点下去会落回标准格位。沉默地弹回 = 用户以为「点了没反应」，
+    // 这里明说一次：选了哪个、实际按哪个跑。
+    const applied = result?.userMode?.key
+    if (applied && applied !== key) {
+      pushToast(t('mode.intensityCollapsed', {
+        picked: userModeLabel(key),
+        applied: userModeLabel(applied),
+      }), { tone: 'info', duration: 8000 })
+    }
+  }
   emit('picked')
 }
 </script>

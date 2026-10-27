@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Marguerite</title>
+<!--
+  启动页（本地自包含）。
+  为什么需要它：主窗口初始 URL 若直接指向 http://localhost:18790/control/，
+  网关还没起来时 WebView2 会先渲染自己的「无法连接到 127.0.0.1」错误页 —— 用户
+  第一眼看到的是内部实现细节，而不是产品。现在初始 URL 是本文件（随包内嵌），
+  网关就绪后由 Rust 侧 `win.navigate(control_url())` 接管跳转。
+
+  硬约束：
+  · 不依赖任何外部资源（内联 CSS/JS；媒体只引 /splash/ 下的随包资产）；
+  · 不等 JS 才出画面：视频 poster 用首帧色块兜底，弱机也能立刻看到东西；
+  · 不主动 fetch 网关：CSP 的 connect-src 不含 http://127.0.0.1:18790，
+    探测交给 Rust（它不受 CSP 限制），本页只负责「好看地等」与人工兜底入口。
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0712;
+    --ink: #f6f2ff;
+    --dim: #a99cc4;
+    --accent: #b388ff;
+    --accent-2: #ff7ad9;
+    --line: rgba(179, 136, 255, 0.16);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  #bg {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; opacity: .42; filter: saturate(1.15) contrast(1.05);
+  }
+  /* 视频未解码时也先有底色，避免白/黑闪一下 */
+  #stage::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(1200px 700px at 50% 18%, rgba(179, 136, 255, .22), transparent 62%),
+      radial-gradient(900px 600px at 78% 88%, rgba(255, 122, 217, .16), transparent 60%),
+      linear-gradient(160deg, #0b0712, #120a1e 55%, #0a0611);
+  }
+  #veil {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(60% 50% at 50% 42%, transparent 0%, rgba(11, 7, 18, .55) 70%, rgba(11, 7, 18, .92) 100%);
+  }
+  .panel {
+    position: relative; z-index: 2; width: min(86vw, 520px);
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 34px 30px 28px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: linear-gradient(180deg, rgba(28, 18, 44, .72), rgba(14, 9, 22, .82));
+    box-shadow: 0 30px 90px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .06);
+    backdrop-filter: blur(14px) saturate(1.2);
+  }
+  .logo {
+    width: 104px; height: 104px; border-radius: 26px; object-fit: cover;
+    box-shadow: 0 14px 40px rgba(179, 136, 255, .35), inset 0 0 0 1px rgba(255, 255, 255, .08);
+    animation: float 4.4s ease-in-out infinite;
+  }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+  h1 {
+    margin: 0; font-size: 26px; letter-spacing: .32em; text-indent: .32em;
+    font-weight: 600;
+    background: linear-gradient(92deg, #fff, var(--accent) 55%, var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .sub { margin: 0; font-size: 12px; letter-spacing: .18em; color: var(--dim); }
+  .bar {
+    width: 100%; height: 4px; border-radius: 999px; overflow: hidden;
+    background: rgba(255, 255, 255, .08);
+  }
+  .bar > i {
+    display: block; height: 100%; width: 34%; border-radius: inherit;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    animation: slide 1.35s cubic-bezier(.5, 0, .5, 1) infinite;
+  }
+  @keyframes slide {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(340%); }
+  }
+  .status {
+    min-height: 18px; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums;
+  }
+  .tip { font-size: 11px; color: rgba(169, 156, 196, .72); line-height: 1.7; text-align: center; }
+  .enter {
+    display: none; margin-top: 2px; padding: 9px 22px; border-radius: 999px;
+    border: 1px solid rgba(179, 136, 255, .5); color: var(--ink); text-decoration: none;
+    font-size: 12px; letter-spacing: .12em;
+    background: linear-gradient(92deg, rgba(179, 136, 255, .22), rgba(255, 122, 217, .18));
+    transition: transform .18s ease, box-shadow .18s ease;
+  }
+  .enter:hover { transform: translateY(-1px); box-shadow: 0 10px 26px rgba(179, 136, 255, .3); }
+  .enter.show { display: inline-block; }
+  @media (prefers-reduced-motion: reduce) {
+    #bg { display: none; }
+    .logo, .bar > i { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <video id="bg" autoplay muted loop playsinline preload="auto">
+      <source src="/splash/bg-v2-h264.mp4" type="video/mp4; codecs=avc1.4D401F" />
+      <source src="/splash/bg-v2.webm" type="video/webm; codecs=vp9" />
+    </video>
+    <div id="veil"></div>
+
+    <main class="panel" role="status" aria-live="polite">
+      <img class="logo" src="/brand/logo.png" alt="Marguerite" onerror="this.style.display='none'" />
+      <h1>MARGUERITE</h1>
+      <p class="sub" id="sub">正在唤醒本地工作台</p>
+      <div class="bar"><i></i></div>
+      <div class="status" id="status">已等待 0s</div>
+      <p class="tip" id="tip">首次启动需要初始化本地引擎，通常 3–10 秒；不要重复打开应用。</p>
+      <a class="enter" id="enter" href="http://localhost:18790/control/">手动进入控制台</a>
+    </main>
+  </div>
+
+<script>
+  (function () {
+    var started = Date.now();
+    var statusEl = document.getElementById('status');
+    var enterEl = document.getElementById('enter');
+    var tipEl = document.getElementById('tip');
+
+    // 只做本地计时与提示，不探测端口（CSP 不允许，且探测由 Rust 负责）。
+    var timer = setInterval(function () {
+      var sec = Math.floor((Date.now() - started) / 1000);
+      statusEl.textContent = '已等待 ' + sec + 's';
+      if (sec >= 8) enterEl.classList.add('show');
+      if (sec >= 20) {
+        tipEl.textContent = '初始化较慢：可能正在解压引擎或被杀毒软件扫描。可以继续等待，或手动进入控制台。';
+      }
+      if (sec >= 90) {
+        tipEl.textContent = '初始化超时。请关闭后重试；若仍失败，请查看安装目录下的日志。';
+        clearInterval(timer);
+      }
+    }, 250);
+
+    // 视频播不出来（编解码缺失/被策略禁用）时，保留渐变底色，不显示破图。
+    var video = document.getElementById('bg');
+    video.addEventListener('error', function () { video.style.display = 'none'; }, true);
+    var p = video.play && video.play();
+    if (p && typeof p.catch === 'function') p.catch(function () {});
+
+    // 兜底：若 Rust 侧 navigate 因故未发生，而页面其实能直达控制台，用户点一下即可。
+    enterEl.addEventListener('click', function () { clearInterval(timer); });
+  })();
+</script>
+</body>
+</html>

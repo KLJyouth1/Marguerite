@@ -42,7 +42,7 @@ impl EscalationResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EscalationAck {
     /// 已按指定决策结束该升级（从挂起表移除）
-    Resolved(EscalationEvent, EscalationResolution),
+    Resolved(Box<EscalationEvent>, EscalationResolution),
     /// 未找到挂起升级（可能已消费或 ID 不存在）
     NotFound,
 }
@@ -99,7 +99,7 @@ impl EscalationRegistry {
             .lock()
             .unwrap()
             .push_back((event.clone(), resolution));
-        EscalationAck::Resolved(event, resolution)
+        EscalationAck::Resolved(Box::new(event), resolution)
     }
 
     /// 最近 N 条处置历史（新→旧）
@@ -164,7 +164,7 @@ mod tests {
         let id = reg.register(&ev);
         assert_eq!(
             reg.resolve(&id, EscalationResolution::Continue),
-            EscalationAck::Resolved(ev.clone(), EscalationResolution::Continue)
+            EscalationAck::Resolved(Box::new(ev.clone()), EscalationResolution::Continue)
         );
         assert!(reg.is_empty(), "消费后应从挂起表移除");
         assert_eq!(reg.resolve(&id, EscalationResolution::Continue), EscalationAck::NotFound);
@@ -181,7 +181,7 @@ mod tests {
         let id = reg.register(&ev);
         assert_eq!(
             reg.resolve(&id, EscalationResolution::Abort),
-            EscalationAck::Resolved(ev, EscalationResolution::Abort)
+            EscalationAck::Resolved(Box::new(ev), EscalationResolution::Abort)
         );
         assert!(reg.is_empty());
     }

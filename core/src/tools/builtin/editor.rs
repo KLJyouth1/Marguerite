@@ -33,11 +33,11 @@ pub(crate) struct EditorSnapshot {
     before: String,
 }
 
-pub(crate) async fn editor_view(ws: &Path, p: &str) -> Result<ToolResult> {
+pub(crate) async fn editor_view(ws: &RootSet, p: &str) -> Result<ToolResult> {
     if p.trim().is_empty() {
         return err("path must be a non-empty string".into(), "INVALID_PARAMS");
     }
-    let abs = safe_resolve(ws, p)?;
+    let abs = ws.resolve(p)?;
     if !abs.exists() {
         return err(format!("The path {} does not exist.", p), "NOT_FOUND");
     }
@@ -61,7 +61,7 @@ pub(crate) async fn editor_view(ws: &Path, p: &str) -> Result<ToolResult> {
 }
 
 pub(crate) async fn editor_create(
-    ws: &Path,
+    ws: &RootSet,
     undo: &Arc<Mutex<Option<EditorSnapshot>>>,
     p: &str,
     file_text: Option<&String>,
@@ -78,7 +78,7 @@ pub(crate) async fn editor_create(
             )
         }
     };
-    let abs = safe_resolve(ws, p)?;
+    let abs = ws.resolve(p)?;
     if abs.exists() {
         return err(
             format!(
@@ -88,7 +88,7 @@ pub(crate) async fn editor_create(
             "ALREADY_EXISTS",
         );
     }
-    if let Some(denied) = gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(ws), &content)) {
+    if let Some(denied) = gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(ws), &content)) {
         return denied;
     }
     if let Some(parent) = abs.parent() {
@@ -108,7 +108,7 @@ pub(crate) async fn editor_create(
 }
 
 pub(crate) async fn editor_str_replace(
-    ws: &Path,
+    ws: &RootSet,
     versions: &Arc<Option<VersionManager>>,
     undo: &Arc<Mutex<Option<EditorSnapshot>>>,
     p: &str,
@@ -134,14 +134,14 @@ pub(crate) async fn editor_str_replace(
         Some(s) => s.clone(),
     };
     let new = new_str.cloned().unwrap_or_default();
-    let abs = safe_resolve(ws, p)?;
+    let abs = ws.resolve(p)?;
     if !abs.is_file() {
         return err(
             format!("The path {} does not exist or is not a regular file.", p),
             "NOT_FOUND",
         );
     }
-    if let Some(denied) = gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(ws), &new)) {
+    if let Some(denied) = gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(ws), &new)) {
         return denied;
     }
     let content = std::fs::read_to_string(&abs).map_err(|e| anyhow!("read {}: {}", p, e))?;
@@ -198,7 +198,7 @@ pub(crate) async fn editor_str_replace(
 }
 
 pub(crate) async fn editor_insert(
-    ws: &Path,
+    ws: &RootSet,
     versions: &Arc<Option<VersionManager>>,
     undo: &Arc<Mutex<Option<EditorSnapshot>>>,
     p: &str,
@@ -237,14 +237,14 @@ pub(crate) async fn editor_insert(
             }
         },
     };
-    let abs = safe_resolve(ws, p)?;
+    let abs = ws.resolve(p)?;
     if !abs.is_file() {
         return err(
             format!("The path {} does not exist or is not a regular file.", p),
             "NOT_FOUND",
         );
     }
-    if let Some(denied) = gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(ws), &new)) {
+    if let Some(denied) = gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(ws), &new)) {
         return denied;
     }
     let content = std::fs::read_to_string(&abs).map_err(|e| anyhow!("read {}: {}", p, e))?;
@@ -321,9 +321,10 @@ pub(crate) async fn editor_undo(undo: &Arc<Mutex<Option<EditorSnapshot>>>) -> Re
 }
 
 pub(crate) fn str_replace_editor_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     versions: Arc<Option<VersionManager>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     let undo: Arc<Mutex<Option<EditorSnapshot>>> = Arc::new(Mutex::new(None));
     boxed(
         "str_replace_editor",

@@ -60,6 +60,26 @@ export interface EngineSnapshot {
   hasTierRpc: boolean
   hasBudgetRpc: boolean
   hasGameRpc: boolean
+  // ── 以下字段来自真实 `model.tier.get` / `cache.status`；未知为 null ──
+  /** 生效档位：flagship / balanced / turbo */
+  effectiveTier?: string | null
+  /** 用户锁定档位（null = 自动） */
+  tierLocked?: string | null
+  /** 预算状态机：healthy / degraded / emergency / depleted */
+  budgetState?: string | null
+  /** 预算剩余比例 0..1 */
+  budgetRemaining?: number | null
+  /**
+   * W5.6：服务端前缀覆盖 = cache_read / 归一后总输入 token（0..100）。
+   * 与「合格请求命中率」量纲不同，**绝不**再合成一个数。
+   */
+  cacheCoveragePct?: number | null
+  /** W5.6：合格请求命中 = 至少命中一次的请求 / 达到 provider 最小可缓存长度的请求（0..100）。 */
+  cacheRequestHitRatePct?: number | null
+  /** W5.6：客户端（本地前缀缓存）命中率 0..100 —— 独立量纲，仅作对照。 */
+  clientHitRatePct?: number | null
+  /** 数据来源：live = W5.1 新字段；legacy = 只有旧 `server_cache_hit_rate`（coverage 别名）。 */
+  cacheMetricsSource?: 'live' | 'legacy' | null
 }
 
 export interface GameSave {

@@ -28,7 +28,7 @@
   /* Reading ink — 焦墨 text on 宣纸 clears WCAG AA with large margin. */
   --text: #1a1a1a;
   --text-muted: #4d4d4d;
-  --text-dim: #8a8a8a;
+  --text-dim: #6A6A6A;
 
   /* Ink borders — never pure black. */
   --border: #D8D0BD;

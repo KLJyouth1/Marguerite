@@ -33,6 +33,7 @@ import { useSettingsPromotedForm, DEFAULT_LLM_TIMEOUT_SECONDS } from '@/composab
 import { useSettingsSection } from '@/composables/setup/useSettingsSection'
 import { SETTINGS_SECTIONS, type SettingsSectionId } from '@/composables/setup/settingsSections'
 import { useRpcStore } from '@/stores/rpc'
+import { useCandidateModelsStore } from '@/stores/candidateModels'
 import { useToasts } from '@/composables/useToasts'
 import { useConfirm } from '@/composables/useConfirm'
 import { saveFailedMessage } from '@/lib/rpcErrors'
@@ -402,6 +403,10 @@ const rpc = useRpcStore()
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
 const t = i18n.global.t
+// 路由候选真源（config.get 的 candidateModels）：保存 provider / modelStrategy /
+// 激活路径统一经 loadData 写入该 store，与本地模型中心共享同一份列表。
+const candidateStore = useCandidateModelsStore()
+let candidateUnsub: (() => void) | null = null
 
 const catalog = ref<OnboardingCatalog>({})
 const status = ref<OnboardingStatus>({})
@@ -716,9 +721,12 @@ watch(section, value => {
 onMounted(async () => {
   await loadData()
   loaded.value = true
+  candidateUnsub = candidateStore.subscribe()
 })
 
 onUnmounted(() => {
+  candidateUnsub?.()
+  candidateUnsub = null
 })
 
 // ---------------------------------------------------------------------------
@@ -744,6 +752,9 @@ async function loadData(options: {
     status.value = st || {}
     config.value = cfg || {}
     effectiveConfig.value = effective || {}
+    // 候选真源：直接复用本轮已取回的 config.get，不重复发 RPC
+    // （saveProvider / saveModelStrategy / activateProvider 都汇聚到 loadData）。
+    candidateStore.applyConfig(cfg || {})
     // A probe result describes one exact saved deployment. Any successful
     // reload may follow a key, endpoint, model, activation, or deletion
     // mutation, so stale results must never survive it.

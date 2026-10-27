@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sidecar-log-dir"
+description = "Enables the sidecar_log_dir command without any pre-configured scope."
+commands.allow = ["sidecar_log_dir"]
+
+[[permission]]
+identifier = "deny-sidecar-log-dir"
+description = "Denies the sidecar_log_dir command without any pre-configured scope."
+commands.deny = ["sidecar_log_dir"]

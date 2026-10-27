@@ -3,6 +3,7 @@ import { detectPetRuntime, detectWebGL, renderTierOf } from './detectPetRuntime'
 import desktopPetSource from './DesktopPet.vue?raw'
 import petViewSource from '@/views/PetView.vue?raw'
 import petOverlaySource from '@/views/PetOverlayView.vue?raw'
+import petRendererSource from './petRenderer.ts?raw'
 
 function mockCanvas(glType: 'webgl2' | 'webgl1' | 'none') {
   const ctx = glType === 'none' ? null : ({}) as WebGLRenderingContext
@@ -75,7 +76,7 @@ describe('detectPetRuntime —— 能力诚实探测', () => {
     expect(renderTierOf('fallback')).toBe('low')
   })
 
-  it('三处桌宠构造点都按 renderTierOf 透传档位（DesktopPet 已切 PetSvg，不得把档位压成两档）', () => {
+  it('三处桌宠构造点都按 renderTierOf 透传档位（不得把档位压成两档）', () => {
     // 回归背景：三处构造点此前都写 `quality === 'high' ? 'high' : 'low'`，
     // 于是新增的 medium 档在**调用点**就被压回 low，档位表再正确也不生效。
     const sites = [
@@ -97,13 +98,22 @@ describe('detectPetRuntime —— 能力诚实探测', () => {
         .filter(([, line]) => /quality\s*===\s*'high'\s*\?/.test(line))
       expect(collapsed, `${name} 把档位压成两档：${JSON.stringify(collapsed)}`).toEqual([])
     }
-    // DesktopPet 已从 Pet3D 切到 PetSvg：构造点必须是 PetSvg，且档位经 renderTierOf 透传。
-    const desktop = strip(desktopPetSource)
-    expect(desktop, 'DesktopPet 应构造 PetSvg（不再用 Pet3D）').toContain('new PetSvg(')
-    expect(
-      /new PetSvg\(\{[\s\S]*?quality:\s*renderTierOf\(/.test(desktop),
-      'DesktopPet 的 PetSvg 构造必须按 renderTierOf 透传档位',
-    ).toBe(true)
+    // DesktopPet / PetOverlayView 已改为经 `petRenderer` 工厂构造（优先三维）：
+    // 档位仍必须在**调用点**经 renderTierOf 透传，由工厂原样交给三维/矢量两个渲染器。
+    for (const [name, src] of [['DesktopPet.vue', desktopPetSource], ['PetOverlayView.vue', petOverlaySource]] as const) {
+      const code = strip(src)
+      expect(code, `${name} 应经 createPetRenderer 构造（优先三维）`).toContain('createPetRenderer(')
+      expect(
+        /createPetRenderer\(\{[\s\S]*?quality:\s*renderTierOf\(/.test(code),
+        `${name} 的渲染器构造必须按 renderTierOf 透传档位`,
+      ).toBe(true)
+    }
+    // 工厂内部：两种渲染器都要收到同一个 quality（漏一个 = 某条路径上档位失效）
+    const factory = strip(petRendererSource)
+    expect(factory, '工厂应构造三维场景').toContain('new mod.Pet3DScene(')
+    expect(factory, '工厂应构造矢量兜底').toContain('new PetSvg(')
+    const qualitySites = factory.match(/quality:\s*opts\.quality/g) ?? []
+    expect(qualitySites.length, '三维与矢量都必须透传 opts.quality').toBe(2)
   })
 
   it('override 可强制 fallback（测试/诊断注入）', () => {

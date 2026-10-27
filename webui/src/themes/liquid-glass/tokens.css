@@ -1,0 +1,88 @@
+/* Theme: liquid-glass (value) — 液态玻璃 · 流光。
+ *
+ * 深色基底 + 单一冷色主调，靠"玻璃"而不是靠色块建立层次：
+ *   · 底色近黑（#070a12），所有面板都是**半透明玻璃**，背景的云/海/沙丘从中透出；
+ *   · 主色只有两种：极光蓝 + 薄荷（点缀），其余全部是白→灰的明度阶；
+ *   · 对比度按 WCAG AA 校验（text/bg ≈ 17.4:1，text-muted/bg-surface ≈ 9.4:1，
+ *     accent/bg ≈ 8.9:1，accent-foreground/accent ≈ 11.6:1）。
+ *
+ * 玻璃参数（--glass-*）单独成组：`world.css` 只消费这些令牌，参数面板
+ * （Settings → 外观 → 玻璃参数）改的就是它们，改完即时生效并可导出 JSON。
+ */
+[data-theme='liquid-glass'] {
+  /* 地面：近黑夜色（不是纯黑，纯黑会把玻璃的层次吃掉） */
+  --bg: #070a12;
+  --bg-surface: #0c1018;
+  --bg-surface-2: #111823;
+  --bg-elevated: #161f2c;
+  --bg-hover: #1b2634;
+
+  /* 文字：刻意不用纯白 —— 纯白压在玻璃上会"发光"，读久了刺眼 */
+  --text: #e9eef8;
+  --text-muted: #aebbcf;
+  --text-dim: #8494ab;
+
+  --border: #23303f;
+  --border-strong: #33455a;
+  --border-focus: #8fc7ff;
+  --card: #0d131c;
+  --hairline: #1c2733;
+
+  /* 主色：极光蓝；次色：薄荷（只用于状态/强调，绝不铺大面积） */
+  --accent: #8ab4ff;
+  --accent-hover: #a8c7ff;
+  --accent-deep: #5d7fd6;
+  --accent-secondary: #7ff0d8;
+  --accent-foreground: #04101f;
+
+  --ok: #7fe0a8;
+  --warn: #f2cc7a;
+  --danger: #ff8b9a;
+  --info: #8fd0ff;
+  --queued: #c9b3ff;
+
+  --syntax-comment: #7c8bb8;
+  --syntax-keyword: #8ab4ff;
+  --syntax-string: #7ff0d8;
+  --syntax-literal: #f2cc7a;
+  --syntax-title: #ffd9a3;
+  --syntax-attr: #c9b3ff;
+}
+
+/* 结构身份：紧字距的无衬线展示字 + 大圆角 + 冷色投影。
+ * 放在 tokens.css 是为了在 data-theme 落笔的第一帧就生效，避免"先直角后圆角"的跳动。 */
+[data-theme='liquid-glass'] {
+  --font-display: 'Inter Tight', 'Geist', 'SF Pro Display', 'Segoe UI Variable Display', system-ui, 'Noto Sans SC', sans-serif;
+
+  --radius-control: 14px;
+  --radius-card: 22px;
+  --radius-panel: 26px;
+  --radius-modal: 26px;
+  --radius-pill: 999px;
+
+  /* 焦点：冷色双层环（内环贴边、外环发光），在玻璃上也能看见 */
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 72%, transparent),
+                0 0 0 6px color-mix(in srgb, var(--accent) 16%, transparent);
+  --focus-ring-inset: inset 0 0 0 1px color-mix(in srgb, var(--accent) 62%, transparent);
+
+  --shadow-color: color-mix(in srgb, #01030a 78%, transparent);
+  --shadow: 0 28px 64px -34px var(--shadow-color), 0 2px 10px -6px var(--shadow-color);
+
+  /* 关掉全局胶片颗粒：细碎噪点是"廉价感"的主要来源，也让磨砂看起来脏。
+     本主题的高级感来自大块柔和渐变 + 玻璃叠层，不需要颗粒。 */
+  --grain-opacity: 0;
+
+  /* ── 玻璃参数（参数面板可调，单位见注释） ───────────────────────── */
+  --glass-radius: 22px;        /* 卡片/面板圆角 */
+  --glass-blur: 34px;          /* 背景模糊半径 */
+  --glass-saturate: 185%;      /* 背景提饱和 */
+  --glass-brightness: 90%;     /* 背景压亮度：高亮壁纸下也不让白字失守 */
+  --glass-tint: 12%;           /* 白玻璃叠层不透明度（设计基准 10%） */
+  --glass-scrim: 52%;          /* 玻璃底部的暗纱：66% 时背景「看得见但没感觉」，压到 52% 才叫玻璃 */
+  --glass-edge: 42%;           /* 1px 白亮边强度（>40% 会塑料感，>55% 失去玻璃语义） */
+  --glass-sheen: 22%;          /* 边缘折射高光 */
+  --glass-gap: 28px;           /* 内容内边距（留白） */
+  --glass-stack: 20px;         /* 区块间距 */
+  --glass-lift: 2px;           /* 悬浮抬升 */
+  --glass-text-veil: 58%;      /* 文字区底板（越低越透，越低越难读） */
+}

@@ -23,9 +23,17 @@ export interface SessionNavigationDiagEntry {
 export type SessionNavigationDiagData = Omit<SessionNavigationDiagEntry, 't' | 'iso' | 'source'>
 
 let storageOverride: SessionNavigationDiagStorage | null = null
+// 诊断数据的读取失败保持静默（它不承担任何用户可见功能），但必须留下一条
+// 可查的线索。采样一次即可：读失败通常意味着整个存储不可用，逐次 warn 会刷屏。
+let readFailureWarned = false
 
 export function setSessionNavigationDiagStorageForTest(storage: SessionNavigationDiagStorage | null) {
   storageOverride = storage
+}
+
+/** 仅测试：让「已告警」的采样标记复位。 */
+export function _resetSessionNavigationDiagWarningForTests(): void {
+  readFailureWarned = false
 }
 
 function storage(): SessionNavigationDiagStorage | null {
@@ -46,7 +54,11 @@ export function readSessionNavigationDiag(): SessionNavigationDiagEntry[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed.filter(Boolean) : []
-  } catch {
+  } catch (err) {
+    if (!readFailureWarned) {
+      readFailureWarned = true
+      console.warn('[sessionNavigationDiag] read failed:', err)
+    }
     return []
   }
 }

@@ -129,6 +129,10 @@ METHOD_SCOPES: dict[str, str] = {
     "sessions.messages.subscribe": READ_SCOPE,
     "sessions.messages.hydrate": READ_SCOPE,
     "sessions.messages.unsubscribe": READ_SCOPE,
+    # P2-10: reconnect event replay/snapshot.
+    "events.resync": READ_SCOPE,
+    # P2-11: list interrupted (in-flight) long-task checkpoints.
+    "tasks.checkpoint.list": READ_SCOPE,
     "sessions.promptCacheKeepalive.status": READ_SCOPE,
     "artifacts.list": READ_SCOPE,
     "artifacts.get": READ_SCOPE,
@@ -223,6 +227,9 @@ METHOD_SCOPES: dict[str, str] = {
     "sessions.fork": WRITE_SCOPE,
     "sessions.forkThroughTurn": WRITE_SCOPE,
     "sessions.send": WRITE_SCOPE,
+    # P2-11: mutate interrupted long-task checkpoints.
+    "tasks.checkpoint.abandon": WRITE_SCOPE,
+    "tasks.checkpoint.replay": WRITE_SCOPE,
     "plans.capabilities": READ_SCOPE,
     "plans.setMode": WRITE_SCOPE,
     "plans.implement": WRITE_SCOPE,

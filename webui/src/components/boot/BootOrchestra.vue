@@ -2,31 +2,41 @@
 /**
  * Post-mount boot orchestra — continues the CSS splash with a live
  * constellation of agents / subagents / tools. Only runs when splash tier is
- * `full`, once per browser profile (localStorage), and never under reduced motion.
+ * `full`, once per browser profile (localStorage). Under reduced motion it still
+ * honours the 10s floor but renders a frozen (animation-free) frame.
  * Choosing Full again in Appearance clears the seen flag so this can replay.
  */
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import { useGatewayReadiness } from '@/composables/useGatewayReadiness'
 import {
   BOOT_LOG,
   BOOT_NODES,
-  BOOT_ORCHESTRA_AUTO_MS,
+  BOOT_ORCHESTRA_MAX_MS,
   BOOT_ORCHESTRA_MIN_MS,
   BOOT_ORCHESTRA_SEEN_KEY,
 } from './bootSequence'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+// 就绪信号来自 App.vue 提供的唯一 readiness 实例（inject），不新建第二个 RPC 轮询。
+const gateway = useGatewayReadiness()
 
 const visible = ref(false)
 const exiting = ref(false)
-const ready = ref(false)
+const staticMode = ref(false)
+const gatewayReady = ref(false)
+const minElapsed = ref(false)
 const visibleLogs = ref(0)
 const litCount = ref(0)
 
+/** 只有「网关就绪 + 最短展示已满」才算真正 ready，避免抢跑或拖尾。 */
+const ready = computed(() => gatewayReady.value && minElapsed.value)
+
 let timers: number[] = []
 let onKey: ((e: KeyboardEvent) => void) | null = null
+let stopReadyWatch: (() => void) | null = null
 
 function reducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -73,14 +83,19 @@ function dismiss(): void {
 }
 
 function startSequence(): void {
-  if (appStore.bootAnimation !== 'full' || reducedMotion() || hasSeen()) return
+  if (appStore.bootAnimation !== 'full' || hasSeen()) return
   if (visible.value) return
 
   clearTimers()
   detachKey()
+  stopReadyWatch?.()
+  stopReadyWatch = null
   visible.value = true
   exiting.value = false
-  ready.value = false
+  // 减少动效时不再整块跳过：仍展示满 10s，但画面静止（CSS `.is-static`）。
+  staticMode.value = reducedMotion()
+  minElapsed.value = false
+  gatewayReady.value = gateway.isReady.value
   visibleLogs.value = 0
   litCount.value = 0
 
@@ -96,13 +111,31 @@ function startSequence(): void {
     }, line.delayMs))
   })
 
+  // 最短展示窗口：就绪也不能早于它消失。
   timers.push(window.setTimeout(() => {
-    ready.value = true
+    minElapsed.value = true
+    if (gatewayReady.value) dismiss()
   }, BOOT_ORCHESTRA_MIN_MS))
 
+  // 最长展示窗口：30s 仍未就绪 → 强制进入，并留下可观测原因。
   timers.push(window.setTimeout(() => {
+    if (!visible.value || exiting.value) return
+    console.warn(
+      `[BootOrchestra] hard cap ${BOOT_ORCHESTRA_MAX_MS}ms reached before gateway readiness ` +
+      `(readiness=${gateway.readiness.value}); forcing entry.`,
+    )
     dismiss()
-  }, BOOT_ORCHESTRA_AUTO_MS))
+  }, BOOT_ORCHESTRA_MAX_MS))
+
+  // 就绪即进入的前提是「已满最短展示」，否则等到 MIN 定时器再收尾。
+  stopReadyWatch = watch(
+    () => gateway.isReady.value,
+    (isReady) => {
+      gatewayReady.value = isReady
+      if (isReady && minElapsed.value) dismiss()
+    },
+    { flush: 'sync' },
+  )
 
   onKey = (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Escape') dismiss()
@@ -124,6 +157,8 @@ watch(
 onUnmounted(() => {
   clearTimers()
   detachKey()
+  stopReadyWatch?.()
+  stopReadyWatch = null
 })
 
 function nodeStyle(angle: number, radius: number): Record<string, string> {
@@ -139,7 +174,7 @@ function nodeStyle(angle: number, radius: number): Record<string, string> {
     <div
       v-if="visible"
       class="boot-orch"
-      :class="{ 'is-exiting': exiting }"
+      :class="{ 'is-exiting': exiting, 'is-static': staticMode }"
       role="dialog"
       aria-modal="true"
       :aria-label="t('boot.orchestraAria')"
@@ -206,6 +241,50 @@ function nodeStyle(angle: number, radius: number): Record<string, string> {
 .boot-orch.is-exiting {
   animation: boot-orch-out var(--dur-enter) var(--ease-in) both;
   pointer-events: none;
+}
+
+/* prefers-reduced-motion：仍展示满 10s（由 JS 的 MIN 常量负责），但整块静止。
+   这里只关动效，不隐藏内容、不改变时长、不报错。 */
+.boot-orch.is-static,
+.boot-orch.is-static.is-exiting {
+  animation: none;
+}
+.boot-orch.is-static .boot-orch__ring,
+.boot-orch.is-static .boot-orch__dot,
+.boot-orch.is-static .boot-orch__bar > span,
+.boot-orch.is-static .boot-orch__log > li {
+  animation: none;
+}
+.boot-orch.is-static .boot-orch__node,
+.boot-orch.is-static .boot-orch__enter,
+.boot-orch.is-static .boot-orch__bar > span {
+  transition: none;
+}
+.boot-orch.is-static .boot-orch__bar > span {
+  width: 100%;
+}
+.boot-orch.is-static .boot-orch__log > li {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-orch,
+  .boot-orch .boot-orch__ring,
+  .boot-orch .boot-orch__dot,
+  .boot-orch .boot-orch__bar > span,
+  .boot-orch .boot-orch__log > li {
+    animation: none;
+  }
+  .boot-orch .boot-orch__node,
+  .boot-orch .boot-orch__enter,
+  .boot-orch .boot-orch__bar > span {
+    transition: none;
+  }
+  .boot-orch .boot-orch__log > li {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .boot-orch__field {

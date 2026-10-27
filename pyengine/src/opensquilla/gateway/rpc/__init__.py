@@ -60,6 +60,7 @@ import opensquilla.gateway.rpc_config  # noqa: E402, F401
 import opensquilla.gateway.rpc_cron  # noqa: E402, F401
 import opensquilla.gateway.rpc_diagnostics  # noqa: E402, F401
 import opensquilla.gateway.rpc_doctor  # noqa: E402, F401
+import opensquilla.gateway.rpc_events_resync  # noqa: E402, F401
 import opensquilla.gateway.rpc_logs  # noqa: E402, F401
 import opensquilla.gateway.rpc_memory  # noqa: E402, F401
 import opensquilla.gateway.rpc_memory_import  # noqa: E402, F401
@@ -77,6 +78,7 @@ import opensquilla.gateway.rpc_secrets  # noqa: E402, F401
 import opensquilla.gateway.rpc_sessions  # noqa: E402, F401
 import opensquilla.gateway.rpc_skills  # noqa: E402, F401
 import opensquilla.gateway.rpc_system  # noqa: E402, F401
+import opensquilla.gateway.rpc_task_checkpoints  # noqa: E402, F401
 import opensquilla.gateway.rpc_tools  # noqa: E402, F401
 import opensquilla.gateway.rpc_usage  # noqa: E402, F401
 import opensquilla.gateway.rpc_wizard  # noqa: E402, F401

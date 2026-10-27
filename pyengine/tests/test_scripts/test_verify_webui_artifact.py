@@ -219,23 +219,43 @@ def test_local_playlist_override_is_forbidden_only_in_official_artifacts(
         verify_dist(dist, webui_root=webui, forbid_personal_bgm=True)
 
 
-def test_official_guard_rejects_tracks_in_the_tracked_playlist(tmp_path: Path) -> None:
+def test_official_guard_rejects_non_whitelisted_track_srcs(tmp_path: Path) -> None:
+    # New contract (music workbench): the tracked playlist.json ships four CC0
+    # tracks. A track src may be an https:// stream or a whitelisted CC0 file;
+    # any other local filename (a personal/copyrighted upload) is still banned.
     webui, dist = _artifact(
         tmp_path,
         tracked_playlist={
             "tracks": [
                 {
-                    "id": "private-stream",
-                    "title": "Private stream",
-                    "src": "https://example.com/private.mp3",
+                    "id": "private-local",
+                    "title": "Private local rip",
+                    "src": "private.mp3",
                 }
             ]
         },
     )
 
     assert "music/playlist.json" in verify_dist(dist, webui_root=webui)
-    with pytest.raises(ArtifactError, match="must keep its tracks list empty"):
+    with pytest.raises(ArtifactError, match="must use https:// streams or whitelisted CC0 files"):
         verify_dist(dist, webui_root=webui, forbid_personal_bgm=True)
+
+
+def test_official_guard_allows_https_streams_and_whitelisted_cc0_tracks(
+    tmp_path: Path,
+) -> None:
+    webui, dist = _artifact(
+        tmp_path,
+        tracked_playlist={
+            "tracks": [
+                {"id": "stream", "title": "Remote stream", "src": "https://example.com/stream.mp3"},
+                {"id": "dusk-pad", "title": "Dusk Pad", "src": "dusk-pad.mp3"},
+            ]
+        },
+    )
+
+    files = verify_dist(dist, webui_root=webui, forbid_personal_bgm=True)
+    assert "music/playlist.json" in files
 
 
 def test_invalid_manifest_and_entrypoint_return_actionable_artifact_errors(
@@ -399,7 +419,7 @@ def test_node_official_guard_rejects_tracks_in_the_tracked_playlist(
         encoding="utf-8",
     )
     (dist / "music/playlist.json").write_text(
-        '{"tracks":[{"id":"private","src":"https://example.com/private.mp3"}]}\n',
+        '{"tracks":[{"id":"private","src":"private.mp3"}]}\n',
         encoding="utf-8",
     )
     subprocess.run(
@@ -420,4 +440,4 @@ def test_node_official_guard_rejects_tracks_in_the_tracked_playlist(
         timeout=30,
     )
     assert result.returncode != 0
-    assert "must keep its tracks list empty" in result.stderr
+    assert "must use https:// streams or whitelisted CC0 files" in result.stderr

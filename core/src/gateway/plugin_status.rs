@@ -132,6 +132,10 @@ pub fn assemble() -> PluginAssembly {
 /// `plugins.status` 的响应负载（如实分类 + 清单装配状态）。
 pub fn status_json() -> Value {
     let asm = warm_assembly();
+    // 注册表启停状态：只读加载，不初始化插件运行时（避免观测路径触发 DI）。
+    let disabled = crate::gateway::plugins_runtime::disabled_names_from(
+        &crate::gateway::plugins_runtime::registry_path(),
+    );
 
     let manifests: Vec<Value> = asm
         .manifest_status
@@ -144,16 +148,24 @@ pub fn status_json() -> Value {
                 "entry": m.entry,
                 "activation": m.activation,
                 "assembled": m.assembled,
+                "enabled": !disabled.contains(&m.name),
                 "slots": m.slots,
             })
         })
         .collect();
 
     // 仅含可用项（list() 已排除停用项）；kind 用 serde 的 snake_case 名序列化。
+    // 注册表停用的插件立即从槽位视图移除（热启停可观测）。
     let slots: Vec<Value> = asm
         .slot
         .list()
         .iter()
+        .filter(|s| {
+            s.source
+                .as_deref()
+                .map(|src| !disabled.contains(src))
+                .unwrap_or(true)
+        })
         .map(|s| {
             json!({
                 "name": s.name,
@@ -179,6 +191,8 @@ pub fn status_json() -> Value {
         "applied": asm.report.applied.len(),
         "skipped": asm.report.skipped.len(),
         "errors": asm.report.errors.len(),
+        // 注册表停用数（热启停可观测；真实计数，不臆造）
+        "disabled_plugins": disabled.len(),
     });
 
     json!({

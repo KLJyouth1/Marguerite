@@ -101,8 +101,28 @@ describe('switchActiveMode — honest feedback', () => {
     rpcCall.mockResolvedValueOnce({ kind: 'bloom', mode: 'bloom' })
 
     const result = await switchActiveMode('bloom')
-    expect(result).toEqual({ kind: 'bloom', mode: 'bloom' })
+    // 归一化后一定带上规范 3×3 格位：老网关只回 kind 时反推 standard_doit，
+    // 否则徽标/胶囊/发送门禁会同时丢选中态（真机缺陷，2026-10-24）。
+    expect(result).toMatchObject({ kind: 'bloom', mode: 'bloom' })
+    expect(result?.userMode?.key).toBe('standard_doit')
     expect(activeMode.value?.kind).toBe('bloom')
+    expect(activeMode.value?.userMode?.key).toBe('standard_doit')
     expect(switchError.value).toBeNull()
+  })
+
+  it('normalizes mode.switch’s string userMode into the full 3×3 slot', async () => {
+    // 网关真实形状：mode.switch 回字符串，mode.get 回对象。
+    rpcCall.mockResolvedValueOnce({
+      ok: true,
+      kind: 'bloom',
+      runtimeKind: 'bloom',
+      userMode: 'standard_doit',
+    })
+
+    const result = await switchUserMode('standard_doit')
+    expect(result?.userMode?.key).toBe('standard_doit')
+    expect(result?.userMode?.label).toBe('标准·执行')
+    // 关键断言：store 里必须是对象，消费方都读 `.userMode.key`
+    expect(activeMode.value?.userMode?.key).toBe('standard_doit')
   })
 })

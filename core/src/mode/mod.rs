@@ -277,6 +277,16 @@ fn is_write_class(tool: &str) -> bool {
     )
 }
 
+/// 工具是否属**桌面控制**类（鼠标 / 键盘 / 窗口 / 应用驱动）。
+///
+/// 与 [`runtime_denies_tool`] 同一张类别表，只是把 Desktop 单独暴露出来：
+/// `guard::tool_intent` 对桌面控制只判 Medium（它的 `EXEC_TOOLS` 表按命令串判破坏性，
+/// 而桌面动作没有命令串），但「直接驱动本机 UI」本身就是高影响动作 ——
+/// agent 工具回路据此把它一并纳入人工确认范围。
+pub fn is_desktop_class(tool: &str) -> bool {
+    matches!(classify_tool(tool), ToolClass::Desktop)
+}
+
 /// 门控决策
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -615,8 +625,11 @@ enum ToolClass {
 fn classify_tool(tool: &str) -> ToolClass {
     match tool {
         // 桌面/系统级控制（真实名 + 别名）
+        // auto_replay 会真实驱动本机键鼠、auto_record 会安装全局钩子并落盘 →
+        // 同属「直接驱动本机 UI」，必须与 system_control 同口径纳入确认面。
         "system_control" | "window_manage" | "clipboard" | "office_automation"
-        | "control_desktop" | "browser_control" => ToolClass::Desktop,
+        | "control_desktop" | "browser_control" | "auto_record" | "auto_replay"
+        | "computer_use" => ToolClass::Desktop,
         // 出网（真实名 + 别名）
         "web_fetch" | "web_search" | "web_research" | "http_request" | "research" | "vision"
         | "browser" | "browser_a11y" | "see" => ToolClass::Network,
@@ -631,7 +644,14 @@ fn classify_tool(tool: &str) -> ToolClass {
         "write_file" | "append_file" | "edit_file" | "write_code" | "create_file"
         | "delete_file" | "rename_file" | "copy_file" | "move_file" | "make_dir"
         | "apply_patch" | "rollback" | "git_commit" | "str_replace_editor" | "todo_write"
-        | "memory_save" => ToolClass::Write,
+        | "memory_save"
+        // 多模态产物：都会在工作区落盘（生成的图 / 视频 / 音频 / 转写文本），
+        // Plan 模式声称只读，不能放它们过去。
+        | "image_generate" | "video_generate" | "audio_speak" | "audio_transcribe"
+        // 本地生视频同样会落盘 mp4（并写临时帧目录），按写操作处理。
+        | "code_video" | "web_video" | "manim_video" => {
+            ToolClass::Write
+        }
         // 护栏
         "syntax" | "semantic" | "fact" | "contract" | "guard" => ToolClass::Guard,
         // 默认只读（read_file / list_dir / grep / find_files / codebase_search /

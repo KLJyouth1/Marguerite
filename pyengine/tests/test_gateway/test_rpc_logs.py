@@ -36,6 +36,39 @@ async def test_logs_tail_missing_file_returns_empty_payload(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_logs_tail_filters_level_by_position_not_substring(tmp_path, monkeypatch) -> None:
+    """`errors=0` 这类结构化字段不得把 INFO 行误判成 ERROR。"""
+    monkeypatch.setenv("OPENSQUILLA_LOG_DIR", str(tmp_path))
+    log_file = tmp_path / "debug.log"
+    log_file.write_text(
+        "2026-10-22 19:19:33,945 [INFO] opensquilla.skills.loader: "
+        "skill_catalog.refreshed errors=0 removed=0\n"
+        "2026-10-22 19:19:34,001 [ERROR] opensquilla.gateway.websocket: handshake failed\n",
+        encoding="utf-8",
+    )
+
+    info = await _handle_logs_tail({"limit": 10, "cursor": 0, "level": "INFO"}, None)  # type: ignore[arg-type]
+    errors = await _handle_logs_tail({"limit": 10, "cursor": 0, "level": "ERROR"}, None)  # type: ignore[arg-type]
+
+    assert len(info["lines"]) == 1
+    assert "skill_catalog.refreshed" in info["lines"][0]
+    assert len(errors["lines"]) == 1
+    assert "handshake failed" in errors["lines"][0]
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_tolerates_null_limit_and_cursor(tmp_path, monkeypatch) -> None:
+    """首轮 `cursor: null` / `limit: null` 必须容错，而不是 INTERNAL_ERROR。"""
+    monkeypatch.setenv("OPENSQUILLA_LOG_DIR", str(tmp_path))
+    log_file = tmp_path / "debug.log"
+    log_file.write_text("2026-10-22 19:19:33,945 [INFO] opensquilla: ready\n", encoding="utf-8")
+
+    result = await _handle_logs_tail({"limit": None, "cursor": None}, None)  # type: ignore[arg-type]
+
+    assert result["lines"] == ["2026-10-22 19:19:33,945 [INFO] opensquilla: ready"]
+
+
+@pytest.mark.asyncio
 async def test_logs_status_reports_raw_capture_disabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("OPENSQUILLA_TURN_CALL_LOG", raising=False)
     monkeypatch.delenv("OPENSQUILLA_TURN_CALL_LOG_DIR", raising=False)

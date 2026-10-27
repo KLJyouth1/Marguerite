@@ -9,11 +9,96 @@
       <div class="control-stage__actions"><button class="btn btn--ghost" @click="loadAll"><Icon name="refresh" :size="16" /><span>刷新</span></button></div>
     </header>
 
+    <section v-if="error" class="expert-error" role="alert">{{ error }}</section>
+
     <section class="expert-constellation" aria-hidden="true">
       <span v-for="n in expertOrbit" :key="n" class="expert-constellation__node">{{ n }}</span>
     </section>
 
-    <section v-if="error" class="expert-error">{{ error }}</section>
+    <!-- 主智能体（主视觉）：桌面端所有默认会话（agent:main:*）都由它应答 -->
+    <section
+      v-if="mainAgent"
+      class="ma-hero"
+      aria-labelledby="ma-hero-name"
+    >
+      <div class="ma-hero__mark" aria-hidden="true">
+        <img
+          v-if="avatarOk"
+          class="ma-hero__avatar"
+          :src="mainAvatar"
+          alt=""
+          width="56"
+          height="56"
+          @error="avatarOk = false"
+        />
+        <template v-else>{{ mainInitial }}</template>
+      </div>
+      <div class="ma-hero__body">
+        <p class="ma-hero__kicker">主智能体 · Main Agent</p>
+        <h2 id="ma-hero-name" class="ma-hero__name">{{ mainAgent.name }}</h2>
+        <p class="ma-hero__desc">{{ mainAgent.description }}</p>
+        <ul v-if="mainAgent.skills && mainAgent.skills.length" class="ma-hero__chips">
+          <li v-for="s in mainAgent.skills" :key="s" class="ma-chip">{{ s }}</li>
+        </ul>
+        <p class="ma-hero__meta">
+          <span>id <code>{{ mainAgent.id }}</code></span>
+          <span>工具 {{ mainAgent.tools ? mainAgent.tools.length : 0 }}</span>
+          <span>技能 {{ mainAgent.skills ? mainAgent.skills.length : 0 }}</span>
+          <span>模型 {{ mainAgent.model || '默认路由' }}</span>
+          <span :class="['ma-hero__state', mainAgent.enabled === false ? 'is-off' : 'is-on']">
+            {{ mainAgent.enabled === false ? '已停用（人格不注入）' : '已启用' }}
+          </span>
+        </p>
+      </div>
+      <div class="ma-hero__actions">
+        <button class="btn btn--primary" type="button" @click="startMainChat">开始对话</button>
+        <button
+          class="btn btn--ghost"
+          type="button"
+          :aria-expanded="personaOpen"
+          aria-controls="ma-persona"
+          @click="personaOpen = !personaOpen"
+        >{{ personaOpen ? '收起人设' : '查看人设' }}</button>
+        <button class="btn btn--ghost" type="button" @click="openAgents">智能体管理</button>
+      </div>
+    </section>
+
+    <!-- 主智能体加载中：骨架，而不是把「还没加载」渲染成「没有智能体」 -->
+    <section v-else-if="loading" class="ma-hero ma-hero--skeleton" aria-busy="true" aria-live="polite">
+      <div class="ma-hero__mark ma-skeleton" aria-hidden="true"></div>
+      <div class="ma-hero__body">
+        <p class="ma-skeleton ma-skeleton--line" style="width: 30%"></p>
+        <p class="ma-skeleton ma-skeleton--line ma-skeleton--title" style="width: 46%"></p>
+        <p class="ma-skeleton ma-skeleton--line" style="width: 82%"></p>
+        <p class="ma-skeleton ma-skeleton--line" style="width: 64%"></p>
+      </div>
+      <span class="ma-sr">正在读取主智能体…</span>
+    </section>
+
+    <!-- 主智能体缺失：如实说明，不伪造一个占位身份。
+         注意 `!error` 这道门：清单读取失败时 `agents` 也是空数组，
+         若不区分，「请求失败」会被渲染成「网关里没有 main」——把异常态说成空态。 -->
+    <section v-else-if="!error" class="ma-hero ma-hero--missing" role="status">
+      <div class="ma-hero__body">
+        <p class="ma-hero__kicker">主智能体 · Main Agent</p>
+        <h2 class="ma-hero__name">未找到主智能体（id: main）</h2>
+        <p class="ma-hero__desc">
+          网关返回的智能体清单里没有 <code>main</code>。默认会话（<code>agent:main:webchat:*</code>）
+          仍可对话，但不会注入任何人设。请到「智能体管理」页确认内置智能体是否被停用或清单读取失败。
+        </p>
+        <p class="ma-hero__meta"><button class="btn btn--ghost btn--sm" type="button" @click="loadAll">重新读取</button></p>
+      </div>
+    </section>
+
+    <section v-if="mainAgent && personaOpen" id="ma-persona" class="expert-card ma-persona">
+      <div class="expert-card__title">主智能体人设（system prompt · 只读）</div>
+      <pre class="ma-persona__text">{{ mainAgent.system_prompt || mainAgent.systemPrompt || '（该智能体未设置人设）' }}</pre>
+      <p class="expert-note">
+        人设来自内置台账 <code>agent/personas/senior-dev-engineer.md</code>，随会话键
+        <code>agent:main:*</code> 注入系统提示。内置智能体不可在此编辑；如需定制，
+        到「智能体管理」用「自定义」复制一份再改。
+      </p>
+    </section>
 
     <!-- 模式与蜂群 -->
     <section v-if="spec" class="expert-card">
@@ -34,28 +119,41 @@
       </div>
       <p class="expert-note">蜂群数量上限由内置模式规格（bloom.yaml / omni_transcend.yaml）决定；智能体、智能体团队、专家团队在 Bloom / OmniTranscend 模式下均可按此上限启动蜂群并行攻坚。</p>
     </section>
+    <!-- 模式规格缺失：此前整张卡静默消失，用户看到的是「页面少了块东西」而不是失败 -->
+    <section v-else class="expert-card">
+      <div class="expert-card__title">模式与蜂群（mode.spec）</div>
+      <p class="expert-note expert-note--err">
+        模式规格未读取到（mode.spec 失败或网关未就绪）——本卡不渲染任何猜测值。
+      </p>
+    </section>
 
     <!-- 蜂群控制（数量上限设置） -->
     <section class="expert-card">
       <div class="expert-card__title">蜂群控制 · 数量上限设置（mode.swarm.get / set）</div>
-      <div class="expert-form">
-        <label class="expert-field">
-          <span>蜂群分片上限（0 = 内置默认；硬上限 {{ swarm.maxShardsCap }}）</span>
-          <input v-model.number="swarmShards" type="number" min="0" :max="swarm.maxShardsCap" class="expert-input" />
-        </label>
-        <label class="expert-field">
-          <span>子专家上限（0 = 内置默认；硬上限 {{ swarm.maxSubExpertsCap }}）</span>
-          <input v-model.number="swarmSubExperts" type="number" min="0" :max="swarm.maxSubExpertsCap" class="expert-input" />
-        </label>
-        <button class="btn btn--primary" :disabled="swarmBusy" @click="saveSwarm">保存上限</button>
-        <button class="btn btn--ghost" :disabled="swarmBusy" @click="resetSwarm">恢复内置默认</button>
-      </div>
-      <div class="expert-pills expert-pills--swarm">
-        <span class="expert-pill">生效分片上限 {{ swarm.effectiveShards }}</span>
-        <span class="expert-pill">生效子专家上限 {{ swarm.effectiveSubExperts }}</span>
-        <span class="expert-pill">已配置 {{ swarm.configuredShards ?? '内置默认' }} / {{ swarm.configuredSubExperts ?? '内置默认' }}</span>
-      </div>
-      <p class="expert-note">智能体 / 团队 / 专家启动蜂群时按此上限扇出（orchestration run_bloom_swarm 实时读取）；持久化 data_dir/swarm_config.json，重启不丢。</p>
+      <template v-if="swarm">
+        <div class="expert-form">
+          <label class="expert-field">
+            <span>蜂群分片上限（0 = 内置默认；硬上限 {{ swarm.maxShardsCap }}）</span>
+            <input v-model.number="swarmShards" type="number" min="0" :max="swarm.maxShardsCap" class="expert-input" />
+          </label>
+          <label class="expert-field">
+            <span>子专家上限（0 = 内置默认；硬上限 {{ swarm.maxSubExpertsCap }}）</span>
+            <input v-model.number="swarmSubExperts" type="number" min="0" :max="swarm.maxSubExpertsCap" class="expert-input" />
+          </label>
+          <button class="btn btn--primary" :disabled="swarmBusy" @click="saveSwarm">保存上限</button>
+          <button class="btn btn--ghost" :disabled="swarmBusy" @click="resetSwarm">恢复内置默认</button>
+        </div>
+        <div class="expert-pills expert-pills--swarm">
+          <span class="expert-pill">生效分片上限 {{ swarm.effectiveShards }}</span>
+          <span class="expert-pill">生效子专家上限 {{ swarm.effectiveSubExperts }}</span>
+          <span class="expert-pill">已配置 {{ swarm.configuredShards ?? '内置默认' }} / {{ swarm.configuredSubExperts ?? '内置默认' }}</span>
+        </div>
+        <p class="expert-note">智能体 / 团队 / 专家启动蜂群时按此上限扇出（orchestration run_bloom_swarm 实时读取）；持久化 data_dir/swarm_config.json，重启不丢。</p>
+      </template>
+      <p v-else class="expert-note expert-note--err">
+        上限未读取到（mode.swarm.get 失败或网关未就绪）——此处<b>不显示任何猜测值</b>，避免把
+        「未知」伪装成「内置默认 11 / 5」。<button class="btn btn--ghost btn--sm" type="button" @click="loadSwarm">重试</button>
+      </p>
     </section>
 
     <!-- 团队 / 蜂群一键启动 -->
@@ -115,36 +213,55 @@
       <p v-if="comps.length === 0" class="expert-note">暂无已保存组合 —— 填写上方表单保存；重跑会把成员清单作为团队构成注入目标（参与角色检测）。</p>
     </section>
 
-    <!-- 用户行为蒸馏 -->
+    <!-- 用户行为蒸馏（用户画像，不是主智能体画像） -->
     <section class="expert-card">
-      <div class="expert-card__title">用户行为蒸馏 → 优化主智能体</div>
-      <div class="expert-pills">
+      <div class="expert-card__title">用户行为蒸馏 → 适配主智能体</div>
+      <div v-if="behavior" class="expert-pills">
         <span class="expert-pill">行为事件 {{ behavior.events ?? 0 }}</span>
         <span class="expert-pill">对话轮次 {{ behavior.turns ?? 0 }}</span>
         <span class="expert-pill">工具 Top：<span v-for="(t, i) in (behavior.tool_uses ?? [])" :key="i">{{ t.tool }}×{{ t.count }} </span></span>
       </div>
+      <p v-else class="expert-note expert-note--err">
+        行为汇总未读取到（memory.behavior.summary 失败或网关未就绪）——不显示任何 0 值假象。
+      </p>
       <div v-if="profile" class="expert-pills expert-pills--swarm">
-        <span class="expert-pill expert-pill--accent">主智能体画像：{{ profile.role }} · {{ profile.tone }}</span>
+        <span class="expert-pill expert-pill--accent">用户画像：{{ profile.role }} · {{ profile.tone }}</span>
         <span class="expert-pill">专长：{{ profile.expertise }}</span>
         <span class="expert-pill">来源 {{ profile.source_count }} 条上下文</span>
+        <span class="expert-pill">{{ profileInjected ? '已注入主智能体' : '未注入（样本不足）' }}</span>
       </div>
-      <p class="expert-note">每轮对话经 record_behavior 落账（B3 行为捕获，memory.behavior.summary 聚合）；画像由 agent.profile.auto 从最近上下文确定性抽取（不烧 token），经 persona 注入主智能体 —— 越用越懂你。</p>
+      <p class="expert-note">
+        每轮对话经 record_behavior 落账（B3 行为捕获，memory.behavior.summary 聚合）；画像是
+        <b>用户的</b>画像，由 agent.profile.auto 从最近上下文确定性抽取（不烧 token）。
+        命中高置信度（角色非中性且样本 ≥ {{ profileMinSources }} 条）时，以一行软提示注入主智能体
+        用于调整术语深度与举例；否则<b>不注入</b>——宁可不猜，也不误导。
+      </p>
     </section>
 
     <!-- 预设智能体 -->
     <section class="expert-card">
       <div class="expert-card__title">预设智能体（agents.list，内置在前）</div>
       <div v-if="agents.length" class="expert-grid">
-        <div v-for="a in agents" :key="a.id" class="expert-item">
-          <b>{{ a.id }}</b>
+        <div v-for="a in agents" :key="a.id" class="expert-item" :class="{ 'is-main': a.id === 'main' }">
+          <b>{{ a.name || a.id }}</b>
+          <code class="expert-item__id">{{ a.id }}</code>
           <span class="expert-item__meta">
             <i v-if="a.is_builtin" class="expert-tag">内置</i>
+            <i v-if="a.id === 'main'" class="expert-tag">主智能体</i>
             <i v-if="a.enabled === false" class="expert-tag expert-tag--dim">停用</i>
           </span>
-          <span class="expert-item__desc">{{ a.model || '（默认模型路由）' }}</span>
+          <span class="expert-item__desc">{{ a.description || '（无描述）' }}</span>
+          <span class="expert-item__desc">{{ a.model || '（默认模型路由）' }} · 工具 {{ a.tools ? a.tools.length : 0 }}</span>
         </div>
       </div>
-      <p v-else class="expert-note">暂无智能体记录 — 可在「Agent」页创建自定义智能体（含自定义规则与逻辑）</p>
+      <div v-else-if="loading" class="expert-pills">
+        <span class="expert-pill ma-skeleton ma-skeleton--line" style="width: 180px"></span>
+        <span class="expert-pill ma-skeleton ma-skeleton--line" style="width: 140px"></span>
+      </div>
+      <p v-else class="expert-note">
+        网关返回的智能体清单为空 —— 内置智能体由 <code>seed_builtins()</code> 在首次启动时写入
+        <code>data_dir/agents.json</code>，为空说明台账未初始化或读取失败。可到「智能体管理」页刷新查看。
+      </p>
     </section>
 
     <!-- 预设专家库（可在对话框 @ 引用） -->
@@ -155,17 +272,25 @@
         <code>@名称</code> 到剪贴板，粘贴进输入框即可（引用为消息文本标注，不改写发送负载）。
       </p>
       <p v-if="citeNote" class="expert-note expert-note--ok">{{ citeNote }}</p>
-      <div class="expert-grid">
+      <div v-if="experts.length" class="expert-grid">
         <article v-for="e in experts" :key="e.id" class="expert-item">
           <b>{{ e.label }}</b>
           <span class="expert-item__desc">{{ e.lineage }}</span>
           <span class="expert-item__desc">{{ e.mindset }}</span>
-          <span class="expert-item__desc">{{ e.skills }}</span>
-          <span class="expert-item__playbook">剧本 {{ e.playbook.length }} 步</span>
+          <span class="expert-item__desc">专长：{{ joinList(e.expertise) }}</span>
+          <span class="expert-item__desc">专属技能：{{ joinList(e.skills) }}</span>
+          <span class="expert-item__playbook">剧本 {{ (e.playbook || []).length }} 步</span>
           <button class="btn btn--sm btn--ghost expert-item__cite" @click="citeExpert(e)">在对话框引用 @</button>
         </article>
       </div>
-      <p v-if="experts.length === 0" class="expert-note">暂无预设专家 —— 专家库为空或网关未就绪。</p>
+      <div v-else-if="loading" class="expert-pills">
+        <span class="expert-pill ma-skeleton ma-skeleton--line" style="width: 200px"></span>
+        <span class="expert-pill ma-skeleton ma-skeleton--line" style="width: 160px"></span>
+      </div>
+      <p v-else class="expert-note">
+        网关返回的专家库为空（<code>experts.list</code> 正常但列表为 0）—— 检查 <code>agent::expertise</code>
+        的内置专家库是否被裁空；若同时伴随上方红色错误，则属于网关未就绪。
+      </p>
     </section>
 
     <!-- 团队 / 蜂群 / 第三方说明 -->
@@ -182,15 +307,45 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
+// 主智能体头像来自专家包 `senior-dev-engineer/avatars/expert.png`（10 KB）。
+// 载入失败时自动退回首字标记，不出现破图。
+import mainAvatar from '@/assets/agents/senior-dev-engineer.png'
 
 const rpc = useRpcStore()
+const router = useRouter()
 const expertOrbit = ['Lead', 'Architect', 'Builder', 'Reviewer', 'Memory', 'Tools', 'Knowledge']
 
-interface Expert { id: string; label: string; lineage: string; mindset: string; expertise: string; skills: string; playbook: string[] }
-interface AgentItem { id: string; is_builtin?: boolean; enabled?: boolean; model?: string }
+/**
+ * 专家库条目。`expertise` / `skills` 在网关侧是**数组**
+ * （`gateway/team.rs::experts_list` 直接序列化 `&[&str]`），
+ * 此前这里声明成 `string` 属于契约谎言——运行时靠 JS 隐式 `Array#toString`
+ * 才没炸，一旦改用 `.length` / `.map` 就会得到错值。
+ */
+interface Expert {
+  id: string
+  label: string
+  lineage: string
+  mindset: string
+  expertise?: string[]
+  skills?: string[]
+  playbook?: string[]
+}
+interface AgentItem {
+  id: string
+  name?: string
+  description?: string
+  is_builtin?: boolean
+  enabled?: boolean
+  model?: string
+  tools?: string[]
+  skills?: string[]
+  system_prompt?: string
+  systemPrompt?: string
+}
 interface ModeSpec { kind: string; label: string; risk_level: string; allowed_tools: number; denied_tools: number; bloom?: { max_swarm_shards: number; max_sub_experts: number; thinking_depth: number; verification_passes: number; reasoning_effort: string; snapshot_enabled: boolean; budget_tokens: number; max_iterations: number } | null }
 
 const experts = ref<Expert[]>([])
@@ -198,6 +353,49 @@ const agents = ref<AgentItem[]>([])
 const spec = ref<ModeSpec | null>(null)
 const error = ref('')
 const citeNote = ref('')
+/** 首屏加载中：把「还没回来」与「真的为空」分开渲染，避免空态闪现。 */
+const loading = ref(true)
+const personaOpen = ref(false)
+/** 头像加载失败 → 退回首字标记（不渲染破图）。 */
+const avatarOk = ref(true)
+
+/** 主智能体 = 默认会话（`agent:main:*`）的应答者。 */
+const mainAgent = computed<AgentItem | null>(
+  () => agents.value.find(a => a.id === 'main') ?? null,
+)
+const mainInitial = computed(() => (mainAgent.value?.name || 'M').trim().slice(0, 1) || 'M')
+
+/** 用户画像注入门槛：与后端 `agent::profile::USER_PROFILE_MIN_SOURCES` 对齐。 */
+const profileMinSources = 20
+const profileInjected = computed(() => {
+  const p = profile.value
+  if (!p) return false
+  const role = (p.role || '').trim()
+  const neutral = !role || role === '通用助手' || role === '通用用户'
+  return (p.source_count ?? 0) >= profileMinSources && !neutral
+})
+
+/** 数组/字符串统一渲染（后端既有数组也有单串的历史契约）。 */
+function joinList(v?: string[] | string): string {
+  if (Array.isArray(v)) return v.length ? v.join('、') : '—'
+  return v || '—'
+}
+
+/**
+ * 开始与主智能体对话：进入**草稿路由**（`/chat/new`）并带上 agent=main，
+ * 而不是跳到固定会话键 `agent:main:webchat:default`。
+ *
+ * 理由（踩过的坑）：落地页/建议 chips 只在草稿路由渲染（`isDraftRoute()` 门），
+ * 固定会话键要么带着旧历史直接进对话，要么渲染成空会话——用户点「开始对话」
+ * 期待的是「一段新的对话」，不是「回到上次那个会话」。
+ */
+function startMainChat() {
+  void router.push({ path: '/chat/new', query: { agent: 'main' } })
+}
+
+function openAgents() {
+  void router.push('/agents')
+}
 
 /** 复制 `@名称` 到剪贴板，供用户在对话框输入框中引用该专家。 */
 async function citeExpert(e: Expert) {
@@ -213,28 +411,37 @@ async function citeExpert(e: Expert) {
 
 async function loadAll() {
   error.value = ''
+  loading.value = true
   try {
     // 冷加载竞态守卫：WS 仍处于 connecting 时先等连接就绪，避免把「未就绪」
     // 当成加载失败，把 `not connected (state: connecting)` 裸串渲染给用户。
     if (!rpc.isConnected) await rpc.waitForConnection(10_000)
     const [e, a, s] = await Promise.all([
-      rpc.call<{ experts: Expert[] }>('experts.list', {}),
-      rpc.call<{ agents: AgentItem[] }>('agents.list', {}),
+      rpc.call<{ experts?: Expert[] }>('experts.list', {}),
+      rpc.call<{ agents?: AgentItem[] }>('agents.list', {}),
       rpc.call<ModeSpec>('mode.spec', {}),
     ])
-    void loadSwarm()
-    void loadBehavior()
-    void loadComps()
-    experts.value = e.experts ?? []
-    agents.value = a.agents ?? []
-    spec.value = s
+    experts.value = e?.experts ?? []
+    agents.value = a?.agents ?? []
+    spec.value = s ?? null
   } catch (err) {
     error.value = `加载失败: ${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    loading.value = false
   }
+  // 次要数据源独立加载：任一失败只影响它自己那张卡，且失败会如实呈现（不再静默吞掉）。
+  void loadSwarm()
+  void loadBehavior()
+  void loadComps()
 }
 
 interface SwarmCfg { configuredShards?: number | null; configuredSubExperts?: number | null; effectiveShards: number; effectiveSubExperts: number; maxShardsCap: number; maxSubExpertsCap: number }
-const swarm = ref<SwarmCfg>({ effectiveShards: 11, effectiveSubExperts: 5, maxShardsCap: 200, maxSubExpertsCap: 50 })
+/**
+ * `null` = 尚未读到（未加载 / 读取失败）。
+ * 此前默认值是硬编码的 `{ effectiveShards: 11, effectiveSubExperts: 5 }`，
+ * 于是 RPC 一失败，界面就把「未知」显示成「内置默认 11 / 5」——纯属编造。
+ */
+const swarm = ref<SwarmCfg | null>(null)
 const swarmShards = ref(0)
 const swarmSubExperts = ref(0)
 const swarmBusy = ref(false)
@@ -242,20 +449,28 @@ const swarmBusy = ref(false)
 async function loadSwarm() {
   try {
     const s = await rpc.call<SwarmCfg>('mode.swarm.get', {})
+    // 契约校验：缺关键字段时视为读取失败，而不是把 undefined 渲染成空白
+    if (!s || typeof s.effectiveShards !== 'number') throw new Error('mode.swarm.get 返回不完整')
     swarm.value = s
     swarmShards.value = s.configuredShards ?? 0
     swarmSubExperts.value = s.configuredSubExperts ?? 0
-  } catch { /* 静默 */ }
+  } catch {
+    swarm.value = null
+  }
 }
 
 async function saveSwarm() {
+  if (!swarm.value) return
   swarmBusy.value = true
   try {
     const s = await rpc.call<SwarmCfg>('mode.swarm.set', { maxSwarmShards: swarmShards.value, maxSubExperts: swarmSubExperts.value })
+    if (!s || typeof s.effectiveShards !== 'number') throw new Error('mode.swarm.set 返回不完整')
     swarm.value = s
     swarmShards.value = s.configuredShards ?? 0
     swarmSubExperts.value = s.configuredSubExperts ?? 0
-  } catch { /* 静默 */ } finally { swarmBusy.value = false }
+  } catch {
+    swarm.value = null
+  } finally { swarmBusy.value = false }
 }
 
 async function resetSwarm() {
@@ -271,7 +486,7 @@ const teamGoal = ref('')
 const teamBusy = ref(false)
 const teamResult = ref<TeamResult | null>(null)
 const teamError = ref('')
-const behavior = ref<BehaviorSummary>({})
+const behavior = ref<BehaviorSummary | null>(null)
 const profile = ref<AutoProfile | null>(null)
 
 async function launchTeam() {
@@ -288,8 +503,17 @@ async function launchTeam() {
 }
 
 async function loadBehavior() {
-  try { behavior.value = await rpc.call<BehaviorSummary>('memory.behavior.summary', {}) } catch { /* 静默 */ }
-  try { profile.value = await rpc.call<AutoProfile>('agent.profile.auto', {}) } catch { /* 静默 */ }
+  try {
+    behavior.value = (await rpc.call<BehaviorSummary>('memory.behavior.summary', {})) ?? null
+  } catch {
+    // 失败保持 null：模板据此渲染「未读取到」，而不是 0 值假象
+    behavior.value = null
+  }
+  try {
+    profile.value = (await rpc.call<AutoProfile>('agent.profile.auto', {})) ?? null
+  } catch {
+    profile.value = null
+  }
 }
 
 interface BgTask { taskId: string; status: string; retryCount: number; maxRetries: number; checkpoints?: unknown[] }
@@ -384,8 +608,21 @@ async function rerunComp(c: Composition) {
   await launchBackgroundTeam()
 }
 
+// P3 打通：模型/路由变更（本地部署、档案激活、路由保存）与编排 agent 事件
+// （orchestrate.run 统一发 started/stopped）→ 专家中心被动刷新，无需手动点刷新。
+const rpcUnsubs: Array<() => void> = []
+rpcUnsubs.push(
+  rpc.on('models.changed', () => void loadAll()),
+  rpc.on('agent.started', () => void loadAll()),
+  rpc.on('agent.stopped', () => void loadAll()),
+)
+
 onMounted(loadAll)
-onUnmounted(() => { if (bgTimer) clearInterval(bgTimer) })
+onUnmounted(() => {
+  for (const unsub of rpcUnsubs) unsub()
+  rpcUnsubs.length = 0
+  if (bgTimer) clearInterval(bgTimer)
+})
 </script>
 
 <style scoped>
@@ -398,6 +635,170 @@ onUnmounted(() => { if (bgTimer) clearInterval(bgTimer) })
   text-transform: uppercase;
   color: var(--accent);
 }
+/* ── 主智能体主视觉 ───────────────────────────────────────────── */
+.ma-hero {
+  position: relative;
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--hairline));
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 58%),
+    var(--card);
+}
+.ma-hero__mark {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  background: color-mix(in srgb, var(--accent) 16%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.ma-hero__avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
+}
+.ma-hero__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ma-hero__kicker {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.ma-hero__name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.15rem, 0.9rem + 0.7vw, 1.5rem);
+  font-weight: 700;
+  color: var(--text);
+}
+.ma-hero__desc {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-dim);
+  max-width: 62ch;
+}
+.ma-hero__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ma-chip {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border: 1px solid var(--hairline);
+}
+.ma-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ma-hero__meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ma-hero__state.is-on { color: var(--ok, var(--accent)); }
+.ma-hero__state.is-off { color: var(--danger); }
+.ma-hero__actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 132px;
+}
+.ma-hero--missing { border-color: color-mix(in srgb, var(--danger) 32%, var(--hairline)); }
+.ma-persona__text {
+  margin: 0;
+  padding: 12px;
+  max-height: 340px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+.ma-skeleton {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 6%, transparent),
+    color-mix(in srgb, var(--text) 13%, transparent),
+    color-mix(in srgb, var(--text) 6%, transparent)
+  );
+  background-size: 200% 100%;
+  animation: ma-shimmer 1.4s ease-in-out infinite;
+}
+.ma-skeleton--line {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  margin: 4px 0;
+}
+.ma-skeleton--title { height: 20px; }
+@keyframes ma-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.expert-item__id {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.expert-item.is-main { border-color: color-mix(in srgb, var(--accent) 45%, var(--hairline)); }
+.ma-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media (max-width: 720px) {
+  .ma-hero { flex-wrap: wrap; }
+  .ma-hero__actions { flex-direction: row; flex-wrap: wrap; min-width: 0; width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ma-skeleton { animation: none; }
+}
+
 .expert-constellation {
   display: flex;
   flex-wrap: wrap;

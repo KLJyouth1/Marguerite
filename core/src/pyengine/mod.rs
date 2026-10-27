@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod client;
 pub mod event_bridge;
+pub mod memfence;
 pub mod sidecar;
 
 pub use sidecar::{

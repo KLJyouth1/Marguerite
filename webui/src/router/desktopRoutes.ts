@@ -4,6 +4,8 @@ import type { RouteRecordRaw } from 'vue-router'
 // V2.1-P2：pet-overlay 悬浮窗独立视图（Tauri 壳加载）：透明背景 + 独立 3D 画布，
 // 不挂侧栏/顶栏，无导航分组元数据（保持不可见于侧边导航，符合 WebUI 导航契约）。
 const PetOverlayView = () => import('@/views/PetOverlayView.vue')
+// P0-4：任务悬浮球（Tauri 120×120 透明窗口）：同样不挂外壳、不进侧栏。
+const TaskOverlayView = () => import('@/views/TaskOverlayView.vue')
 
 export const desktopRoutes: RouteRecordRaw[] = [
   {
@@ -16,6 +18,18 @@ export const desktopRoutes: RouteRecordRaw[] = [
       viewKey: 'pet-overlay',
       routeTransition: 'none',
       // 不设置 meta.group：R5 WebUI 导航分组契约保证不出现于侧栏
+    },
+  },
+  {
+    path: '/task-overlay',
+    name: 'task-overlay',
+    component: TaskOverlayView,
+    meta: {
+      title: 'Marguerite Tasks',
+      platforms: ['web', 'desktop'],
+      viewKey: 'task-overlay',
+      routeTransition: 'none',
+      // 不设置 meta.group：保持不可见于侧栏（与 pet-overlay 同契约）
     },
   },
 ]

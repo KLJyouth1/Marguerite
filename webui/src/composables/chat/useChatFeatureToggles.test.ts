@@ -311,14 +311,40 @@ describe('useChatFeatureToggles model routing mode', () => {
     const { api, rpc, emit } = createHarness()
     const cleanup = api.bindFeatureRefresh()
 
-    emit('models.routing.changed', { mode: 'ensemble', selection_mode: 'router_dynamic' })
+    // P3 打通：后端统一发 `models.changed`（原 models.routing.changed 后端从未发布）。
+    emit('models.changed', { mode: 'ensemble', selection_mode: 'router_dynamic' })
     expect(api.modelRoutingMode.value).toBe('llm_ensemble')
     expect(api.llmEnsembleSelectionMode.value).toBe('router_dynamic')
 
     cleanup()
-    expect(rpc.on).toHaveBeenCalledWith('models.routing.changed', expect.any(Function))
-    emit('models.routing.changed', { mode: 'direct' })
+    expect(rpc.on).toHaveBeenCalledWith('models.changed', expect.any(Function))
+    emit('models.changed', { mode: 'direct' })
     expect(api.modelRoutingMode.value).toBe('llm_ensemble')
+  })
+
+  it('refreshes toggles when models.changed carries no routing snapshot', async () => {
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
+    vi.stubGlobal('window', {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
+    const { api, rpc, emit } = createHarness()
+    const cleanup = api.bindFeatureRefresh()
+    const before = rpc.call.mock.calls.length
+
+    // 非路由变更（如 llm_profile_upsert）：只重读 toggles，不应用路由快照。
+    emit('models.changed', { reason: 'llm_profile_upsert', provider_id: 'p' })
+    await Promise.resolve()
+
+    expect(api.modelRoutingMode.value).toBe('off')
+    expect(rpc.call.mock.calls.length).toBeGreaterThan(before)
+
+    cleanup()
+    vi.unstubAllGlobals()
   })
 
   it('derives bloom_ensemble from a gateway bloom snapshot', async () => {
@@ -333,7 +359,7 @@ describe('useChatFeatureToggles model routing mode', () => {
     const { api, emit } = createHarness()
     const cleanup = api.bindFeatureRefresh()
 
-    emit('models.routing.changed', { mode: 'bloom', selection_mode: 'router_dynamic' })
+    emit('models.changed', { mode: 'bloom', selection_mode: 'router_dynamic' })
     expect(api.modelRoutingMode.value).toBe('bloom_ensemble')
     expect(api.llmEnsembleEnabled.value).toBe(true)
     expect(api.routerEnabled.value).toBe(true)

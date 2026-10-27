@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-core"
-version = "0.2.13"
+version = "0.2.17"
 edition = "2021"
 description = "Marguerite CLI Workbench - Core Engine"
 
@@ -16,6 +16,9 @@ dirs = "*"
 tracing-appender = "0.2"
 regex = "1.5.5"
 reqwest = { version = "0.12", features = ["json", "stream"] }
+# 内容更新源（GitHub Release 检查 / update-manifest.json 同步）：网关 RPC 是同步
+# 分派，需要一个阻塞式 HTTP 客户端；ureq 纯 Rust（rustls），已在 workspace lockfile 内。
+ureq = "2"
 futures-util = "0.3.7"
 tokio = { version = "1.44.2", features = ["full"] }
 chrono = { version = "0.4.20", features = ["serde"] }
@@ -29,6 +32,11 @@ yrs = "0.27"
 tokio-stream = "0.1"
 ratatui = "0.28"
 crossterm = "0.28"
+
+# 交互式终端沙箱：真实 PTY（Windows ConPTY / Unix openpty）。
+# 取自 wezterm 的 portable-pty（master/slave 抽象 + resize + 子进程等待），
+# 纯 Rust（winapi / libc），不引入 C 构建链，不影响离线打包。
+portable-pty = "0.9"
 
 # 删除转回收站（软删除）：不用外部 `trash` crate，而是自有 TrashStore
 # （`.marguerite/trash/<id>/{entry.json,payload/}`）——跨平台行为一致、可单元测试、
@@ -68,6 +76,10 @@ axum = { version = "0.8", features = ["ws"] }
 # sentence-transformers 模型。首次使用需要下载模型权重（约 80MB），离线不可用；
 # 未启用该 feature 时引擎走零依赖的特征哈希。
 fastembed = { version = "3", optional = true }
+deepseek-recipe = "0.2.0"
+deepseek-recipe-encoding = "0.2.0"
+ab_glyph = "0.2.32"
+tokenizers = "0.23"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -80,6 +92,11 @@ unicode-width = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 
+# Unix 进程组信号（`sandboxed_exec` 超时按组终止）。已在 lockfile（portable-pty 传递依赖），
+# 不新增下载。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # 桌面自动化：Windows COM/OLE + UI Automation。只在 Windows target 编译；
 # 非 Windows（linux/macOS）下 desktop_automation 的 COM/UIA 驱动不参与编译（cfg(windows)）。
 # 不引入第三方 uiautomation / enigo：直接用 windows crate 的 Win32 原生绑定，
@@ -91,12 +108,24 @@ windows = { version = "0.62.1", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_Globalization",
+    # P1-6：侧车 RSS 采集。OpenProcess（限信息查询权限）+ GetProcessMemoryInfo
+    # 读 PROCESS_MEMORY_COUNTERS.WorkingSetSize（常驻物理内存）。
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    # P1-5：侧车内存围栏。CreateJobObjectW / SetInformationJobObject /
+    # AssignProcessToJobObject + JOBOBJECT_EXTENDED_LIMIT_INFORMATION.JobMemoryLimit。
+    "Win32_System_JobObjects",
+    # CreateJobObjectW 的 SECURITY_ATTRIBUTES 形参由 Win32_Security feature 门控。
+    "Win32_Security",
     # B1：UIA 桥。IUIAutomation / IUIAutomationElement / IUIAutomationTreeWalker /
     # IUIAutomationInvokePattern(Toggle/SelectionItem) 全部位于 Win32_UI_Accessibility
     # 之后，未启用时连 `use` 都会编译失败（这正是此前 WindowsUiaSource 只能软失败的硬约束）。
     "Win32_UI_Accessibility",
     # 前台窗口句柄：GetForegroundWindow / SetForegroundWindow。
     "Win32_UI_WindowsAndMessaging",
+    # W3.2：用系统默认程序打开文件走 ShellExecuteW（不经 cmd /c start，
+    # 路径里的 & | 不再被解释成命令分隔符）。
+    "Win32_UI_Shell",
 ] }
 
 [features]

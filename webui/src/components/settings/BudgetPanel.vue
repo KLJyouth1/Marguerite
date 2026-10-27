@@ -5,7 +5,10 @@
  * budget.warning 升级事件（审计日志可见）并在此高亮。
  */
 import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
+
+const { t } = useI18n()
 
 interface BudgetState {
   ok: boolean
@@ -38,7 +41,7 @@ async function refresh() {
     await rpc.waitForConnection()
     const data = await rpc.call<BudgetState>('usage.budget.get', { session: session.value })
     if (data?.ok === false) {
-      error.value = data.error ?? '读取预算失败'
+      error.value = data.error ?? t('settings.budget.readFailed')
     } else {
       state.value = data
       formTokens.value = data.threshold_tokens
@@ -62,9 +65,9 @@ async function save() {
     if (formUsd.value != null) params.thresholdUsd = formUsd.value
     const data = await rpc.call<{ ok: boolean; error?: string }>('usage.budget.set', params)
     if (data.ok) {
-      message.value = '预算阈值已保存'
+      message.value = t('settings.budget.saved')
     } else {
-      error.value = data.error ?? '保存失败'
+      error.value = data.error ?? t('settings.budget.saveFailed')
     }
     await refresh()
   } catch (e) {
@@ -85,9 +88,9 @@ async function clearBudget() {
       thresholdUsd: 0,
     })
     if (data.ok) {
-      message.value = '已移除预算阈值'
+      message.value = t('settings.budget.cleared')
     } else {
-      error.value = data.error ?? '移除失败'
+      error.value = data.error ?? t('settings.budget.clearFailed')
     }
     await refresh()
   } catch (e) {
@@ -103,49 +106,49 @@ onMounted(refresh)
 <template>
   <section class="control-section">
     <div class="control-section__head">
-      <h3 class="control-section__title">会话预算阈值（FinOps）</h3>
+      <h3 class="control-section__title">{{ t('settings.budget.title') }}</h3>
       <p class="control-section__desc">
-        M3-D2 成本归因：设置该会话的 token / 美元预算阈值，超出后 core 自动触发 budget.warning 升级事件并写入审计日志。
+        {{ t('settings.budget.description') }}
       </p>
     </div>
     <div v-if="error" class="budget-banner budget-banner--err" role="alert">{{ error }}</div>
     <div v-else-if="message" class="budget-banner budget-banner--ok" role="status">{{ message }}</div>
     <div v-if="state" class="budget-summary" :data-testid="state.exceeded ? 'budget-exceeded' : 'budget-ok'">
       <div class="budget-summary__item">
-        <span class="budget-summary__label">会话</span>
+        <span class="budget-summary__label">{{ t('settings.budget.session') }}</span>
         <span class="budget-summary__value">{{ state.session }}</span>
       </div>
       <div class="budget-summary__item">
-        <span class="budget-summary__label">已用 token</span>
+        <span class="budget-summary__label">{{ t('settings.budget.usedTokens') }}</span>
         <span class="budget-summary__value">{{ state.total_tokens.toLocaleString() }}</span>
       </div>
       <div class="budget-summary__item">
-        <span class="budget-summary__label">已用成本</span>
+        <span class="budget-summary__label">{{ t('settings.budget.usedCost') }}</span>
         <span class="budget-summary__value">${{ state.cost_usd.toFixed(4) }} {{ state.currency }}</span>
       </div>
       <div class="budget-summary__item">
-        <span class="budget-summary__label">阈值</span>
+        <span class="budget-summary__label">{{ t('settings.budget.threshold') }}</span>
         <span class="budget-summary__value">
           {{ state.threshold_tokens != null ? `${state.threshold_tokens.toLocaleString()} tok` : '—' }}
           / {{ state.threshold_usd != null ? `$${state.threshold_usd}` : '—' }}
         </span>
       </div>
       <div class="budget-summary__item">
-        <span class="budget-summary__label">状态</span>
+        <span class="budget-summary__label">{{ t('settings.budget.status') }}</span>
         <span class="budget-status" :class="state.exceeded ? 'budget-status--exceeded' : 'budget-status--ok'">
-          {{ state.exceeded ? '已超阈值（升级）' : '正常' }}
+          {{ state.exceeded ? t('settings.budget.exceeded') : t('settings.budget.normal') }}
         </span>
       </div>
     </div>
-    <div v-else-if="loading" class="budget-empty">加载中…</div>
+    <div v-else-if="loading" class="budget-empty">{{ t('settings.budget.loading') }}</div>
     <div class="budget-form">
       <input
         v-model.number="formTokens"
         class="control-input control-input--narrow"
         type="number"
         min="0"
-        placeholder="阈值 token"
-        aria-label="预算阈值 token"
+        :placeholder="t('settings.budget.tokensPlaceholder')"
+        :aria-label="t('settings.budget.tokensAria')"
       />
       <input
         v-model.number="formUsd"
@@ -153,11 +156,11 @@ onMounted(refresh)
         type="number"
         min="0"
         step="0.001"
-        placeholder="阈值 USD"
-        aria-label="预算阈值 USD"
+        :placeholder="t('settings.budget.usdPlaceholder')"
+        :aria-label="t('settings.budget.usdAria')"
       />
-      <button type="button" class="btn" :disabled="saving || loading" @click="save">保存阈值</button>
-      <button type="button" class="btn btn--ghost" :disabled="saving || loading" @click="clearBudget">移除</button>
+      <button type="button" class="btn" :disabled="saving || loading" @click="save">{{ t('settings.budget.save') }}</button>
+      <button type="button" class="btn btn--ghost" :disabled="saving || loading" @click="clearBudget">{{ t('settings.budget.clear') }}</button>
     </div>
   </section>
 </template>

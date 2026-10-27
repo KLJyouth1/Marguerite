@@ -1361,8 +1361,8 @@ describe('useChatRpcEventHandlers reasoning timer replay', () => {
   })
 })
 
-describe('useChatRpcEventHandlers narration separation (A3)', () => {
-  it('separates stacked narration records with a blank line', () => {
+describe('useChatRpcEventHandlers narration stays out of the reasoning fold', () => {
+  it('drops orchestrator narration frames instead of rendering them as thinking', () => {
     const { api, stop } = createHarness()
 
     try {
@@ -1381,10 +1381,7 @@ describe('useChatRpcEventHandlers narration separation (A3)', () => {
         started_at: 101_000,
       })
 
-      expect(api.streamThinkingText.value).toBe(
-        '> 自动编排决策：Pipeline — 检测到 3 个交付物\n\n'
-        + '> 交付流水线：检索 → 网页 → 演示文稿',
-      )
+      expect(api.streamThinkingText.value).toBe('')
     } finally {
       stop()
     }
@@ -1413,19 +1410,18 @@ describe('useChatRpcEventHandlers narration separation (A3)', () => {
     }
   })
 
-  it('does not prepend a separator before the first narration record', () => {
+  it('ignores whitespace-only reasoning frames', () => {
     const { api, stop } = createHarness()
 
     try {
       api.handlers.onAny('session.event.thinking', {
         session_key: 'agent:main:test',
         stream_seq: 1,
-        text: '> 单条叙述',
-        kind: 'narration',
+        text: '   \n  ',
         started_at: 100_000,
       })
 
-      expect(api.streamThinkingText.value).toBe('> 单条叙述')
+      expect(api.streamThinkingText.value).toBe('')
     } finally {
       stop()
     }

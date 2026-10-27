@@ -92,5 +92,11 @@ describe('CommandPalette navigation commands', () => {
       omni!.querySelector('.cmdp-option__sub')?.textContent?.trim(),
       'active marker must light for the hyphen kind',
     ).toBeTruthy()
+    // `shared.cmdp.groupModes` is not in the shipped locales yet; the palette
+    // must fall back to the stable group id, never put the raw key on screen.
+    const groupLabels = Array.from(el.querySelectorAll('.cmdp-group-label'))
+      .map(node => node.textContent)
+    expect(groupLabels).toContain('Modes')
+    expect(groupLabels).not.toContain('shared.cmdp.groupModes')
   })
 })

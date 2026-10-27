@@ -306,10 +306,18 @@ fn mode_gate(mode: ModeKind, interactive: &AtomicBool) -> Result<(), String> {
     }
 }
 
-/// 路径守卫：cwd 规范化后必须是工作区的子路径（组件级前缀匹配）
+/// 路径守卫：cwd 规范化后必须是工作区的子路径（组件级前缀匹配）。
+///
+/// F-05 修复：canonicalize **失败即拒绝**（fail-closed）。旧实现失败时回退原始
+/// 路径比较，符号链接/不存在路径可能绕过前缀判定；而 cwd 不存在时命令本就
+/// 无法执行，拒绝不会损失合法能力。
 fn validate_cwd(cwd: &Path, workspace: &Path) -> bool {
-    let cwd_c = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let ws_c = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let (Ok(cwd_c), Ok(ws_c)) = (
+        std::fs::canonicalize(cwd),
+        std::fs::canonicalize(workspace),
+    ) else {
+        return false;
+    };
     cwd_c.starts_with(&ws_c)
 }
 

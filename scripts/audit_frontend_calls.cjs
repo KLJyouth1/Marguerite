@@ -41,6 +41,8 @@ const FRONTEND_METHODS = [
   'mode.get', 'mode.spec', 'mode.swarm.get', 'cache.status', 'router.decision', 'router.selflearning.status',
   'pet.status', 'games.list', 'long_running.list', 'workspaces.list', 'pages.list',
   'terminal.backends.status', 'mcp.servers.list', 'mcp.list', 'context.status',
+  // Harness 台账（2026-10-24）：SQLite 运行台账 + 递归技能覆盖报告
+  'harness.ledger.status', 'harness.ledger.query', 'harness.ledger.replay', 'skills.coverage',
 ];
 
 async function run() {

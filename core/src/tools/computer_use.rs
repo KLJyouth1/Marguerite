@@ -41,6 +41,10 @@ use crate::tools::builtin::make_local_tool;
 use crate::vision::image_metadata;
 use crate::vision::VisionCapability;
 
+/// 桌面操控增强（DPI 感知 / 批量动作 / 窗口与应用操控 / VK 键位）。
+#[path = "computer_use_pilot.rs"]
+mod pilot;
+
 /// 工具闭包类型（与 `tools::builtin::ToolFn` 透明等价）
 type ToolFn = std::sync::Arc<
     dyn for<'a> Fn(
@@ -199,9 +203,15 @@ impl OsComputerUse {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let p = std::env::temp_dir().join(format!("marg_cu_{stamp}.ps1"));
-        let prologue = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n$OutputEncoding = [System.Text.Encoding]::UTF8\n";
+        let prologue = format!(
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n$OutputEncoding = [System.Text.Encoding]::UTF8\n{}",
+            pilot::DPI_PRELUDE
+        );
         let trailer = "if ($Error.Count -gt 0) { exit 1 }\n";
-        std::fs::write(&p, format!("{prologue}{content}\n{trailer}"))
+        // 必须带 UTF-8 BOM：Windows PowerShell 5.1 对**无 BOM** 的 .ps1 按 ANSI 代码页解码，
+        // 脚本里的中文（注释也会）会变成乱码字节；实测把中文注释写进 Add-Type 的 C# 源码后，
+        // 紧随其后的方法签名被解析成非法语句（`if (IsIconic(h))` 报「应输入标识符」）。
+        std::fs::write(&p, format!("\u{feff}{prologue}{content}\n{trailer}"))
             .map_err(|e| anyhow!("写入 ps1 失败: {e}"))?;
         Ok(p)
     }
@@ -292,12 +302,22 @@ impl OsComputerUse {
     }
 
     /// 构造截图命令（跨平台；多屏/活动窗口/降采样由 `mode`/`max_edge` 控制）
-    fn build_capture_cmd(&self, path: &str, mode: CaptureMode, max_edge: u32) -> Result<NativeCmd> {
+    ///
+    /// `rulers`：在图上画坐标刻度（上沿/左沿每 200px，标注**屏幕坐标**）。
+    /// 这是 dsh-pilot 的「刻度尺」做法：模型直接读刻度，不用数像素，也不怕图被压小。
+    fn build_capture_cmd(
+        &self,
+        path: &str,
+        mode: CaptureMode,
+        max_edge: u32,
+        rulers: bool,
+    ) -> Result<NativeCmd> {
         if cfg!(windows) {
             // PowerShell 内容写入 .ps1 后 argv 直连执行（不经 cmd，路径无需引号转义）
             let bounds = match mode {
-                // 设备像素：逻辑 Bounds × DPI 比例（SetCursorPos 使用设备/虚拟坐标空间，非 DPI 缩放逻辑像素）
-                CaptureMode::Primary => "$dpi=(([System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)).DpiX)/96.0; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[int]($s.Width*$dpi); $h=[int]($s.Height*$dpi); $ox=[int]($s.X*$dpi); $oy=[int]($s.Y*$dpi);".to_string(),
+                // 进程已在脚本前置里声明 PerMonitorV2 → `Screen.Bounds` 本身就是物理像素。
+                // 旧实现再乘一次 `DpiX/96` 会在 150%/200% 缩放下把图放大一倍（点必偏）。
+                CaptureMode::Primary => "$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[int]$s.Width; $h=[int]$s.Height; $ox=[int]$s.X; $oy=[int]$s.Y;".to_string(),
                 // 虚拟屏幕设备像素（与 SetCursorPos 同一坐标系）；P/Invoke GetSystemMetrics(SM_X/Y/CX/CYVIRTUALSCREEN=76/77/78/79)
                 CaptureMode::All => "$sm=Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern int GetSystemMetrics(int n);' -Name SM -Namespace W32 -PassThru; $ox=[W32.SM]::GetSystemMetrics(76); $oy=[W32.SM]::GetSystemMetrics(77); $w=[W32.SM]::GetSystemMetrics(78); $h=[W32.SM]::GetSystemMetrics(79);".to_string(),
                 // 前台窗口设备像素矩形（GetWindowRect 本就返回设备像素）
@@ -311,9 +331,18 @@ impl OsComputerUse {
             } else {
                 format!("$b.Save('{p}');", p = path)
             };
+            let ruler_ps = if rulers {
+                // 刻度失败绝不影响截图本身：整段包在 try/catch 里。
+                format!(
+                    "try {{ $pen=New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(210,255,48,48),1); $fnt=New-Object System.Drawing.Font('Consolas',10); $br=[System.Drawing.Brushes]::OrangeRed; for($i=0;$i -lt $b.Width;$i+=200){{ $g.DrawLine($pen,$i,0,$i,10); $g.DrawString(([string]($i+{ox})),$fnt,$br,($i+2),10) }}; for($j=0;$j -lt $b.Height;$j+=200){{ $g.DrawLine($pen,0,$j,10,$j); $g.DrawString(([string]($j+{oy})),$fnt,$br,2,($j+2)) }}; $pen.Dispose(); $fnt.Dispose() }} catch {{}}",
+                    ox = "$ox", oy = "$oy"
+                )
+            } else {
+                String::new()
+            };
             let content = format!(
-                "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n{bounds}\n$b=New-Object System.Drawing.Bitmap($w,$h)\n$g=[System.Drawing.Graphics]::FromImage($b)\n$g.CopyFromScreen($ox,$oy,0,0,$b.Size)\n{save}\n\"$w $h\" | Set-Content -Path '{p}.dim' -Encoding ascii\n",
-                bounds = bounds, save = save, p = path
+                "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n{bounds}\n$b=New-Object System.Drawing.Bitmap($w,$h)\n$g=[System.Drawing.Graphics]::FromImage($b)\n$g.CopyFromScreen($ox,$oy,0,0,$b.Size)\n{rulers}\n{save}\n\"$w $h $ox $oy\" | Set-Content -Path '{p}.dim' -Encoding ascii\n",
+                bounds = bounds, rulers = ruler_ps, save = save, p = path
             );
             self.ps1_cmd(&content)
         } else if cfg!(target_os = "macos") {
@@ -363,6 +392,7 @@ impl OsComputerUse {
         if cfg!(windows) {
             // 统一经 user32（SetCursorPos + mouse_event）与 SendKeys，写入 .ps1 执行
             let sig = "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X,int Y); [DllImport(\"user32.dll\")] public static extern void mouse_event(int f,int a,int b,int d,int e); [DllImport(\"user32.dll\")] public static extern void keybd_event(byte b,int a,int f,int e);' -Name MU -Namespace W32 -PassThru";
+            let mut needs_win32 = false;
             let body = match action {
                 "click" => format!(
                     "[W32.MU]::SetCursorPos({x},{y}); Start-Sleep -Milliseconds 30; [W32.MU]::mouse_event(0x0002,0,0,0,0); [W32.MU]::mouse_event(0x0004,0,0,0,0)"
@@ -398,14 +428,34 @@ impl OsComputerUse {
                     // 先移动到 (x,y) 再滚动（参考 robotgo/computer_use_ootb）
                     format!("[W32.MU]::SetCursorPos({x},{y}); {v} {h}", x = x, y = y, v = v, h = h)
                 }
-                "type" | "key" | "combo" => {
-                    let t = if action == "combo" { key } else { text };
+                "type" => {
                     // SendKeys 用单引号包裹；转义内部单引号
-                    let escaped = t.replace('\'', "''");
+                    let escaped = text.replace('\'', "''");
                     format!(
                         "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{e}')",
                         e = escaped
                     )
+                }
+                // key / combo：按 VK 序列注入。
+                //
+                // 旧实现把 `key` 的值喂给 `text`（恒为空）→ `key` 动作静默无效；
+                // 且把文档里的 `ctrl+c` 直接交给 SendKeys（SendKeys 语法是 `^c`）→ 组合键也不生效。
+                // 现在：SendKeys 专有语法原样透传，其余一律解析成 VK 按住/点按序列。
+                "key" | "combo" => {
+                    let t = key.trim();
+                    if t.is_empty() {
+                        return Err(anyhow!("key/key_combo 需要非空的 key 参数"));
+                    }
+                    if pilot::is_sendkeys_syntax(t) {
+                        let escaped = t.replace('\'', "''");
+                        format!(
+                            "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{e}')",
+                            e = escaped
+                        )
+                    } else {
+                        needs_win32 = true;
+                        pilot::chord_ps(t)?
+                    }
                 }
                 "clipboard_set" => {
                     let escaped = text.replace('\'', "''");
@@ -416,15 +466,20 @@ impl OsComputerUse {
                 }
                 "clipboard_get" => "Get-Clipboard".to_string(),
                 "window_focus" => {
-                    let escaped = key.replace('\'', "''");
-                    format!(
-                        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate('{e}')",
-                        e = escaped
-                    )
+                    // 旧实现走 `AppActivate(标题)`：被前台锁拒绝时它可能既不抛错也不生效，
+                    // 于是「窗口没切过去」被报成成功。改为 hwnd + ForceForeground + 回读校验。
+                    needs_win32 = true;
+                    pilot::force_foreground_ps(key)
                 }
                 _ => return Err(anyhow!("未知输入动作: {action}")),
             };
-            let content = format!("{sig}\n{body}\n", sig = sig, body = body);
+            // 只有需要窗口/VK 能力的动作才付 `MargUi` 的编译成本；纯键鼠仍走轻量小类型。
+            let prelude = if needs_win32 {
+                pilot::WIN32_CLASS.to_string()
+            } else {
+                sig.to_string()
+            };
+            let content = format!("{prelude}\n{body}\n", prelude = prelude, body = body);
             self.ps1_cmd(&content)
         } else if cfg!(target_os = "macos") {
             let cmd = match action {
@@ -576,7 +631,7 @@ $root.FindAll([System.Windows.Automation.TreeScope]::Subtree,$cond) | \
 
 impl ScreenPerception for OsComputerUse {
     fn capture_cmd(&self, out_path: &str, mode: CaptureMode, max_edge: u32) -> Result<NativeCmd> {
-        self.build_capture_cmd(out_path, mode, max_edge)
+        self.build_capture_cmd(out_path, mode, max_edge, false)
     }
 }
 
@@ -689,16 +744,121 @@ fn grounding_metadata(
 /// capture 在 Windows 路径以设备像素（含 DPI 修正）写入；缺失/损坏时返回 `None`，
 /// 由调用方退化为截图像素（scale=1）。
 fn read_dim_sidecar(path: &str) -> Option<(u32, u32)> {
+    read_dim_sidecar_full(path).map(|(w, h, _, _)| (w, h))
+}
+
+/// 同上，但连同采集**原点**一起读（新格式 `"w h ox oy"`；旧格式缺原点时按 0,0）。
+fn read_dim_sidecar_full(path: &str) -> Option<(u32, u32, i64, i64)> {
     let s = std::fs::read_to_string(path).ok()?;
     let mut it = s.split_whitespace();
     let w = it.next()?.parse::<u32>().ok()?;
     let h = it.next()?.parse::<u32>().ok()?;
-    Some((w, h))
+    let ox = it.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let oy = it.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    Some((w, h, ox, oy))
+}
+
+/// 上一帧指纹（进程级）：同一画面重复截图时标记 unchanged，避免模型为同一帧重复推理。
+fn last_frame_hash() -> &'static std::sync::Mutex<Option<String>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 只读冒烟：真实调用 `window_list` 与截图，验证 DPI 前置 + Win32 桥能跑通。
+    ///
+    /// 不碰键鼠、不改任何窗口，但需要**桌面会话**（无桌面的 CI 里截图为空会失败），
+    /// 因此按仓库既有惯例标 `#[ignore]`，在真机上手动跑。
+    #[tokio::test]
+    #[ignore = "真机：需要桌面会话才能截图"]
+    async fn live_window_list_and_screenshot_contract() {
+        if !cfg!(windows) {
+            return;
+        }
+        let mut a = HashMap::new();
+        a.insert("action".to_string(), "window_list".to_string());
+        let out = dispatch(a, None).await.expect("window_list 不应报错");
+        match out {
+            ToolResult::Success { data, .. } => {
+                assert!(
+                    data.contains("NO_VISIBLE_WINDOW") || data.contains("hwnd="),
+                    "窗口列表应以行式输出: {data}"
+                );
+            }
+            other => panic!("window_list 应成功: {other:?}"),
+        }
+
+        let mut s = HashMap::new();
+        s.insert("action".to_string(), "screenshot".to_string());
+        s.insert("rulers".to_string(), "true".to_string());
+        let out = dispatch(s, None).await.expect("screenshot 不应报错");
+        match out {
+            ToolResult::Success { data, metadata } => {
+                assert!(data.contains("capture="), "必须给出坐标契约: {data}");
+                assert!(metadata.contains_key("screenshot.hash"), "必须给出帧指纹");
+                assert!(metadata.contains_key("screenshot.contract"), "必须给出契约元数据");
+            }
+            other => panic!("screenshot 应成功: {other:?}"),
+        }
+    }
+
+    /// 真机端到端：启动记事本 → 聚焦 → 一次 `sequence` 打字 + `ctrl+a`/`ctrl+c` → 读剪贴板校验。
+    ///
+    /// 会真实抢前台并注入键鼠，故 `#[ignore]`：只在桌面会话里手动跑
+    /// （`cargo test -p marguerite-core --lib live_sequence -- --ignored --nocapture`）。
+    #[tokio::test]
+    #[ignore = "真机：会启动记事本并注入键鼠，只在桌面会话下手动运行"]
+    async fn live_sequence_types_into_notepad_and_verifies_clipboard() {
+        if !cfg!(windows) {
+            return;
+        }
+        let mut launch = HashMap::new();
+        launch.insert("action".to_string(), "app_launch".to_string());
+        launch.insert("app".to_string(), "notepad.exe".to_string());
+        let _ = dispatch(launch, None).await.expect("启动记事本");
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let steps = r#"[
+            {"action":"focus","title":"notepad"},
+            {"action":"wait","ms":400},
+            {"action":"type","text":"MARGUERITE-PILOT"},
+            {"action":"key_combo","key":"ctrl+a"},
+            {"action":"key_combo","key":"ctrl+c"},
+            {"action":"wait","ms":400}
+        ]"#;
+        let mut seq = HashMap::new();
+        seq.insert("action".to_string(), "sequence".to_string());
+        seq.insert("steps".to_string(), steps.to_string());
+        seq.insert("capture".to_string(), "none".to_string());
+        let out = dispatch(seq, None).await.expect("sequence 不应报错");
+        let data = match out {
+            ToolResult::Success { data, .. } => data,
+            other => panic!("sequence 应成功: {other:?}"),
+        };
+        assert!(
+            data.contains("STEP 6 ok") && data.contains("SEQUENCE DONE 6"),
+            "六步都应报 ok: {data}"
+        );
+
+        let mut clip = HashMap::new();
+        clip.insert("action".to_string(), "clipboard_get".to_string());
+        let clip_out = dispatch(clip, None).await.expect("读剪贴板");
+        let text = match clip_out {
+            ToolResult::Success { data, .. } => data,
+            other => panic!("clipboard_get 应成功: {other:?}"),
+        };
+        // 收尾：结束记事本（不保存）
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "notepad.exe", "/F"])
+            .output();
+        assert!(
+            text.contains("MARGUERITE-PILOT"),
+            "打字 + ctrl+a/ctrl+c 的闭环未生效，剪贴板内容: {text}"
+        );
+    }
 
     #[test]
     fn map_normalized_no_downsample_identity() {
@@ -1279,17 +1439,51 @@ pub async fn dispatch(
         .get("patch_grounding")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
+    // 坐标刻度尺：在截图上画屏幕坐标刻度（dsh-pilot 的做法），让模型不必数像素。
+    let rulers = args
+        .get("rulers")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     match action {
         "screenshot" => {
             let path = cu.screenshot_path();
             let p = path.to_string_lossy().to_string();
-            let cmd = cu.capture_cmd(&p, mode, max_edge)?;
+            let cmd = cu.build_capture_cmd(&p, mode, max_edge, rulers)?;
             match cu.run_cmd(cmd).await? {
                 // 如实回报产物路径：否则调用方拿到「成功」却无从使用这张图
                 ToolResult::Success { data, mut metadata } => {
                     metadata.insert("screenshot.path".to_string(), p.clone());
+                    // 坐标契约 + 帧指纹：模型据前者决定「能不能直接照用图里的像素」，
+                    // 据后者知道自己是不是盯着同一帧在重复推理。
+                    let mut contract = String::new();
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let meta = image_metadata(&bytes);
+                        let delivered = (meta.width.unwrap_or(0), meta.height.unwrap_or(0));
+                        let (cw, ch, ox, oy) = read_dim_sidecar_full(&format!("{p}.dim"))
+                            .unwrap_or((delivered.0, delivered.1, 0, 0));
+                        contract = pilot::scale_contract((cw, ch), delivered, (ox, oy));
+                        metadata.insert("screenshot.contract".to_string(), contract.clone());
+                        let hash = pilot::frame_hash(&bytes);
+                        let unchanged = last_frame_hash()
+                            .lock()
+                            .map(|mut g| {
+                                let same = g.as_deref() == Some(hash.as_str());
+                                *g = Some(hash.clone());
+                                same
+                            })
+                            .unwrap_or(false);
+                        metadata.insert("screenshot.hash".to_string(), hash);
+                        metadata.insert("screenshot.unchanged".to_string(), unchanged.to_string());
+                        if unchanged {
+                            contract.push_str("；与上一帧逐字节相同（unchanged=true），坐标继续有效，无需重复推理");
+                        }
+                    }
                     let mut out = format!("截图已保存: {p}");
+                    if !contract.is_empty() {
+                        out.push('\n');
+                        out.push_str(&contract);
+                    }
                     if !data.is_empty() {
                         out.push('\n');
                         out.push_str(&data);
@@ -1315,6 +1509,122 @@ pub async fn dispatch(
         "clipboard_set" => cu.run_cmd(cu.clipboard_set_cmd(&text)?).await,
         "clipboard_get" => cu.run_cmd(cu.clipboard_get_cmd()?).await,
         "window_focus" => cu.run_cmd(cu.window_focus_cmd(&key)?).await,
+        // 窗口与应用操控（对齐 Windows-MCP 的 `App` 能力）
+        "window_list" => cu.run_cmd(cu.ps1_cmd(&format!("{}\n{}", pilot::WIN32_CLASS, pilot::window_list_ps()))?).await,
+        "window_move" | "window_resize" => {
+            let title = args
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| key.clone());
+            if title.trim().is_empty() {
+                return Ok(ToolResult::Error {
+                    message: "window_move/window_resize 需要 title（窗口标题或进程名的子串）".into(),
+                    code: "MISSING_TITLE".into(),
+                });
+            }
+            let w = parse_i("width");
+            let h = parse_i("height");
+            let ps = pilot::window_rect_ps(&title, x, y, w, h);
+            cu.run_cmd(cu.ps1_cmd(&format!("{}\n{}", pilot::WIN32_CLASS, ps))?).await
+        }
+        "app_launch" => {
+            let app = args
+                .get("app")
+                .cloned()
+                .unwrap_or_else(|| text.clone());
+            if app.trim().is_empty() {
+                return Ok(ToolResult::Error {
+                    message: "app_launch 需要 app（可执行文件路径或开始菜单显示名）".into(),
+                    code: "MISSING_APP".into(),
+                });
+            }
+            let argv: Vec<String> = args
+                .get("argv")
+                .and_then(|v| serde_json::from_str::<Vec<String>>(v).ok())
+                .unwrap_or_default();
+            let cwd = args.get("cwd").cloned().unwrap_or_default();
+            let ps = pilot::app_launch_ps(&app, &argv, &cwd);
+            cu.run_cmd(cu.ps1_cmd(&ps)?).await
+        }
+        // 一次调用跑完整串动作（对齐 dsh-pilot 的 desktop_sequence）
+        "sequence" => {
+            let raw = args.get("steps").cloned().unwrap_or_default();
+            let steps = match pilot::parse_steps(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(ToolResult::Error {
+                        message: e.to_string(),
+                        code: "BAD_STEPS".into(),
+                    })
+                }
+            };
+            let risk = pilot::risk_of(&steps, args.get("risk").map(String::as_str).unwrap_or("low"));
+            let confirm = args
+                .get("confirm")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            let dry_run = args
+                .get("dry_run")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if dry_run {
+                return Ok(ToolResult::Success {
+                    data: pilot::plan_text(&steps),
+                    metadata: HashMap::new(),
+                });
+            }
+            if risk != "low" && !confirm {
+                return Ok(ToolResult::Error {
+                    message: format!(
+                        "该批次风险等级为 {risk}，必须带 confirm=true 才会执行（先用 dry_run=true 检查计划）：\n{}",
+                        pilot::plan_text(&steps)
+                    ),
+                    code: "SEQUENCE_NEEDS_CONFIRM".into(),
+                });
+            }
+            let stop_on_error = args
+                .get("stop_on_error")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true);
+            let script = match pilot::sequence_ps1(&steps, stop_on_error) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(ToolResult::Error {
+                        message: e.to_string(),
+                        code: "BAD_STEPS".into(),
+                    })
+                }
+            };
+            let executed = cu.run_cmd(cu.ps1_cmd(&script)?).await?;
+            // 批次结束默认补一帧：让模型「看一眼结果」，否则它只能盲猜下一步。
+            let capture = args
+                .get("capture")
+                .map(|v| v != "none" && v != "false")
+                .unwrap_or(true);
+            if !capture {
+                return Ok(executed);
+            }
+            let shot = cu.screenshot_path();
+            let sp = shot.to_string_lossy().to_string();
+            let cmd = cu.build_capture_cmd(&sp, mode, max_edge, rulers)?;
+            let shot_res = cu.run_cmd(cmd).await?;
+            let shot_ok = shot_res.is_success();
+            Ok(match executed {
+                ToolResult::Success { data, mut metadata } => {
+                    if shot_ok {
+                        metadata.insert("screenshot.path".to_string(), sp.clone());
+                        ToolResult::Success {
+                            data: format!("{data}\n批次结束截图: {sp}"),
+                            metadata,
+                        }
+                    } else {
+                        ToolResult::Success { data, metadata }
+                    }
+                }
+                // 失败/超时原样透出：不把「批次失败」粉饰成带截图的成功。
+                other => other,
+            })
+        }
         "cursor_pos" => cu.run_cmd(cu.cursor_pos_cmd()?).await,
         "key_state" => cu.run_cmd(cu.key_state_cmd(&key)?).await,
         "idle_time" => cu.run_cmd(cu.idle_time_cmd()?).await,
@@ -1432,22 +1742,75 @@ pub async fn dispatch(
     }
 }
 
+/// 桌面动作错误 → 工具错误码（模型可按码决定重试/换窗口/报错）。
+fn desktop_error_code(e: &DesktopError) -> &'static str {
+    match e {
+        DesktopError::AppUnknown(_) => "DESKTOP_APP_UNKNOWN",
+        DesktopError::ActionDenied(_) => "ACTION_DENIED",
+        DesktopError::UnsupportedAction(_) => "UNSUPPORTED_ACTION",
+        DesktopError::NotRunning(_) => "DESKTOP_NOT_RUNNING",
+        DesktopError::ElementNotFound(_) => "ELEMENT_NOT_FOUND",
+        DesktopError::WindowNotFound(_) => "WINDOW_NOT_FOUND",
+        DesktopError::Timeout(_) => "ACTION_TIMEOUT",
+        DesktopError::ComError(_) => "DESKTOP_COM_ERROR",
+    }
+}
+
+/// W6.2：`desktop_action` 的目标选择（纯函数，便于单测）。
+#[derive(Debug, PartialEq, Eq)]
+enum ActionTarget {
+    /// 调用方给了已登记的句柄（desktop_launch / desktop_attach 返回），直接复用。
+    Handle(String),
+    /// 没给句柄：按 window 附着；`None` = 附着当前前台窗口。
+    Attach(Option<String>),
+}
+
+/// 解析目标：非空 `handle` 优先；否则 `window`（去空白，空串视为未提供）→
+/// `Attach(Some)`，再缺省退化到前台窗口 `Attach(None)`。
+fn action_target(handle: &str, window: &str) -> ActionTarget {
+    let handle = handle.trim();
+    if !handle.is_empty() {
+        return ActionTarget::Handle(handle.to_string());
+    }
+    let window = window.trim();
+    if window.is_empty() {
+        ActionTarget::Attach(None)
+    } else {
+        ActionTarget::Attach(Some(window.to_string()))
+    }
+}
+
+/// 附着窗口提示：工具参数 `window` 优先；为空时回退动作参数里的 `window`。
+///
+/// 模型经常把 `window` 写进 `action.params`（与网关 `desktop.action` 的两条来源
+/// 口径一致）；若不回退，会静默附着到前台窗口，操作错目标。
+fn window_hint(window_param: &str, action: &UiAction) -> String {
+    let trimmed = window_param.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    action.param_str_nonempty("window").unwrap_or_default()
+}
+
 /// 注册桌面应用操控工具：让 LLM 智能体直接驱动已注册的桌面应用（如 WPS 演示）。
 ///
-/// 提供两个工具：
-/// - `desktop_launch`：按应用标识启动一个桌面应用，返回句柄 id；
-/// - `desktop_action`：对句柄执行一次 UI 动作（如「生成一周计划 PPT」），
-///   并复用 gateway/methods.rs 的安全闸门（敏感动作二次确认 + 注入扫描）。
+/// 提供三个工具：
+/// - `desktop_launch`：按应用标识**启动新应用**（generic 是附着语义），返回句柄 id；
+/// - `desktop_attach`：附着**已经打开**的应用（按窗口标题/进程名），返回可复用句柄；
+/// - `desktop_action`：执行一次 UI 动作（`handle` 可选：缺省时按 `window` 附着，
+///   再退化到当前前台窗口），并复用 gateway/methods.rs 的安全闸门
+///   （敏感动作二次确认 + 注入扫描）。
 ///
 /// 桌面自动化为 Windows-only 驱动（`AppRegistry::global()` 仅在 `#[cfg(windows)]` 下
 /// 注册 WpsPpt 等驱动）。非 Windows 环境下 `launch` 自然返回 `AppUnknown` 错误，
 /// 工具优雅降级，因此此处**不**加 `#[cfg(windows)]` 门控，保持与既有工具一致。
 fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
-    // 工具 1：desktop_launch —— 启动一个已注册的桌面应用，返回句柄 id。
+    // 工具 1：desktop_launch —— 启动一个新应用（generic 是「附着当前窗口」，不会开新进程）。
     let launch_run: ToolFn = std::sync::Arc::new(move |args: &HashMap<String, String>| {
         let a = args.clone();
         Box::pin(async move {
             let app_kind = a.get("app_kind").cloned().unwrap_or_default();
+            let window = a.get("window").cloned().unwrap_or_default();
             let kind = match AppKind::from_str(&app_kind) {
                 Some(k) => k,
                 None => {
@@ -1457,51 +1820,72 @@ fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
                     })
                 }
             };
-            match AppRegistry::global().launch(kind, &json!({"app_kind": app_kind})) {
+            match AppRegistry::global()
+                .launch(kind, &json!({"app_kind": app_kind, "window": window}))
+            {
                 Ok(h) => Ok(ToolResult::Success {
                     data: h.id.clone(),
                     metadata: HashMap::new(),
                 }),
-                Err(e) => {
-                    let code = match e {
-                        DesktopError::AppUnknown(_) => "DESKTOP_APP_UNKNOWN",
-                        DesktopError::ComError(_) => "DESKTOP_COM_ERROR",
-                        _ => "DESKTOP_COM_ERROR",
-                    };
-                    Ok(ToolResult::Error {
-                        message: e.to_string(),
-                        code: code.into(),
-                    })
-                }
+                Err(e) => Ok(ToolResult::Error {
+                    message: e.to_string(),
+                    code: desktop_error_code(&e).into(),
+                }),
             }
         })
     });
     registry.register_local(make_local_tool(
         "desktop_launch",
-        "启动/附着一个桌面应用，返回句柄 id；后续 desktop_action 使用该句柄。\
-         支持两类：wps_ppt（WPS 演示，COM 驱动）与 generic（附着当前前台应用，UIA 驱动）。\
-         调用约定：先用本工具拿到句柄，再把句柄传给 desktop_action 执行具体动作。",
+        "启动**新**桌面应用，返回句柄 id；后续 desktop_action 使用该句柄。\
+         支持 wps_ppt（WPS 演示，COM 驱动）与 generic（附着语义：绑定前台窗口或 window 指定的窗口，不会新开进程）。\
+         若目标应用**已经打开**，不要用本工具：直接用 desktop_action 的 window 参数，或先调 desktop_attach。",
         json!({
             "type": "object",
             "properties": {
-                "app_kind": { "type": "string", "description": "应用标识：wps_ppt（WPS 演示）或 generic（附着当前前台应用，走 UI Automation）" }
+                "app_kind": { "type": "string", "description": "应用标识：wps_ppt（WPS 演示）或 generic（附着窗口，走 UI Automation）" },
+                "window": { "type": "string", "description": "generic 专用：附着哪个窗口（标题或进程名子串）；省略则附着当前前台窗口" }
             },
             "required": ["app_kind"]
         }),
         launch_run,
     ));
 
-    // 工具 2：desktop_action —— 对句柄执行一次 UI 动作（如生成 WPS PPT）。
+    // 工具 2：desktop_attach —— 附着已打开的应用，返回可复用句柄（W6.2）。
+    let attach_run: ToolFn = std::sync::Arc::new(move |args: &HashMap<String, String>| {
+        let a = args.clone();
+        Box::pin(async move {
+            let window = a.get("window").cloned().unwrap_or_default();
+            let query = (!window.trim().is_empty()).then_some(window.as_str());
+            match AppRegistry::global().attach(query) {
+                Ok(h) => Ok(ToolResult::Success {
+                    data: h.id,
+                    metadata: HashMap::new(),
+                }),
+                Err(e) => Ok(ToolResult::Error {
+                    message: e.to_string(),
+                    code: desktop_error_code(&e).into(),
+                }),
+            }
+        })
+    });
+    registry.register_local(make_local_tool(
+        "desktop_attach",
+        "附着**已经打开**的桌面应用（按窗口标题或进程名，大小写不敏感子串），返回可复用句柄 id。\
+         省略 window 时附着当前前台窗口。找不到/空窗口返回 WINDOW_NOT_FOUND。\
+         拿到句柄后即可反复调用 desktop_action；不需要 desktop_launch。",
+        json!({
+            "type": "object",
+            "properties": {
+                "window": { "type": "string", "description": "窗口标题或进程名子串（如「记事本」或 notepad.exe）；省略则附着前台窗口" }
+            }
+        }),
+        attach_run,
+    ));
+
+    // 工具 3：desktop_action —— 执行一次 UI 动作（handle 可选，缺省自动附着）。
     let action_run: ToolFn = std::sync::Arc::new(move |args: &HashMap<String, String>| {
         let a = args.clone();
         Box::pin(async move {
-            let handle = a.get("handle").cloned().unwrap_or_default();
-            if handle.is_empty() {
-                return Ok(ToolResult::Error {
-                    message: "缺少 handle".into(),
-                    code: "MISSING_HANDLE".into(),
-                });
-            }
             let action_json = a.get("action").cloned().unwrap_or_default();
             let action: UiAction = match serde_json::from_str(&action_json) {
                 Ok(a) => a,
@@ -1512,19 +1896,52 @@ fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
                     })
                 }
             };
+            // 未知动作在碰 UI 之前就拒绝：报错确定、不依赖桌面会话。
+            if !crate::desktop_automation::driver::is_known_action_kind(&action.kind) {
+                return Ok(ToolResult::Error {
+                    message: format!(
+                        "未知桌面动作: {}（支持 snapshot/find/click/invoke/set_value/type/toggle/select/expand/collapse/scroll/focus/wait/window_activate；WPS 另有 generate_presentation）",
+                        action.kind
+                    ),
+                    code: "UNSUPPORTED_ACTION".into(),
+                });
+            }
             let approved = a.get("approved").map(|s| s == "true").unwrap_or(false);
             if Policy::require_confirmation(&action) && !approved {
+                let reason = Policy::sensitive_target(&action)
+                    .map(|term| {
+                        format!("该动作需要二次确认：目标命中危险操作词「{term}」（请携带 approved=true）")
+                    })
+                    .unwrap_or_else(|| "该动作需要二次确认（请携带 approved=true）".into());
                 return Ok(ToolResult::Error {
-                    message: "该动作需要二次确认（请携带 approved=true）".into(),
+                    message: reason,
                     code: "ACTION_NEEDS_CONFIRM".into(),
                 });
             }
-            if let Some(reason) = Policy::scan_injection(&action) {
+            if let Some(reason) = Policy::scan_command_text(&action) {
                 return Ok(ToolResult::Error {
                     message: reason,
                     code: "ACTION_INJECTION".into(),
                 });
             }
+            // handle 缺省 → 按 window 附着；window 也缺省 → 前台窗口（W6.2）。
+            let window_param = a.get("window").cloned().unwrap_or_default();
+            let target_window = window_hint(&window_param, &action);
+            let handle = match action_target(
+                &a.get("handle").cloned().unwrap_or_default(),
+                &target_window,
+            ) {
+                ActionTarget::Handle(handle) => handle,
+                ActionTarget::Attach(window) => match AppRegistry::global().attach(window.as_deref()) {
+                    Ok(h) => h.id,
+                    Err(e) => {
+                        return Ok(ToolResult::Error {
+                            message: e.to_string(),
+                            code: desktop_error_code(&e).into(),
+                        })
+                    }
+                },
+            };
             let session = a.get("session_key").cloned().unwrap_or_default();
             match AppRegistry::global().run_action(&handle, &action, &session) {
                 Ok(receipt) => {
@@ -1534,38 +1951,39 @@ fn register_desktop_app_tools(registry: &mut ToolRegistry) -> Result<()> {
                         metadata: HashMap::new(),
                     })
                 }
-                Err(e) => {
-                    let code = match e {
-                        DesktopError::AppUnknown(_) => "DESKTOP_APP_UNKNOWN",
-                        DesktopError::ActionDenied(_) => "ACTION_DENIED",
-                        _ => "DESKTOP_COM_ERROR",
-                    };
-                    Ok(ToolResult::Error {
-                        message: e.to_string(),
-                        code: code.into(),
-                    })
-                }
+                Err(e) => Ok(ToolResult::Error {
+                    message: e.to_string(),
+                    code: desktop_error_code(&e).into(),
+                }),
             }
         })
     });
     registry.register_local(make_local_tool(
         "desktop_action",
-        "对句柄执行一次 UI 动作。参数 action 是 UiAction 的 JSON 字符串。\
-         generic（UIA，附着前台应用）支持两类动作：\
-         {\"kind\":\"snapshot\",\"params\":{}} 读取前台窗口控件树（回执里给出每个控件的 ref_id/name/bounds/clickable）；\
-         {\"kind\":\"click\",\"params\":{\"ref_id\":\"<snapshot 里的 ref_id>\"}} 或 {\"kind\":\"click\",\"params\":{\"name\":\"确定\"}} 激活控件。\
+        "对桌面应用执行一次 UI 动作（结构化 UIA）。参数 action 是 UiAction 的 JSON 字符串。\
+         **结构化优先：能用 desktop_action（按控件 ref_id/name）就不要用像素坐标（computer_use）。**\
+         **操作已打开的应用用本工具 + window（标题/进程名）或 desktop_attach 返回的 handle；启动新应用用 desktop_launch。**\
+         handle 可省略：缺省按 window 附着，再退化到当前前台窗口。\
+         generic（UIA）支持的动作：\
+         {\"kind\":\"snapshot\",\"params\":{}} 读取控件树（每项含 ref_id/role/name/automation_id/bounds/enabled/patterns）；\
+         {\"kind\":\"find\",\"params\":{\"name\":\"保存\",\"role\":\"button\"}} 按条件找节点；\
+         {\"kind\":\"invoke\",\"params\":{\"ref_id\":\"<snapshot/find 的 ref_id>\"}} 或 {\"kind\":\"click\",\"params\":{\"name\":\"确定\"}}；\
+         {\"kind\":\"set_value\",\"params\":{\"ref_id\":\"…\",\"value\":\"文本\"}} / {\"kind\":\"type\",\"params\":{\"ref_id\":\"…\",\"text\":\"文本\",\"clear\":true}}；\
+         toggle / select / expand / collapse / scroll / focus / wait（state=exists|enabled|focused|value_non_empty, timeout_ms）/ window_activate（title 或 hwnd）。\
+         回执含 ok / before / after / verified / effect（value_changed|node_removed|state_changed|no_observable_change）。\
          wps_ppt 支持 generate_presentation，例如：\
          {\"kind\":\"generate_presentation\",\"params\":{\"outline\":{\"slides\":[{\"title\":\"周一\",\"bullets\":[\"晨会\",\"需求评审\"]}]},\"output_path\":\"C:/Users/Administrator/Desktop/weekly-plan.pptx\"}}。\
          可选 approved（敏感动作需 \"true\"）、session_key（审计会话键）。",
         json!({
             "type": "object",
             "properties": {
-                "handle": { "type": "string", "description": "desktop_launch 返回的句柄 id" },
+                "handle": { "type": "string", "description": "句柄 id（desktop_launch / desktop_attach 返回）。省略时按 window 附着，再退化到前台窗口" },
+                "window": { "type": "string", "description": "目标窗口标题或进程名子串；handle 缺省时用它附着已打开的应用" },
                 "action": { "type": "string", "description": "UiAction 的 JSON 字符串" },
                 "approved": { "type": "string", "description": "敏感动作二次确认开关，携带 \"true\" 表示已确认" },
                 "session_key": { "type": "string", "description": "审计会话键，用于在审计快照中定位本次会话" }
             },
-            "required": ["handle", "action"]
+            "required": ["action"]
         }),
         action_run,
     ));
@@ -1593,12 +2011,19 @@ pub fn register_computer_use_tools(
     registry.register_local(make_local_tool(
         "computer_use",
         "计算机操控：三层架构（屏幕感知 screenshot / 键鼠控制 click·double_click·right_click·middle_click·type·key·key_combo·scroll·drag·move / 剪贴板 clipboard_set·clipboard_get / 窗口聚焦 window_focus / GUI 定位 locate / 辅助感知 perceive）。\
-         融合自 OpenCUA、ScreenSpot-Pro-GUI-Grounding、robotgo、computer_use_ootb、Guided-Attention-Inference-Network 等 10 个 computer use 仓库；\
-         grounding 由视觉语言模型在「截图→坐标→执行」闭环中完成。",
+         **结构化优先：能读到控件的场景请先用 desktop_action（UIA 的 ref_id/name/invoke/set_value），只有画布类应用或 UIA 不可用时才退回本工具的像素坐标与键鼠。**\
+         另含桌面直控增强：\
+         sequence（一次调用跑完整串动作，steps 为动作数组；风险批次需 confirm=true，可先 dry_run=true 看计划）；\
+         window_list（列出可见窗口 hwnd/pid/是否前台/矩形/标题）；\
+         window_move / window_resize（按标题移动/缩放，配合 title 与 x/y/width/height）；\
+         app_launch（按可执行文件路径或开始菜单显示名启动应用）。\
+         坐标系：截图与点击同为**物理屏幕像素**（每显示器 DPI 感知）；坐标契约见截图结果里的 capture/delivered/scale。\
+         融合自 OpenCUA、ScreenSpot-Pro-GUI-Grounding、robotgo、computer_use_ootb、Guided-Attention-Inference-Network 等仓库，\
+         并对齐 dsh-pilot 的「批量动作 + 刻度尺」与 Windows-MCP 的「窗口/应用操控 + VK 快捷键」。",
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["screenshot","click","double_click","right_click","middle_click","type","key","key_combo","scroll","drag","move","clipboard_set","clipboard_get","window_focus","cursor_pos","key_state","idle_time","perceive","locate"], "description": "操作类型" },
+                "action": { "type": "string", "enum": ["screenshot","click","double_click","right_click","middle_click","type","key","key_combo","scroll","drag","move","clipboard_set","clipboard_get","window_focus","window_list","window_move","window_resize","app_launch","sequence","cursor_pos","key_state","idle_time","perceive","locate"], "description": "操作类型" },
                 "x": { "type": "integer", "description": "click/double_click/move/scroll 的屏幕 X 坐标（locate 时由视觉模型产出，无需手填）" },
                 "y": { "type": "integer", "description": "屏幕 Y 坐标" },
                 "x2": { "type": "integer", "description": "drag 的终点 X 坐标" },
@@ -1612,7 +2037,20 @@ pub fn register_computer_use_tools(
                 "mode": { "type": "string", "enum": ["primary","all","window"], "description": "screenshot/locate 的采集模式：主屏/多屏/活动窗口" },
                 "max_edge": { "type": "integer", "description": "截图长边上限像素（>0 时降采样，降低 VLMM 输入体积）" },
                 "threshold": { "type": "number", "description": "locate 置信度阈值（0..1），低于则视为低置信度不自动点击" },
-                "patch_grounding": { "type": "boolean", "description": "locate 高分辨率截图时启用 ScreenSpot-Pro 分块 grounding（仅长边≥1600 生效；需 image 后端裁剪 patch）" }
+                "patch_grounding": { "type": "boolean", "description": "locate 高分辨率截图时启用 ScreenSpot-Pro 分块 grounding（仅长边≥1600 生效；需 image 后端裁剪 patch）" },
+                "rulers": { "type": "boolean", "description": "截图上画坐标刻度（上沿/左沿每 200px，标注屏幕坐标；默认 false）" },
+                "steps": { "type": "string", "description": "sequence 的动作数组（JSON 字符串）。每项形如 {\"action\":\"click\",\"x\":100,\"y\":200}；可用动作：click/double_click/right_click/middle_click/move/drag/scroll/type/key/key_combo/wait(ms)/focus(title)，可选 settle_ms" },
+                "risk": { "type": "string", "enum": ["low","medium","high"], "description": "sequence 的风险声明（默认 low；含 win+r / alt+f4 等危险快捷键会自动升级）" },
+                "confirm": { "type": "boolean", "description": "sequence 风险为 medium/high 时必须为 true，否则拒绝执行" },
+                "dry_run": { "type": "boolean", "description": "sequence 只返回执行计划、不触碰桌面" },
+                "stop_on_error": { "type": "boolean", "description": "sequence 首错即停（默认 true）" },
+                "capture": { "type": "string", "description": "sequence 结束后是否补一帧：end（默认，截图）/ none（不截）" },
+                "title": { "type": "string", "description": "window_move/window_resize 的目标窗口（标题或进程名子串，大小写不敏感）" },
+                "width": { "type": "integer", "description": "window_resize 的目标宽度（物理像素）" },
+                "height": { "type": "integer", "description": "window_resize 的目标高度（物理像素）" },
+                "app": { "type": "string", "description": "app_launch 的应用：可执行文件路径，或开始菜单里的显示名（如「记事本」）" },
+                "argv": { "type": "string", "description": "app_launch 的参数数组（JSON 字符串，如 [\"--new-window\"]）" },
+                "cwd": { "type": "string", "description": "app_launch 的工作目录（可选）" }
             },
             "required": ["action"]
         }),
@@ -1623,4 +2061,52 @@ pub fn register_computer_use_tools(
     register_desktop_app_tools(registry)?;
 
     Ok(())
+}
+
+/// W6.2：`desktop_action` 目标解析的纯函数测试（不触碰真实桌面 / AppRegistry）。
+#[cfg(test)]
+mod desktop_target_tests {
+    use super::{action_target, window_hint, ActionTarget};
+    use crate::desktop_automation::driver::UiAction;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_handle_is_reused_and_never_attaches() {
+        assert_eq!(
+            action_target("  mock-handle ", "记事本"),
+            ActionTarget::Handle("mock-handle".into())
+        );
+    }
+
+    #[test]
+    fn missing_handle_attaches_the_window_or_falls_back_to_the_foreground() {
+        assert_eq!(
+            action_target("", "  记事本 "),
+            ActionTarget::Attach(Some("记事本".into()))
+        );
+        assert_eq!(
+            action_target("   ", "  "),
+            ActionTarget::Attach(None),
+            "空 handle + 空 window = 附着当前前台窗口"
+        );
+    }
+
+    #[test]
+    fn window_hint_prefers_the_tool_param_and_falls_back_to_action_params() {
+        let action = UiAction {
+            kind: "invoke".into(),
+            params: json!({ "window": "计算器" }),
+        };
+        assert_eq!(window_hint(" 记事本 ", &action), "记事本");
+        assert_eq!(
+            window_hint("   ", &action),
+            "计算器",
+            "工具参数为空时必须回退 action.params.window"
+        );
+        let none = UiAction {
+            kind: "invoke".into(),
+            params: json!({}),
+        };
+        assert_eq!(window_hint("", &none), "");
+    }
 }

@@ -77,6 +77,92 @@ pub fn is_engine_homepage(url: &str) -> bool {
     path.trim_end_matches('/').is_empty()
 }
 
+// ── 词典/翻译噪音门禁（P0-4）─────────────────────────────────────────────
+//
+// 归因（实测 2026-09-24）：cn.bing 对「以英文品牌词开头 + 长尾修饰」的查询会返回
+// **词典/翻译**结果 —— 实测 `Three.js floating island 3D scene tutorial low poly`
+// 的前 8 条里有 4 条是「three是什么意思_three的翻译_音标_读音_用法_例句」、
+// 「THREE中文(简体)翻译：剑桥词典」、「three（表示数字3的英文单词）_百度百科」。
+// 换 `mkt` / `setlang` / `ensearch=1` / 加引号**均无效**（已逐一实测，结果逐字相同），
+// 说明这是引擎侧对首词的词典意图判定，不是市场参数问题。
+//
+// 子智能体的实际后果：把 8 条垃圾读满、每次 19s，再改道 web_fetch 直抓 —— 白烧预算。
+// 因此这里加一道**离散**门禁：只在「查询本身不是在查词典释义」时才剔除词典结果，
+// 以免误杀「serendipity 意思」这类**真的想查词典**的查询。
+
+/// 词典/翻译站 host（已去 `www.`，小写）。这些站点的页面在技术检索里一律是噪音。
+const DICTIONARY_HOSTS: &[&str] = &[
+    "iciba.com",
+    "dictionary.cambridge.org",
+    "dict.youdao.com",
+    "youdao.com",
+    "zdic.net",
+    "hujiang.com",
+    "dict.cn",
+];
+
+/// 词典/翻译页标题特征（中文站最常见的几种落点标题模板）。
+const DICTIONARY_TITLE_MARKERS: &[&str] = &[
+    "是什么意思",
+    "的翻译",
+    "音标",
+    "读音",
+    "用法_例句",
+    "中文翻译",
+    "词典",          // 「THREE中文 (简体)翻译：剑桥词典」
+    "英文单词",      // 「three（表示数字3的英文单词）_百度百科」
+    "definition & meaning",
+    "definition of",
+    "meaning in",
+];
+
+/// 查询自带「查词/释义」意图的特征词。命中即**不**启用词典门禁。
+const DEFINITION_INTENT_MARKERS: &[&str] = &[
+    "意思", "翻译", "读音", "怎么读", "音标", "词典", "释义",
+    "define", "meaning", "definition", "translate", "translation",
+];
+
+/// 查询是否在寻求「词义/翻译」——此时词典结果正是用户要的，不能剔。
+pub fn query_seeks_definition(query: &str) -> bool {
+    let q = query.to_lowercase();
+    DEFINITION_INTENT_MARKERS.iter().any(|m| q.contains(m))
+}
+
+/// 单条结果是否为词典/翻译噪音（**与查询意图无关**的纯判定）。
+pub fn is_dictionary_noise(r: &SearchResult) -> bool {
+    let by_host = r
+        .url
+        .as_deref()
+        .is_some_and(|u| DICTIONARY_HOSTS.contains(&host_and_path(u).0.as_str()));
+    if by_host {
+        return true;
+    }
+    let title = r.title.to_lowercase();
+    DICTIONARY_TITLE_MARKERS.iter().any(|m| title.contains(m))
+}
+
+/// 按查询意图剔除词典噪音，返回 `(保留, 被剔除下标)`。
+///
+/// 查询本身在查词义时**整批放行**（返回原样 + 空下标），保证「查词典」场景不被破坏。
+pub fn filter_dictionary_noise(
+    results: Vec<SearchResult>,
+    query: &str,
+) -> (Vec<SearchResult>, Vec<usize>) {
+    if query_seeks_definition(query) {
+        return (results, Vec::new());
+    }
+    let mut kept = Vec::with_capacity(results.len());
+    let mut removed = Vec::new();
+    for (index, result) in results.into_iter().enumerate() {
+        if is_dictionary_noise(&result) {
+            removed.push(index);
+        } else {
+            kept.push(result);
+        }
+    }
+    (kept, removed)
+}
+
 /// 摘要是否命中首页导航模板文案。
 pub fn is_nav_template(snippet: &str) -> bool {
     let s = snippet.trim();

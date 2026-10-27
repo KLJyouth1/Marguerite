@@ -75,7 +75,11 @@ impl ModelTier {
                     audio: false,
                     video: false,
                 },
-                max_reasoning: ThinkingEffort::Max,
+                // 2026-10-21 放宽：原要求 `Max`（极限思考），但旗舰档真实在售模型
+                // （opus-4-7 / glm-5-3-flash）能力声明是 `Deep` —— 按 Max 卡会把旗舰
+                // 档清空。旗舰的区分度改由「1M 上下文 + 视觉 + 最宽价格线」承担，
+                // 思考强度只要达到「深度」即可。
+                max_reasoning: ThinkingEffort::Deep,
                 ttft_budget_ms: 15_000,
                 cost_per_m_in: 30.0,
                 cost_per_m_out: 60.0,
@@ -85,14 +89,21 @@ impl ModelTier {
                 context_window: 65_536,
                 multimodal: MultimodalCaps {
                     text: true,
-                    image: true,
+                    // 2026-10-21 放宽：均衡档不再强制「具备图像能力」——在售的
+                    // glm-5-3 就是纯文本但价格/上下文都够均衡档。视觉需求属于
+                    // **任务级能力过滤**（按请求是否带图选模型），不该写进档位准入，
+                    // 否则「文本强、无视觉」的模型会被整档排除。旗舰档仍强制视觉。
+                    image: false,
                     audio: false,
                     video: false,
                 },
                 max_reasoning: ThinkingEffort::Deep,
                 ttft_budget_ms: 3_000,
-                cost_per_m_in: 1.0,
-                cost_per_m_out: 3.0,
+                // 2026-10-21 放宽（原 1.0 / 3.0）：该线低于当年在售均衡档模型的实价
+                // （sonnet-4-6 3/15、gpt-5-4-mini 0.75/4.5、glm-5-3 1.11/3.89），
+                // 结果 3 个模型「声明均衡档但被自己的准入线拒掉」。
+                cost_per_m_in: 3.5,
+                cost_per_m_out: 16.0,
                 streaming_stable: true,
             },
             ModelTier::Turbo => TierCaps {
@@ -105,8 +116,11 @@ impl ModelTier {
                 },
                 max_reasoning: ThinkingEffort::Off,
                 ttft_budget_ms: 800,
-                cost_per_m_in: 0.5,
-                cost_per_m_out: 0.5,
+                // 2026-10-21 放宽（原 0.5 / 0.5）：haiku-4-5 实价 1.0 / 5.0，
+                // 旧线把它挡在 Turbo 之外（而它正是 Turbo 链的第一名）。
+                // 仍需比均衡档便宜一个量级，保住「极速档=便宜」的语义。
+                cost_per_m_in: 1.2,
+                cost_per_m_out: 6.0,
                 streaming_stable: true,
             },
         }
@@ -445,6 +459,26 @@ impl SessionBudget {
     pub fn suggested_downgrade(&self, current: ModelTier) -> ModelTier {
         Self::downgrade_for_ratio(current, self.remaining_ratio())
     }
+
+    /// 用**台账实测快照**覆盖上限与已用（返回新值，不写盘）。
+    ///
+    /// 为什么需要：`tokens_used/usd_used` 在本仓没有任何写入点（`record_usage()` 零调用者），
+    /// 真实用量只存在于 `usage` 台账；而用户显式设的预算阈值也在台账（`budget_meta`）。
+    /// 于是「生效预算」的四个数（上限/已用/剩余/状态）必须以台账为准，
+    /// 否则 `remaining_ratio()` 恒为 1.0 —— 预算降档永不触发，控制台还会展示「剩余 100%」假读数。
+    pub fn with_measured_snapshot(
+        mut self,
+        tokens_cap: u64,
+        usd_cap: f64,
+        tokens_used: u64,
+        usd_used: f64,
+    ) -> Self {
+        self.tokens_cap = tokens_cap;
+        self.usd_cap = usd_cap;
+        self.tokens_used = tokens_used;
+        self.usd_used = usd_used;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -658,9 +692,21 @@ impl SessionState {
     /// 语义：**会话持久态优先**——`locked` 与 `budget_left` 一律以 `self` 为准，
     /// 传入 `req` 里的同名字段被忽略。这样调用方无需知道用户锁了什么档、预算还剩多少，
     /// 也就不会因为漏传而静默绕过熔断。
-    pub fn resolve_tier_for(&self, mut req: TierRequest) -> TierDecision {
+    pub fn resolve_tier_for(&self, req: TierRequest) -> TierDecision {
+        self.resolve_tier_with(req, None)
+    }
+
+    /// 同上，但允许调用方传入**实测**剩余比例（来自 `usage` 台账，见
+    /// [`crate::usage::tightest_budget_snapshot`]）。
+    ///
+    /// 为什么不直接用 `self.budget.remaining_ratio()`：会话态里的 `tokens_used/usd_used`
+    /// 是**没人写入**的字段（恒 0），真实用量只在台账里。传 `None` 时退回会话态口径
+    /// （未配置预算 = 1.0，不熔断），行为与旧版一致。
+    pub fn resolve_tier_with(&self, mut req: TierRequest, measured_ratio: Option<f64>) -> TierDecision {
         req.locked = self.locked_tier;
-        req.budget_left = self.budget.remaining_ratio();
+        req.budget_left = measured_ratio
+            .map(|r| r.clamp(0.0, 1.0))
+            .unwrap_or_else(|| self.budget.remaining_ratio());
         resolve_tier(&req)
     }
 }
@@ -900,12 +946,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_flagship_claim_without_max_reasoning() {
-        // Flagship 的意义是「Max 思考的最终答案档」；漏检会让只支持中等思考的模型
-        // 占据旗舰位 —— 用户以为在做深推理，实际没有。
-        let mut c = caps_like(ModelTier::Flagship);
-        c.max_reasoning = ThinkingEffort::Deep;
-        assert!(!c.accepts(ModelTier::Flagship));
+    fn rejects_flagship_claim_below_deep_reasoning() {
+        // Flagship 的意义是「能深推理的最终答案档」。2026-10-21 把准入从 Max 放宽到
+        // Deep（在售旗舰 opus-4-7 / glm-5-3-flash 的能力声明就是 Deep，按 Max 卡会把
+        // 旗舰档清空）；但**低于 Deep 仍必须拒绝** —— 只支持 Off/Normal 的模型占据
+        // 旗舰位，会让用户以为在做深推理而实际没有。
+        let mut deep_ok = caps_like(ModelTier::Flagship);
+        deep_ok.max_reasoning = ThinkingEffort::Deep;
+        assert!(deep_ok.accepts(ModelTier::Flagship), "Deep 是旗舰档的新准入线");
+
+        let mut too_shallow = caps_like(ModelTier::Flagship);
+        too_shallow.max_reasoning = ThinkingEffort::Normal;
+        assert!(!too_shallow.accepts(ModelTier::Flagship), "Normal 不得进旗舰档");
     }
 
     #[test]
@@ -1174,6 +1226,70 @@ mod tests {
             ..TierRequest::default()
         });
         assert_eq!(d.tier, ModelTier::Turbo);
+    }
+
+    /// **实测**剩余比例必须真的驱动降档（审计：预算熔断此前是 advisory）。
+    ///
+    /// 会话态里的 `tokens_used/usd_used` 全仓无人写入（恒 0），真实用量只在 `usage`
+    /// 台账；`resolve_tier_with` 就是那个把实测值接进档位判定的入口。
+    #[test]
+    fn measured_budget_ratio_actually_downgrades_tier() {
+        let s = SessionState {
+            locked_tier: Some(ModelTier::Flagship),
+            ..SessionState::default()
+        };
+        // 无实测（None）→ 退回会话态口径（无人写入 ⇒ 1.0）→ 与旧行为一致：保持锁定档
+        let d = s.resolve_tier_with(TierRequest::default(), None);
+        assert_eq!(d.tier, ModelTier::Flagship, "无实测时不得改变既有行为");
+
+        // 实测余量充足 → 保持
+        assert_eq!(
+            s.resolve_tier_with(TierRequest::default(), Some(0.5)).tier,
+            ModelTier::Flagship
+        );
+
+        // 实测 15%（< 20% 降档线）→ 旗舰降均衡，且 why 可解释
+        let d = s.resolve_tier_with(TierRequest::default(), Some(0.15));
+        assert_eq!(d.tier, ModelTier::Balanced, "预算吃紧必须真的降档");
+        assert!(
+            d.why.iter().any(|w| w.contains("预算剩余")),
+            "降档原因必须回显（可解释选档）: {:?}",
+            d.why
+        );
+
+        // 实测 5%（< 8% 紧急线）→ 极速档
+        assert_eq!(
+            s.resolve_tier_with(TierRequest::default(), Some(0.05)).tier,
+            ModelTier::Turbo,
+            "预算紧急必须降到极速档"
+        );
+
+        // 越界值不得穿帮（clamp 到 0..1）
+        assert_eq!(
+            s.resolve_tier_with(TierRequest::default(), Some(-3.0)).tier,
+            ModelTier::Turbo
+        );
+        assert_eq!(
+            s.resolve_tier_with(TierRequest::default(), Some(9.0)).tier,
+            ModelTier::Flagship
+        );
+    }
+
+    /// `with_measured_snapshot` 让「上限/已用/剩余/状态」四个数与台账保持一致。
+    #[test]
+    fn measured_snapshot_overrides_caps_and_usage() {
+        let b = SessionBudget::default().with_measured_snapshot(1_000, 1.0, 250, 0.25);
+        assert_eq!(b.tokens_cap, 1_000, "上限以台账为准（用户设的阈值）");
+        assert_eq!(b.tokens_used, 250, "已用以台账事件为准");
+        assert!((b.remaining_ratio() - 0.75).abs() < 1e-9);
+        assert_eq!(b.state(), BudgetState::Healthy);
+
+        let tight = SessionBudget::default().with_measured_snapshot(1_000, 1.0, 1_000, 0.0);
+        assert_eq!(
+            tight.state(),
+            BudgetState::Depleted,
+            "用满上限必须如实判 Depleted（此前永远 Healthy 是假读数）"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { nextTick, ref, watch } from 'vue'
 
+import type { EffortLevel } from '@/types/effort'
 import { useChatSend, type UseChatSendOptions } from './useChatSend'
 import { useChatMessageActions } from './useChatMessageActions'
 import type { FoldLiveTurnMode } from './useChatTurnLog'
@@ -4030,5 +4031,38 @@ describe('useChatSend Ensemble image guard', () => {
 
     const params = rpc.call.mock.calls[0]?.[1]
     expect(params).not.toHaveProperty('collaborationMode')
+  })
+})
+
+// 推理等级（effort）负载：这是「四档能力」真正到达模型的唯一通道。
+// 之前 UI 只发 `thinking: true`，后端四档（off/normal/deep/max）有两档永远到不了。
+describe('chat.send reasoning effort payload', () => {
+  function sendPayload(rpc: { call: { mock: { calls: unknown[][] } } }) {
+    return rpc.call.mock.calls.find((c) => c[0] === 'chat.send')?.[1] as
+      | Record<string, unknown>
+      | undefined
+  }
+
+  it('sends the explicit level on every turn', async () => {
+    const { api, rpc } = makeOptions({ reasoningEffort: ref<EffortLevel>('deep') })
+    await api.onSend()
+    expect(sendPayload(rpc)).toMatchObject({ effort: 'deep', thinking: true })
+  })
+
+  it('sends off explicitly so a previously persisted level cannot linger', async () => {
+    // 服务端会把显式档位持久化；若「off 时不发」，用户拖回关闭后仍会按上一档思考。
+    const { api, rpc } = makeOptions({ reasoningEffort: ref<EffortLevel>('off') })
+    await api.onSend()
+    const payload = sendPayload(rpc)
+    expect(payload?.effort).toBe('off')
+    expect(payload?.thinking).toBe(false)
+  })
+
+  it('falls back to the legacy thinking flag when no effort ref is wired', async () => {
+    const { api, rpc } = makeOptions({ enableThinking: ref(true) })
+    await api.onSend()
+    const payload = sendPayload(rpc)
+    expect(payload?.thinking).toBe(true)
+    expect(payload?.effort).toBeUndefined()
   })
 })

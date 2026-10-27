@@ -52,17 +52,17 @@ impl DeliverableKind {
 
 /// 一个交付物（契约节点）。
 ///
-/// 注：`role` 为 `&'static str`（对齐 [`SubtaskSpec::role`]），serde 无法为其生成可行的
-/// `Deserialize` impl（会要求 `'de: 'static`），故**仅派 `Serialize`**——本结构只用于
-/// 向前端投递，从不需要反序列化。
+/// 注：`role` 与 [`SubtaskSpec::role`] 同类型（`String`）——角色名不再要求
+/// `&'static str`，以便蜂群/名册按规模动态生成唯一角色名。本结构仍**仅派 `Serialize`**
+/// （只用于向前端投递，从不需要反序列化）。
 #[derive(Debug, Clone, Serialize)]
 pub struct DeliverableSpec {
     /// 稳定 ID（`"d1"` / `"d2"` …），供依赖边与前端步骤键引用。
     pub id: String,
     /// 交付物种类。
     pub kind: DeliverableKind,
-    /// 静态角色名（[`SubtaskSpec::role`] 需要 `&'static str`）。
-    pub role: &'static str,
+    /// 角色名（与 [`SubtaskSpec::role`] 同源）。
+    pub role: String,
     /// 人类可读标题（"检索 AI 新闻" / "生成 PPT" …）。
     pub title: String,
     /// 目标落盘路径（相对工作区）。`Research` 为 `None`；其余为具体相对路径。
@@ -244,7 +244,7 @@ pub fn detect(text: &str) -> Option<DeliverableContract> {
         deliverables.push(DeliverableSpec {
             id: id.clone(),
             kind: DeliverableKind::Research,
-            role: artifact_role(DeliverableKind::Research),
+            role: artifact_role(DeliverableKind::Research).to_string(),
             title: format!("检索 {topic}"),
             target_path: None,
             search_query: Some(topic.clone()),
@@ -260,7 +260,7 @@ pub fn detect(text: &str) -> Option<DeliverableContract> {
         deliverables.push(DeliverableSpec {
             id: id.clone(),
             kind: *kind,
-            role: artifact_role(*kind),
+            role: artifact_role(*kind).to_string(),
             title: format!("生成 {}（{path}）", kind_title(*kind)),
             target_path: Some(path.to_string()),
             search_query: None,
@@ -323,7 +323,7 @@ pub fn contract_to_specs(c: &DeliverableContract) -> Vec<SubtaskSpec> {
                 })
                 .collect();
             SubtaskSpec {
-                role: d.role,
+                role: d.role.clone(),
                 system_prompt: kind_system_prompt(d.kind).to_string(),
                 task,
                 intent: kind_intent(d.kind),
@@ -429,7 +429,7 @@ mod tests {
             deliverables: vec![DeliverableSpec {
                 id: "d1".into(),
                 kind: DeliverableKind::HtmlPage,
-                role: "HTML",
+                role: "HTML".to_string(),
                 title: "x".into(),
                 target_path: Some("output.html".into()),
                 search_query: None,

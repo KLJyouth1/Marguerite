@@ -13,6 +13,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { detectWebGL } from '@/components/pet/detectPetRuntime'
+import CacheStrip from '@/components/chat/CacheStrip.vue'
 import { IslandGameScene, type IslandGameTier, type SceneHud } from '@/components/island/game/IslandGameScene'
 import { useEngineBridge } from '@/components/island/game/useEngineBridge'
 import {
@@ -104,6 +105,7 @@ function mountScene(): void {
   s.setDayPhase(phase.value)
   s.setModeKind(snapshot.value.modeKind)
   s.setParty(assignedPartyCount.value)
+  s.setCacheHitRate(snapshot.value.cacheCoveragePct ?? null)
   scene.value = s
 }
 
@@ -118,6 +120,7 @@ function syncScene(): void {
   s.setModeKind(snapshot.value.modeKind)
   s.setParty(assignedPartyCount.value)
   s.setDayPhase(phase.value)
+  s.setCacheHitRate(snapshot.value.cacheCoveragePct ?? null)
 }
 
 // 切换视图模式：进 classic 才创建 IslandGameCanvas（nextTick 等 canvas 出 DOM），
@@ -177,6 +180,17 @@ function rollback(): void {
 
 const titlesUnlocked = computed(() => save.value.titles)
 
+// 档位/预算：全部来自真实 RPC；未知时显示「—」，不猜数值。
+const tierLabel = computed(() => snapshot.value.effectiveTier ?? t('islandGame.engine.unknown'))
+const budgetLabel = computed(() => {
+  const r = snapshot.value.budgetRemaining
+  if (r == null) return t('islandGame.engine.unknown')
+  const state = snapshot.value.budgetState ?? ''
+  return `${state} ${Math.round(r * 100)}%`.trim()
+})
+// W5.6：服务端缓存指标由 CacheStrip 分开显示（coverage / request hit rate / local），
+// 不再合成单个 `cacheHitRate`；萤火虫密度只消费服务端前缀覆盖率（token 占比）。
+
 onMounted(() => {
   // 默认进 3D 开放世界时不创建经典场景（省一份 WebGL 上下文与渲染循环）。
   if (viewMode.value === 'classic') mountScene()
@@ -208,6 +222,14 @@ watch([snapshot, phase], syncScene)
         </span>
         <span class="chip">{{ t('islandGame.engine.mode') }}: {{ snapshot.modeKind ?? t('islandGame.engine.unknown') }}</span>
         <span class="chip">{{ t('islandGame.engine.shards') }}: {{ snapshot.maxSwarmShards ?? t('islandGame.engine.unknown') }}</span>
+        <span class="chip">{{ t('islandGame.engine.tier') }}: {{ tierLabel }}</span>
+        <span class="chip">{{ t('islandGame.engine.budget') }}: {{ budgetLabel }}</span>
+        <CacheStrip
+          :coverage-pct="snapshot.cacheCoveragePct ?? null"
+          :request-hit-rate-pct="snapshot.cacheRequestHitRatePct ?? null"
+          :client-hit-rate-pct="snapshot.clientHitRatePct ?? null"
+          :legacy="snapshot.cacheMetricsSource === 'legacy'"
+        />
         <span class="chip chip--muted">{{ t('islandGame.weather.' + weather) }} · {{ t('islandGame.day.' + phase) }}</span>
         <span class="chip chip--muted" v-if="use3d && viewMode === 'classic'">{{ hud.fps }} fps · {{ t('islandGame.tier.' + tier) }}</span>
       </div>

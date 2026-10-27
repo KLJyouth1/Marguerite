@@ -74,11 +74,34 @@ fn render_chat(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
             )));
         }
     }
+    // 思考过程（推理链）单独渲染、且用弱化色：它**不是**答复正文。
+    // 此前 Thinking 被累积进正文缓冲，界面上把推理当答案显示。
+    if let Some(tk) = &state.chat.thinking {
+        if !tk.trim().is_empty() {
+            lines.push(Line::from(Span::styled(
+                "AI（思考）:",
+                Style::default().fg(t.text_secondary),
+            )));
+            for ln in tk.lines() {
+                lines.push(Line::from(Span::styled(
+                    ln.to_string(),
+                    Style::default().fg(t.text_secondary),
+                )));
+            }
+        }
+    }
     if let Some(s) = &state.chat.streaming {
+        // 逐行渲染：答复含换行时，单条 `Line` 无法正确展示（会截断/串行）。
         lines.push(Line::from(Span::styled(
-            format!("AI: {s}"),
-            Style::default().fg(t.brand_light),
+            "AI: ",
+            Style::default().fg(t.text_secondary),
         )));
+        for ln in s.lines() {
+            lines.push(Line::from(Span::styled(
+                ln.to_string(),
+                Style::default().fg(t.brand_light),
+            )));
+        }
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), v[0]);
 

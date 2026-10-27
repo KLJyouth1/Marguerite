@@ -96,6 +96,51 @@ export function userModeInfoFor(key: string): UserModeInfo | null {
 }
 
 /**
+ * 把网关返回的 `userMode` 归一成对象。
+ *
+ * 为什么必须有这一步（真机缺陷，2026-10-24）：
+ * `mode.get` 回的是对象 `{key,label,intensity,...}`，而 `mode.switch`
+ * （core/src/gateway/mode.rs）回的是**字符串** `"standard_doit"`。
+ * 两个方法共用同一份 `ModePayload`，`switchUserMode` 又直接 `store.mode = r`，
+ * 于是切换成功后 `store.mode.userMode` 变成字符串 →
+ *   `activeUserMode.value?.key` 为 undefined →
+ *   ① 输入框胶囊退化成「模式」、3×3 网格无高亮；
+ *   ② 发送门禁 `gearKey` 落到编排面板的旧副本（如 standard_plan），
+ *     蜂群/团队被判「档位不允许」——用户看到的就是「切了模式却发不出去」。
+ * 只接受字符串或对象两种真实形状，其它一律返回 null（不猜）。
+ */
+export function userModeFromWire(value: unknown): UserModeInfo | null {
+  if (typeof value === 'string') return userModeInfoFor(value.trim())
+  if (value && typeof value === 'object') {
+    const key = (value as { key?: unknown }).key
+    if (typeof key === 'string') return userModeInfoFor(key.trim())
+  }
+  return null
+}
+
+/**
+ * 归一化任意一次 `mode.get` / `mode.switch` 载荷。
+ *
+ * - `userMode` 缺失（老网关只回 kind）时，用 `userModeKeyForKind` 反推规范格位，
+ *   保证 UI 至少有一个真实、可核对的选中态，而不是空高亮。
+ * - `kind` / `mode` 统一成字符串，避免调用方各自兼容。
+ */
+export function normalizeModePayload(raw: unknown): ModePayload | null {
+  if (!raw || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  const kind = typeof record.kind === 'string'
+    ? record.kind
+    : typeof record.mode === 'string'
+      ? record.mode
+      : undefined
+  const userMode = userModeFromWire(record.userMode)
+    ?? (kind ? userModeInfoFor(userModeKeyForKind(kind)) : null)
+  const payload: ModePayload = { ...record, kind, mode: kind }
+  if (userMode) payload.userMode = userMode
+  return payload
+}
+
+/**
  * Canonical runtime-mode kinds (mirrors `core/src/mode/mod.rs` `ModeKind::as_str`).
  *
  * The last entry is hyphenated on purpose: core broadcasts `omni-transcend`,

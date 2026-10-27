@@ -4,13 +4,16 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import { useDialogLayer } from '@/composables/useDialogA11y'
-import { useBgm, BGM_LOCAL_TRACK_ID } from '@/composables/useBgm'
+import { useBgm, BGM_LOCAL_TRACK_ID, BGM_SYNTH_TRACK_ID, type RepeatMode } from '@/composables/useBgm'
+import { formatClock, fractionToSeek } from '@/composables/bgmFormat'
 
 // Topbar background-music control: a split button next to the language/theme
-// menus. The note button toggles play/pause of the current track; the caret
-// opens a picker (reusing the global .theme-menu* classes so the three topbar
-// popovers can never drift in look) with the playlist.json tracks, a volume
-// slider, and a session-only "Choose local file…" escape hatch.
+// menus. The note button toggles play/pause of the current track (and turns
+// into a 3-bar bouncing equaliser while playing); the caret opens a player panel
+// (reusing the global .theme-menu* classes so the three topbar popovers can
+// never drift in look) with transport (prev/play·pause/next), a seekable
+// progress bar, three-state repeat + shuffle, the playlist.json tracks, a
+// volume slider, and a session-only "Choose local file…" escape hatch.
 
 const { t } = useI18n()
 const {
@@ -18,6 +21,10 @@ const {
   playing,
   currentTrackId,
   currentTitle,
+  currentTime,
+  duration,
+  repeat,
+  shuffle,
   volume,
   localTrackTitle,
   initBgm,
@@ -25,6 +32,11 @@ const {
   selectTrack,
   setVolume,
   playLocalFile,
+  seek,
+  next,
+  prev,
+  setRepeat,
+  setShuffle,
 } = useBgm()
 
 const menuOpen = ref(false)
@@ -37,6 +49,45 @@ onMounted(() => { void initBgm() })
 
 function onToggle() {
   void toggle()
+}
+
+function onPrev() {
+  void prev()
+}
+
+function onNext() {
+  void next()
+}
+
+// Repeat cycles off → all → one → off; the icon + aria-label track the state.
+const REPEAT_NEXT: Record<RepeatMode, RepeatMode> = { off: 'all', all: 'one', one: 'off' }
+function onRepeat() {
+  setRepeat(REPEAT_NEXT[repeat.value])
+}
+const repeatIcon = computed(() => (repeat.value === 'one' ? 'repeatOne' : 'repeat'))
+const repeatLabel = computed(() =>
+  repeat.value === 'off'
+    ? t('chrome.bgm.repeatOff')
+    : repeat.value === 'all'
+      ? t('chrome.bgm.repeatAll')
+      : t('chrome.bgm.repeatOne'),
+)
+
+function onShuffle() {
+  setShuffle(!shuffle.value)
+}
+
+// Seek bar: the synth pad has no timeline, so the bar stays inert there.
+const hasTimeline = computed(
+  () => Number.isFinite(duration.value) && duration.value > 0 && currentTrackId.value !== BGM_SYNTH_TRACK_ID,
+)
+const progressValue = computed(() =>
+  hasTimeline.value ? Math.min(1000, Math.max(0, (currentTime.value / duration.value) * 1000)) : 0,
+)
+function onSeekInput(e: Event) {
+  const ratio = Number((e.target as HTMLInputElement).value) / 1000
+  const target = fractionToSeek(ratio, duration.value)
+  if (target !== null) seek(target)
 }
 
 function pickTrack(id: string) {
@@ -94,7 +145,12 @@ useDocumentEvent('keydown', (e) => {
       data-testid="bgm-toggle"
       @click="onToggle"
     >
-      <Icon :name="playing ? 'pause' : 'music'" :size="16" />
+      <!-- While playing the note swaps for a 3-bar bouncing equaliser; paused
+           keeps the music glyph. -->
+      <span v-if="playing" class="bgm-eq" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </span>
+      <Icon v-else name="music" :size="16" />
     </button>
     <button
       ref="caretRef"
@@ -110,6 +166,77 @@ useDocumentEvent('keydown', (e) => {
       <Icon name="chevronDown" :size="12" />
     </button>
     <div v-if="menuOpen" class="theme-menu bgm-menu" role="menu" :aria-label="t('chrome.bgm.label')">
+      <!-- Transport row: prev / play·pause / next / repeat / shuffle. -->
+      <div class="bgm-menu__transport" role="group" :aria-label="t('chrome.bgm.transport')">
+        <button
+          type="button"
+          class="bgm-tbtn"
+          :aria-label="t('chrome.bgm.prev')"
+          data-testid="bgm-prev"
+          @click.stop="onPrev"
+        >
+          <Icon name="skipBack" :size="15" />
+        </button>
+        <button
+          type="button"
+          class="bgm-tbtn bgm-tbtn--main"
+          :aria-label="playing ? t('chrome.bgm.pause') : t('chrome.bgm.play')"
+          data-testid="bgm-playpause"
+          @click.stop="onToggle"
+        >
+          <Icon v-if="!playing" name="play" :size="15" />
+          <span v-else class="bgm-eq bgm-eq--sm" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+        </button>
+        <button
+          type="button"
+          class="bgm-tbtn"
+          :aria-label="t('chrome.bgm.next')"
+          data-testid="bgm-next"
+          @click.stop="onNext"
+        >
+          <Icon name="skipForward" :size="15" />
+        </button>
+        <button
+          type="button"
+          class="bgm-tbtn"
+          :class="{ 'is-active': repeat !== 'off' }"
+          :aria-pressed="repeat !== 'off'"
+          :aria-label="repeatLabel"
+          data-testid="bgm-repeat"
+          @click.stop="onRepeat"
+        >
+          <Icon :name="repeatIcon" :size="14" />
+        </button>
+        <button
+          type="button"
+          class="bgm-tbtn"
+          :class="{ 'is-active': shuffle }"
+          :aria-pressed="shuffle"
+          :aria-label="t('chrome.bgm.shuffle')"
+          data-testid="bgm-shuffle"
+          @click.stop="onShuffle"
+        >
+          <Icon name="shuffle" :size="14" />
+        </button>
+      </div>
+      <!-- Seek row: dragging must not dismiss the menu. -->
+      <div class="bgm-menu__seek" role="none" @click.stop>
+        <span class="bgm-seek__time" data-testid="bgm-time-current">{{ formatClock(currentTime) }}</span>
+        <input
+          type="range"
+          min="0"
+          max="1000"
+          step="10"
+          :value="progressValue"
+          :disabled="!hasTimeline"
+          :aria-label="t('chrome.bgm.seek')"
+          data-testid="bgm-seek"
+          @input="onSeekInput"
+        />
+        <span class="bgm-seek__time" data-testid="bgm-time-total">{{ formatClock(duration) }}</span>
+      </div>
       <button
         v-for="track in tracks"
         :key="track.id"
@@ -206,8 +333,98 @@ useDocumentEvent('keydown', (e) => {
 }
 
 .bgm-menu {
-  min-width: 200px;
-  max-width: 280px;
+  min-width: 220px;
+  max-width: 300px;
+}
+
+/* --- Mini equaliser (collapsed toggle + panel main button) ---------------- */
+.bgm-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  height: 12px;
+}
+.bgm-eq--sm {
+  height: 10px;
+}
+.bgm-eq > span {
+  width: 2px;
+  height: 100%;
+  background: currentColor;
+  border-radius: var(--radius-xs);
+  transform-origin: bottom;
+  animation: bgm-eq-bounce var(--dur-pulse) ease-in-out infinite;
+}
+.bgm-eq > span:nth-child(2) {
+  animation-delay: calc(var(--dur-pulse) * 0.18);
+}
+.bgm-eq > span:nth-child(3) {
+  animation-delay: calc(var(--dur-pulse) * 0.36);
+}
+@keyframes bgm-eq-bounce {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
+/* --- Transport row ---------------------------------------------------------- */
+.bgm-menu__transport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 8px 2px;
+}
+.bgm-tbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard);
+}
+.bgm-tbtn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.bgm-tbtn.is-active {
+  color: var(--accent);
+}
+.bgm-tbtn--main {
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+}
+
+/* --- Seek row ---------------------------------------------------------------- */
+.bgm-menu__seek {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px 10px 6px;
+  color: var(--text-muted);
+}
+.bgm-seek__time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  min-width: 34px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.bgm-menu__seek input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.bgm-menu__seek input[type='range']:disabled {
+  opacity: var(--state-disabled-opacity);
 }
 
 .bgm-menu__title {

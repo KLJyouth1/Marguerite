@@ -61,6 +61,7 @@ function harness() {
     // 真实生产默认 ON：帧必须被真正追加。
     useReducer: ref(true),
   }
+  const usageAccum = ref({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 })
   const scope = effectScope()
   const api = scope.run(() => useChatRpcEventHandlers({
     sessionKey,
@@ -71,7 +72,7 @@ function harness() {
     aborted: ref(false),
     messages,
     pendingQueue: ref<ChatPendingItem[]>([]),
-    usageAccum: ref({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 }),
+    usageAccum,
     usageModel: ref(''),
     stream,
     normalizeRunStatus: (s: string) => s,
@@ -97,8 +98,40 @@ function harness() {
     loadCurrentSessionUsage: vi.fn(),
     refreshRunModePreference: vi.fn(),
   }))!
-  return { api, stream, sessionKey }
+  return { api, stream, sessionKey, usageAccum }
 }
+
+describe('session.event.usage → 真实 token 累加', () => {
+  it('累加 snake_case 的 prompt/completion tokens（网关真实形状）', () => {
+    const { api, usageAccum } = harness()
+    api.handlers.onAny('session.event.usage', {
+      model: 'deepseek-v4-flash',
+      prompt_tokens: 883,
+      completion_tokens: 2,
+      total_tokens: 885,
+    } as never)
+    expect(usageAccum.value.input).toBe(883)
+    expect(usageAccum.value.output).toBe(2)
+  })
+
+  it('非流式期间到达的 usage（定时任务/其它会话）不计入本会话', () => {
+    const { api, stream, usageAccum } = harness()
+    stream.isStreaming.value = false
+    api.handlers.onAny('session.event.usage', { prompt_tokens: 100, completion_tokens: 5 } as never)
+    expect(usageAccum.value.input).toBe(0)
+    expect(usageAccum.value.output).toBe(0)
+  })
+
+  it('缓存 token 计入 cacheRead，供命中率使用', () => {
+    const { api, usageAccum } = harness()
+    api.handlers.onAny('session.event.usage', {
+      input_tokens: 1000,
+      output_tokens: 50,
+      cached_tokens: 400,
+    } as never)
+    expect(usageAccum.value.cacheRead).toBe(400)
+  })
+})
 
 describe('T04 handlers append activity rows', () => {
   it('appends a memory_recall row for a matching session with hits>0', () => {

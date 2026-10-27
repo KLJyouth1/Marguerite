@@ -69,9 +69,16 @@ describe('ChatComposer control hierarchy', () => {
       .toBe('在沙箱中运行，并遵循你的安全规则。')
   })
 
-  it('offers Safe from the composer only after sandbox setup is ready', () => {
-    expect(viewSource).toContain("status.state !== 'ready'")
-    expect(viewSource).toContain("allowedRunModes.value.filter((mode) => mode !== 'safe')")
+  it('keeps Safe selectable when setup is not ready and threads the real state', () => {
+    // 旧行为：setup 未 ready 就把 safe 从 allowedRunModes 剔除 → 原生 disabled
+    // 按钮不派发 click（「点了没反应」）。现在只展示「待安装」与降级原因。
+    expect(viewSource).not.toContain("allowedRunModes.value.filter((mode) => mode !== 'safe')")
+    expect(viewSource).toContain(':safe-setup-state="runModeSetupState"')
+    expect(viewSource).toContain('runModeDegradedReason')
+    expect(composerSource).toContain(':safe-setup-state="safeSetupState"')
+    expect(runModeSource).toContain('safeSetupPending')
+    expect(runModeSource).toContain("props.safeSetupState !== 'ready'")
+    expect(zhHans.settings.sandbox.safeMode.pendingLabel).toBe('安全（待安装）')
   })
 
   it('moves visual effects to Appearance settings', () => {

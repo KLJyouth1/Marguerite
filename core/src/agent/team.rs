@@ -274,6 +274,9 @@ impl Team {
     /// - 收集：等待全部完成后逐成员取结论；spawn 失败或子 Agent 无结果
     ///   均**如实**进入 `member_results`，不静默跳过、不冒充成功。
     pub async fn run(&self, subagents: &SubAgentManager, context: &str) -> TeamOutcome {
+        // 并发闸门按本团队成员数抬升：默认闸门（5）会让 8 人团队只同时跑 5 人，
+        // 看板上「选了 8 路只看到 5 个成员」。用户口径是不对成员数设上限。
+        subagents.ensure_concurrency(self.members.len());
         // 单波并行扇出：一次性 spawn 全部成员（无依赖图调度）。
         // 迭代身份统一用「成员索引」（与 run_p2p 一致风格）：单波扇出下所有成员同批唤醒，
         // 索引键无副作用，仅作一致性表达，并为未来可能的依赖调度预留同角色隔离基础。
@@ -361,6 +364,8 @@ impl Team {
     ///   在 spawn 前把信箱中「发给自己的消息」注入上下文（P2P 直连，而非仅经主管聚合）；
     /// - 无依赖声明的成员（含既有 `run` 测试）在第一波全部并行，行为与 `run` 一致。
     pub async fn run_p2p(&self, subagents: &SubAgentManager, context: &str) -> TeamOutcome {
+        // 同 `run`：并发闸门按成员数抬升，避免「大团队被默认 5 并发卡住」。
+        subagents.ensure_concurrency(self.members.len());
         let mut mailbox = Mailbox::new();
         // 调度身份用「成员索引」而非「角色名」：避免两个同角色但依赖集不同的成员，
         // 因 done 以角色为键而在 retain 阶段被整批误删（静默丢弃未 spawn 的成员）。
@@ -487,6 +492,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
                 timeout_secs: 0,
+                    wire_api: crate::model::wire::WireApi::Chat,
             },
             ..Default::default()
         };

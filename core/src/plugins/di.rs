@@ -216,6 +216,13 @@ pub struct PluginRegistryEntry {
     /// 来源：local / symlink / remote（仅信息，不影响逻辑）
     #[serde(default)]
     pub source: String,
+    /// 声明式插件（清单装配，无原生入口）。
+    ///
+    /// 这类条目参与注册表拓扑与启停，但**不交给 `DynamicLoad`**：
+    /// 否则真实 loader 会拿空 `entry` 去加载 DLL/WASM 并失败，
+    /// 表现为「声明式插件一启用就整批加载失败」。
+    #[serde(default)]
+    pub declarative: bool,
 }
 
 fn default_true() -> bool {
@@ -256,6 +263,8 @@ impl PluginRegistryFile {
         Ok(this)
     }
 
+    /// 落盘（原子写）。R13：`fs::write` 先截断再写，半截 JSON 会让
+    /// `PluginRegistry::load` 解析失败并回落空注册表 —— 用户装的插件全部"消失"。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -263,8 +272,9 @@ impl PluginRegistryFile {
                     .with_context(|| format!("创建注册表目录失败: {}", parent.display()))?;
             }
         }
-        let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, json).with_context(|| format!("写注册表失败: {}", path.display()))?;
+        let json = serde_json::to_string_pretty(self)?;
+        crate::persistence::write_json_atomic(path, &json)
+            .with_context(|| format!("写注册表失败: {}", path.display()))?;
         Ok(())
     }
 
@@ -354,6 +364,7 @@ pub fn discover_symlinks(
             enabled: true,
             depends_on: deps,
             source: source.to_string(),
+            declarative: false,
         });
     }
     Ok(out)
@@ -620,6 +631,11 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
         let mut container = GuardedContainer::new(container, &mut self.invariants);
         for name in &order {
             let entry = enabled.get(name).unwrap();
+            // 声明式插件没有原生入口：跳过 DynamicLoad，但仍保留在 order 中
+            // （拓扑完整性 + 启停可观测）。
+            if entry.declarative {
+                continue;
+            }
             let plugin = self.dynamic.load(entry).with_context(|| {
                 format!(
                     "动态加载插件 '{}' 失败（entry={}）",
@@ -683,6 +699,25 @@ impl<DL: DynamicLoad> PluginLoader<DL> {
         self.invariants.applied_service_types.clear();
         self.load_enabled(runtime, container)?;
         Ok(true)
+    }
+
+    /// 按当前注册表整体重载（显式管理动作）。
+    ///
+    /// 与 [`Self::reload_plugin`] 的区别：本方法同时清空**专用**服务容器，
+    /// 因此停用插件提供的服务会真正消失（否则 reload 后旧服务仍留在容器里，
+    /// 表现为「停用了但还能用」）。调用方必须保证 `container` 是插件专用容器，
+    /// 不能是共享了宿主服务的容器。
+    pub fn reload_all(
+        &mut self,
+        runtime: &mut DiRuntime,
+        container: &mut ServiceContainer,
+    ) -> Result<Vec<String>> {
+        runtime.unload();
+        *runtime = DiRuntime::new();
+        *container = ServiceContainer::new();
+        // 显式管理动作：允许回收已 applied 的 TypeId（红线例外仅限 reload 流程）
+        self.invariants.applied_service_types.clear();
+        self.load_enabled(runtime, container)
     }
 }
 
@@ -973,6 +1008,7 @@ mod tests {
             enabled: true,
             depends_on: vec!["p2".into()],
             source: "symlink".into(),
+            declarative: false,
         });
         reg.upsert(PluginRegistryEntry {
             name: "p2".into(),
@@ -981,6 +1017,7 @@ mod tests {
             enabled: false,
             depends_on: vec![],
             source: "local".into(),
+            declarative: false,
         });
         reg.save(&reg_path).unwrap();
         let loaded = PluginRegistryFile::load(&reg_path).unwrap();
@@ -1128,6 +1165,7 @@ mod tests {
             enabled: true,
             depends_on: deps.into_iter().map(String::from).collect(),
             source: "test".into(),
+            declarative: false,
         }
     }
 

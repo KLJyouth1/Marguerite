@@ -21,7 +21,7 @@ import {
   type IslandThemeRole,
 } from '@/components/island/islandContract'
 import { getIslandSpec, listIslandSpecs, validateIslandSpec } from '@/components/island/islandSpec'
-import { buildIslandWorld } from '@/components/island/islandWorld'
+import { buildIslandWorld, type IslandEntity } from '@/components/island/islandWorld'
 import { buildConstructionEntities, constructionDayRange, sampleConstructionPlots } from '@/components/island/constructionWorld'
 import { STAGE_LABEL_KEY } from '@/components/island/buildingGrowth'
 import { keyboardCameraCommand } from '@/components/island/islandSim'
@@ -131,8 +131,17 @@ const STATUS_KEY: Record<IslandActivityStatus, string> = {
   waiting: 'island.status.waiting',
 }
 
+/** 标签显示名（HTML 层与 3D 投影层共用同一份文案：宽度估算必须与实际渲染一致） */
+function labelTitleFor(entity: IslandEntity): string {
+  // 无任务、无会话时数据层只给占位标题 'session'（islandWorld.shortKey 的兜底）。
+  // 那不是人话：浮层改显示建筑类型（详情面板同样以类型行开头）。
+  const placeholderCore = entity.kind === 'core' && !entity.meta?.taskTitle && !entity.meta?.sessionKey
+  return placeholderCore ? t(ISLAND_KIND_META[entity.kind].labelKey) : entity.title
+}
+
 function titleOf(entityId: string): string {
-  return world.value.entities.find((entity) => entity.id === entityId)?.title ?? entityId
+  const entity = world.value.entities.find((item) => item.id === entityId)
+  return entity ? labelTitleFor(entity) : entityId
 }
 
 /* ── 3D 生命周期 ── */
@@ -161,6 +170,7 @@ function mountIsland(): void {
       onLabels: (anchors) => {
         labels.value = anchors
       },
+      labelTitle: labelTitleFor,
       onContextLost: () => {
         // 诚实降级：上下文丢了就换 2D，并说明原因
         island.value?.dispose()

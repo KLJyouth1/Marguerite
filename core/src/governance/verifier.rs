@@ -225,6 +225,7 @@ pub fn llm_config_from(cfg: &crate::persistence::config::Config) -> Option<LLMCl
         timeout_secs: 30,
         thinking: crate::model::thinking::ThinkingEffort::Off,
         context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+        wire_api: m.wire_api,
     }))
 }
 

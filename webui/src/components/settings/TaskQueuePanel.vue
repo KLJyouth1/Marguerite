@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -20,6 +21,7 @@ interface QueueItem {
 
 const rpc = useRpcStore()
 const { confirm } = useConfirm()
+const { t } = useI18n()
 
 const items = ref<QueueItem[]>([])
 const loading = ref(false)
@@ -31,14 +33,14 @@ const newTitle = ref('')
 const newGoal = ref('')
 const newPriority = ref(5)
 
-const STATUS_LABEL: Record<string, string> = {
-  queued: '排队中',
-  running: '执行中',
-  paused: '已暂停',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
+const statusLabel = computed<Record<string, string>>(() => ({
+  queued: t('settings.taskQueue.statusQueued'),
+  running: t('settings.taskQueue.statusRunning'),
+  paused: t('settings.taskQueue.statusPaused'),
+  completed: t('settings.taskQueue.statusCompleted'),
+  failed: t('settings.taskQueue.statusFailed'),
+  cancelled: t('settings.taskQueue.statusCancelled'),
+}))
 
 const counts = computed(() => ({
   total: items.value.length,
@@ -71,7 +73,7 @@ async function enqueue() {
       goal: newGoal.value.trim() || newTitle.value.trim(),
       priority: newPriority.value,
     })
-    message.value = '任务已入队'
+    message.value = t('settings.taskQueue.enqueued')
     newTitle.value = ''
     newGoal.value = ''
     newPriority.value = 5
@@ -84,9 +86,9 @@ async function enqueue() {
 async function runOp(item: QueueItem, op: 'start' | 'pause' | 'resume' | 'cancel') {
   if (op === 'cancel') {
     const ok = await confirm({
-      title: '取消任务',
-      body: `确定取消队列任务「${item.title}」？取消后不可恢复。`,
-      primaryLabel: '取消任务',
+      title: t('settings.taskQueue.cancelTitle'),
+      body: t('settings.taskQueue.cancelBody', { title: item.title }),
+      primaryLabel: t('settings.taskQueue.cancelConfirm'),
       primaryClass: 'btn--danger',
     })
     if (!ok) return
@@ -96,9 +98,10 @@ async function runOp(item: QueueItem, op: 'start' | 'pause' | 'resume' | 'cancel
   try {
     const data = await rpc.call<{ ok: boolean; error?: string }>(`queue.${op}`, { id: item.id })
     if (data.ok) {
-      message.value = `「${item.title}」已${op === 'start' ? '开始执行' : op === 'pause' ? '暂停' : op === 'resume' ? '恢复' : '取消'}`
+      const key = op === 'start' ? 'doneStart' : op === 'pause' ? 'donePause' : op === 'resume' ? 'doneResume' : 'doneCancel'
+      message.value = t(`settings.taskQueue.${key}`, { title: item.title })
     } else {
-      error.value = data.error ?? '操作失败'
+      error.value = data.error ?? t('settings.taskQueue.opFailed')
     }
     await refresh()
   } catch (e) {
@@ -120,9 +123,9 @@ async function moveStep(item: QueueItem, direction: 'up' | 'down') {
       direction,
     })
     if (data.ok) {
-      message.value = `「${item.title}」已${direction === 'up' ? '上移' : '下移'}`
+      message.value = t(direction === 'up' ? 'settings.taskQueue.movedUp' : 'settings.taskQueue.movedDown', { title: item.title })
     } else {
-      error.value = data.error ?? '操作失败'
+      error.value = data.error ?? t('settings.taskQueue.opFailed')
     }
     await refresh()
   } catch (e) {
@@ -136,22 +139,22 @@ onMounted(refresh)
 <template>
   <section class="control-section">
     <div class="control-section__head">
-      <h3 class="control-section__title">持久任务队列（Persistent Queue）</h3>
+      <h3 class="control-section__title">{{ t('settings.taskQueue.title') }}</h3>
       <p class="control-section__desc">
-        跨会话任务 Backlog：长任务可排队、暂停、恢复、取消，状态落盘持久化，重启后仍可继续管理。当前：{{ counts.total }} 个任务（执行中 {{ counts.running }} / 排队 {{ counts.queued }} / 暂停 {{ counts.paused }}）。
+        {{ t('settings.taskQueue.description', counts) }}
       </p>
     </div>
 
     <div class="control-row control-row--stack">
       <div class="control-row__label-block">
-        <span class="control-row__label">入队新任务</span>
-        <span class="control-row__desc">标题必填；目标可省略（默认同标题）</span>
+        <span class="control-row__label">{{ t('settings.taskQueue.enqueueTitle') }}</span>
+        <span class="control-row__desc">{{ t('settings.taskQueue.enqueueDesc') }}</span>
       </div>
       <div class="control-row__control queue-enqueue">
-        <input v-model="newTitle" class="control-input" placeholder="任务标题 *" aria-label="任务标题" @keyup.enter="enqueue" />
-        <input v-model="newGoal" class="control-input" placeholder="目标描述" aria-label="目标描述" @keyup.enter="enqueue" />
-        <input v-model.number="newPriority" class="control-input control-input--narrow" type="number" min="1" max="9" placeholder="优先级" aria-label="优先级" />
-        <button type="button" class="btn" :disabled="loading || !newTitle.trim()" @click="enqueue">入队</button>
+        <input v-model="newTitle" class="control-input" :placeholder="t('settings.taskQueue.titlePlaceholder')" :aria-label="t('settings.taskQueue.titleAria')" @keyup.enter="enqueue" />
+        <input v-model="newGoal" class="control-input" :placeholder="t('settings.taskQueue.goalPlaceholder')" :aria-label="t('settings.taskQueue.goalAria')" @keyup.enter="enqueue" />
+        <input v-model.number="newPriority" class="control-input control-input--narrow" type="number" min="1" max="9" :placeholder="t('settings.taskQueue.priorityPlaceholder')" :aria-label="t('settings.taskQueue.priorityAria')" />
+        <button type="button" class="btn" :disabled="loading || !newTitle.trim()" @click="enqueue">{{ t('settings.taskQueue.enqueue') }}</button>
       </div>
     </div>
 
@@ -159,21 +162,27 @@ onMounted(refresh)
     <div v-else-if="message" class="queue-banner queue-banner--ok" role="status">{{ message }}</div>
 
     <div class="queue-toolbar">
-      <span class="queue-toolbar__count">{{ counts.total }} 个任务</span>
-      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">刷新</button>
+      <span class="queue-toolbar__count">{{ t('settings.taskQueue.countLabel', { count: counts.total }) }}</span>
+      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">{{ t('settings.taskQueue.refresh') }}</button>
     </div>
 
-    <div v-if="loading" class="queue-empty">加载中…</div>
-    <div v-else-if="items.length === 0" class="queue-empty">队列为空。长任务可在此排队并跨会话管理。</div>
+    <div v-if="loading" class="queue-empty">{{ t('settings.taskQueue.loading') }}</div>
+    <div v-else-if="items.length === 0" class="queue-empty">{{ t('settings.taskQueue.empty') }}</div>
     <table v-else class="queue-table">
       <thead>
         <tr>
-          <th>状态</th><th>标题</th><th>模式</th><th>优先级</th><th>创建时间</th><th>更新时间</th><th>操作</th>
+          <th>{{ t('settings.taskQueue.colStatus') }}</th>
+          <th>{{ t('settings.taskQueue.colTitle') }}</th>
+          <th>{{ t('settings.taskQueue.colMode') }}</th>
+          <th>{{ t('settings.taskQueue.colPriority') }}</th>
+          <th>{{ t('settings.taskQueue.colCreated') }}</th>
+          <th>{{ t('settings.taskQueue.colUpdated') }}</th>
+          <th>{{ t('settings.taskQueue.colActions') }}</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="it in items" :key="it.id">
-          <td><span class="queue-status" :class="'queue-status--' + it.status">{{ STATUS_LABEL[it.status] ?? it.status }}</span></td>
+          <td><span class="queue-status" :class="'queue-status--' + it.status">{{ statusLabel[it.status] ?? it.status }}</span></td>
           <td>
             <div class="queue-title">{{ it.title }}</div>
             <div v-if="it.goal && it.goal !== it.title" class="queue-goal">{{ it.goal }}</div>
@@ -185,13 +194,13 @@ onMounted(refresh)
           <td>{{ fmtTime(it.updated_at_ms) }}</td>
           <td>
             <span v-if="it.status === 'queued' || it.status === 'paused'" class="queue-ops">
-              <button v-if="it.status === 'paused'" type="button" class="btn btn--sm" @click="runOp(it, 'resume')">恢复</button>
-              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm" @click="runOp(it, 'start')">执行</button>
-              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm btn--ghost" title="上移（提高调度优先级）" aria-label="上移" @click="moveStep(it, 'up')">↑</button>
-              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm btn--ghost" title="下移（降低调度优先级）" aria-label="下移" @click="moveStep(it, 'down')">↓</button>
-              <button type="button" class="btn btn--sm btn--ghost" @click="runOp(it, 'cancel')">取消</button>
+              <button v-if="it.status === 'paused'" type="button" class="btn btn--sm" @click="runOp(it, 'resume')">{{ t('settings.taskQueue.opResume') }}</button>
+              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm" @click="runOp(it, 'start')">{{ t('settings.taskQueue.opStart') }}</button>
+              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm btn--ghost" :title="t('settings.taskQueue.upTitle')" :aria-label="t('settings.taskQueue.upAria')" @click="moveStep(it, 'up')">↑</button>
+              <button v-if="it.status === 'queued'" type="button" class="btn btn--sm btn--ghost" :title="t('settings.taskQueue.downTitle')" :aria-label="t('settings.taskQueue.downAria')" @click="moveStep(it, 'down')">↓</button>
+              <button type="button" class="btn btn--sm btn--ghost" @click="runOp(it, 'cancel')">{{ t('settings.taskQueue.opCancel') }}</button>
             </span>
-            <button v-else-if="it.status === 'running'" type="button" class="btn btn--sm btn--ghost" @click="runOp(it, 'pause')">暂停</button>
+            <button v-else-if="it.status === 'running'" type="button" class="btn btn--sm btn--ghost" @click="runOp(it, 'pause')">{{ t('settings.taskQueue.opPause') }}</button>
             <span v-else class="queue-dim">—</span>
           </td>
         </tr>

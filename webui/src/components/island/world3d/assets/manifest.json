@@ -4,7 +4,7 @@
   "pipeline": "AI 资产规格 JSON（blender/schemas/prop_asset.schema.json）→ blender/asset_pipeline.py 建模导出 GLB → glbHotReload.ts 校验（含 Mesh / 非退化包围盒 / 面数预算 ≤ 50k 三角形）→ scene.ts 热加载进场景",
   "assetDir": {
     "strategy": "GLB 走 webui/public/ 静态资产目录（与 music/、pets/ 同模式）：文件放 public/island3d/<kind>.glb，Vite 原样复制进 dist，不改 vite.config.ts。",
-    "urlResolve": "本清单 url 字段是相对本目录的登记名（./<kind>.glb）。运行时由消费方按环境解析真实 URL：DEV 直接取 /island3d/<kind>.glb；PROD 取 <basePath>/static/dist/island3d/<kind>.glb（basePath 取 #Marguerite-data 的 dataset.basePath，与 useBgm.ts 的 musicAssetUrl 同构）。",
+    "urlResolve": "本清单 url 字段是相对本目录的登记名（./<kind>.glb）。运行时由消费方按环境解析真实 URL：DEV 直接取 /island3d/<kind>.glb；PROD 取 <basePath>/static/island3d/<kind>.glb（basePath 取 #Marguerite-data 的 dataset.basePath，与 useBgm.ts 的 musicAssetUrl 同构；网关 /static/ 已映射 dist 根，不再拼 dist/）。",
     "mime": "网关对 .glb 未 pin Content-Type（回落 application/octet-stream 或 mimetypes 猜测）；GLTFLoader 用 fetch+ArrayBuffer 解析二进制，不校验 Content-Type，故无需改 Rust/pyengine 网关。",
     "cache": "非 HTML 静态资产 immutable 长缓存——同名 GLB 更新需换文件名或清缓存（同 music/ 模式）。"
   },

@@ -49,18 +49,26 @@ impl PageDigest {
 }
 
 /// 页面上下文抽取 JS（返回 JSON 字符串）。纯函数，离线可测。
+///
+/// **必须带 `textContent` 兜底**：`innerText` 依赖布局（layout）计算，而本通道跑的是
+/// `--headless=new --disable-gpu` 的无窗口 Chromium。实测（2026-10-23，threejs.org）
+/// `document.readyState === "complete"` 且节点数正常，但 `document.body.innerText`
+/// 长度恒为 **0** —— 于是 `web_fetch`/`web_research` 拿到空正文，子智能体以为抓取失败，
+/// 反复换 URL 重试（真机截图里连续 6 次 web_fetch 全部空转）。
+/// `textContent` 不依赖布局，是可靠兜底。
 pub fn collect_page_js() -> &'static str {
     r#"(() => {
+  const txt = (el) => el ? (el.innerText || el.textContent || "") : "";
   const title = document.title || "";
   const body = document.body;
-  const text = body ? body.innerText.replace(/\s+/g, " ").trim() : "";
+  const text = txt(body).replace(/\s+/g, " ").trim();
   const headings = Array.from(document.querySelectorAll("h1,h2,h3"))
-    .map(h => (h.innerText || "").replace(/\s+/g, " ").trim())
+    .map(h => txt(h).replace(/\s+/g, " ").trim())
     .filter(Boolean);
   const links = Array.from(document.querySelectorAll("a[href]"))
-    .map(a => ({ text: (a.innerText || "").replace(/\s+/g, " ").trim(), href: a.href }))
+    .map(a => ({ text: txt(a).replace(/\s+/g, " ").trim(), href: a.href }))
     .filter(l => l.href && l.href.startsWith("http"));
-  return JSON.stringify({ title, text, headings, links });
+  return JSON.stringify({ title, text, headings, links, ready: document.readyState });
 })()"#
 }
 
@@ -116,17 +124,63 @@ pub fn extract_digest_from_json(raw: &str, url: &str) -> Result<PageDigest> {
     })
 }
 
+/// 正文可读下限：低于该字符数视为「首屏还没渲染出来」，继续轮询等待。
+const MIN_READABLE_CHARS: usize = 200;
+/// 就绪轮询：最多 10 轮 × 300ms ≈ 3s。SPA / 重资源页首屏常超过固定 600ms，
+/// 但也不该无限等——3s 未出正文就交给调用方回退（reqwest 直抓）。
+const READINESS_ATTEMPTS: usize = 10;
+const READINESS_INTERVAL: Duration = Duration::from_millis(300);
+
+/// 抽取结果里的 `document.readyState` 是否为 `complete`（纯函数，离线可测）。
+///
+/// 用于「短页面提前收工」：正文不足 [`MIN_READABLE_CHARS`] 但文档已 complete 且
+/// 有正文时，没必要再轮询到 3s。
+fn page_is_complete(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| v.get("ready").and_then(|r| r.as_str()).map(|s| s == "complete"))
+        .unwrap_or(false)
+}
+
 /// 用内置浏览器导航并采集页面（无外部 API）。需本机有 Chromium。
+///
+/// 固定 sleep 换成**就绪轮询**：此前写死 600ms 就抽正文，重资源页抽到空串
+/// （实测 threejs.org 首帧正文为空），工具却返回「成功但零正文」，子智能体无法判断
+/// 是「页面没内容」还是「抓取没生效」，于是反复重试白烧预算。
+/// 现在等到正文达到可读下限再返回；确实为空则**明确报错**，让调用方走回退路径。
 pub async fn collect_page(bridge: &BrowserBridge, url: &str) -> Result<PageDigest> {
     let mut page = bridge.open(url).await?;
-    // 等首屏渲染（真实浏览器已加载完成，短延时足够让 innerText 稳定）
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let raw = page
-        .session
-        .evaluate(collect_page_js(), true)
-        .await
-        .map_err(|e| anyhow!("采集页面 JS 求值失败: {e}"))?;
-    extract_digest_from_json(&raw, url)
+    let mut digest = PageDigest {
+        title: String::new(),
+        url: url.to_string(),
+        text: String::new(),
+        headings: Vec::new(),
+        links: Vec::new(),
+    };
+    for _ in 0..READINESS_ATTEMPTS {
+        tokio::time::sleep(READINESS_INTERVAL).await;
+        let raw = page
+            .session
+            .evaluate(collect_page_js(), true)
+            .await
+            .map_err(|e| anyhow!("采集页面 JS 求值失败: {e}"))?;
+        digest = extract_digest_from_json(&raw, url)?;
+        let complete = page_is_complete(&raw);
+        // 两种收工条件：
+        //  - 正文够长（重资源页即使还没 idle，正文也已可读）；
+        //  - 文档已 complete 且已有正文（短页面不必陪跑满 3s）。
+        if digest.text.chars().count() >= MIN_READABLE_CHARS
+            || (complete && !digest.text.trim().is_empty())
+        {
+            return Ok(digest);
+        }
+    }
+    if digest.text.trim().is_empty() {
+        return Err(anyhow!(
+            "页面无可读正文（可能需要登录 / 被风控 / 非 HTML）: {url}"
+        ));
+    }
+    Ok(digest)
 }
 
 /// 搜索引擎结果抽取 JS（从渲染后 DOM 取标题/链接/摘要）。纯函数，离线可测。
@@ -207,15 +261,36 @@ pub(crate) async fn browser_search(
     max: usize,
 ) -> Result<Vec<crate::tools::builtin::SearchResult>> {
     // P0-3：改用 cn.bing.com（国内直连可用），避免 www.bing.com 的 302 重定向开销。
-    let url = format!("https://cn.bing.com/search?q={}", encode_query(query));
+    //
+    // 市场/语言必须跟随查询语言（与直连引擎 `web_search::search_market` 同一口径）：
+    // cn.bing 对裸 `?q=` 默认按中文市场重排，英文技术查询会被中文站点甚至词典模块挤占
+    // —— 实测子智能体因此回报「搜索受到中文词典结果干扰」并改道 web_fetch。
+    let (mkt, setlang) = crate::tools::builtin::web_search::search_market(query);
+    let url = format!(
+        "https://cn.bing.com/search?q={}&mkt={mkt}&setlang={setlang}",
+        encode_query(query)
+    );
     let mut page = bridge.open(&url).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let raw = page
-        .session
-        .evaluate(search_results_js(), true)
-        .await
-        .map_err(|e| anyhow!("搜索引擎结果抽取失败: {e}"))?;
-    let mut res = extract_search_results_from_json(&raw);
+    // 结果块就绪轮询（替代固定 800ms）：导航是异步的，慢网/首屏渲染未完成时
+    // 固定睡眠会抽到空列表，把「还没加载完」误判成「引擎 DOM 改版」，进而白白回退。
+    //
+    // 预算刻意只给 4 轮（≈1.2s）：实测（2026-10-23）headless 下 cn.bing 2.5s 后
+    // 仍是 `readyState=loading`、`document.body === null`，等到 3s 也换不来结果，
+    // 而直连引擎 0.7s 就能给出 5 条 —— 多等只是在每次搜索上白扣时间。
+    // 拿不到就让上层回退，熔断器会把这台机器的实际情况记住（10 分钟内不再试探）。
+    let mut res = Vec::new();
+    for _ in 0..4 {
+        tokio::time::sleep(READINESS_INTERVAL).await;
+        let raw = page
+            .session
+            .evaluate(search_results_js(), true)
+            .await
+            .map_err(|e| anyhow!("搜索引擎结果抽取失败: {e}"))?;
+        res = extract_search_results_from_json(&raw);
+        if !res.is_empty() {
+            break;
+        }
+    }
     res.truncate(max);
     Ok(res)
 }
@@ -372,6 +447,31 @@ mod tests {
     fn extract_search_results_from_json_handles_garbage() {
         assert!(extract_search_results_from_json("not json").is_empty());
         assert!(extract_search_results_from_json("[]").is_empty());
+    }
+
+    /// 真机缺陷回归：headless Chromium 的 `innerText` 可能恒为空（依赖布局），
+    /// 抽取脚本必须用 `textContent` 兜底，否则抓取到的正文永远是空串。
+    #[test]
+    fn collect_page_js_falls_back_to_text_content() {
+        let js = collect_page_js();
+        assert!(js.contains("innerText"), "优先用 innerText（屏幕阅读顺序更好）");
+        assert!(
+            js.contains("textContent"),
+            "必须用 textContent 兜底：headless 下 innerText 可能为空"
+        );
+        // 兜底必须是 `innerText || textContent` 的前后关系，而不是各自独立取
+        let inner_first = js.find("innerText").unwrap();
+        let tc = js.find("textContent").unwrap();
+        assert!(inner_first < tc, "兜底顺序应为 innerText 优先、textContent 兜底");
+        assert!(js.contains("readyState"), "抽取脚本需回传就绪状态供提前收工");
+    }
+
+    #[test]
+    fn page_is_complete_reads_ready_state() {
+        assert!(page_is_complete(r#"{"title":"t","text":"x","ready":"complete"}"#));
+        assert!(!page_is_complete(r#"{"title":"t","text":"x","ready":"loading"}"#));
+        assert!(!page_is_complete(r#"{"title":"t","text":"x"}"#), "缺字段不应崩");
+        assert!(!page_is_complete("not json"));
     }
 
     #[test]

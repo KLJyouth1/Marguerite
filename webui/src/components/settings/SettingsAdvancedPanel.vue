@@ -239,7 +239,7 @@ const agentConfigAriaLabel = computed(() =>
 
     <div class="control-section__subhead">
       <h4 class="control-section__subhead-title">{{ t('setup.advanced.experimental') }}</h4>
-      <span class="control-section__subhead-hint">仅限明确了解风险的高级用户。</span>
+      <span class="control-section__subhead-hint">{{ t('setup.advanced.experimentalHint') }}</span>
     </div>
 
     <label class="control-row control-row--experimental">

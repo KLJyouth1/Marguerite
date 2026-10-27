@@ -70,6 +70,11 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("engine", "gateway"),
     ("engine", "identity"),
     ("engine", "memory"),
+    # The main agent's per-turn "Capability State" block lists live MCP client
+    # names so servers connected mid-session are visible without a restart
+    # (lazy import inside prompt assembly, fail-open). mcp imports only tools,
+    # so engine<->mcp closes no new package cycle.
+    ("engine", "mcp"),
     ("engine", "observability"),
     ("engine", "persistence"),
     ("engine", "plugins"),

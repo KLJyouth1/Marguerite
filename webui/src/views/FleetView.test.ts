@@ -19,6 +19,7 @@ vi.mock('@/stores/rpc', async () => {
     state,
     call,
     waitForConnection,
+    on: vi.fn(() => () => {}),
     get isConnected() {
       return state.value === 'connected'
     },
@@ -116,5 +117,93 @@ describe('FleetView connection timing', () => {
     await flush()
 
     expect(el.textContent).toContain('Architect')
+  })
+})
+
+// P0-6 守卫：能力星座的状态必须**来自实测**。此前 4 格是硬编码常量
+// （status=running、meta="memory.graph · warm"/"tools.runtime · 12 adapters"），
+// 界面看起来是活的，实际从未测量过任何运行时状态。
+describe('FleetView capability honesty', () => {
+  /** 按方法名分别应答，模拟真实探测端点。 */
+  function mockProbes(overrides: Record<string, unknown> = {}) {
+    const table: Record<string, unknown> = {
+      'fleet.list': { roles },
+      'memory.layers.status': {
+        layers: [
+          { reachable: true },
+          { reachable: true },
+          { reachable: false },
+        ],
+      },
+      'kb.status': { documents: 7, chunks: 42, engine: 'bm25' },
+      'tools.catalog': { items: [{ enabled: true }, { enabled: true }, { enabled: false }] },
+      ...overrides,
+    }
+    h.call.mockImplementation(async (method: string) => {
+      if (method in table) return table[method]
+      throw new Error(`unsupported: ${method}`)
+    })
+  }
+
+  it('能力格的副标题是实测数值，不是装饰文案', async () => {
+    h.wait.mockResolvedValue(undefined)
+    mockProbes()
+    h.state.value = 'connected'
+
+    const el = await mountView()
+    await flush()
+    await flush()
+    await flush()
+
+    const text = el.textContent || ''
+    // 记忆：3 层里 2 层可达 → 如实写出来（不全可达时不得谎报 ok）
+    expect(text).toContain('3 层 · 可达 2')
+    expect(text).toContain('memory.layers.status · 实测')
+    // 知识库：篇数/分块来自 kb.status
+    expect(text).toContain('7 篇 · 42 分块 · bm25')
+    // 工具：可用数 + 已停用数
+    expect(text).toContain('2 个可用 · 1 个已停用')
+    // 旧硬编码文案不得再出现
+    expect(text).not.toContain('12 adapters')
+    expect(text).not.toContain('· warm')
+  })
+
+  it('探测失败的格子如实标注「未探测」，并给出失败原因', async () => {
+    h.wait.mockResolvedValue(undefined)
+    mockProbes()
+    // 让记忆探测抛错
+    h.call.mockImplementation(async (method: string) => {
+      if (method === 'memory.layers.status') throw new Error('rpc down')
+      if (method === 'fleet.list') return { roles }
+      if (method === 'kb.status') return { documents: 0, chunks: 0, engine: 'bm25' }
+      if (method === 'tools.catalog') return { items: [] }
+      throw new Error(`unsupported: ${method}`)
+    })
+    h.state.value = 'connected'
+
+    const el = await mountView()
+    await flush()
+    await flush()
+    await flush()
+
+    const text = el.textContent || ''
+    expect(text).toContain('探测失败：rpc down')
+    expect(text).toContain('memory.layers.status · 未探测')
+    // 知识库为 0 篇时是 idle，不得谎报 ok(健康)
+    expect(text).toContain('0 篇 · 0 分块')
+  })
+
+  it('角色卡不谎称运行中：状态恒为 idle（角色是配置，不是进程）', async () => {
+    h.wait.mockResolvedValue(undefined)
+    mockProbes()
+    h.state.value = 'connected'
+
+    const el = await mountView()
+    await flush()
+    await flush()
+    await flush()
+
+    // 推荐前后都不应出现「运行中」这类未被证实的运行态
+    expect(el.textContent).not.toContain('running')
   })
 })

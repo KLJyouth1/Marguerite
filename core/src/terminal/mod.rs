@@ -29,6 +29,10 @@
 //! 让 Windows 用户也能在 Linux 环境里跑命令，详见 [backend]。
 pub mod ansi;
 pub mod backend;
+/// 真实 PTY 会话（ConPTY / openpty）：交互式终端沙箱的底座。
+pub mod pty;
+/// Shell 发现与画像（pwsh / powershell / cmd / git-bash / bash / zsh / fish / wsl）。
+pub mod shells;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -308,6 +312,23 @@ fn spawn_reader<R: Read + Send + 'static>(r: Option<R>) -> thread::JoinHandle<St
 /// 本函数保留原签名对外兼容，内部转发到 [`ansi::strip_ansi`]。
 pub fn strip_ansi(s: &str) -> String {
     ansi::strip_ansi(s)
+}
+
+/// 进程级「真的拉起 shell」测试串行闸。
+///
+/// 这类用例（`terminal::pty`、`tools::terminal`）每个都要启动一个真实
+/// PowerShell / bash。cargo 默认并行跑测试，多个 shell 同时冷启动会互相抢 CPU，
+/// 于是「等输出 N 秒」的窗口在高负载下失效 —— 全量跑随机红、单独跑必过。
+///
+/// 串行化是把不确定变成确定；断言本身不放宽。
+///
+/// 用 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：异步用例要跨 `.await`
+/// 持有它，`std` 版本的 guard 跨 await 会触发 `clippy::await_holding_lock`。
+/// 同步用例用 `blocking_lock()` 拿同一把锁。
+#[cfg(test)]
+pub(crate) fn pty_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 #[cfg(test)]

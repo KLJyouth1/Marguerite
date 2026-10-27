@@ -37,6 +37,29 @@
           </div>
         </div>
       </div>
+      <div v-if="contextRefs.length > 0" class="chat-collapse-region">
+        <div class="chat-attachments">
+          <div
+            v-for="r in contextRefs"
+            :key="`${r.kind}:${r.id}`"
+            class="attachment-chip"
+            :title="r.path || r.id"
+          >
+            <span class="attachment-chip__icon" aria-hidden="true">
+              <Icon :name="r.kind === 'folder' ? 'folder' : 'fileText'" :size="15" />
+            </span>
+            <span class="attachment-chip__name">@{{ r.label }}</span>
+            <button
+              class="attachment-action attachment-remove"
+              :title="t('chat.remove')"
+              :aria-label="t('chat.remove')"
+              @click="removeRef(r.kind, r.id)"
+            >
+              <Icon name="x" :size="12" />
+            </button>
+          </div>
+        </div>
+      </div>
       <div class="chat-input-panel">
         <div v-if="replanActive" class="chat-collapse-region">
           <div
@@ -60,6 +83,22 @@
             </button>
           </div>
         </div>
+        <!-- 输入框上方上下文条：工作区 / 分支 / 工作位置（Codex 式胶囊） -->
+        <ChatComposerContextBar
+          v-if="!collapsed"
+          :workspace="projectWorkspace"
+          :workspace-status="projectWorkspaceStatus"
+          :status-message="projectStatusMessage"
+          :can-close-project="canCloseProject"
+          :can-choose-project="canChooseProject"
+          :project-roots="projectRoots"
+          :can-attach-project-roots="canAttachProjectRoots && Boolean(projectWorkspace)"
+          :git="workspaceGit"
+          @choose-project="emit('chooseProject')"
+          @close-project="emit('closeProject')"
+          @add-project-root="projectRootsOpen = true"
+          @remove-project-root="emit('removeProjectRoot', $event)"
+        />
         <div class="chat-input-wrap">
           <textarea
             ref="textareaEl"
@@ -83,6 +122,7 @@
             v-if="mentionQuery !== null"
             ref="mentionPopoverEl"
             :query="mentionQuery"
+            :workspace-id="projectWorkspace?.id"
             @select="applyMention"
           />
         </div>
@@ -97,6 +137,9 @@
               @open-advanced="openAdvancedFromPresets"
               @set-model-routing-mode="emit('setModelRoutingMode', $event)"
             />
+            <ChatModelPicker />
+            <!-- 记忆楼层：8 层（7 层记忆 + 经验）可逐层开关，关掉的层不参与检索也不注入 -->
+            <MemoryFloorsPopover />
             <div ref="addMenuAnchorEl" class="chat-settings-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-plus-btn"
@@ -117,45 +160,14 @@
                 :plan-mode-busy="planModeBusy === true || planModeDisabled === true"
                 @activate-plan-mode="emit('setCollaborationMode', 'plan')"
                 @attach-files="fileInputEl?.click()"
+                @open-commands="emit('openCommands')"
+                @open-artifacts="emit('openArtifacts')"
+                @open-file-tree="emit('openFileTree')"
+                @open-skills="emit('openSkills')"
+                @open-plugins="emit('openPlugins')"
                 @close="addMenuOpen = false"
               />
             </div>
-            <div
-              v-if="showProjectContext && projectWorkspace"
-              class="chat-project-chip"
-              :data-status="projectWorkspaceStatus || 'ready'"
-              :title="projectWorkspace.path"
-            >
-              <Icon name="folder" :size="14" />
-              <span class="chat-project-chip__name">{{ projectWorkspace.name }}</span>
-              <span v-if="projectStatusMessage" class="chat-project-chip__status">
-                {{ projectStatusMessage }}
-              </span>
-              <button
-                v-if="canCloseProject"
-                type="button"
-                :aria-label="t('workspaces.closeProjectDraft')"
-                :title="t('workspaces.closeProjectDraft')"
-                @click="emit('closeProject')"
-              >
-                <Icon name="x" :size="12" />
-              </button>
-            </div>
-            <button
-              v-if="
-                canChooseProject
-                && isNewLanding
-                && !projectWorkspace
-                && (!projectWorkspaceStatus || projectWorkspaceStatus === 'none')
-              "
-              type="button"
-              class="chat-project-choose"
-              @click="emit('chooseProject')"
-            >
-              <Icon name="folder" :size="15" />
-              <span>{{ t('workspaces.chooseProject') }}</span>
-              <Icon class="chat-project-choose__chevron" name="chevronDown" :size="12" />
-            </button>
             <button
               v-if="codingModeEnabled"
               type="button"
@@ -174,6 +186,7 @@
               :run-mode="runMode"
               :allowed-run-modes="allowedRunModes"
               :safe-setup-available="safeSetupAvailable"
+              :safe-setup-state="safeSetupState"
               :run-mode-locked="runModeLocked"
               :run-mode-lock-message="runModeLockMessage"
               :collaboration-mode="collaborationMode || 'default'"
@@ -188,16 +201,106 @@
               @set-collaboration-mode="emit('setCollaborationMode', $event)"
               @set-model-routing-mode="emit('setModelRoutingMode', $event)"
             />
-            <button
-              class="btn btn--icon btn--ghost chat-thinking-btn"
-              :class="{ 'is-active': thinking }"
-              :title="t('chat.composer.thinking')"
-              :aria-label="t('chat.composer.thinking')"
-              :aria-pressed="thinking ? 'true' : 'false'"
-              @click="toggleThinking"
-            >
-              <Icon name="sparkles" :size="17" />
-            </button>
+<ChatEffortSlider
+              :model-value="effort"
+              :disabled="runModeLocked"
+              :routing-on="modelRoutingMode !== 'off'"
+              :applies-next-turn="isStreaming"
+              @update:model-value="emit('setEffort', $event)"
+            />
+            <div v-if="props.orchestration" ref="agentPanelAnchorEl" class="chat-settings-anchor">
+              <button
+                type="button"
+                class="btn btn--icon btn--ghost chat-orch-btn"
+                :class="{ 'is-active': orchestration?.form === 'subagent' }"
+                :title="t('chat.orchestration.btnAssign')"
+                :aria-label="t('chat.orchestration.btnAssign')"
+                aria-haspopup="dialog"
+                :aria-expanded="agentPanelOpen ? 'true' : 'false'"
+                data-testid="chat-orchestration-btn-agents"
+                @click="toggleAgentPanel"
+              >
+                <Icon name="agents" :size="17" />
+                <span
+                  v-if="(orchestration?.agents?.length ?? 0) > 0"
+                  class="chat-orch-badge"
+                  data-testid="orch-agents-count"
+                >{{ orchestration!.agents!.length }}</span>
+              </button>
+              <ChatAgentPicker
+                :open="agentPanelOpen"
+                :agents="orchestration?.agents ?? []"
+                @update:open="agentPanelOpen = $event"
+                @update:agents="applyAgents"
+              />
+            </div>
+            <div v-if="props.orchestration" ref="teamPanelAnchorEl" class="chat-settings-anchor">
+              <button
+                type="button"
+                class="btn btn--icon btn--ghost chat-orch-btn"
+                :class="{ 'is-active': orchestration?.form === 'team' || orchestration?.form === 'expert' }"
+                :title="t('chat.orchestration.btnTeam')"
+                :aria-label="t('chat.orchestration.btnTeam')"
+                aria-haspopup="dialog"
+                :aria-expanded="teamPanelOpen ? 'true' : 'false'"
+                data-testid="chat-orchestration-btn-team"
+                @click="toggleTeamPanel"
+              >
+                <Icon name="boxes" :size="17" />
+              </button>
+              <ChatTeamPicker
+                :open="teamPanelOpen"
+                :teams="orchestration?.teams ?? []"
+                @update:open="teamPanelOpen = $event"
+                @toggle-team="toggleTeam"
+                @clear-teams="clearTeams"
+              />
+            </div>
+            <div v-if="props.orchestration" ref="swarmPanelAnchorEl" class="chat-settings-anchor">
+              <button
+                type="button"
+                class="btn btn--icon btn--ghost chat-orch-btn"
+                :class="{ 'is-active': orchestration?.swarmOn === true }"
+                :title="t('chat.orchestration.btnSwarm')"
+                :aria-label="t('chat.orchestration.btnSwarm')"
+                aria-haspopup="dialog"
+                :aria-expanded="swarmPanelOpen ? 'true' : 'false'"
+                data-testid="chat-orchestration-btn-swarm"
+                @click="toggleSwarmPanel"
+              >
+                <Icon name="swarm" :size="17" />
+              </button>
+              <ChatSwarmPopover
+                :open="swarmPanelOpen"
+                :swarm-on="orchestration?.swarmOn === true"
+                :swarm-size="orchestration?.swarmSize ?? 3"
+                @update:open="swarmPanelOpen = $event"
+                @update:swarm-on="applySwarmOn"
+                @update:swarm-size="applySwarmSize"
+              />
+            </div>
+            <div v-if="props.orchestration" ref="modePanelAnchorEl" class="chat-settings-anchor">
+              <button
+                type="button"
+                class="btn btn--icon btn--ghost chat-orch-btn"
+                :class="{ 'is-active': orchestration?.modeKey && orchestration.modeKey !== 'standard_doit' }"
+                :title="t('chat.orchestration.capabilitiesTitle')"
+                :aria-label="t('chat.orchestration.capabilitiesTitle')"
+                aria-haspopup="dialog"
+                :aria-expanded="modePanelOpen ? 'true' : 'false'"
+                data-testid="chat-orchestration-btn-mode"
+                @click="toggleModePanel"
+              >
+                <Icon name="mode" :size="17" />
+              </button>
+              <ChatModeCapabilityPanel
+                :open="modePanelOpen"
+                :mode-key="orchestration?.modeKey ?? 'standard_doit'"
+                :capabilities="orchestration?.capabilities ?? []"
+                @update:open="modePanelOpen = $event"
+                @update:capabilities="applyCapabilities"
+              />
+            </div>
             <div ref="moreActionsAnchorEl" class="chat-settings-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-more-actions-btn"
@@ -293,7 +396,7 @@
                 :aria-label="replanActive ? t('chat.plan.reviseSend') : t('chat.send')"
                 :aria-describedby="sendBlockedMessage ? 'chat-composer-send-status' : undefined"
                 :disabled="Boolean(sendBlockedMessage) || inputDisabled"
-                @click="emit('send')"
+                @click="submitFromButton"
               >
                 <Icon name="arrowUp" :size="17" />
               </button>
@@ -322,6 +425,18 @@
       class="hidden"
       @change="emit('fileChange', $event)"
     />
+    <!-- 附加项目多选：复用项目选择弹窗的多选模式（只勾选已注册项目，不浏览文件系统）。 -->
+    <ProjectWorkspacePickerDialog
+      v-if="canAttachProjectRoots && projectWorkspace"
+      :open="projectRootsOpen"
+      :multi="true"
+      :enabled="true"
+      :primary-id="primaryProjectId"
+      :selected-ids="projectRoots.map(root => root.id)"
+      :workspaces="projectRootOptions"
+      @close="projectRootsOpen = false"
+      @apply="applyProjectRoots"
+    />
   </div>
 </template>
 
@@ -331,15 +446,38 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
 import ChatComposerAddMenu from '@/components/chat/ChatComposerAddMenu.vue'
+import ChatModelPicker from '@/components/chat/ChatModelPicker.vue'
+import MemoryFloorsPopover from '@/components/chat/MemoryFloorsPopover.vue'
 import ChatComposerPresets from '@/components/chat/ChatComposerPresets.vue'
+import ChatEffortSlider from '@/components/chat/ChatEffortSlider.vue'
+import ChatAgentPicker from '@/components/chat/ChatAgentPicker.vue'
+import ChatComposerContextBar from '@/components/chat/ChatComposerContextBar.vue'
+import ChatModeCapabilityPanel from '@/components/chat/ChatModeCapabilityPanel.vue'
+import ChatSwarmPopover from '@/components/chat/ChatSwarmPopover.vue'
+import ChatTeamPicker from '@/components/chat/ChatTeamPicker.vue'
 import ComposerMentionPopover from '@/components/chat/ComposerMentionPopover.vue'
+import {
+  addContextRef,
+  removeContextRef,
+  useContextRefs,
+  type ContextRefItem,
+} from '@/composables/chat/contextRefs'
 import RunModePanel from '@/components/chat/RunModePanel.vue'
+import ProjectWorkspacePickerDialog from '@/components/ProjectWorkspacePickerDialog.vue'
+import {
+  EXPERT_TEAMS,
+  type OrchestrationState,
+} from '@/composables/chat/orchestration'
 import type { Attachment } from '@/types/chat'
+import type { ProjectWorkspaceItem } from '@/types/rpc'
+import type { EffortLevel } from '@/types/effort'
 import type { ModelRoutingMode } from '@/types/modelRouting'
-import type { SandboxRunMode } from '@/types/sandbox'
+import type { SandboxRunMode, SandboxSetupState } from '@/types/sandbox'
 import type { CollaborationMode } from '@/types/plans'
 import type { PromptCacheKeepaliveStatus } from '@/types/promptCacheKeepalive'
+import type { WorkspaceGitSummary } from '@/composables/sessions/useWorkspaceStatus'
 import { isAttachmentBusy, isImageDisplayAttachment } from '@/utils/chat/attachments'
+import { useActiveMode } from '@/composables/useActiveMode'
 
 interface ChatComposerExpose {
   composerElement: () => HTMLElement | null
@@ -364,12 +502,14 @@ const props = withDefaults(defineProps<{
   runMode: SandboxRunMode
   allowedRunModes: SandboxRunMode[]
   safeSetupAvailable?: boolean
+  /** 沙箱 setup 真实状态（未 ready → 安全模式显示「待安装」但仍可点击）。 */
+  safeSetupState?: SandboxSetupState | null
   runModeLocked: boolean
   runModeLockMessage: string
   modelRoutingMode: ModelRoutingMode
   modelRoutingSettingsBusy: boolean
-  /** 深度思考（DeepSeek thinking 模式）开关状态，由父级持久化。 */
-  thinking?: boolean
+  /** 推理等级（off/normal/deep/max）：底栏滑块的当前档位，由父级持久化。 */
+  effort?: EffortLevel
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
   voiceBusy: boolean
@@ -378,8 +518,18 @@ const props = withDefaults(defineProps<{
   projectWorkspace?: { id: string; name: string; path: string } | null
   projectWorkspaceStatus?: 'none' | 'resolving' | 'ready' | 'unavailable' | 'removed' | 'unknown' | 'error'
   projectStatusMessage?: string
+  /** 工作区 Git 摘要（只读）：由 `workspace.status` 一并解析，用于分支胶囊。 */
+  workspaceGit?: WorkspaceGitSummary | null
   canCloseProject?: boolean
   canChooseProject?: boolean
+  /** 会话级附加项目（不含主项目）：chips 展示，每个可单独移除。 */
+  projectRoots?: Array<{ id: string; name: string; path: string; available: boolean }>
+  /** 附加项目候选项（工作区清单），供多选弹窗渲染 name/path/可用性。 */
+  projectRootOptions?: ProjectWorkspaceItem[]
+  /** 是否显示「+ 附加项目」入口（可读取工作区清单时为 true）。 */
+  canAttachProjectRoots?: boolean
+  /** 主项目 id：多选弹窗里置灰且不可取消。 */
+  primaryProjectId?: string
   planModeAvailable?: boolean
   collaborationMode?: CollaborationMode
   planModeBusy?: boolean
@@ -394,12 +544,19 @@ const props = withDefaults(defineProps<{
   /** Floating-composer toggle: false docks the panel (solid surface, no
       glass) even though the composer still renders in the normal layout. */
   floating?: boolean
-  /** D-02：在底栏渲染 3×3 模式选择胶囊（仅 ChatView 开启）。 */
+/** D-02：在底栏渲染 3×3 模式选择胶囊（仅 ChatView 开启）。 */
   showPresets?: boolean
+  /** P2·E：对话编排状态。form 非 single 时，父级把当前输入提交给 orchestrate.run。 */
+  orchestration?: OrchestrationState
 }>(), {
   canChooseProject: true,
+  canAttachProjectRoots: false,
+  primaryProjectId: '',
+  projectRootOptions: () => [],
+  projectRoots: () => [],
   codingModeEnabled: false,
   codingModeSettingsBusy: false,
+  effort: 'off',
   inputDisabled: false,
   safeSetupAvailable: false,
   floating: false,
@@ -418,7 +575,7 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setModelRoutingMode: [mode: ModelRoutingMode]
-  setThinking: [enabled: boolean]
+  setEffort: [level: EffortLevel]
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
   cancelReplan: []
@@ -428,10 +585,22 @@ const emit = defineEmits<{
   stop: []
   chooseProject: []
   closeProject: []
+  /** 多选弹窗确认：完整的附加项目 id 集合（不含主项目）。 */
+  applyProjectRoots: [ids: string[]]
+  /** 移除单个附加项目 chip。 */
+  removeProjectRoot: [id: string]
+  /** 「+」菜单 → 打开斜杠命令清单 / 产物面板 / 工作区文件树 / 技能页 / 插件页。 */
+  openCommands: []
+  openArtifacts: []
+  openFileTree: []
+  openSkills: []
+  openPlugins: []
   openPromptCacheKeepalive: []
   refreshPromptCacheKeepalive: []
-  /** Request the parent to restore the full (expanded) composer. */
+/** Request the parent to restore the full (expanded) composer. */
   expand: []
+  /** P2·E：编排状态补丁（面板单选/开关 → 父级合并）。form 推导在本组件 handler 完成。 */
+  updateOrchestration: [patch: Partial<OrchestrationState>]
 }>()
 
 const { t } = useI18n()
@@ -440,13 +609,56 @@ const inputText = defineModel<string>({ required: true })
 const composerEl = ref<HTMLElement | null>(null)
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const fileInputEl = ref<HTMLInputElement | null>(null)
-const addMenuOpen = ref(false)
-const runModePanelOpen = ref(false)
-const moreActionsOpen = ref(false)
+// 附加项目多选弹窗的开合是纯 UI 状态；附加项目集合本身由 ChatView 单例持有。
+const projectRootsOpen = ref(false)
 
-// ── 「@」专家 / 智能体引用（对话框内）─────────────────────────────────────
-// 输入 `@` 触发候选浮层；选中后把 `@名称` 插入输入框。纯前端引用（不改 chat.send
-// 负载）——满足「专家团能在对话框中被引用」；专家团整队启动走专家中心页 team.run。
+function applyProjectRoots(ids: string[]) {
+  projectRootsOpen.value = false
+  emit('applyProjectRoots', ids)
+}
+// 输入区浮层是**单槽**状态：同一时刻只允许一个浮层存在。
+//
+// 此前这里是 7 个独立的 `ref(false)`，「互斥」靠零散 watch 手工维护，只覆盖了
+// Add / More / RunMode 三者。后果在真机上可见：先开「执行模式与路由」，再点
+// 「模式与能力」，两个面板会同时挂在输入区上方互相叠压、下缘被裁切。
+// 改成单槽后互斥是**结构性的**（写入即抢占），不再依赖某处补 watch。
+type ComposerPopover = 'add' | 'runMode' | 'more' | 'agent' | 'team' | 'swarm' | 'mode'
+
+const activePopover = ref<ComposerPopover | null>(null)
+
+/** 把一个具名浮层映射成 `v-model:open` 可用的可写布尔。 */
+function popoverOpen(name: ComposerPopover) {
+  return computed({
+    get: () => activePopover.value === name,
+    set: (open: boolean) => {
+      if (open) {
+        activePopover.value = name
+      } else if (activePopover.value === name) {
+        activePopover.value = null
+      }
+    },
+  })
+}
+
+const addMenuOpen = popoverOpen('add')
+const runModePanelOpen = popoverOpen('runMode')
+const moreActionsOpen = popoverOpen('more')
+// P2·E 编排四面板：子智能体指派 / 团队专家 / 蜂群 / 模式能力。
+const agentPanelOpen = popoverOpen('agent')
+const teamPanelOpen = popoverOpen('team')
+const swarmPanelOpen = popoverOpen('swarm')
+const modePanelOpen = popoverOpen('mode')
+const agentPanelAnchorEl = ref<HTMLElement | null>(null)
+const teamPanelAnchorEl = ref<HTMLElement | null>(null)
+const swarmPanelAnchorEl = ref<HTMLElement | null>(null)
+const modePanelAnchorEl = ref<HTMLElement | null>(null)
+// P3 打通：模式矩阵 ↔ 编排面板共享同一全局 3×3 状态源（activeUserMode）。
+const { activeUserMode } = useActiveMode()
+
+// ── 「@」引用（对话框内）─────────────────────────────────────────────────
+// 输入 `@` 触发候选浮层：文件/目录/规则/历史会话会登记为本轮引用
+// （随 `chat.send.contextRefs` 上行，由后端渲染成材料）；专家/智能体只插入
+// `@名称` 文本作为角色指向，整队启动仍走专家中心页 team.run。
 const mentionPopoverEl = ref<InstanceType<typeof ComposerMentionPopover> | null>(null)
 const mentionQuery = ref<string | null>(null)
 
@@ -482,18 +694,23 @@ function onTextareaKeydown(event: KeyboardEvent) {
   emit('keydown', event)
 }
 
-function applyMention(label: string) {
+function applyMention(payload: { label: string; ref?: ContextRefItem }) {
   const text = inputText.value
   const m = /(^|\s)@([^\s@]*)$/.exec(text)
   if (m) {
-    inputText.value = `${text.slice(0, m.index)}${m[1]}@${label} `
+    inputText.value = `${text.slice(0, m.index)}${m[1]}@${payload.label} `
   }
+  // 文件/目录/规则/会话：登记为本轮引用（发送时随 chat.send.contextRefs 上行，
+  // 后端把材料拼在用户消息尾部）。专家/智能体只是角色指向，不入引用负载。
+  if (payload.ref) addContextRef(payload.ref)
   mentionQuery.value = null
   void nextTick(() => textareaEl.value?.focus())
 }
-const showProjectContext = computed(() =>
-  Boolean(props.projectWorkspace && (props.canCloseProject || props.projectStatusMessage)),
-)
+
+const contextRefs = useContextRefs()
+function removeRef(kind: string, id: string) {
+  removeContextRef(kind, id)
+}
 const promptCacheKeepaliveStatusText = computed(() => {
   const status = props.promptCacheKeepaliveStatus
   if (!status || status.state === 'off') return ''
@@ -524,18 +741,11 @@ function dismissRouterNewBadge() {
 const addMenuAnchorEl = ref<HTMLElement | null>(null)
 const moreActionsAnchorEl = ref<HTMLElement | null>(null)
 
-const anyPopoverOpen = computed(() =>
-  addMenuOpen.value
-  || runModePanelOpen.value
-  || moreActionsOpen.value,
-)
+const anyPopoverOpen = computed(() => activePopover.value !== null)
 
-// 「@」候选与 Add / More 菜单互斥：同一时刻只留一个浮层。
+// 「@」候选与输入区浮层互斥：单槽状态，直接清空即可。
 watch(mentionQuery, (q) => {
-  if (q !== null) {
-    addMenuOpen.value = false
-    moreActionsOpen.value = false
-  }
+  if (q !== null) activePopover.value = null
 })
 
 function eventInsideRoot(event: PointerEvent, root: HTMLElement | null): boolean {
@@ -555,6 +765,18 @@ function closeOpenPopoversFromOutside(event: PointerEvent) {
   ) {
     moreActionsOpen.value = false
   }
+  if (agentPanelOpen.value && !eventInsideRoot(event, agentPanelAnchorEl.value)) {
+    agentPanelOpen.value = false
+  }
+  if (teamPanelOpen.value && !eventInsideRoot(event, teamPanelAnchorEl.value)) {
+    teamPanelOpen.value = false
+  }
+  if (swarmPanelOpen.value && !eventInsideRoot(event, swarmPanelAnchorEl.value)) {
+    swarmPanelOpen.value = false
+  }
+  if (modePanelOpen.value && !eventInsideRoot(event, modePanelAnchorEl.value)) {
+    modePanelOpen.value = false
+  }
 }
 
 watch(anyPopoverOpen, (open) => {
@@ -569,31 +791,29 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', closeOpenPopoversFromOutside, true)
 })
 
-// 首次展开统一模式面板时消除「NEW」角标（原在路由按钮上）；
-// 同时与 Add / More 菜单互斥，保证同一时刻只有一个浮层。
+// 首次展开统一模式面板时消除「NEW」角标（原在路由按钮上）。
+// 浮层互斥已由单槽状态保证，这里不再手工关闭其它面板。
 watch(runModePanelOpen, (isOpen) => {
-  if (isOpen) {
-    dismissRouterNewBadge()
-    addMenuOpen.value = false
-    moreActionsOpen.value = false
-  }
+  if (isOpen) dismissRouterNewBadge()
 })
 
-function toggleThinking() {
-  emit('setThinking', !props.thinking)
-}
-
-// 「高级 ▾」：打开既有 RunModePanel（内含全量的 RunMode / PlanMode / ModelRouting），
-// 与 Add / More 菜单互斥（见 runModePanelOpen 的 watch）。
+// 「高级 ▾」：打开既有 RunModePanel（内含全量的 RunMode / PlanMode / ModelRouting）。
 function openAdvancedFromPresets() {
   runModePanelOpen.value = true
 }
 
 function closeAllPopovers() {
-  addMenuOpen.value = false
-  runModePanelOpen.value = false
-  moreActionsOpen.value = false
+  activePopover.value = null
   mentionQuery.value = null
+}
+
+/// 发送按钮：先收起所有浮层再提交。
+///
+/// 否则蜂群浮层会留在原地盖住刚出现的编排泳道卡片右侧（真机可见），
+/// 用户以为「卡片没显示全」，实际是被浮层遮住了。
+function submitFromButton() {
+  closeAllPopovers()
+  emit('send')
 }
 
 // The retract animation collapses the footer with overflow clipping; any open
@@ -604,25 +824,110 @@ watch(() => props.collapsed, (collapsed) => {
 })
 
 function toggleMoreActions() {
-  moreActionsOpen.value = !moreActionsOpen.value
-  if (moreActionsOpen.value) {
-    addMenuOpen.value = false
-    runModePanelOpen.value = false
-    if (
-      props.promptCacheKeepaliveAvailable
-      && props.promptCacheKeepaliveSessionReady
-    ) {
-      emit('refreshPromptCacheKeepalive')
-    }
+  const opening = activePopover.value !== 'more'
+  activePopover.value = opening ? 'more' : null
+  if (
+    opening
+    && props.promptCacheKeepaliveAvailable
+    && props.promptCacheKeepaliveSessionReady
+  ) {
+    emit('refreshPromptCacheKeepalive')
   }
 }
 
+/** 点同一个控件开/关；点另一个控件直接抢占（单槽状态的语义）。 */
+function togglePopover(name: ComposerPopover) {
+  activePopover.value = activePopover.value === name ? null : name
+}
+
 function toggleAddMenu() {
-  addMenuOpen.value = !addMenuOpen.value
-  if (addMenuOpen.value) {
-    moreActionsOpen.value = false
-    runModePanelOpen.value = false
+  togglePopover('add')
+}
+
+// ── P2·E 编排四面板：互斥由单槽状态保证 ─────────────────────────────
+function toggleAgentPanel() {
+  togglePopover('agent')
+}
+function toggleTeamPanel() {
+  togglePopover('team')
+}
+function toggleSwarmPanel() {
+  togglePopover('swarm')
+}
+function toggleModePanel() {
+  togglePopover('mode')
+}
+
+// ── P2·E 编排状态补丁：面板单选/开关 → updateOrchestration ─────────
+// form 由「最后一次选择」即时推导，保证任意时刻 form 与面板状态一致：
+//   agents 非空 → subagent；选团队 → team/expert；开蜂群 → swarm；
+//   对应面板清空/关闭 → 回落 single（原 chat.send 路径）。
+function applyOrchestration(patch: Partial<OrchestrationState>) {
+  emit('updateOrchestration', patch)
+}
+
+function applyAgents(agents: string[]) {
+  const patch: Partial<OrchestrationState> = { agents }
+  if (agents.length > 0) {
+    patch.form = 'subagent'
+  } else if (props.orchestration?.form === 'subagent') {
+    patch.form = 'single'
   }
+  applyOrchestration(patch)
+}
+
+/** 团队多选：点已选项 = 取消；至少选一个后按「是否含专家团」推导 team/expert。 */
+function toggleTeam(teamId: string) {
+  const current = props.orchestration?.teams ?? []
+  const next = current.includes(teamId)
+    ? current.filter(id => id !== teamId)
+    : [...current, teamId].slice(0, 8)
+  applyTeams(next)
+}
+
+function clearTeams() {
+  applyTeams([])
+}
+
+function applyTeams(teams: string[]) {
+  if (teams.length === 0) {
+    applyOrchestration({ teams: [], form: 'single', confirmed: false })
+    return
+  }
+  const isExpert = teams.some(id => EXPERT_TEAMS.some(t => t.id === id))
+  applyOrchestration({
+    teams,
+    form: isExpert ? 'expert' : 'team',
+    confirmed: false,
+  })
+}
+
+function applySwarmOn(on: boolean) {
+  const patch: Partial<OrchestrationState> = { swarmOn: on }
+  if (on) {
+    patch.form = 'swarm'
+  } else if (props.orchestration?.form === 'swarm') {
+    patch.form = 'single'
+  }
+  applyOrchestration(patch)
+}
+
+function applySwarmSize(size: number) {
+  applyOrchestration({ swarmSize: size })
+}
+
+// P3 打通（反向）：外部模式切换（徽标菜单 / ModeMatrix / 路由保存）经
+// `session.event.mode.changed` 广播更新 activeUserMode；这里把最新格位回填到
+// 编排面板，保证「任一界面操作 → 全工作台一致」。
+// 2026-10-24：能力面板不再画 3×3 矩阵（与「模式」弹层重复），档位只在 ModeMatrix 改。
+watch(activeUserMode, (um) => {
+  if (um?.key && props.orchestration && um.key !== props.orchestration.modeKey) {
+    emit('updateOrchestration', { modeKey: um.key })
+  }
+})
+
+function applyCapabilities(capabilities: string[]) {
+  applyOrchestration({ capabilities })
 }
 
 function triggerVoice() {
@@ -841,31 +1146,6 @@ defineExpose<ChatComposerExpose>({
 .chat-coding-mode-chip:disabled {
   cursor: default;
   opacity: var(--state-disabled-opacity);
-}
-.chat-thinking-btn {
-  position: relative;
-}
-.chat-thinking-btn.is-active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
-}
-.chat-thinking-btn.is-active::after {
-  content: '';
-  position: absolute;
-  inset: -2px;
-  border-radius: var(--radius-full);
-  box-shadow: 0 0 8px 0 color-mix(in srgb, var(--accent) 45%, transparent);
-  animation: chat-thinking-glow 1.8s var(--ease-standard) infinite;
-  pointer-events: none;
-}
-@keyframes chat-thinking-glow {
-  0%, 100% { opacity: 0.4; }
-  55% { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .chat-thinking-btn.is-active::after { animation: none; opacity: 0.6; }
 }
 .chat-project-choose {
   flex-shrink: 0;

@@ -127,6 +127,9 @@ async function safe<T>(fn: () => Promise<T>): Promise<T | null> {
 }
 
 async function loadStatus() {
+  // 冷加载竞态守卫：WS 仍处于 connecting 时先等连接就绪。否则 `safe()` 会把
+  // `not connected (state: connecting)` 当成加载失败，直接渲染成红错误条。
+  if (!rpc.isConnected) await safe(() => rpc.waitForConnection(10_000))
   const s = await safe(() => rpc.call<Status>('browser.status', {}))
   if (s) status.value = s
 }

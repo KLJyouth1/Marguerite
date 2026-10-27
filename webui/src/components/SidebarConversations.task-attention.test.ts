@@ -73,3 +73,17 @@ describe('SidebarConversations task attention', () => {
     expect(root.querySelector('.sidebar-history-run')).toBeNull()
   })
 })
+
+describe('SidebarConversations running label', () => {
+  it('uses the same localized running label as the attention dot', async () => {
+    const root = await mountSidebar([
+      taskRow('running-task', 'running'),
+    ])
+    const indicator = root.querySelector<HTMLElement>('.sidebar-run-indicator')
+    expect(indicator?.querySelector('.sidebar-run-text')?.textContent).toBe('Task running')
+    expect(indicator?.getAttribute('title')).toBe('Task running')
+    expect(indicator?.getAttribute('aria-label')).toBe('Task running')
+    // 这条文案曾经硬编码中文，切到 en 仍然显示「运行中」。
+    expect(root.textContent).not.toContain('运行中')
+  })
+})

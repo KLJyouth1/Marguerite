@@ -186,15 +186,21 @@ fn build_capabilities() -> Vec<Capability> {
         cap!("sec.guardrail", "操作护栏", CapabilityGroup::Security, CapabilityTier::Enhanced, "危险操作需审批门", Real, "外部参考 exec 审批门"),
 
         // ── 自动化与 RPA（独家）──
-        cap!("auto.record", "操作录制", CapabilityGroup::Automation, CapabilityTier::Exclusive, "未实装：录制用户键鼠/窗口操作序列暂无任何实现（desktop_automation::Recorder 只落桌面动作的审计快照供 desktop.snapshots 回放审计，不是用户操作录制）", Narrative, "nexustar automations"),
-        cap!("auto.replay", "回放与编排", CapabilityGroup::Automation, CapabilityTier::Exclusive, "未实装：按条件/循环回放录制序列暂无实现（projection::replay 是事件溯源 fold，与本能力无关）", Narrative, "nexustar control_tool"),
+        cap!("auto.record", "操作录制", CapabilityGroup::Automation, CapabilityTier::Exclusive, "录制用户真实键鼠操作：后台 PowerShell 进程经 Add-Type 内联 C# 安装 WH_MOUSE_LL/WH_KEYBOARD_LL 全局低级钩子，事件降采样（40ms + 4px 双阈值）后写成 JSONL（含窗口标题），停止用哨兵文件跨进程通知；工具 auto_record（start/stop/status/list）", Real, "nexustar automations"),
+        cap!("auto.replay", "回放与编排", CapabilityGroup::Automation, CapabilityTier::Exclusive, "按录制时间轴重放宏：JSONL 编译成临时 .ps1（SetCursorPos + mouse_event + keybd_event，含变速/循环/AppActivate 聚焦），走脚本文件而非 -Command 以突破 32K 命令行上限；工具 auto_replay（run/dry_run/show）。边界：键盘按虚拟键码复现（快捷键可复现，IME 上屏的中文不逐字重现）", Real, "nexustar control_tool"),
         cap!("auto.fix", "自动修复", CapabilityGroup::Automation, CapabilityTier::Exclusive, "基于 LLM 后端对错误/测试失败生成修复并安全落盘（依赖 model.cloud 运行期出真回复）", Partial, "hermes self-healing"),
         // 注：auto.uia 使用上方「UIA 跨应用桥」条目（Partial：仅 WPS COM 为真），不得重复登记同一 ID。
-        // auto.record / auto.replay 为纯叙事（零实现），如实降级，不得回填 Real。
+        // auto.record / auto.replay 已于 2026-10-23 落地为真实录放（tools/macros.rs），故升为 Real。
 
         // ── 多模态（独家）──
         cap!("vis.image", "图像理解", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "看图/截图/设计稿理解", Real, "nexustar vision"),
-        cap!("vis.audio", "音频理解", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "语音/音频转写与理解", Narrative),
+        cap!("vis.image_gen", "图像生成", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "文本生成图片：按档案声明的「图像输出」能力调用 OpenAI 兼容 /v1/images/generations（可用 *Endpoint 覆盖路径、*Params 追加参数），结果落盘到工作区并登记产物；工具 image_generate。未声明能力时明确报错并给出配置指引，不假装生成", Real, "marguerite tools/image_gen"),
+        cap!("vis.video_gen", "视频生成", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "文本/图片生成视频：按档案声明的「视频输出」能力调用 OpenAI 兼容 /v1/videos/generations（可用 *Endpoint 覆盖路径、*Params 追加参数），兼容 data[].url / data[].b64_json / video_url / output.video_url 四种同步返回形状；返回 task_id 时按 status_url 模板（默认把 /generations 换成 /{id}）轮询到 completed 再取片；结果落盘到工作区并登记产物；工具 video_generate。未声明能力时明确报错并给出配置指引，不假装生成", Real, "marguerite tools/video_gen"),
+        cap!("vis.code_video", "代码生视频", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "把源码渲染成「打字动画」mp4：ab_glyph 栅格化字形 → PPM 帧序列 → 内置 ffmpeg 编码 H.264。支持 Rust/Python/JS/TS/Go/Shell/JSON 启发式高亮、逐字符打出、光标闪烁、行号与自动滚动；零联网、零 token；工具 code_video", Real, "marguerite tools/code_video"),
+        cap!("vis.web_video", "网页动效视频", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "给 HTML/CSS/JS，用本机 Chrome 无头 + CDP 逐帧截图 → 内置 ffmpeg 编码 mp4；注入 __mqSeek(ms) 帧时钟钩子，未定义时退回 CSS 变量 --mq-t 与 mq-frame 事件。只有画面没有音轨；Chrome 缺失时明确报错并给安装指引；工具 web_video", Partial, "marguerite tools/web_video"),
+        cap!("vis.manim_video", "Manim 动画", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "调用本机 Python 的 Manim 渲染场景代码为 mp4（-ql/-qm/-qh/-qk 四档），自动识别 Scene/ThreeDScene/MovingCameraScene 子类；Python 或 manim 缺失时明确报错并给 pip 安装指引，不假装渲染；工具 manim_video", Partial, "marguerite tools/manim_video"),
+        cap!("vis.audio", "音频理解", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "音频转文字三条真实路径：①档案声明「音频输入」→ 云端 OpenAI 兼容 /v1/audio/transcriptions（手工 multipart，25MB 上限校验）；②PATH 有 whisper-cli 且设置 MARGUERITE_WHISPER_MODEL → 本地转写；③Windows 系统语音识别（SAPI，仅 WAV）。工具 audio_transcribe。质量取决于语音包/权重，故为 Partial", Partial),
+        cap!("vis.speech", "语音合成", CapabilityGroup::Multimodal, CapabilityTier::Exclusive, "文本转语音：①档案声明「语音输出」→ 云端 OpenAI 兼容 /v1/audio/speech；②Windows SAPI（离线，System.Speech → WAV）。工具 audio_speak，结果落盘并登记产物", Partial),
 
         // ── 研究管线（独家）──
         cap!("rs.pipeline", "研究管线", CapabilityGroup::Research, CapabilityTier::Exclusive, "多步检索-综合-引用", Real, "nexustar research"),
@@ -217,6 +223,7 @@ fn build_capabilities() -> Vec<Capability> {
         cap!("model.local", "本地量化模型", CapabilityGroup::Model, CapabilityTier::Exclusive, "本地运行量化模型，离线可用", Narrative, "nexustar local_model_loader"),
         cap!("model.dual", "双模型配对", CapabilityGroup::Model, CapabilityTier::Exclusive, "主模型 + Bloom copilot 副模型配对（use_copilot/copilot_config），规划/执行可不同模型", Real, "nexustar dual_model"),
         cap!("model.router", "智能路由", CapabilityGroup::Model, CapabilityTier::Enhanced, "按任务复杂度选模型", Real, "nexustar model_router"),
+        cap!("model.deepseek_recipe", "DeepSeek 协议渲染", CapabilityGroup::Model, CapabilityTier::Exclusive, "接入 DeepSeek 官方 deepseek-recipe（crates.io v0.2，MIT）：把 Messages/Chat Completions 按 V4/V4.1 规范渲染成真实 prompt（RPC model.deepseek.render），用于自托管 DeepInfer 服务的接入校验与提示词漂移排查。DeepInfer 本身是 Linux+GPU/昇腾的在线推理引擎，不内嵌进桌面端，客户端经其 OpenAI 兼容面接入", Real, "deepseek-ai/deepseek-recipe + deepseek-ai/DeepInfer"),
 
         // ── 记忆系统（5 层，独家）──
         cap!("mem.working", "工作记忆", CapabilityGroup::Memory, CapabilityTier::Baseline, "当前上下文窗口管理", Real),
@@ -255,6 +262,7 @@ fn build_capabilities() -> Vec<Capability> {
         cap!("dsh.market.list",    "Market 插件浏览",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "本地 manifest 目录浏览已安装 DSH 插件及其版本、capabilities", Real, "DSH plugin: market (list)"),
         cap!("dsh.market.search",  "Market 关键词搜索",  CapabilityGroup::Tooling, CapabilityTier::Enhanced, "在本地 manifests 与内置 catalog.json 中按关键词模糊搜索", Real, "DSH plugin: market (search)"),
         cap!("dsh.market.install", "Market 插件安装",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "按名称安装/校验 manifest（纯离线，运行期注册随网关重启生效）；含 SKILL_SCAN 二次签名校验", Real, "DSH plugin: market (install)"),
+        cap!("dsh.market.remote", "Market 远程源",      CapabilityGroup::Tooling, CapabilityTier::Exclusive,"接 DSH 开源生态：market.remote.search 拉取可配置的插件索引 JSON（plugins/items/裸数组三形状兼容），market.install_url 按清单直链下载→校验→原子落盘（SSRF 守卫 + 512KiB 体积上限 + entry 不得绝对路径/含 ..），如实回报「重启后生效」", Real, "DSH plugin: market (remote registry)"),
         cap!("dsh.market.upgrade", "Market 插件升级",    CapabilityGroup::Tooling, CapabilityTier::Enhanced, "同插件新版本 manifest 原子替换（semver 升序校验 + tmp/rename，版本未升据实失败）", Real, "DSH plugin: market (upgrade)"),
 
         // ··· Better Sidebar 工作台（4）
@@ -409,13 +417,13 @@ mod tests {
         let s = stats();
         assert_eq!(
             (s.total, s.implemented, s.real, s.partial, s.narrative),
-            (89, 85, 78, 7, 4),
+            (97, 96, 85, 11, 1),
             "能力统计与 README 宣传不一致：请同步 README.md 的 capabilities 输出示例"
         );
     }
 
-    /// 纯叙事清单当前仅剩依赖重型运行时/模型的后端大件与已核实的零实现项：
-    /// 音频理解、本地量化模型、操作录制（auto.record）、回放与编排（auto.replay）。
+    /// 纯叙事清单当前仅剩依赖重型运行时的后端大件：
+    /// 本地量化模型（model.local）。
     /// 若未来新增纯叙事项请同步此处；这也防止「能力与实现脱节」悄然回潮。
     #[test]
     fn test_narrative_ids_are_honest_minimal() {
@@ -427,13 +435,8 @@ mod tests {
         narrative.sort();
         assert_eq!(
             narrative,
-            vec![
-                "auto.record".to_string(),
-                "auto.replay".to_string(),
-                "model.local".to_string(),
-                "vis.audio".to_string(),
-            ],
-            "纯叙事能力应为真实立项清单（音频理解/本地量化模型/操作录制/回放编排）"
+            vec!["model.local".to_string()],
+            "纯叙事能力应为真实立项清单（当前仅剩本地量化模型）"
         );
     }
 

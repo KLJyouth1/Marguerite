@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sidecar-stop"
+description = "Enables the sidecar_stop command without any pre-configured scope."
+commands.allow = ["sidecar_stop"]
+
+[[permission]]
+identifier = "deny-sidecar-stop"
+description = "Denies the sidecar_stop command without any pre-configured scope."
+commands.deny = ["sidecar_stop"]

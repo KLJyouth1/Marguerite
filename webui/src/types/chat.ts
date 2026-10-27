@@ -126,6 +126,11 @@ export interface ChatToolCall {
   resultPreview: string
   sources?: unknown
   isOpen: boolean
+  /**
+   * 引擎真实审批裁决（来自 ToolCall 事件的 `approval` 字段）。
+   * 缺失表示后端没有给出裁决（例如非高自主本机工具），不补默认值。
+   */
+  approval?: 'approved' | 'pending' | 'denied'
 }
 
 export type ChatToolCallRenderItem = ChatToolCall & {

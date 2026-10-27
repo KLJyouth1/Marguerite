@@ -1,27 +1,34 @@
 <template>
   <div v-if="report" class="gate-report" :class="report.passed ? 'is-pass' : 'is-fail'">
     <div class="gate-report__head">
-      <span>{{ report.passed ? '✅ 通过 shipped gate' : '⛔ 未通过 shipped gate' }}</span>
+      <span>{{ report.passed ? t('gateReport.passed') : t('gateReport.failed') }}</span>
       <span v-if="report.blocking.length" class="gate-report__muted">
-        阻断项：{{ report.blocking.join('、') }}
+        {{ t('gateReport.blockingLabel', { items: report.blocking.join(t('gateReport.blockingSeparator')) }) }}
       </span>
     </div>
     <ul v-if="report.findings.length" class="gate-report__list">
       <li v-for="(f, i) in report.findings" :key="i" :class="'v-' + f.verdict">
         <span class="gate-report__v">{{ verdictLabel(f.verdict) }}</span>
-        <b>{{ f.element }}</b>：{{ f.detail }}
+        <b>{{ f.element }}</b>{{ t('gateReport.findingSeparator') }}{{ f.detail }}
       </li>
     </ul>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import type { GateReport, GateFinding } from './gateTypes'
 
 defineProps<{ report: GateReport | null }>()
 
+const { t } = useI18n()
+
 function verdictLabel(v: GateFinding['verdict']): string {
-  return v === 'pass' ? '通过' : v === 'warn' ? '提示' : '阻断'
+  return v === 'pass'
+    ? t('gateReport.verdictPass')
+    : v === 'warn'
+      ? t('gateReport.verdictWarn')
+      : t('gateReport.verdictFail')
 }
 </script>
 

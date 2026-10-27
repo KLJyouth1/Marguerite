@@ -15,6 +15,8 @@ use ratatui::{
 pub struct StatusBar {
     /// 模型名称
     pub model_name: String,
+    /// 档位与预算（flagship/balanced/turbo + 台账；空 = 尚未加载）
+    pub tier_label: String,
     /// Token 用量
     pub token_usage: String,
     /// 会话时间
@@ -30,6 +32,7 @@ impl StatusBar {
     pub fn new() -> Self {
         Self {
             model_name: "deepseek-v4-pro".to_string(),
+            tier_label: String::new(),
             token_usage: "0".to_string(),
             session_time: "00:00".to_string(),
             agent_state: "Ready".to_string(),
@@ -39,7 +42,14 @@ impl StatusBar {
 
     /// 渲染状态栏
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let left = format!(" {} | {} ", self.model_name, self.agent_state);
+        let left = if self.tier_label.is_empty() {
+            format!(" {} | {} ", self.model_name, self.agent_state)
+        } else {
+            format!(
+                " {} | {} | {} ",
+                self.model_name, self.tier_label, self.agent_state
+            )
+        };
         let right = format!(
             " {} | {} | {} ",
             self.token_usage, self.session_time, self.connection_status

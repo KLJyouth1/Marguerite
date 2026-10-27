@@ -6505,6 +6505,20 @@ class Agent:
         _loop = asyncio.get_running_loop()
         _total_deadline = _loop.time() + self.config.timeout if self.config.timeout > 0 else None
 
+        # P2-9: unified, env-driven hard circuit breaker (steps / wall-clock /
+        # tokens). Disabled by default; see engine/turn_budget.py. Resolved once
+        # per turn, checked at the loop head, raises TurnBudgetExhausted on
+        # breach so the task runtime can surface a recognizable budget_exhausted
+        # terminal status instead of a silent truncation.
+        from opensquilla.engine.turn_budget import (
+            TurnBudgetExhausted,
+            check_turn_budget,
+            limits_from_env,
+        )
+
+        _turn_budget_limits = limits_from_env()
+        _turn_started_monotonic = _loop.time()
+
         # Endgame git freeze: once remaining wall clock drops below the margin,
         # the shell tools block workspace-reverting git commands outright so
         # the current diff survives runner-side collection. The armed flag
@@ -7020,6 +7034,20 @@ class Agent:
                 # Check total turn deadline (if configured)
                 if _total_deadline is not None and _loop.time() > _total_deadline:
                     raise TimeoutError(f"Agent total timeout after {self.config.timeout}s")
+
+                # P2-9: unified env-driven hard circuit breaker. Checked before
+                # every further LLM call; a breach force-aborts the turn with a
+                # recognizable budget_exhausted terminal result. ``iterations``
+                # here is the count of already-completed LLM calls this turn.
+                if _turn_budget_limits.any_enabled():
+                    _turn_breach = check_turn_budget(
+                        used_steps=iterations,
+                        elapsed_secs=_loop.time() - _turn_started_monotonic,
+                        used_tokens=total_input_tokens + total_output_tokens,
+                        limits=_turn_budget_limits,
+                    )
+                    if _turn_breach is not None:
+                        raise TurnBudgetExhausted(_turn_breach)
 
                 # Pre-deadline wrap-up: arm once when remaining wall clock drops
                 # below the configured margin. The directive is spliced into

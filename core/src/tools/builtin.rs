@@ -28,10 +28,10 @@ use crate::memory::{ExperienceKind, ExperienceLedger};
 use crate::research::ResearchCapability;
 use crate::security::scanner_l3::OpKind;
 use crate::security::{
-    normalize_workspace, sandboxed_exec, CommandGuard, Preflight, PreflightDecision, SsrfGuard,
-    DEFAULT_TIMEOUT,
+    exec_with, normalize_workspace, CommandGuard, ExecRequest, ExecShell, Preflight,
+    PreflightDecision, SsrfGuard, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT,
 };
-use crate::tools::fs_path::safe_resolve;
+use crate::tools::fs_path::RootSet;
 use crate::tools::git::{git_tool, SystemGitRunner};
 pub(crate) use crate::tools::trash;
 use crate::tools::register_computer_use_tools;
@@ -52,7 +52,7 @@ mod web;             // shell_exec/web_fetch/http_request/html_parse
 mod browser;         // browser sessions + browser_tool
 mod browser_actions; // run_browser_action dispatcher
 mod system;          // system_control + sendkeys + run_web_search
-mod web_search;      // run_web_search_direct + web_search_tool/web_research_tool
+pub(crate) mod web_search;      // run_web_search_direct + web_search_tool/web_research_tool + search_market
 mod query;           // distill_query（整句 → 检索词，P1-1）
 mod search_quality;  // 检索质量门禁（引擎首页/空壳识别，P0-3）
 mod utils;           // json_query_tool/diff_tool/count_lines/read_env
@@ -100,7 +100,7 @@ pub(crate) use system::run_web_search;
 // 注册入口
 // ---------------------------------------------------------------------------
 
-/// 将全部内置原生工具注册到 `registry`，绑定到给定工作区。
+/// 将全部内置原生工具注册到 `registry`，绑定到给定工作区（单根）。
 ///
 /// 同时构造命令护栏与 SSRF 防护器（共享），供 shell / web 类工具复用。
 pub fn register_builtin_tools(
@@ -110,10 +110,31 @@ pub fn register_builtin_tools(
     vision_cap: Option<Arc<VisionCapability>>,
     automation_cap: Option<Arc<Mutex<AutomationManager>>>,
 ) -> Result<()> {
-    let ws = workspace.to_path_buf();
+    register_builtin_tools_with_roots(
+        registry,
+        std::slice::from_ref(&workspace.to_path_buf()),
+        research_cap,
+        vision_cap,
+        automation_cap,
+    )
+}
+
+/// 多根版本（P2-9 多项目工作区）：`roots[0]` 是主根。
+///
+/// 文件域工具（读写/编辑/补丁/检索/git/shell/回收站）与生成类工具
+/// （媒体/图像/视频/Blender/browser）都接受完整根集合：已存在文件跟随真实所在根，
+/// 新建产物落主根。
+pub fn register_builtin_tools_with_roots(
+    registry: &mut ToolRegistry,
+    roots: &[PathBuf],
+    research_cap: Option<Arc<ResearchCapability>>,
+    vision_cap: Option<Arc<VisionCapability>>,
+    automation_cap: Option<Arc<Mutex<AutomationManager>>>,
+) -> Result<()> {
+    let ws = RootSet::new(roots.to_vec());
     let guard = Arc::new(CommandGuard::new());
     let ssrf = Arc::new(SsrfGuard::new());
-    let versions = Arc::new(VersionManager::new(workspace).ok());
+    let versions = Arc::new(VersionManager::new(ws.primary()).ok());
 
     let mut tools: Vec<Box<dyn ToolExecutor>> = vec![
         read_file_tool(ws.clone()),
@@ -139,6 +160,7 @@ pub fn register_builtin_tools(
         make_dir_tool(ws.clone()),
         shell_exec_tool(ws.clone(), guard.clone()),
         crate::tools::code::code_exec_tool(),
+        crate::tools::structured_output::structured_output_tool(),
         web_fetch_tool(ssrf.clone()),
         http_request_tool(ssrf.clone()),
         web_search_tool(),
@@ -154,7 +176,43 @@ pub fn register_builtin_tools(
         count_lines_tool(ws.clone()),
         read_env_tool(),
         git_tool(ws.clone(), Arc::new(SystemGitRunner)),
+        // 媒体域（R14）：ffmpeg/ffprobe 真实桥。此前产品宣称的「视频与图片编辑」
+        // 在工具层**完全不存在**，模型只能靠 shell_exec 手拼命令行（参数正确性与
+        // 注入面都不可控）。这里收成结构化动作：probe/convert/frames/thumbnail。
+        Box::new(crate::tools::media::MediaTool::with_system_runner(ws.clone())),
+        // 多模态：生图 / 生视频 / 语音转写 / 语音合成（2026-10-23）。
+        // 此前工具面里没有任何「生成」类多模态能力，模型只能拒绝用户。
+        Box::new(crate::tools::image_gen::ImageGenerateTool::with_http(ws.clone())),
+        Box::new(crate::tools::video_gen::VideoGenerateTool::with_http(ws.clone())),
+        // 本地生视频（2026-10-24）：代码打字动画 / 网页动效 / Manim。
+        // 这三条都不需要云端模型，只需本机 ffmpeg（安装包内置）与 Chrome/Python。
+        Box::new(crate::tools::code_video::CodeVideoTool::new(ws.clone())),
+        Box::new(crate::tools::web_video::WebVideoTool::new(ws.clone())),
+        Box::new(crate::tools::manim_video::ManimVideoTool::new(ws.clone())),
+        Box::new(crate::tools::audio::AudioTranscribeTool::with_http(ws.clone())),
+        Box::new(crate::tools::audio::AudioSpeakTool::with_http(ws.clone())),
+        // 操作录制 + 回放（RPA 录放闭环）：能力台账里的 auto.record / auto.replay
+        // 从「纯叙事」变为可调用工具。
+        Box::new(crate::tools::macros::AutoRecordTool::new()),
+        Box::new(crate::tools::macros::AutoReplayTool::new()),
     ];
+    // Blender 域（R72）：无头 bpy 执行 / 渲染 / 探测。发现链：env → PATH →
+    // Program Files → 仓库 third_party。找不到时结构化报错，不伪装。
+    //
+    // ⚠️ 必须是**可选**注册：此前这里写成 `?`，Blender 未安装会让整个
+    // `register_builtin_tools` 提前返回 Err —— 调用方只打印一句「部分工具不可用」，
+    // 实际后果是**一个工具都没注册**（文件读写 / shell / 浏览器 / 电脑操控 / Office
+    // 全部消失）。真机 2026-10-23：蜂群子智能体因此只剩知识库与技能工具，
+    // 用户看到的就是「没有 Office 生成、没有文件写入、没有浏览器自动化」。
+    match crate::tools::blender::BlenderTool::with_discovered_binary(ws.clone()) {
+        Ok(tool) => tools.push(Box::new(tool)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "blender 未安装：跳过 blender 工具，其余原生工具照常注册"
+            );
+        }
+    }
     // 记忆层工具（SQLite 持久化 + 语义检索），与 self-evolution 台账共用 ExperienceLedger
     tools.extend(memory_tools(user_memory_dir()));
 
@@ -163,8 +221,12 @@ pub fn register_builtin_tools(
     }
 
     // 计算机操控三层工具（屏幕感知 / 键鼠控制 / GUI 定位），融合自 10 个 computer use 仓库
-    // 注入视觉能力后 locate 完成「截图→VLMM坐标→(可选)自动点击」闭环
-    register_computer_use_tools(registry, workspace, vision_cap.clone())?;
+    // 注入视觉能力后 locate 完成「截图→VLMM坐标→(可选)自动点击」闭环。
+    // 同样按可选处理：桌面自动化依赖主机权限，注册失败只跳过这一域，
+    // 不得连累已经注册好的文件 / 脚本 / 浏览器工具。
+    if let Err(e) = register_computer_use_tools(registry, ws.primary(), vision_cap.clone()) {
+        tracing::warn!(error = %e, "computer_use 工具注册失败：仅跳过该域，其余工具保持可用");
+    }
 
     // 深度研究（E 期 research/ 能力落地）：编排器持有的 ResearchCapability 注入此工具，
     // 让 lead / 子 Agent 在运行时可调用本地 BM25 检索 + LLM 综合的研究 pipeline。
@@ -224,7 +286,7 @@ pub fn register_builtin_tools(
                     if path.trim().is_empty() {
                         return err("vision 需要非空的 path 参数".into(), "INVALID_PARAMS");
                     }
-                    let abs = match safe_resolve(&ws, &path) {
+                    let abs = match ws.resolve(&path) {
                         Ok(p) => p,
                         Err(e) => return err(format!("路径解析失败: {e}"), "INVALID_PATH"),
                     };

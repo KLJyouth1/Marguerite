@@ -1,7 +1,7 @@
 <template>
   <div
     class="chat"
-    :style="{ fontSize: chatFontPx }"
+    :style="chatRootStyle"
     :class="{
       'chat--new-landing': isNewChatLanding,
       'chat--meta-setup': Boolean(setupState),
@@ -9,6 +9,7 @@
       'chat--plan-questionnaire-open': Boolean(dockedPlanQuestionnaire),
       'chat--composer-floating': composerFxEnabled && !isNewChatLanding,
       'chat--composer-collapsed': composerCollapsed && composerFxEnabled && !isNewChatLanding,
+      'chat--panel-resizing': rightPanelResizing,
     }"
     @dragenter="onChatDragEnter"
     @dragover="onChatDragOver"
@@ -31,6 +32,15 @@
 
     <!-- Chat owns the actions; App owns their stable, in-flow shell position. -->
     <Teleport to="#app-route-header">
+      <!-- P3 全域打通：当前模型指示（读 config.get，订阅 models.changed）。
+           放在标题之后、动作之前——用户扫一眼就知道这条消息会发给谁。 -->
+      <ChatModelIndicator v-if="!isNewChatLanding" class="chat-header__model" />
+      <!-- 上下文压力：网关 usage.status 的 contextStatus 越过阈值才出现（见组件注释） -->
+      <ChatContextPressureChip
+        v-if="!isNewChatLanding && contextWarning"
+        :warning="contextWarning"
+        @compact="requestManualCompact"
+      />
       <ChatHeaderActions
         v-if="!isNewChatLanding"
         ref="chatHeaderActionsRef"
@@ -104,12 +114,24 @@
           @keydown="onThreadScrollKeydown"
         >
         <template v-if="isNewChatLanding">
+          <LandingHero
+            :project-name="activeWorkspace?.name || ''"
+            :project-path="activeWorkspace?.path || ''"
+            :branch="workspaceGit?.branch ?? null"
+            :detached="workspaceGit?.detached === true"
+          >
+            <template #model>
+              <ChatModelPicker variant="compact" panel-placement="below" />
+            </template>
+          </LandingHero>
           <div class="chat-landing-brand" :aria-label="t('chat.newChatBrand')">
             <EmptyStateChips
               :key="landingAgentId"
               :agent-id="landingAgentId"
+              :agent-name="landingAgentName"
               :suppressed="landingSuggestionsHidden"
               :disabled="landingSuggestionsDisabled"
+              :show-intro="false"
               @pick="applyLandingSuggestion"
             />
           </div>
@@ -200,11 +222,27 @@
           @plan-implement-new="implementPlanInNewTask"
           @plan-replan="beginPlanRevision"
           @plan-reuse-last="reuseLastPlan"
+          @focus-subagent="openSubagentInSidebar"
+          @show-full-message="showFullMessage"
         >
           <template #router-strip="{ message: msg }">
             <RouterFxStrip v-if="shouldRenderRouterStrip(msg)" :message="msg" />
           </template>
         </ChatMessageList>
+
+        <!-- 编排执行时间线：蜂群 / 团队 / 子智能体的成员与工具过程实时可见。
+             【2026-10-23 位置修复】原先渲染在输入框上方（PendingQueue 之后），
+             用户口径是「卡片一直贴在输入框上，执行完也不进对话」。现在放进消息
+             流末尾（`chat-message-surface` 内），随对话一起滚动 —— 执行过程属于
+             这一轮对话的一部分，不是输入区的附属控件。 -->
+        <div v-if="orchestrationRuns.length" class="chat-orch-runs">
+          <OrchestrationRunCard
+            v-for="run in orchestrationRunsChronological"
+            :key="run.runId"
+            :run="run"
+            :now="orchestrationNow"
+          />
+        </div>
         </div>
 
         <!-- Manual or turn-boundary compaction has no assistant turn to own
@@ -435,6 +473,13 @@
           />
         </template>
         </div>
+        <TurnSuggestions
+          v-if="showTurnSuggestions"
+          :can-revert="turnChangeStats.canRevert"
+          @view="fileChangesOpen = true"
+          @run-tests="prefillComposerFromTurnSuggestion(t('chat.turnSuggestions.runPrompt'))"
+          @revert="turnChangeSummaryRef?.requestRevert()"
+        />
         <ConversationMinimap
           v-if="!isNewChatLanding && !shareMode && !forkTransition"
           :messages="renderedMessages"
@@ -534,7 +579,11 @@
       @edit="editPendingMessage"
       @remove="removePendingChip"
       @steer="steerPendingMessage"
+      @send-now="sendPendingNow"
+      @move="movePendingMessage"
     />
+
+    <ChatOrchestrationStatus :items="orchestrationItems" />
 
     <div
       v-if="dockedPlanQuestionnaire"
@@ -550,6 +599,19 @@
         @submit="submitClarify"
       />
     </div>
+
+    <!-- 本回合文件改动：把「改了几个文件、多少行」和「全部保留 / 全部撤销」
+         收在输入框正上方，省掉一次打开抽屉再逐条裁决。 -->
+    <TurnChangeSummary
+      ref="turnChangeSummaryRef"
+      v-if="lastTurnChangeSince !== null"
+      :key="String(lastTurnChangeSince)"
+      :session-key="sessionKey"
+      :since="lastTurnChangeSince"
+      @view="fileChangesOpen = true"
+      @reverted="focusComposer"
+      @stats="turnChangeStats = $event"
+    />
 
     <ChatComposer
       ref="composerRef"
@@ -568,11 +630,14 @@
       :run-mode="runMode"
       :allowed-run-modes="composerAllowedRunModes"
       :safe-setup-available="composerSafeSetupAvailable"
+      :safe-setup-state="runModeSetupState"
       :run-mode-locked="runModeLocked"
       :run-mode-lock-message="t('chat.composer.runModeLocked')"
       :model-routing-mode="modelRoutingMode"
       :model-routing-settings-busy="modelRoutingSettingsBusy"
-      :thinking="composerThinking"
+      :effort="composerEffort"
+      :effort-wire-hint="effortWireHint"
+      :orchestration="orchestration"
       :coding-mode-enabled="codingModeEnabled"
       :coding-mode-settings-busy="codingModeSettingsBusy"
       :voice-busy="voiceBusy"
@@ -580,9 +645,14 @@
       :voice-ready="voiceReady"
       :project-workspace="activeWorkspace"
       :project-workspace-status="activeWorkspaceStatus"
+      :workspace-git="workspaceGit"
       :project-status-message="activeProjectStatusMessage"
       :can-close-project="isDraftRoute() && pendingWorkspaceId !== null"
       :can-choose-project="rpc.canChooseProject"
+      :can-attach-project-roots="rpc.canManageProjectWorkspaces"
+      :project-roots="projectRootChips"
+      :project-root-options="projectRootOptions"
+      :primary-project-id="activeWorkspace?.id || ''"
       :plan-mode-available="planUiAvailable"
       :collaboration-mode="collaboration.mode"
       :plan-mode-busy="planModeBusy"
@@ -606,7 +676,8 @@
       @set-busy-send-mode="busySendMode = $event"
       @set-run-mode="setComposerRunMode"
       @set-model-routing-mode="setComposerModelRoutingMode"
-      @set-thinking="setComposerThinking"
+      @set-effort="setComposerEffort"
+      @update-orchestration="applyOrchestrationPatch"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
       @cancel-replan="cancelPlanRevision"
@@ -617,23 +688,35 @@
       @stop="onComposerStop"
       @choose-project="openProjectPicker"
       @close-project="closeProjectDraft"
+      @apply-project-roots="projectRoots.applySelection($event, activeWorkspace?.id)"
+      @remove-project-root="projectRoots.removeExtraId"
+      @open-commands="openComposerCommands"
+      @open-artifacts="focusSidebarTab('artifacts')"
+      @open-file-tree="focusSidebarTab('tree')"
+      @open-skills="void router.push('/skills')"
+      @open-plugins="void router.push('/plugins')"
       @open-prompt-cache-keepalive="promptCacheKeepaliveOpen = true"
       @refresh-prompt-cache-keepalive="void refreshPromptCacheKeepaliveStatus()"
     />
     <!-- Usage telemetry: small-print footnote rendered BELOW the composer's
          "内容由 AI 生成" disclaimer, so runtime stats never compete with input.
-         Only shown when THIS session has its own usage (or a client-measured
-         first token) — an unscoped aggregate is never labelled 本会话. -->
+         数据来自网关每轮真实下发的 `session.event.usage`（token 与缓存命中都在
+         这一帧里）；没有真实用量时整条不渲染，不再拿全为 0 的全局计数冒充本会话。 -->
     <div
-      v-if="(usageStrip?.runs ?? 0) > 0 || (usageStrip?.total_tokens ?? usageStrip?.totalTokens ?? 0) > 0 || lastTtftMs !== null"
+      v-if="sessionUsage.total > 0 || lastTtftMs !== null || runModeDegradedReason"
       class="chat-usage-strip chat-usage-strip--foot"
       data-testid="chat-usage-strip"
     >
-      <span class="chat-usage-strip__item">首 token {{ lastTtftMs === null ? '—' : lastTtftMs + ' ms' }}（客户端实测）</span>
-      <span class="chat-usage-strip__item">本会话 token {{ usageStrip?.total_tokens ?? usageStrip?.totalTokens ?? 0 }}</span>
-      <span class="chat-usage-strip__item">轮次 {{ usageStrip?.runs ?? 0 }}</span>
-      <span class="chat-usage-strip__item">服务端前缀缓存命中率 {{ cacheStrip?.server_cache_hit_rate ?? 0 }}%</span>
-      <span class="chat-usage-strip__item">省前缀 token {{ cacheStrip?.saved_prompt_tokens ?? 0 }}（复用 {{ cacheStrip?.prefix_hits ?? 0 }} 次）</span>
+      <span class="chat-usage-strip__item">{{ t('chat.usage.ttft', { ms: lastTtftMs === null ? '—' : lastTtftMs + ' ms' }) }}</span>
+      <span class="chat-usage-strip__item">{{ t('chat.usage.sessionTokens', { n: sessionUsage.total }) }}</span>
+      <span class="chat-usage-strip__item">{{ t('chat.usage.rounds', { n: sessionUsage.turns }) }}</span>
+      <span v-if="sessionUsage.cacheHitPct !== null" class="chat-usage-strip__item">{{ t('chat.usage.cacheHitRate', { pct: sessionUsage.cacheHitPct }) }}</span>
+      <!-- 真实能力降级：安全模式未就绪时如实说明，不在页脚假装已隔离。 -->
+      <span
+        v-if="runModeDegradedReason"
+        class="chat-usage-strip__item chat-usage-strip__item--warn"
+        data-testid="chat-run-mode-degraded"
+      >{{ runModeDegradedReason }}</span>
     </div>
     <SandboxSetupDialog
       :open="composerSandboxSetupOpen"
@@ -662,6 +745,12 @@
       @close="toolResultModal.open = false"
     />
 
+    <FullMessageModal
+      :open="fullMessageModal.open"
+      :content="fullMessageModal.content"
+      @close="fullMessageModal.open = false"
+    />
+
     <DeliverablesDrawer
       :open="deliverablesOpen"
       :artifacts="sessionArtifacts"
@@ -678,9 +767,15 @@
 
     <RightSidebar
       :open="rightSidebarOpen"
+      :focus-tab="sidebarFocus.tab"
+      :focus-seq="sidebarFocus.seq"
+      :focus-subagent-key="sidebarSubagentFocus"
       :tasks="sidebarTasks"
+      :subagents="sidebarSubagents"
       :artifacts="sessionArtifacts"
       :changes="sidebarChanges"
+      :root-path="activeWorkspace?.path"
+      :session-key="sessionKey"
       :diagnostics="sidebarDiagnostics"
       :streaming="isStreaming"
       :live-keys="liveKeys"
@@ -701,7 +796,7 @@
           class="aie-overlay__panel"
           role="dialog"
           aria-modal="true"
-          aria-label="产物编辑与预览"
+          :aria-label="t('chat.artifactEditorAria')"
         >
           <ArtifactInlineEditor
             :artifact="editingArtifact"
@@ -754,6 +849,7 @@ import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useRpcStore } from '@/stores/rpc'
 import { useRpcCall } from '@/composables/useRpc'
+import { useAgentOptions } from '@/composables/useAgentOptions'
 import { useChatFontScale } from '@/composables/useChatFontScale'
 import { useAppStore } from '@/stores/app'
 import { useSandboxSetupStore } from '@/stores/sandboxSetup'
@@ -766,14 +862,31 @@ import AssistantActivityTimeline from '@/components/chat/AssistantActivityTimeli
 import ChatArtifactList from '@/components/chat/ChatArtifactList.vue'
 import ChatForkTransitionOverlay from '@/components/chat/ChatForkTransitionOverlay.vue'
 import ChatHeaderActions from '@/components/chat/ChatHeaderActions.vue'
+import ChatModelIndicator from '@/components/chat/ChatModelIndicator.vue'
+import ChatContextPressureChip from '@/components/chat/ChatContextPressureChip.vue'
 import ModeHintBar from '@/components/ModeHintBar.vue'
 import PromptCacheKeepaliveDialog from '@/components/chat/PromptCacheKeepaliveDialog.vue'
 import DeliverablesDrawer from '@/components/chat/DeliverablesDrawer.vue'
 import FileChangesDrawer from '@/components/chat/FileChangesDrawer.vue'
+import TurnChangeSummary from '@/components/chat/TurnChangeSummary.vue'
+import TurnSuggestions from '@/components/chat/TurnSuggestions.vue'
 import RightSidebar from '@/components/chat/RightSidebar.vue'
 import ArtifactInlineEditor from '@/components/chat/ArtifactInlineEditor.vue'
 import type { RsArtifact } from '@/components/chat/RightSidebar.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
+import ChatOrchestrationStatus from '@/components/chat/ChatOrchestrationStatus.vue'
+import OrchestrationRunCard from '@/components/chat/OrchestrationRunCard.vue'
+import { useOrchestrationActivity } from '@/composables/chat/useOrchestrationActivity'
+import { useOrchestrationRuns } from '@/composables/chat/useOrchestrationRuns'
+import { activeUserMode } from '@/composables/useActiveMode'
+import { useHostExitEvidence } from '@/composables/useHostExitEvidence'
+import {
+  EXPERT_TEAMS,
+  loadStoredOrchestration,
+  persistOrchestration,
+  shouldSendDispatchBrief,
+  type OrchestrationState,
+} from '@/composables/chat/orchestration'
 import ProjectWorkspacePickerDialog from '@/components/ProjectWorkspacePickerDialog.vue'
 import ChatMessageList from '@/components/chat/ChatMessageList.vue'
 import ChatSessionRecoveryStatus from '@/components/chat/ChatSessionRecoveryStatus.vue'
@@ -781,6 +894,8 @@ import ChatStallNotice from '@/components/chat/ChatStallNotice.vue'
 import ClarifyCard from '@/components/chat/ClarifyCard.vue'
 import ConversationMinimap from '@/components/chat/ConversationMinimap.vue'
 import EmptyStateChips from '@/components/chat/EmptyStateChips.vue'
+import LandingHero from '@/components/chat/LandingHero.vue'
+import ChatModelPicker from '@/components/chat/ChatModelPicker.vue'
 import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
 import ReasoningPart from '@/components/chat/parts/ReasoningPart.vue'
 import TextPart from '@/components/chat/parts/TextPart.vue'
@@ -795,6 +910,7 @@ import RouterFxStrip from '@/components/chat/RouterFxStrip.vue'
 import SharePreviewModal from '@/components/chat/SharePreviewModal.vue'
 import SandboxSetupDialog from '@/components/sandbox/SandboxSetupDialog.vue'
 import ToolResultModal from '@/components/chat/ToolResultModal.vue'
+import FullMessageModal from '@/components/chat/FullMessageModal.vue'
 import Icon from '@/components/Icon.vue'
 import HistoryLoadSentinel from '@/components/HistoryLoadSentinel.vue'
 import ParticleField from '@/components/ParticleField.vue'
@@ -829,7 +945,8 @@ import { useChatRpcEventHandlers } from '@/composables/chat/useChatRpcEventHandl
 import { useChatRpcSubscriptions } from '@/composables/chat/useChatRpcSubscriptions'
 import { useChatSend, type ChatSendOutcome } from '@/composables/chat/useChatSend'
 import {
-  effectiveComposerRunMode,
+  resolveComposerRunMode,
+  type ComposerRunModeDegradation,
 } from '@/composables/chat/composerRunMode'
 import { useSandboxSetupRecovery } from '@/composables/chat/useSandboxSetupRecovery'
 import { useChatStallWatchdog } from '@/composables/chat/useChatStallWatchdog'
@@ -872,21 +989,34 @@ import { useChatUsageWidget } from '@/composables/chat/useChatUsageWidget'
 import { useSessionArtifacts } from '@/composables/chat/useSessionArtifacts'
 import { useArtifactActions } from '@/composables/chat/useArtifactActions'
 import { useChatSidebarPanels } from '@/composables/chat/useChatSidebarPanels'
+import { usePanelResize } from '@/composables/usePanelResize'
 import { useVoiceInput } from '@/composables/chat/useVoiceInput'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 import { hasOpenDialogLayer } from '@/composables/useDialogA11y'
 import { useToasts } from '@/composables/useToasts'
+import { notifyTurnEnded } from '@/composables/useTurnNotification'
 import { usePartialTextRestore } from '@/composables/chat/usePartialTextRestore'
 import { useConfirm } from '@/composables/useConfirm'
 import { useProjectWorkspaces } from '@/composables/useProjectWorkspaces'
+import { useWorkspaceStatus } from '@/composables/sessions/useWorkspaceStatus'
 import {
   createDraftProjectHydrationGuard,
   useActiveProjectWorkspace,
 } from '@/composables/useActiveProjectWorkspace'
 import { useFreshTaskDraft } from '@/composables/useFreshTaskDraft'
+import {
+  SESSION_LIST_VIEW,
+  itemKey,
+  normalizeSessionItem,
+} from '@/composables/useSessions'
+import {
+  projectRootChips as projectRootChipsFrom,
+  useChatProjectRoots,
+} from '@/composables/chat/useChatProjectRoots'
 import type {
   Attachment,
   ChatMaintenanceEvent,
+  ChatMessage,
   ChatPendingItem,
   ChatRenderedMessage,
   ChatRunStatusSource,
@@ -899,11 +1029,19 @@ import type {
 import { createForkTransitionLifetime } from '@/utils/chat/forkTransition'
 import { liveToolElapsedText } from '@/utils/chat/liveToolElapsedText'
 import type {
+  ChatDispatchBrief,
   MetaDraftDiscardResponse,
   SessionEventPayload,
   SessionMessagesSnapshotResponse,
+  SessionsListResponse,
 } from '@/types/rpc'
 import type { ModelRoutingMode } from '@/types/modelRouting'
+import {
+  effortFromThinking,
+  isEffortLevel,
+  thinkingFromEffort,
+  type EffortLevel,
+} from '@/types/effort'
 import {
   isRecognizedSandboxRunMode,
   normalizeSandboxRunMode,
@@ -970,6 +1108,8 @@ import {
 import { isShareableChatMessage } from '@/utils/chat/messageIdentity'
 import { agentIdFromSessionKey } from '@/utils/chat/sessionKeys'
 import { shouldDisableLandingSuggestions } from '@/utils/chat/landingSuggestions'
+import { isLastTurnSuccessful, resolveLastTurnStartTs } from '@/utils/chat/lastTurnStart'
+import { subagentPanelEntries } from '@/utils/chat/subagent'
 import { handoffPlanQuestionnaireWheel } from '@/utils/chat/planQuestionnaireWheel'
 import { clearAssistantActivityExpansionState } from '@/utils/chat/activityDisclosureState'
 import {
@@ -1038,6 +1178,14 @@ const {
 
 // 工具结果弹窗控制器（C 阶段抽出）。
 const { showToolResultModal } = useChatToolResultController(viewState)
+
+const fullMessageModal = ref<{ open: boolean; content: string }>({ open: false, content: '' })
+
+function showFullMessage(message: ChatRenderedMessage) {
+  const content = message.text || ''
+  if (!content.trim()) return
+  fullMessageModal.value = { open: true, content }
+}
 // Composer 辅助控制器（C 阶段 Batch 8 安全切片）：scrollToBottom /
 // lastUserMessageText / scrollToStepCard / focusPendingApprovalCard。
 // 装配在 viewState 解构后、首个引用方（chatStream @~1169）之前。
@@ -1083,6 +1231,40 @@ const { pushToast } = useToasts()
 const { confirm } = useConfirm()
 const projectWorkspaces = useProjectWorkspaces()
 const activeProjectWorkspace = useActiveProjectWorkspace()
+// 附加项目（P2-9 多根）：会话级状态放在单一组合式实例里，ChatComposer 通过
+// props/事件读写同一份数据，不允许两边各存一份。
+const projectRoots = useChatProjectRoots()
+// 会话身份一变（切换会话 / 进入草稿 / 草稿落库换了 key）就先清空附加项目，
+// 再等新会话元数据里的 projectPaths 回填 —— 这是唯一的跨会话泄漏入口。
+watch(sessionKey, () => { projectRoots.resetForSession() })
+const projectRootOptions = computed(() => projectWorkspaces.workspaces.value)
+const projectRootChips = computed(() => projectRootChipsFrom(
+  projectRoots.extraIds.value,
+  projectRootOptions.value,
+))
+// 会话列表是 `projectPaths`（多根）唯一稳定的下发点；会话订阅快照只有单值
+// workspace。元数据没带多根时按 key 回填一次，避免 chips 在旧网关上永远为空。
+let projectRootsHydrationSequence = 0
+async function hydrateProjectRootsFromSessionList(key: string) {
+  if (!key) return
+  const sequence = ++projectRootsHydrationSequence
+  try {
+    const response = await rpc.call<SessionsListResponse>(
+      'sessions.list',
+      { limit: 200, view: SESSION_LIST_VIEW },
+    )
+    if (sequence !== projectRootsHydrationSequence || key !== sessionKey.value) return
+    const raw = (response?.sessions || response?.keys || [])
+      .find(entry => itemKey(entry) === key)
+    const item = normalizeSessionItem(raw)
+    projectRoots.applyProjectPaths(
+      item?.projectPaths,
+      projectWorkspaces.workspaces.value,
+    )
+  } catch {
+    // 列表读取失败保持「无附加项目」：下一轮元数据或会话切换会再试，绝不阻断对话。
+  }
+}
 const draftProjectHydration = createDraftProjectHydrationGuard()
 const {
   pendingWorkspaceId,
@@ -1090,11 +1272,33 @@ const {
   activeWorkspace,
   status: activeWorkspaceStatus,
 } = activeProjectWorkspace
+// 输入框上下文条的分支胶囊：`workspace.status` 已返回权威解析 + 只读 Git 摘要，
+// 这里只做一次拉取并随会话/绑定目录变化刷新，不另造第二个数据源。
+const workspaceStatus = useWorkspaceStatus()
+const workspaceGit = computed(() => workspaceStatus.status.value?.git ?? null)
+watch(
+  () => [activeWorkspace.value?.path || '', sessionKey.value],
+  () => { void workspaceStatus.load(activeWorkspace.value?.path) },
+  { immediate: true },
+)
 // 项目校验控制器（activeProjectValidationController / cancelActiveProjectValidation）
 // 已迁入 useChatProjectController，于装配层 chatSessionRuntime 之后接线。
 const isCompactViewport = useMediaQuery('(max-width: 480px)')
 const isDesktopViewport = useMediaQuery('(min-width: 769px)')
 const landingAgentId = computed(() => agentIdFromSessionKey(sessionKey.value))
+/**
+ * 落地页身份行：首条消息之前还没有 `router_decision` 事件，会话头的
+ * `AgentPersonaBadge` 是空的——这里补上「正在和谁对话」。
+ * 只对主智能体渲染（`chat.mainAgent` 是既有文案键，此前一直没人用）；
+ * 其他专家的身份由会话头徽章负责，避免同一事实两处不同措辞。
+ * 取不到名字（agents.list 未回来 / 只有 `Main Agent` 占位名）时整行不渲染。
+ */
+const { agents: landingAgents } = useAgentOptions()
+const landingAgentName = computed(() => {
+  if (landingAgentId.value !== 'main') return ''
+  const name = (landingAgents.value.find(a => a.id === 'main')?.name || '').trim()
+  return name && name !== 'Main Agent' ? name : ''
+})
 // True when the current draft opened with prefilled composer text (Sessions
 // Hub task input); the landing suggestion chips stay out of the way then.
 // Holds the prefill text when the Sessions Hub hand-off requested a one-step
@@ -1233,26 +1437,44 @@ const sandboxSetupRecovery = useSandboxSetupRecovery({
 const {
   status: sandboxSetupStatus,
 } = sandboxSetupRecovery
-const runMode = computed<SandboxRunMode>(() => effectiveComposerRunMode(
+/**
+ * 展示模式 + 降级原因。
+ *
+ * 修复前：setup 未 ready 时这里把 safe 静默改写成 full，同时把 safe 从
+ * `allowedRunModes` 剔除 → 原生 disabled 按钮不派发 click（「点了没反应」）。
+ * 现在保留用户的 safe 选择，只把「隔离运行时未就绪」作为 degraded 原因展示。
+ */
+const runModeResolution = computed(() => resolveComposerRunMode(
   globalRunMode.value,
   sandboxSetupStatus.value,
   activeRunModeLock.value,
   sandboxSetupRecovery.resolved.value,
 ))
-const composerAllowedRunModes = computed<SandboxRunMode[]>(() => {
-  if (!sandboxSetupRecovery.resolved.value) {
-    return allowedRunModes.value.filter((mode) => mode !== 'safe')
-  }
-  const status = sandboxSetupStatus.value
-  if (
-    status !== null
-    && status.state !== 'ready'
-  ) {
-    return allowedRunModes.value.filter((mode) => mode !== 'safe')
-  }
-  return allowedRunModes.value
-})
+const runMode = computed<SandboxRunMode>(() => runModeResolution.value.mode)
+const runModeSetupState = computed(() => sandboxSetupStatus.value?.state ?? null)
+// safe 仍受网关策略的硬约束（auth.runModePolicy.allowedRunModes），
+// 但不再因「setup 未就绪」被剔除。
+const composerAllowedRunModes = computed<SandboxRunMode[]>(() => allowedRunModes.value)
 const composerSafeSetupAvailable = computed(() => sandboxSetupRecovery.canSetup.value)
+
+const runModeDegradation = computed<ComposerRunModeDegradation | null>(
+  () => runModeResolution.value.degraded,
+)
+/**
+ * 页脚降级说明：只在「用户确实选了 safe、但后端确认无法隔离」时出现。
+ * 文案直接引用后端 `sandbox.setup.status.message`，不伪造能力。
+ */
+const runModeDegradedReason = computed(() => {
+  const reason = runModeDegradation.value
+  if (reason === null) return ''
+  if (reason === 'setup_unresolved') {
+    return t('settings.sandbox.safeMode.degradedUnresolved')
+  }
+  const backendMessage = (sandboxSetupStatus.value?.message || '').trim()
+  return backendMessage
+    ? t('settings.sandbox.safeMode.degraded', { reason: backendMessage })
+    : t('settings.sandbox.safeMode.degradedFallback')
+})
 
 async function refreshPostBootstrapMetadata() {
   await refreshRunModePreference()
@@ -1292,7 +1514,7 @@ const { load: loadPartialText } = usePartialTextRestore()
 watch(sessionKey, () => {
   void loadPartialText(sessionKey.value).then((partial) => {
     if (partial) {
-      pushToast('检测到未完成的生成，正在恢复…', { tone: 'info' })
+      pushToast(t('chat.recoveringGeneration'), { tone: 'info' })
     }
   })
 })
@@ -1629,11 +1851,41 @@ const chatUsageWidget = useChatUsageWidget({
 const {
   usageAccum,
   usageModel,
+  contextWarning,
   resetSavingsPopupCooldown,
   saveWidgetState,
   restoreWidgetState,
   loadCurrentSessionUsage,
 } = chatUsageWidget
+
+/**
+ * 底部计量条：token 来自 `session.event.usage` 帧的实时累加（每次真实 LLM 调用
+ * 一条），轮次按本会话已完成的回答数计。
+ *
+ * 为什么不再用 `usage.status`：Rust 台账按 `usage_events.session` 过滤，而绝大多数
+ * 事件写入时 session 是空串（实测 10434 行中 6982 行 session=''），任何会话查出来
+ * 都是 0；`cache.status` 的 prefix 计数在默认路径上也全为 0。两个 0 拼在一起就是
+ * 用户看到的「假仪表」。缓存命中率只在真的观测到 cached>0 时才显示。
+ */
+const sessionUsage = computed(() => {
+  const input = Number(usageAccum.value.input || 0)
+  const output = Number(usageAccum.value.output || 0)
+  const cached = Number(usageAccum.value.cacheRead || 0)
+  const turns = (messages.value as ChatMessage[]).filter(
+    (m) => m.role === 'assistant' && String(m.text || '').trim().length > 0,
+  ).length
+  return {
+    input,
+    output,
+    cached,
+    turns,
+    total: input + output,
+    // 与用量页同口径：cache_read / (prompt_tokens + cache_read)，避免两处显示不同命中率。
+    cacheHitPct: cached > 0 && input + cached > 0
+      ? Math.round(Math.min(1, cached / (input + cached)) * 100)
+      : null,
+  }
+})
 
 const chatFeatureToggles = useChatFeatureToggles({
   rpc,
@@ -1985,7 +2237,12 @@ const chatSessionSubscription = useChatSessionSubscription({
       : activeProjectWorkspace.beginSessionResolution(key),
   onSessionMetadata: (key, generation, metadata) => {
     if (generation < 0) return
-    activeProjectWorkspace.applySessionSnapshot(key, generation, metadata)
+    if (!activeProjectWorkspace.applySessionSnapshot(key, generation, metadata)) return
+    // 多根回填：只认当前会话的元数据，过期快照不得覆盖新会话的附加项目。
+    if (key === sessionKey.value) {
+      projectRoots.applyProjectPaths(metadata.projectPaths, projectWorkspaces.workspaces.value)
+      if (!metadata.projectPaths) void hydrateProjectRootsFromSessionList(key)
+    }
   },
   onSessionMetadataError: (key, generation) => {
     if (generation < 0) return
@@ -2148,6 +2405,9 @@ watch(activeWorkspaceStatus, (status, previousStatus) => {
   flushDeferredPendingDrain()
 })
 
+/** 编排（蜂群 / 专家团 / 子智能体）是否仍在跑：决定「停止」按钮是否可用。 */
+const orchestrationRunningCount = ref(0)
+
 const sessionHasActiveWork = computed(() => (
   isStreaming.value
   || activeTaskGroups.value.size > 0
@@ -2155,6 +2415,9 @@ const sessionHasActiveWork = computed(() => (
   || ['queued', 'running', 'approval_pending'].includes(runStatus.value.status)
   || activePlanRun.value?.status === 'queued'
   || activePlanRun.value?.status === 'running'
+  // 编排跑在独立后台任务里，不能因为「对话流没在推送」就隐藏停止按钮 ——
+  // 否则蜂群/专家团执行期间用户没有任何中止入口（真机反馈）。
+  || orchestrationRunningCount.value > 0
   || pendingQueueOwnerContext.value?.sessionKey === sessionKey.value
 ))
 const canStop = computed(() => !isSessionHydrating.value && sessionHasActiveWork.value)
@@ -2388,6 +2651,39 @@ const {
   restoreDurableMetaDrafts: restoreServerMetaDrafts,
 } = chatSlashCommands
 
+/* ── 输入框「+」菜单的执行端 ─────────────────────────────────────────
+ * 菜单只负责发意图，具体动作在这里接真实能力：
+ *   命令 → 把输入框置为 `/` 并打开斜杠命令清单（与手输 `/` 完全同一条路径）；
+ *   我的产物 / 工作区文件 → 打开右侧栏对应标签；
+ *   技能 / 插件 → 进入对应管理页，可真实启停。
+ */
+const sidebarFocus = ref<{ tab: 'tasks' | 'subagents' | 'artifacts' | 'changes' | 'tree'; seq: number }>({
+  tab: 'tasks',
+  seq: 0,
+})
+const sidebarSubagentFocus = ref('')
+
+function focusSidebarTab(tab: 'tasks' | 'subagents' | 'artifacts' | 'changes' | 'tree') {
+  sidebarFocus.value = { tab, seq: sidebarFocus.value.seq + 1 }
+  rightSidebarOpen.value = true
+}
+
+/** 消息流里的子智能体卡 → 右栏第 5 轴；空 key 只打开列表，不做过滤。 */
+function openSubagentInSidebar(payload: { key: string }) {
+  sidebarSubagentFocus.value = payload?.key || ''
+  focusSidebarTab('subagents')
+}
+
+function openComposerCommands() {
+  const current = inputText.value
+  if (!current.startsWith('/')) {
+    inputText.value = current.trim() ? `/${current}` : '/'
+  }
+  handleSlashInput()
+  expandComposer()
+  void nextTick(() => composerRef.value?.focusTextarea())
+}
+
 const chatComposerShortcuts = useChatComposerShortcuts({
   inputText,
   composing,
@@ -2414,17 +2710,131 @@ const {
 } = chatComposerShortcuts
 resetComposerInputHistory = chatComposerShortcuts.resetInputHistory
 
-// 深度思考（DeepSeek thinking 模式）开关：per-composer 偏好，localStorage 持久化。
-const COMPOSER_THINKING_KEY = 'chat.composer.thinking'
-const composerThinking = ref(localStorage.getItem(COMPOSER_THINKING_KEY) === 'true')
-function setComposerThinking(enabled: boolean) {
-  composerThinking.value = enabled
+// 推理等级（reasoning effort）：输入框拖动条的唯一状态源。
+// 旧实现只有二值 `thinking`（localStorage），表达不了后端的四档；
+// 现在档位既写本地（新会话默认值），也写服务端 `session.thinking.*`（跨设备/重装可恢复）。
+const COMPOSER_EFFORT_KEY = 'chat.composer.effort'
+/** 旧键：仅用于一次性迁移（开=深度、关=关闭），迁移后不再写入。 */
+const LEGACY_COMPOSER_THINKING_KEY = 'chat.composer.thinking'
+
+function readInitialEffort(): EffortLevel {
   try {
-    localStorage.setItem(COMPOSER_THINKING_KEY, String(enabled))
+    const stored = localStorage.getItem(COMPOSER_EFFORT_KEY)
+    if (stored && isEffortLevel(stored)) return stored
+    if (localStorage.getItem(LEGACY_COMPOSER_THINKING_KEY) === 'true') {
+      return effortFromThinking(true)
+    }
   } catch {
-    // localStorage 不可用时静默降级，仅本次会话有效。
+    // localStorage 不可用（隐私模式/配额满）→ 用默认档位，不阻断输入。
+  }
+  return 'off'
+}
+
+const composerEffort = ref<EffortLevel>(readInitialEffort())
+
+/**
+ * 上一轮请求实际发出的思考参数（`model.effort.last`）。
+ *
+ * 用户反馈「推理档位是玩具」——根因是部分模型不在后端支持名单时被**静默跳过**。
+ * 这里把真实结果拿回来展示：注入了哪个字段、值是什么，或明确说「该模型不支持」。
+ */
+const effortWire = ref<Record<string, unknown> | null>(null)
+
+async function refreshEffortWire() {
+  if (!rpc.supportsMethod('model.effort.last')) return
+  try {
+    effortWire.value = (await rpc.call('model.effort.last')) as Record<string, unknown>
+  } catch {
+    effortWire.value = null
   }
 }
+
+const effortWireHint = computed(() => {
+  const raw = effortWire.value
+  if (!raw || raw.available !== true) return ''
+  // 同一回合里还有预热/摘要等辅助请求，它们会覆盖「最近一次」快照。
+  // 因此优先取最近一条 `turnScoped` 记录（= 主回复那次请求）来判定档位是否真的发出。
+  const recent = Array.isArray(raw.recent) ? (raw.recent as Record<string, unknown>[]) : []
+  const scoped = [...recent].reverse().find((e) => e && e.turnScoped === true)
+  const wire = (scoped || raw) as Record<string, unknown>
+  const model = String(wire.model || '')
+  if (wire.supported === false) {
+    return t('chat.effort.wireUnsupported', { model })
+  }
+  if (wire.injected === true) {
+    return t('chat.effort.wireInjected', {
+      model,
+      field: String(wire.field || ''),
+      value: String(wire.value || ''),
+    })
+  }
+  return t('chat.effort.wireOff', { model })
+})
+
+function persistEffortLocally(level: EffortLevel) {
+  try {
+    localStorage.setItem(COMPOSER_EFFORT_KEY, level)
+    localStorage.removeItem(LEGACY_COMPOSER_THINKING_KEY)
+  } catch {
+    // 静默降级：仅本次会话有效。
+  }
+}
+
+/**
+ * 把档位写回服务端（best-effort）。
+ *
+ * 为什么不在发送时顺带持久化：`chat.send` 带 `effort` 时确实会落盘，但用户
+ * **只调滑块不发送**时那条路径不会触发；而滑块是「先设好再写」的控件，
+ * 必须自己把状态存住，否则切会话回来档位就丢了。
+ */
+function pushEffortToServer(level: EffortLevel) {
+  const key = sessionKey.value
+  if (!key || !rpc.supportsMethod('session.thinking.set')) return
+  void rpc
+    .call('session.thinking.set', { sessionKey: key, effort: level })
+    .catch(() => {
+      // 服务端不可用不阻断 UI：本地已存，下一轮 chat.send 仍会带上 effort。
+    })
+}
+
+function setComposerEffort(level: EffortLevel) {
+  composerEffort.value = level
+  persistEffortLocally(level)
+  pushEffortToServer(level)
+}
+
+/** 会话切换/恢复时以服务端档位为准（服务端没有记录则保留本地默认值）。 */
+async function syncEffortFromServer() {
+  const key = sessionKey.value
+  if (!key || !rpc.supportsMethod('session.thinking.get')) return
+  try {
+    const res = await rpc.call<{ effort?: string | null }>('session.thinking.get', {
+      sessionKey: key,
+    })
+    const serverEffort = res?.effort
+    // `null/undefined` = 该会话从未设过档位：**不能**当成 off 覆盖用户偏好。
+    if (!serverEffort || !isEffortLevel(serverEffort)) return
+    if (serverEffort === composerEffort.value) return
+    composerEffort.value = serverEffort
+    persistEffortLocally(serverEffort)
+  } catch {
+    // 读取失败保持现状（离线/侧车未起都能正常对话）。
+  }
+}
+
+// `immediate`：页面重开/刷新后要立刻采用服务端档位（否则滑块停在本地默认值，
+// 与「上一轮实际生效的档位」不一致，用户会以为档位丢了）。
+watch(sessionKey, () => {
+  void syncEffortFromServer()
+}, { immediate: true })
+
+/** 二值 `thinking` 语义保留：非 off 即视为开（模式/编排仍读它）。 */
+const composerThinking = computed(() => thinkingFromEffort(composerEffort.value))
+
+// 编排简报（模式/智能体/蜂群/团队/能力）：每轮随 chat.send 上行，后端据此要求
+// 主智能体先出「调度计划」再执行。用 ref + watch 回填（orchestration 在下方才定义，
+// 这里不能直接依赖它的值；传 ref 给 useChatSend 即可）。
+const dispatchBrief = ref<ChatDispatchBrief | null>(null)
 
 const chatSend = useChatSend({
   rpc,
@@ -2441,12 +2851,16 @@ const chatSend = useChatSend({
   modelRoutingMode,
   modelRoutingSettingsBusy,
   enableThinking: composerThinking,
+  reasoningEffort: composerEffort,
   elevatedMode,
   runMode,
   pendingAttachments,
   composerRevision,
   pendingSessionIntent,
   pendingWorkspaceId,
+  boundWorkspaceId,
+  pendingWorkspaceIds: projectRoots.extraIds,
+  dispatchBrief,
   sendBlockedReason: liveSendBlockedReason,
   validateActiveProjectBeforeSend,
   acceptPendingWorkspaceBinding: activeProjectWorkspace.acceptPendingBinding,
@@ -2675,8 +3089,28 @@ async function onComposerSend() {
   // Serialize an existing-session mode mutation before accepting another
   // composer turn, so the send cannot race the collaboration CAS update.
   if (planModeBusy.value) return
-  const target = replanTarget.value
+const target = replanTarget.value
   if (!target) {
+    // P2·E：编排形态（子智能体/团队/专家/蜂群）走 orchestrate.run 统一入口；
+    // single 保持原 chat.send 路径，零额外开销。
+    const orch = orchestration.value
+    if (orch.form !== 'single' && rpc.supportsMethod('orchestrate.run')) {
+      const message = inputText.value.trim()
+      if (!message) return
+      // 网关没连上 / 宿主不在位时先别弹确认框：确认完也发不出去，
+      // 用户只会觉得"按了确认没用"（真机反馈）。
+      if (!rpc.isConnected || hostProcessDown.value) {
+        pushToast(t('chat.orchestration.offline'), { tone: 'warn', duration: 6000 })
+        return
+      }
+      // 高自主形态先弹确认框；取消 = 原样保留输入，一个字节都不发。
+      if (!(await confirmHighAutonomySend(orch))) return
+      await dispatchOrchestratedSend(
+        HIGH_AUTONOMY_FORMS.has(orch.form) ? { ...orch, confirmed: true } : orch,
+        message,
+      )
+      return
+    }
     onSend()
     return
   }
@@ -2734,6 +3168,36 @@ async function steerPendingMessage(index: number) {
   }
 }
 
+/**
+ * 直接发送：把该条提到可见队首并立即尝试投递。
+ * 空闲时队列会当场发出；正在执行时它成为本轮结束后的第一条（不打断当前任务）。
+ */
+function sendPendingNow(index: number) {
+  const item = takeVisiblePendingItem(index)
+  if (!item) return
+  const head = pendingQueue.value.findIndex(
+    candidate => !candidate.hiddenControl && !candidate.deliveryState,
+  )
+  pendingQueue.value.splice(head < 0 ? 0 : head, 0, item)
+  schedulePendingDrainAfterTerminal()
+  flushDeferredPendingDrain()
+}
+
+/** 队列内上下调序：只交换普通条目，机器控制项与投递中的条目保持原位。 */
+function movePendingMessage(index: number, delta: -1 | 1) {
+  const item = pendingQueue.value[index]
+  if (!item || item.hiddenControl || item.deliveryState) return
+  let target = index + delta
+  while (target >= 0 && target < pendingQueue.value.length) {
+    const candidate = pendingQueue.value[target]
+    if (!candidate.hiddenControl && !candidate.deliveryState) break
+    target += delta
+  }
+  if (target < 0 || target >= pendingQueue.value.length) return
+  pendingQueue.value.splice(index, 1)
+  pendingQueue.value.splice(target, 0, item)
+}
+
 const chatApprovals = useChatApprovals({
   rpc,
   sessionKey,
@@ -2785,6 +3249,7 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   applySessionRunState,
   hasActiveInterrupt: computed(() =>
     Array.from(interruptState.value.values()).some(state => !state.resolution)),
+  reappendInterruptFrames: chatApprovals.appendPendingInterrupts,
   queueRouterDecision,
   appendEnsembleProgress,
   markEnsembleHandoff,
@@ -2964,6 +3429,8 @@ watch(isStreaming, (streaming, wasStreaming) => {
     // polling: it costs one `artifacts.list` per turn, and the composable
     // de-duplicates by artifact identity, so an already-listed file is a no-op.
     sidebarPanels.resyncArtifactsAfterTurn()
+    // 回合结束才有「本轮实际发出的思考参数」：刷新它，让档位的真实效果可核对。
+    void refreshEffortWire()
   }
 })
 
@@ -3099,6 +3566,255 @@ const metaRuns = useMetaRuns({
 // not the measured thinking duration — re-attach this session's records.
 watch(messages, () => attachTurnReasoning())
 
+// ── P2·E 编排状态：ChatComposer 四按钮收集 → ChatView 提交 orchestrate.run ──
+// 初值取本地持久化的上次选择（形态/蜂群/子智能体/团队/能力），
+// 避免每次进入对话页都要重选一遍。
+const orchestration = ref(loadStoredOrchestration())
+
+function applyOrchestrationPatch(patch: Partial<OrchestrationState>) {
+  orchestration.value = { ...orchestration.value, ...patch }
+}
+
+/**
+ * 门禁档位以**全局模式 store**为准。
+ *
+ * 真机缺陷（2026-10-23，浏览器实测）：顶栏/模式预设把运行模式切到「标准·执行」，
+ * 顶栏徽标与状态条都变了，但输入框编排面板里的档位仍是旧的「标准·方案」，
+ * 于是蜂群先弹确认框、确认后被后端 `ORCHESTRATE_DENIED` 硬拒 —— 用户被带进死胡同。
+ *
+ * 根因是同一个概念有两个可写副本（模式 store ↔ 编排面板的 `modeKey`）。这里把
+ * 发送门禁与上抛参数都改成读 store（顶栏、ModeMatrix、编排面板都写它），
+ * 编排面板的副本只作为 store 尚未 hydrate 时的兜底。
+ */
+const gearKey = computed(() => activeUserMode.value?.key || orchestration.value.modeKey)
+
+// 反向同步：全局档位一变，立刻回填编排面板，面板高亮不再与顶栏打架。
+watch(
+  activeUserMode,
+  (um) => {
+    const key = um?.key
+    if (key && key !== orchestration.value.modeKey) applyOrchestrationPatch({ modeKey: key })
+  },
+  { immediate: true },
+)
+
+watch(
+  orchestration,
+  (state) => persistOrchestration(state),
+  { deep: true },
+)
+
+// 调度简报回填：把用户当前选择（档位 + 子智能体 + 团队 + 蜂群 + 能力）同步到一个
+// 纯数据 ref，供每轮 chat.send 上行。缺省字段不写（后端按缺席处理，不猜）。
+//
+// 只在**真的选了分工**时才上行：`single` + 全空 = 原 `chat.send` 路径（与
+// `createDefaultOrchestration` 的「零额外开销」承诺一致）。此前无论有没有选择都发简报，
+// 于是每轮（含「你好」）都被注入「先出调度计划」+ 分工纪律，既白烧 token，
+// 又让模型误以为未被勾选的能力不可用。
+watch(
+  [gearKey, orchestration, sessionKey],
+  () => {
+    const orch = orchestration.value
+    if (!shouldSendDispatchBrief(orch)) {
+      dispatchBrief.value = null
+      return
+    }
+    const brief: ChatDispatchBrief = {
+      mode: gearKey.value || 'standard_doit',
+      agent: agentIdFromSessionKey(sessionKey.value) || 'main',
+      form: orch.form,
+      swarmOn: orch.swarmOn,
+      swarmSize: orch.swarmSize,
+    }
+    if (orch.agents.length) brief.agents = [...orch.agents]
+    if (orch.teams.length) brief.teams = [...orch.teams]
+    if (orch.capabilities.length) brief.capabilities = [...orch.capabilities]
+    dispatchBrief.value = brief
+  },
+  { immediate: true, deep: true },
+)
+
+const orchActivity = useOrchestrationActivity(rpc)
+const orchestrationItems = computed(() => orchActivity.items.value)
+
+// 编排运行时间线（成员 / 工具 / 终态）：后端按 phase 发 `session.event.progress`，
+// 这里聚合成对话内可折叠的执行泳道。会话键用 ref 包一层，切会话时自动按新键过滤。
+const orchestrationRunsModel = useOrchestrationRuns(computed(() => sessionKey.value))
+const orchestrationRuns = computed(() => orchestrationRunsModel.runs.value)
+// 卡片位于消息流末尾，必须按时间正序排列（旧→新）。存储层为了"最近一次优先"
+// 用了新→旧，直接渲染会让同一会话里多次编排的先后顺序颠倒。
+const orchestrationRunsChronological = computed(() => [...orchestrationRuns.value].reverse())
+const orchestrationNow = computed(() => orchestrationRunsModel.now.value)
+// 「停止」按钮要能把编排也一起停掉：把运行中的条数同步给 `sessionHasActiveWork`。
+watch(
+  () => orchestrationRunsModel.activeCount.value,
+  (count) => { orchestrationRunningCount.value = count },
+  { immediate: true },
+)
+/** 编排终态对账定时器（仅在有 running 的编排时真正发请求） */
+let orchestrationReconcileTimer: ReturnType<typeof setInterval> | null = null
+
+// 宿主（Python 侧车）是否**此刻**不在位。`hasEvidence` 是历史记录，
+// `sidecarPresent` 才是实时事实：两者同时成立才算真的挂了。
+//
+// 【2026-10-23 修复】还必须加上 `source === 'memory'`：落盘记录是跨重启的
+// 历史（"上一次运行退出过"），拿它当"此刻挂了"会**误拦发送** —— 启动瞬间侧车
+// 还没注册，用户一发消息就弹「离线」，而实际上几秒后一切正常。
+// 只认本次运行观测到的退出，历史记录最多让诊断卡片延后显示。
+const hostExitEvidence = useHostExitEvidence()
+const hostProcessDown = computed(() =>
+  hostExitEvidence.hasEvidence.value
+  && !hostExitEvidence.sidecarPresent.value
+  && hostExitEvidence.source.value === 'memory',
+)
+
+/**
+ * 高自主编排形态：与后端 `PermissionMatrix`（`core/src/gateway/orchestrate.rs::gate_form`）
+ * 的 Confirm 档对齐 —— team / expert / swarm 在标准档位下需要显式授权。
+ *
+ * 为什么必须在**前端发送前**问一次：后端只会回 `ORCHESTRATE_CONFIRM_REQUIRED`，
+ * 旧实现把它翻译成一条 6 秒 toast「再次发送即确认执行」，用户的真实体感是
+ * 「蜂群打开后要我再次确认，但我根本没看见确认弹窗」，同一条消息还会被草稿
+ * 状态吃掉，重发时又忘。现在改成发送前弹出真正的确认框，明确列出形态、
+ * 并行规模与权限含义，取消则一个字节都不发。
+ */
+const HIGH_AUTONOMY_FORMS = new Set<OrchestrationState['form']>(['team', 'expert', 'swarm'])
+
+/**
+ * 高自主形态只在执行档放行。
+ *
+ * 与后端 `gate_form` 对齐：`PermissionMatrix` 对 team / expert / swarm 在 Ask / Plan
+ * 档一律拒绝（连 `confirmed` 也救不回来），只有 `*_doit` 档才允许。前端提前判定，
+ * 是为了不把用户带进「确认完才被拒」的死胡同。
+ */
+function gearAllowsHighAutonomy(modeKey: string): boolean {
+  return modeKey.endsWith('_doit')
+}
+
+const FORM_LABEL_KEY: Record<OrchestrationState['form'], string> = {
+  single: 'chat.orchestration.formSingle',
+  subagent: 'chat.orchestration.formSubagent',
+  team: 'chat.orchestration.formTeam',
+  expert: 'chat.orchestration.formExpert',
+  swarm: 'chat.orchestration.formSwarm',
+}
+
+const HIGH_AUTONOMY_FORM_LABEL: Record<'team' | 'expert' | 'swarm', string> = {
+  team: FORM_LABEL_KEY.team,
+  expert: FORM_LABEL_KEY.expert,
+  swarm: FORM_LABEL_KEY.swarm,
+}
+
+async function confirmHighAutonomySend(orch: Readonly<OrchestrationState>): Promise<boolean> {
+  if (!HIGH_AUTONOMY_FORMS.has(orch.form)) return true
+  // 先过档位门，再弹确认框：Ask / Plan 档对高自主形态是**硬拒**（后端 gate_form），
+  // 此前先弹「确认启动蜂群？」、用户点确认后才被拒，等于把用户带进死胡同
+  // （真机：切了顶栏档位但输入框面板仍是方案档，连拒两次且没说怎么改）。
+  if (!gearAllowsHighAutonomy(gearKey.value)) {
+    pushToast(
+      t('chat.orchestration.gearBlocked', {
+        gear: t(`mode.userMode.${gearKey.value}`),
+        form: t(FORM_LABEL_KEY[orch.form]),
+      }),
+      { tone: 'warn', duration: 10_000 },
+    )
+    return false
+  }
+  if (orch.confirmed) return true
+  const form = orch.form as 'team' | 'expert' | 'swarm'
+  const bodyKey = form === 'swarm'
+    ? 'chat.orchestration.confirmBodySwarm'
+    : form === 'expert'
+      ? 'chat.orchestration.confirmBodyExpert'
+      : 'chat.orchestration.confirmBodyTeam'
+  return confirm({
+    title: t('chat.orchestration.confirmTitle', { form: t(HIGH_AUTONOMY_FORM_LABEL[form]) }),
+    body: t(bodyKey, {
+      n: orch.swarmSize,
+      agents: orch.agents.length,
+      team: orch.teams.length
+        ? orch.teams
+            .map(id => EXPERT_TEAMS.find(team => team.id === id)?.label || id)
+            .join(' + ')
+        : t('chat.orchestration.teamNone'),
+    }),
+    primaryLabel: t('chat.orchestration.confirmPrimary'),
+    primaryClass: 'btn--primary',
+  })
+}
+
+/**
+ * 编排发送：非 single 形态走 `orchestrate.run` 统一入口（权限门在后端）。
+ * ORCHESTRATE_CONFIRM_REQUIRED → 本会话内置 confirmed 门并提示再次发送；
+ * ORCHESTRATE_DENIED → 直接 toast 拒绝原因；成功 → 清空输入。
+ * 注意：编排与 pendingQueue / chat.send 的排队语义无关，成功后无需触碰队列。
+ */
+async function dispatchOrchestratedSend(
+  orch: Readonly<OrchestrationState>,
+  message: string,
+): Promise<void> {
+  markProvisionalDraftUsed()
+  ttftStartMs.value = performance.now()
+  try {
+    // 编排提交必须有上限：此前不传 timeoutMs 时请求会无限等待。后端 `team.run`
+    // 曾在台账过大时同步重写 SQLite 数十秒（根因已修），前端若没有超时，用户
+    // 看到的仍是「确认后什么都没发生」，输入框也不会恢复。
+    const res = await rpc.call<{ ok?: boolean; taskId?: string; error?: string }>(
+      'orchestrate.run',
+      {
+        form: orch.form,
+        // 档位取全局模式 store（`gearKey`），不取编排面板的本地副本：两份副本
+        // 一旦漂移，就会出现「顶栏显示执行档、后端按方案档拒绝」的死胡同（真机）。
+        mode: gearKey.value,
+        message,
+        sessionKey: sessionKey.value,
+        capabilities: orch.capabilities,
+        agents: orch.agents,
+        // 团队/专家团可多选：后端按名册合并、按角色去重后执行。
+        teams: orch.teams,
+        swarm_on: orch.swarmOn,
+        // 并行规模必须真传：后端此前忽略它，导致确认框写「6 路并行」实际只跑 1 个成员。
+        swarmSize: orch.swarmSize,
+        confirmed: orch.confirmed,
+      },
+      { timeoutMs: 120_000, queue: false, timeoutAction: 'reject' },
+    )
+    // 后端用 `ok:false` 表达「请求已到达但提交失败」（团队编排失败 / 台账登记失败）。
+    // 旧实现无条件清空输入且没有任何提示，等于把失败也当成成功。
+    if (res && res.ok === false) {
+      pushToast(
+        t('chat.orchestration.submitFailed', { error: res.error || '—' }),
+        { tone: 'warn', duration: 10_000 },
+      )
+      return
+    }
+    orchestration.value = { ...orchestration.value, confirmed: false }
+    inputText.value = ''
+    autoResizeTextarea()
+    // 编排结果的正文不会回写到对话流（蜂群写入 long_running 台账），必须显式告诉
+    // 用户「已提交 + taskId」，否则界面看起来与没发送完全一样。
+    pushToast(
+      t('chat.orchestration.submitted', {
+        form: t(FORM_LABEL_KEY[orch.form]),
+        task: res?.taskId || '—',
+      }),
+      { duration: 10_000 },
+    )
+  } catch (err) {
+    const code = (err as { code?: string })?.code
+    if (code === 'ORCHESTRATE_CONFIRM_REQUIRED') {
+      orchestration.value = { ...orchestration.value, confirmed: true }
+      pushToast(t('chat.orchestration.confirmRequired'), { duration: 6000 })
+      return
+    }
+    if (code === 'ORCHESTRATE_DENIED') {
+      pushToast(t('chat.orchestration.denied'), { duration: 6000 })
+      return
+    }
+    pushToast(err instanceof Error ? err.message : String(err), { duration: 6000 })
+  }
+}
+
 // Unsubscribers
 let unsubs: (() => void)[] = []
 // Held separately from `unsubs` so it survives ChatView unmount (route-surviving
@@ -3124,6 +3840,45 @@ const isNewChatLanding = computed(() => {
 })
 
 watch(isNewChatLanding, resetComposerRetraction, { flush: 'sync' })
+
+/**
+ * 本回合文件改动汇总的时间窗左界：最近一条助手消息之前的用户消息时间戳。
+ * 流式进行中、新会话首屏、分享/分叉过渡期间都不显示 —— 那几种状态下
+ * 「本回合」尚未定型，给出汇总只会让用户误以为它已经结束。
+ */
+const lastTurnChangeSince = computed<string | number | null>(() =>
+  resolveLastTurnStartTs(renderedMessages.value, {
+    blocked: Boolean(
+      isStreaming.value || isNewChatLanding.value || shareMode.value || forkTransition.value,
+    ),
+  }),
+)
+
+/**
+ * 汇总条上报的「本回合确实有改动」信号 —— 下一步建议只在有改动可操作时出现，
+ * 并与汇总条共用同一次台账查询（不再单独拉一遍）。
+ */
+const turnChangeStats = ref<{ files: number, canRevert: boolean }>({ files: 0, canRevert: false })
+watch(lastTurnChangeSince, () => {
+  turnChangeStats.value = { files: 0, canRevert: false }
+})
+
+const showTurnSuggestions = computed(() => (
+  lastTurnChangeSince.value !== null &&
+  turnChangeStats.value.files > 0 &&
+  isLastTurnSuccessful(renderedMessages.value)
+))
+
+// 建议行是在台账返回后才出现的（晚于流式收尾的那次贴底）——
+// 仍跟着底部时补一次滚动，否则 chip 会刚好落在视口下沿之外。
+watch(showTurnSuggestions, async (visible) => {
+  if (!visible || !autoScroll.value) return
+  await nextTick()
+  scrollToBottom()
+})
+
+const turnChangeSummaryRef = ref<{ requestRevert: () => void } | null>(null)
+
 
 const historyRecoveryState = computed(() => {
   return resolveChatHistoryRecoveryState({
@@ -3187,6 +3942,9 @@ const showConfirmedEmptySession = computed(() => shouldShowConfirmedEmptySession
   isStreaming: isStreaming.value,
   messageCount: messages.value.length,
   initialHistoryStatus: historyState.value.initialLoadStatus,
+  // 裸 /chat（刷新后 lastRoute 只恢复路径、丢弃 ?session=）会重建一个临时草稿：
+  // 它不请求历史，状态永远停在 pending。这里把它当作权威空会话，避免空态被跳过。
+  isNewSession: pendingSessionIntent.value === 'new_chat',
 }))
 
 const composerPlaceholder = computed(() => {
@@ -3391,6 +4149,19 @@ function focusComposer() {
   composerRef.value?.focusTextarea?.()
 }
 
+/**
+ * 「下一步建议」只把提示词放进输入框，不替用户发送。
+ * 已有草稿时追加而不是覆盖 —— 用户正在写的字不能被一个 chip 抹掉。
+ */
+function prefillComposerFromTurnSuggestion(prompt: string) {
+  const text = prompt.trim()
+  if (!text) return
+  const current = inputText.value.trimEnd()
+  if (!current.trim()) inputText.value = text
+  else if (!current.includes(text)) inputText.value = `${current}\n${text}`
+  focusComposer()
+}
+
 const chatMarkdownExport = useChatMarkdownExport({
   messages: renderedMessages,
   currentTitle: currentChatTitle,
@@ -3499,6 +4270,8 @@ const sidebarPanels = useChatSidebarPanels({
   sessionKey,
   messages,
   streamToolCalls: chatStream.streamToolCalls,
+  // 右侧「运行」面板要能看见"思考及内容"，不能只有一行 "Thinking…" 计时
+  thinking: chatStream.thinkingContent,
   sessionArtifacts,
   loadSessionArtifacts,
   isStreaming,
@@ -3507,8 +4280,6 @@ const sidebarPanels = useChatSidebarPanels({
   openArtifactInSystem: (a) => artifactActions.openInSystem(a),
 })
 const {
-  usageStrip,
-  cacheStrip,
   fileChangesOpen,
   fileChangesVisible,
   rightSidebarOpen,
@@ -3523,6 +4294,15 @@ const {
   staleKeys,
   liveKeys,
 } = sidebarPanels
+const sidebarSubagents = computed(() => subagentPanelEntries(renderedMessages.value))
+// 右侧面板打开时，会话列向左让位（而不是被浮层盖住）：宽度与 RightSidebar
+// 共享同一份 usePanelResize 状态；拖动分割线时会话列同步收缩。
+// 让位宽度 = 面板宽度 + 工作台占位（面板右缘贴在工作台左侧）。
+const { width: rightPanelWidth, resizing: rightPanelResizing } = usePanelResize()
+const chatRootStyle = computed(() => ({
+  fontSize: chatFontPx.value,
+  '--right-panel-w': rightSidebarOpen.value ? `${rightPanelWidth.value}px` : '0px',
+}) as Record<string, string>)
 // 晚绑回填：RPC 订阅接线先持占位，此处立即接管真实处理器。
 onArtifactUpdated = sidebarPanels.onArtifactUpdated
 // 双轨打开（系统程序优先，缺实现时由侧栏面板回退 Gateway 启动器/应用内预览）
@@ -3762,6 +4542,7 @@ let chatViewActive = false
 onMounted(async () => {
   chatViewActive = true
   chatViewDisposed = false
+  void refreshEffortWire()
   const initialRouteFullPath = route.fullPath
   // Initialize session key. Without an explicit ?session= the view opens as a
   // draft instead of restoring a previous session.
@@ -3799,6 +4580,32 @@ onMounted(async () => {
     payload => applyRunModePreferenceChanged(payload),
   ))
 
+  // 回合结束桌面通知（turn-ended）。判据全在 composable 里：
+  // 仅桌面壳、窗口不聚焦、用户未关闭、且非 aborted。发不出去也不打扰主流程。
+  // 用 `text_snapshot`（`chat.done` 的权威快照）而不是 UI 里最后一条消息：
+  // 后者在流式收尾/history 替换的时序里可能还没落位。
+  unsubs.push(rpc.on('chat.done', (payload) => {
+    const p = (payload || {}) as {
+      reason?: string
+      text_snapshot?: string
+      textSnapshot?: string
+      text?: string
+      session_key?: string
+      sessionKey?: string
+      key?: string
+    }
+    // Side-chat turns share the WS bus. They must not fire the main turn-ended
+    // notification or refresh the main session's usage/pressure. Legacy frames
+    // without a session key still count as the current session.
+    const doneSession = String(p.session_key ?? p.sessionKey ?? p.key ?? '')
+    if (doneSession && doneSession !== sessionKey.value) return
+    const body = p.text_snapshot ?? p.textSnapshot ?? p.text ?? ''
+    void notifyTurnEnded({ text: body, reason: p.reason })
+    // 每回合结束后刷新用量/上下文压力：此前只在 config.get 时拉一次，
+    // 长会话里 chip 会一直停在旧压力值（等于不告警）。
+    void loadCurrentSessionUsage()
+  }))
+
   // Register event handlers before sessions.messages.subscribe can replay
   // buffered events, then start the two critical phases before any optional
   // config, usage, slash-command, or project-list RPC can enter the Gateway's
@@ -3810,6 +4617,79 @@ onMounted(async () => {
   unsubs.push(metaRuns.subscribe())
   unsubs.push(chatPlans.subscribe())
   unsubs.push(chatEscalations.subscribe())
+  // P2·E 编排活动日志：常驻订阅 agent.started/stopped，供状态条实时展示。
+  unsubs.push(orchActivity.subscribe())
+  // 编排执行时间线：后端 `ProgressReporter` 把 member / tool 过程发到本会话
+  // （`session.event.progress`，payload.kind = orchestration），这里接住并渲染。
+  unsubs.push(rpc.on('session.event.progress', (payload: unknown, meta?: unknown) => {
+    orchestrationRunsModel.handleFrame({
+      payload: (payload ?? undefined) as Record<string, unknown> | undefined,
+      meta: (meta ?? undefined) as { session?: string } | undefined,
+    })
+  }))
+  // 编排终态对账：进度帧可能永久丢失（真机 2026-10-24 —— 卡片停在「运行中 31s」，
+  // 独立 WS 客户端却收到了 run_completed）。原因可能是服务端写超时拆链、客户端 seq 断档
+  // 重连，而网关不做进度补发。这里在「仍有 running 的编排」时每 20s 拉一次
+  // `orchestration.status`（每个 run 的最后一条编排帧），只接受**终态帧**（幂等）：
+  // 一旦确认已完成/失败，卡片就收敛，不再依赖「终态帧刚好在线」。
+  // 没有 running 时该定时器零开销（一次数组遍历即返回）。
+  const reconcileOrchestration = async (): Promise<void> => {
+    const running = orchestrationRuns.value.filter(run => run.status === 'running')
+    if (!running.length) return
+    try {
+      const res = await rpc.call<{
+        runs?: Array<{ phase?: string; payload?: unknown; runId?: unknown }>
+        coveredSince?: unknown
+        historyOldest?: unknown
+      }>(
+        'orchestration.status',
+        { sessionKey: sessionKey.value },
+        // 对账是尽力而为：断线时不进 outbox（否则每 20s 堆一条永不结束的请求），
+        // 也不能让慢网关把 UI 拖住。
+        { timeoutMs: 8_000, queue: false },
+      )
+      const rows = res?.runs ?? []
+      const seen = new Set<string>()
+      for (const row of rows) {
+        const phase = typeof row.phase === 'string' ? row.phase : ''
+        if (typeof row.runId === 'string') seen.add(row.runId)
+        if (phase !== 'run_completed' && phase !== 'run_failed') continue
+        orchestrationRunsModel.handleFrame({
+          payload: (row.payload ?? undefined) as Record<string, unknown> | undefined,
+          meta: { session: sessionKey.value },
+        })
+      }
+      // 覆盖窗口已包含该 run 的起点、服务端却完全没有它的任何帧 → 这条记录已经不存在了
+      // （网关重启 / 后台任务被 kill / 进程崩溃）。如实收口为失败，不让卡片无限转圈。
+      // `historyOldest` 是缓冲里最旧一条的时间：比它还早的 run 可能只是被 2000 条上限挤掉，
+      // 不能据此判死（否则高频会话里仍在跑的长任务是会被误判）。
+      const sinceMs = typeof res?.coveredSince === 'string' ? Date.parse(res.coveredSince) : Number.NaN
+      const oldestMs = typeof res?.historyOldest === 'string' ? Date.parse(res.historyOldest) : Number.NaN
+      const floorMs = Math.max(
+        Number.isFinite(sinceMs) ? sinceMs : Number.NEGATIVE_INFINITY,
+        Number.isFinite(oldestMs) ? oldestMs : Number.NEGATIVE_INFINITY,
+      )
+      if (Number.isFinite(floorMs)) {
+        for (const run of running) {
+          if (seen.has(run.runId) || run.startedAtMs < floorMs) continue
+          orchestrationRunsModel.markRunLost(run.runId, t('chat.orchestration.runStateLost'))
+        }
+      }
+    } catch {
+      // 对账失败不打断对话：下一轮再试；旧网关不支持该方法时也会落到这里。
+    }
+  }
+  orchestrationReconcileTimer = setInterval(() => { void reconcileOrchestration() }, 20_000)
+  unsubs.push(() => {
+    if (orchestrationReconcileTimer !== null) {
+      clearInterval(orchestrationReconcileTimer)
+      orchestrationReconcileTimer = null
+    }
+  })
+  // 重连成功立刻对一次：断线窗口内的终态帧不会补发，只能靠这一次查询收敛。
+  watch(() => rpc.isConnected, (connected) => {
+    if (connected) void reconcileOrchestration()
+  })
   const sessionBootstrap = startSessionBootstrap({
     includeHistory: !initialSession.draft,
   })
@@ -4128,6 +5008,28 @@ watch(
 <style scoped src="../styles/chat-view.css"></style>
 
 <style scoped>
+/* 右侧面板打开 → 会话列向左平滑收缩（面板是 fixed 浮层，用 margin 让它真正让位，
+   而不是被盖住）。宽度变量由 usePanelResize 提供；拖动分割线时关掉过渡，
+   否则会话列会「追」着指针慢半拍。
+   用户开了「减少动态效果」→ 直接瞬移，不做收缩动画。 */
+.chat {
+  margin-right: calc(var(--right-panel-w, 0px) + var(--workbench-inset-right, 0px));
+  transition: margin-right var(--dur-base, 200ms) var(--ease-standard);
+}
+.chat--panel-resizing { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .chat { transition: none; }
+}
+
+/* 编排执行时间线在消息流末尾：与消息之间留出与普通消息一致的呼吸，
+   并限制宽度跟随消息列（避免在宽屏上被拉成一条横贯全屏的卡片）。 */
+.chat-orch-runs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0 var(--sp-5);
+}
+
 /* No shared sr-only utility exists in this repo (each component scopes its
    own), so the completion announcer's clip-out lives here: zero visual
    footprint, still exposed to assistive tech. */
@@ -4195,4 +5097,9 @@ watch(
 }
 .chat-usage-strip--foot { justify-content: center; opacity: 0.85; }
 .chat-usage-strip__item { white-space: nowrap; }
+/* 降级说明允许折行：它通常比 token 计数长，nowrap 会把原因截成一截。 */
+.chat-usage-strip__item--warn {
+  color: var(--warn);
+  white-space: normal;
+}
 </style>

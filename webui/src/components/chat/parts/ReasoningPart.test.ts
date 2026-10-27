@@ -25,6 +25,12 @@ const i18n = createI18n({
         thoughtProcess: 'Thought process',
         thoughtForSeconds: 'Thought for {seconds}s',
         thoughtForMinutes: 'Thought for {minutes}m {seconds}s',
+        reasoning: {
+          metrics: '{chars} chars',
+          metricsBlocks: '{chars} chars · {blocks} blocks',
+          copy: 'Copy reasoning',
+          copied: 'Copied',
+        },
       },
     },
   },
@@ -139,9 +145,51 @@ describe('ReasoningPart branches', () => {
     const host = mount({ part: part('fold trace', 4) })
     const fold = host.querySelector<HTMLDetailsElement>('details.thinking-fold')
     expect(fold).not.toBeNull()
-    expect(fold?.open).toBe(false)
+    // 短思考默认展开：用户不该为了看 5 个字的思考再点一次。
+    expect(fold?.open).toBe(true)
     expect(fold?.querySelector('.thinking-fold__chevron')).not.toBeNull()
     expect(fold?.querySelector('.thinking-fold__body')?.textContent)
       .toBe('fold trace')
+  })
+})
+
+describe('ReasoningPart thinking visualisation', () => {
+  it('opens the fold while streaming so the trace is visible as it grows', () => {
+    const host = mount({ part: part('streaming trace', 3), live: true })
+    expect(host.querySelector<HTMLDetailsElement>('details.thinking-fold')?.open).toBe(true)
+  })
+
+  it('keeps a short settled fold open so the trace is visible', () => {
+    const host = mount({ part: part('settled trace', 3) })
+    expect(host.querySelector<HTMLDetailsElement>('details.thinking-fold')?.open).toBe(true)
+  })
+
+  it('collapses a long settled fold to keep the transcript scannable', () => {
+    const longTrace = 'evidence '.repeat(100) // 900 字 > 600 字阈值
+    const host = mount({ part: part(longTrace, 42) })
+    expect(host.querySelector<HTMLDetailsElement>('details.thinking-fold')?.open).toBe(false)
+  })
+
+  it('shows real character metrics derived from the trace', () => {
+    const host = mount({ part: part('abcde', 4) })
+    expect(host.querySelector('.thinking-meta')?.textContent).toBe('5 chars')
+  })
+
+  it('counts blank-line separated blocks', () => {
+    const host = mount({ part: part('a\n\nb\n\nc', 4) })
+    // 7 chars（含两个空行）, 3 blocks
+    expect(host.querySelector('.thinking-meta')?.textContent).toBe('7 chars · 3 blocks')
+  })
+
+  it('hides copy affordance while streaming, offers it once settled', () => {
+    expect(mount({ part: part('abc', 2), live: true }).querySelector('.thinking-copy')).toBeNull()
+    expect(mount({ part: part('abc', 2) }).querySelector('.thinking-copy')).not.toBeNull()
+  })
+
+  it('renders nothing for an empty trace (no blank thinking fold)', () => {
+    const host = mount({ part: part('   ', 1) })
+    expect(host.querySelector('.thinking-meta')).toBeNull()
+    expect(host.querySelector('.thinking-fold')).toBeNull()
+    expect(host.querySelector('.thinking-block')).toBeNull()
   })
 })

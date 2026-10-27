@@ -47,6 +47,7 @@ from opensquilla.gateway.config import (
     is_public_bind,
 )
 from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+from opensquilla.gateway.loop_heartbeat import run_loop_heartbeat
 from opensquilla.gateway.rpc import get_dispatcher
 from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.gateway.session_lifecycle import (
@@ -1942,6 +1943,17 @@ _ASYNCIO_NOISE_CONNECTION_EXCEPTIONS: tuple[type[BaseException], ...] = (
 
 _ASYNCIO_NOISE_FILTER_ATTR = "_opensquilla_asyncio_noise_filter"
 
+# 断开噪声的**节流窗**（秒）：窗内只写第一行，其余只计数不逐条写。
+#
+# 【为什么逐条写是个缺陷，哪怕只在 DEBUG 下】抑制器的职责就是日志卫生，但实测
+# 它成了它本要消除的东西：一份 391KB 的 debug.log 共 2373 行，其中 **1958 行（82%）**
+# 是同一条 `asyncio client disconnect noise suppressed`（15:15–15:19 每 2–8 秒一条），
+# 把真正有用的行全淹没。浏览器每次刷新/关页都会触发一次，逐条落下必然刷屏。
+# 节流后仍保留「挂断被看见过」的可诊断性（首行 + 下次窗口首行带上次累计次数），
+# 且**单次调用仍恰好写一行** —— `test_benign_noise_is_debug_only_when_debug_is_enabled`
+# 的既有契约不变。
+_ASYNCIO_NOISE_THROTTLE_SECONDS = 60.0
+
 
 def _is_asyncio_connection_noise(context: Mapping[str, Any]) -> bool:
     """Return True when a loop exception report is just a client hangup.
@@ -1965,17 +1977,42 @@ def _is_asyncio_connection_noise(context: Mapping[str, Any]) -> bool:
 
 
 def _make_asyncio_connection_noise_handler() -> Callable[[Any, dict[str, Any]], None]:
-    """Build the loop exception handler that silences client-disconnect noise."""
+    """Build the loop exception handler that silences client-disconnect noise.
+
+    The throttle window lives **in this closure**, not at module level: each
+    built handler owns its own window, so a handler built in one test cannot
+    swallow the first line another test expects to see.
+    """
+
+    window_start = float("-inf")
+    suppressed = 0
 
     def _handler(loop: Any, context: dict[str, Any]) -> None:
+        nonlocal window_start, suppressed
         if _is_asyncio_connection_noise(context):
             # Respect the existing OPENSQUILLA_LOG_LEVEL switch: at WARNING or
-            # ERROR a DEBUG line is invisible anyway, so stay silent.
+            # ERROR the throttled DEBUG line is invisible anyway, so stay silent.
             if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
-                logging.getLogger(__name__).debug(
-                    "asyncio client disconnect noise suppressed: %s",
-                    context.get("message"),
-                )
+                now = time.monotonic()
+                if now - window_start < _ASYNCIO_NOISE_THROTTLE_SECONDS:
+                    suppressed += 1
+                else:
+                    carried, suppressed = suppressed, 0
+                    window_start = now
+                    logger = logging.getLogger(__name__)
+                    if carried:
+                        logger.debug(
+                            "asyncio client disconnect noise suppressed: %s "
+                            "(carried over: %d more in the previous %.0fs)",
+                            context.get("message"),
+                            carried,
+                            _ASYNCIO_NOISE_THROTTLE_SECONDS,
+                        )
+                    else:
+                        logger.debug(
+                            "asyncio client disconnect noise suppressed: %s",
+                            context.get("message"),
+                        )
             return
         loop.default_exception_handler(context)
 
@@ -2045,6 +2082,7 @@ class GatewayServer:
     _task: asyncio.Task | None = field(default=None, repr=False)
     _preview_server: uvicorn.Server | None = field(default=None, repr=False)
     _preview_task: asyncio.Task | None = field(default=None, repr=False)
+    _loop_heartbeat_task: asyncio.Task | None = field(default=None, repr=False)
     _preview_socket: socket.socket | None = field(default=None, repr=False)
     _preview_service: Any = field(default=None, repr=False)
     _channel_manager: Any = field(default=None, repr=False)
@@ -2150,6 +2188,11 @@ class GatewayServer:
                         await asyncio.wait_for(preview_task, timeout=5.0)
                     except TimeoutError:
                         preview_task.cancel()
+                # The loop heartbeat is a plain sleep loop; cancel it so it is
+                # never left pending after the gateway stops accepting work.
+                heartbeat_task = getattr(self, "_loop_heartbeat_task", None)
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
                 if preview_socket is not None:
                     preview_socket.close()
                 if self._services is not None:
@@ -4750,6 +4793,15 @@ async def start_gateway_server(
         listener_scheduled_at = time.monotonic()
         task = create_background_task(server.serve())
         server_handle._task = task
+
+        # Event-loop liveness heartbeat (P0-2): a coroutine that only
+        # progresses while this gateway's event loop actually turns. /ready
+        # compares its last tick against MARGUERITE_SIDECAR_STALL_SECS so a
+        # wedged loop (TCP answers, no work happens) self-reports as 503.
+        app.state.loop_last_tick = time.time()
+        heartbeat_task = create_background_task(run_loop_heartbeat(app.state))
+        app.state.loop_heartbeat_task = heartbeat_task
+        server_handle._loop_heartbeat_task = heartbeat_task
 
         # Warn loudly before the normal started line so operators
         # see the network-exposure notice even on info-level log streams.

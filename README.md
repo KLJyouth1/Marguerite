@@ -8,12 +8,13 @@ A terminal-first, local-first agent workbench — CLI, TUI, Tauri desktop and a
 loopback web console all driving the same engine, the same sessions and the same
 memory. No account, no cloud relay, no telemetry.
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/KLJyouth1/Marguerite/actions/workflows/ci.yml/badge.svg)](https://github.com/KLJyouth1/Marguerite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
 [![Tests](https://img.shields.io/badge/core%20tests-2704%20passing-brightgreen.svg)](#-quality-gates)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-security-model)
+[![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-recursive-self-improvement)
 
 [Docs](docs/README.md) · [Architecture](docs/architecture.md) · [CLI reference](docs/cli-reference.md) · [Contributing](CONTRIBUTING.md)
 
@@ -85,6 +86,54 @@ Three design rules fall out of that, and they are enforced in code, not just in 
    execution; `CompletionGate` verifies claimed artifacts actually landed on disk
    *after*. A run that claims a file it never wrote fails its own completion check.
 
+## 🧬 Recursive self-improvement
+
+Most agent tooling stops at *it ran*. Marguerite asks the next question:
+**did this run make the next one easier?** A loop repeats; a flywheel compounds.
+The harness is built around that distinction.
+
+The parts already ship. `harness/meta.rs` runs *monitor → diagnose → plan →
+sandbox-evaluate → version-close*; `evolve.rs` keeps round history with rollback;
+`eval.rs` scores runs; `ledger.rs` replays deterministically. What is being added
+now is **reach** — which objects may be improved — and **gates** — which
+improvements are allowed to survive.
+
+| Layer | Responsibility | Lives in |
+|---|---|---|
+| **L1** inner loop | observe → decide → act → observe; every step emits *completion evidence*, not just "done" | `agent/stream_loop.rs` |
+| **L2** shared stack | tool / skill / hand-off / verification — four layers reused across tasks, so one fix benefits many | `tools/`, `agent/` |
+| **L3** outer loop | diagnose → targeted data → candidate → sandbox replay → adopt or roll back | `harness/evolve.rs` |
+| **L4** gates | selection (gain) · regression (per-task loss cap) · cost (token + latency) | `harness/meta.rs` |
+| **L5** meta | the gates themselves, the data policy and the eval set become change targets | `harness/meta.rs` |
+
+**Ten objects, one loop.** Improvement is not limited to the system prompt:
+
+> main agent · sub-agent · sub-sub-agent · expert (43 roles) · team (8) ·
+> swarm · memory · experience · knowledge base · skills and tools
+
+**Three boundaries, enforced by types rather than by prose:**
+
+| Boundary | How it is held |
+|---|---|
+| Core source is **not** a change target | `ChangeTarget` has no such variant; a guard test asserts its absence |
+| **Nothing auto-ships** | `MetaPolicy::auto_apply` defaults to `false`; proposals queue for human approval before staged rollout |
+| **Cost is a gate** | token and latency growth are measured against baseline — "better and twice as expensive" is rejected |
+
+**Why a regression gate, and not just a score.** From the published record: total
+success climbed from 7 of 50 to 11 of 50 while one task quietly lost two previously-passing
+states. The aggregate read as progress. It was rejected. *A number that rises while
+a capability falls is not improvement* — so a candidate must clear a per-task loss
+cap and a protected-task list before its total is even looked at.
+
+**Telling recursive from merely iterative.** Each round reports `delta` (speed),
+`delta_of_delta` (acceleration) and `reuse_rate` — the share of last round's
+distilled knowledge that this round actually called. If nothing from last round was
+reused, the system is relearning, not compounding.
+
+<sub>L1–L4 exist today. Extending reach past the current six change targets, and adding
+the regression gate and the acceleration report, is the active work — see
+[docs/prd/2026-10-26-rsi-roadmap.md](docs/prd/2026-10-26-rsi-roadmap.md).</sub>
+
 ## 🚀 Quickstart
 
 ### Prerequisites
@@ -108,7 +157,7 @@ for the exact list.
 ### Try it with no API key (about 60 seconds)
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
+git clone https://github.com/KLJyouth1/Marguerite.git
 cd REPO
 
 # Fast path: just the CLI. Compiles in a minute or two.
@@ -172,7 +221,7 @@ that reports each capability as fully implemented, partial, or narrative-only:
 
 ```bash
 ./target/debug/marguerite-core capabilities
-# 89 total | 85 implemented (78 real + 7 partial) | 4 narrative-only
+# 97 total | 96 implemented (85 real + 11 partial) | 1 narrative-only
 ```
 
 The parts worth your attention:
@@ -244,6 +293,7 @@ Rust-built gateway in the same job (tracked as follow-up, not silently claimed).
 | Gate | Result |
 |---|---|
 | `cargo test -p marguerite-core --lib` | 2704 passed / 0 failed / 17 ignored |
+| core integration tests (`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`) | offline and deterministic; `third_party_integration` is `[SKIP]` when `third_party/` is absent (a skip is never counted as a pass) |
 | `webui` unit tests (Vitest) | 3509 passed / 0 failed (331 files) |
 | `pyengine` unit tests (pytest, `tests/unit`) | 768 passed / 0 failed / 6 skipped |
 | `pyengine` gateway contracts (pytest, `tests/test_gateway`) | 2929 passed / 0 failed / 11 skipped |
@@ -325,7 +375,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
 
 - Version numbers across the four front ends are now pinned to `core/Cargo.toml`
   and enforced by `scripts/check-version-sync.py` in CI. The engine version is
-  authoritative (`marguerite-core --version`; currently `0.2.13`).
+  authoritative (`marguerite-core --version`; currently `0.2.17`).
 - The desktop app expects the web console bundle next to it. Run it from a packaged
   installer or from the repository — a bare copied `.exe` cannot serve a console it
   does not have. Since this round it no longer fails silently in that case: the
@@ -337,14 +387,16 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   its own Python backend (`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`),
   its own React SPA served by FastAPI on `:8011`, its own packaging pipeline, and
   **its own version line** (`workbench/VERSION`, currently `1.1.0` — independent of the
-  engine's `0.2.13`). It bridges the core store through `core_bridge`, in the same spirit
+  engine's `0.2.17`). It bridges the core store through `core_bridge`, in the same spirit
   as `pyengine/`; the Rust binaries do not import it. Its 71 offline tests and its
   version gate had never been run by any gate until this round, even though the
   sub-project ships — `verify.sh --workbench` now covers both.
-- `gui/src` contains a React front end that is **not currently reachable** from the
-  product UI: the Tauri window loads the gateway URL (`http://127.0.0.1:18790/control/`),
-  which serves the Vue console, so the React app is built by CI but never shown. It
-  needs to be either wired up or removed — currently scheduled for removal.
+- `gui/src` — the React front end that CI built but the product UI never showed — **has
+  been removed**. The Tauri window loads the gateway URL (`http://127.0.0.1:18790/control/`),
+  which serves the Vue console, so `gui/` is now a **pure shell** and `webui/` is the single
+  front end. The archived tree is kept at `docs/legacy/gui-react-2026-10-21/`; three guards
+  (`check_gui_shell_config.py`, the tail of `check-tokens-sync.mjs`, and
+  `verify:no-frontend`) fail if it reappears.
 - The README ships in English and Simplified Chinese only, while the app UI is
   localized into six locales (en, zh-Hans, ja, fr, de, es). The locale-parity guard
   treats the missing README translations as a reported gap, not a build failure.
@@ -432,7 +484,7 @@ This is the **source** repository. Two sibling repositories carry the binaries a
 |---|---|
 | **[Marguerite](https://github.com/KLJyouth1/Marguerite)** — this repo | Rust engine, TUI, Tauri desktop app, loopback web console, Python sidecar |
 | **[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases)** | Installers: `.msi` (WiX) and `-setup.exe` (NSIS), each release with `SHA256SUMS.txt` |
-| **[OmniPilot](https://github.com/KLJyouth1/OmniPilot)** | The companion local agent model: fp16 GGUF / safetensors weights, 7-Zip split archives, inference notes |
+| **[KLJyouth-office-Modle](https://github.com/KLJyouth1/KLJyouth-office-Modle)** | The companion local decision model (Qwen2.5-1.5B + 4-bit QLoRA, ~4.4M trainable params): tool-domain/tool selection, accept-reject scoring, abstain. fp16 GGUF / safetensors / q4_K_M, with SHA256SUMS. |
 
 Just want to **run** Marguerite? Download an installer from
 [Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases/releases/latest).

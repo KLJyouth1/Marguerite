@@ -1,3 +1,5 @@
+import { notifyReadFailure } from '@/utils/readFailureNotice'
+
 export interface PendingMetaDiscard {
   sessionKey: string
   clientRequestId: string
@@ -47,11 +49,17 @@ function read(storage: MetaDiscardStorage | null): PendingMetaDiscard[] {
     const raw = storage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
+    if (!Array.isArray(parsed)) {
+      notifyReadFailure('meta-discard', 'shared.storage.metaDiscardReadFailed')
+      return []
+    }
     return parsed
       .map(value => normalize(value))
       .filter((value): value is PendingMetaDiscard => value !== null)
   } catch {
+    // 丢弃墓碑读不出来 = 已被取消的草稿可能又变成「可以启动」。
+    // 可恢复（覆盖坏键即可），用 toast 明确告知一次。
+    notifyReadFailure('meta-discard', 'shared.storage.metaDiscardReadFailed')
     return []
   }
 }

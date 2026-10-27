@@ -2,12 +2,12 @@
   <div class="control-stage engine-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">引擎健康 · 模型 · 模式</h1>
-        <p class="control-stage__subtitle">能力透明化：能力健康度 / Rust 模型档案 / 重型运行时 / 运行时模式</p>
+        <h1 class="control-stage__title">{{ t('engineHealth.title') }}</h1>
+        <p class="control-stage__subtitle">{{ t('engineHealth.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
         <button class="btn btn--ghost" @click="loadAll">
-          <Icon name="refresh" :size="16" /><span>刷新</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('engineHealth.refresh') }}</span>
         </button>
       </div>
     </header>
@@ -16,47 +16,54 @@
 
     <!-- 能力健康度 -->
     <section v-if="stats" class="engine-card">
-      <div class="engine-card__title">Agent 能力健康度（plans.capabilities）</div>
+      <div class="engine-card__title">{{ t('engineHealth.capabilitiesTitle') }}</div>
       <div class="engine-pills">
-        <span class="engine-pill">已实装 <b>{{ stats.implemented }}</b>/{{ stats.total }}</span>
-        <span class="engine-pill engine-pill--accent">真货 {{ stats.real }}</span>
-        <span class="engine-pill">部分 {{ stats.partial }}</span>
-        <span class="engine-pill engine-pill--dim">纯叙事 {{ stats.narrative }}</span>
+        <span class="engine-pill">{{ t('engineHealth.implemented', { done: stats.implemented, total: stats.total }) }}</span>
+        <span class="engine-pill engine-pill--accent">{{ t('engineHealth.real', { count: stats.real }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.partial', { count: stats.partial }) }}</span>
+        <span class="engine-pill engine-pill--dim">{{ t('engineHealth.narrative', { count: stats.narrative }) }}</span>
       </div>
-      <div v-if="narrative.length" class="engine-note">规划中（用户安装后翻转）：{{ narrative.join(' / ') }}</div>
+      <div v-if="narrative.length" class="engine-note">{{ t('engineHealth.planned', { list: narrative.join(' / ') }) }}</div>
     </section>
 
     <!-- 模型档案 -->
     <section v-if="models" class="engine-card">
-      <div class="engine-card__title">Rust 模型档案（models.profiles.list）</div>
+      <div class="engine-card__title">{{ t('engineHealth.profilesTitle') }}</div>
       <div v-if="!models.ok" class="engine-note">{{ models.error }}</div>
       <table v-else class="engine-table">
         <thead>
-          <tr><th>档案</th><th>provider / model</th><th>类别</th><th>主模型</th><th>副模型</th><th></th></tr>
+          <tr>
+            <th>{{ t('engineHealth.colProfile') }}</th>
+            <th>provider / model</th>
+            <th>{{ t('engineHealth.colKind') }}</th>
+            <th>{{ t('engineHealth.colPrimary') }}</th>
+            <th>{{ t('engineHealth.colCopilot') }}</th>
+            <th></th>
+          </tr>
         </thead>
         <tbody>
           <tr v-for="p in models.profiles" :key="p.id">
             <td><b>{{ p.label }}</b><code class="engine-code">{{ p.id }}</code></td>
             <td>{{ p.provider }} / {{ p.model }}</td>
-            <td>{{ p.kind }}{{ p.builtin ? ' · 内置' : '' }}</td>
-            <td>{{ p.active ? '★ 当前' : '' }}</td>
-            <td>{{ p.copilot ? '◇ 当前' : '' }}</td>
+            <td>{{ p.kind }}{{ p.builtin ? t('engineHealth.builtinSuffix') : '' }}</td>
+            <td>{{ p.active ? t('engineHealth.currentMark') : '' }}</td>
+            <td>{{ p.copilot ? t('engineHealth.copilotMark') : '' }}</td>
             <td class="engine-actions">
-              <button class="btn btn--sm btn--primary" :disabled="busy || p.active" @click="setActive(p.id)">设为主模型</button>
-              <button class="btn btn--sm btn--ghost" :disabled="busy || p.copilot" @click="setCopilot(p.id)">设为副模型</button>
-              <button class="btn btn--sm btn--ghost" :disabled="busy || p.active" @click="removeModel(p.id)">删除</button>
+              <button class="btn btn--sm btn--primary" :disabled="busy || p.active" @click="setActive(p.id)">{{ t('engineHealth.setPrimary') }}</button>
+              <button class="btn btn--sm btn--ghost" :disabled="busy || p.copilot" @click="setCopilot(p.id)">{{ t('engineHealth.setCopilot') }}</button>
+              <button class="btn btn--sm btn--ghost" :disabled="busy || p.active" @click="removeModel(p.id)">{{ t('common.delete') }}</button>
             </td>
           </tr>
         </tbody>
       </table>
       <div v-if="models && models.ok" class="engine-actions engine-actions--footer">
-        <button class="btn btn--sm btn--ghost" :disabled="busy || !models.copilot" @click="setCopilot('')">关闭副模型</button>
-        <button class="btn btn--sm btn--ghost" :disabled="busy" @click="openModelConfig">打开模型配置文件</button>
+        <button class="btn btn--sm btn--ghost" :disabled="busy || !models.copilot" @click="setCopilot('')">{{ t('engineHealth.disableCopilot') }}</button>
+        <button class="btn btn--sm btn--ghost" :disabled="busy" @click="openModelConfig">{{ t('engineHealth.openConfig') }}</button>
       </div>
       <div class="engine-form">
-        <div class="engine-form__title">新增自定义模型档案</div>
+        <div class="engine-form__title">{{ t('engineHealth.addProfileTitle') }}</div>
         <div class="engine-form__row">
-          <input v-model="newModel.id" class="engine-input" placeholder="id（如 my-llama）" />
+          <input v-model="newModel.id" class="engine-input" :placeholder="t('engineHealth.idPlaceholder')" />
           <select v-model="newModel.provider" class="engine-input">
             <option value="custom">custom</option>
             <option value="openai">openai</option>
@@ -64,21 +71,21 @@
             <option value="anthropic">anthropic</option>
             <option value="ollama">ollama</option>
           </select>
-          <input v-model="newModel.model" class="engine-input" placeholder="model（如 gpt-4o-mini / qwen3.8:27b）" />
-          <input v-model="newModel.baseUrl" class="engine-input" placeholder="baseUrl（可选，内置 provider 可留空）" />
+          <input v-model="newModel.model" class="engine-input" :placeholder="t('engineHealth.modelPlaceholder')" />
+          <input v-model="newModel.baseUrl" class="engine-input" :placeholder="t('engineHealth.baseUrlPlaceholder')" />
           <select v-model="newModel.kind" class="engine-input">
             <option value="cloud">cloud</option>
             <option value="custom">custom</option>
-            <option value="local">local（过 shipped gate）</option>
+            <option value="local">{{ t('engineHealth.kindLocal') }}</option>
           </select>
-          <button class="btn btn--sm btn--primary" :disabled="busy || !newModel.id || !newModel.model" @click="addModel">新增</button>
+          <button class="btn btn--sm btn--primary" :disabled="busy || !newModel.id || !newModel.model" @click="addModel">{{ t('engineHealth.add') }}</button>
         </div>
         <div v-if="newModel.kind === 'local'" class="engine-form__checks">
-          <label class="engine-check"><input type="checkbox" v-model="newModel.weightsPresent" /> 权重已实际下载</label>
-          <label class="engine-check"><input type="checkbox" v-model="newModel.runtimeSupports" /> 本机运行时支持</label>
-          <label class="engine-check"><input type="checkbox" v-model="newModel.requireGate" /> 强制 gate 校验</label>
-          <label class="engine-check"><input type="checkbox" v-model="newModel.force" /> 强制跳过 gate</label>
-          <input v-model="newModel.catalogId" class="engine-input engine-input--sm" placeholder="catalogId（可选，精确命中聚合目录）" />
+          <label class="engine-check"><input type="checkbox" v-model="newModel.weightsPresent" /> {{ t('engineHealth.weightsPresent') }}</label>
+          <label class="engine-check"><input type="checkbox" v-model="newModel.runtimeSupports" /> {{ t('engineHealth.runtimeSupports') }}</label>
+          <label class="engine-check"><input type="checkbox" v-model="newModel.requireGate" /> {{ t('engineHealth.requireGate') }}</label>
+          <label class="engine-check"><input type="checkbox" v-model="newModel.force" /> {{ t('engineHealth.forceSkipGate') }}</label>
+          <input v-model="newModel.catalogId" class="engine-input engine-input--sm" :placeholder="t('engineHealth.catalogIdPlaceholder')" />
         </div>
         <div v-if="modelError" class="engine-note">{{ modelError }}</div>
         <GateReport v-if="gateResult" :report="gateResult" />
@@ -87,74 +94,87 @@
 
     <!-- 重型运行时 -->
     <section v-if="runtimes.length" class="engine-card">
-      <div class="engine-card__title">重型运行时（runtime.status）</div>
+      <div class="engine-card__title">{{ t('engineHealth.runtimesTitle') }}</div>
       <div v-for="r in runtimes" :key="r.kind" class="runtime-row">
         <div class="runtime-row__head">
           <span class="runtime-badge">{{ r.status }}</span>
           <b>{{ r.label }}</b>
           <span class="runtime-engine">{{ r.engine }}</span>
         </div>
-        <p class="runtime-download">下载源：<a class="runtime-link" :href="firstUrl(r.download)" target="_blank" rel="noopener">{{ r.download }}</a></p>
+        <p class="runtime-download">{{ t('engineHealth.downloadSource') }}<a class="runtime-link" :href="firstUrl(r.download)" target="_blank" rel="noopener">{{ r.download }}</a></p>
         <p class="runtime-note">{{ r.guidance }}</p>
       </div>
     </section>
 
     <!-- MCP 服务器管理 -->
     <section v-if="mcp" class="engine-card">
-      <div class="engine-card__title">MCP 服务器（mcp.servers.list / add / remove / probe）</div>
+      <div class="engine-card__title">{{ t('engineHealth.mcpTitle') }}</div>
       <div v-if="!mcp.ok" class="engine-note">{{ mcp.error }}</div>
       <table v-if="mcp.servers.length" class="engine-table">
-        <thead><tr><th>名称</th><th>url / command</th><th>动作</th></tr></thead>
+        <thead>
+          <tr>
+            <th>{{ t('engineHealth.colName') }}</th>
+            <th>url / command</th>
+            <th>{{ t('engineHealth.colActions') }}</th>
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="s in mcp.servers" :key="s.name">
             <td><b>{{ s.name }}</b></td>
             <td>{{ s.url || (s.command + ' ' + s.args.join(' ')) }}</td>
             <td class="engine-actions">
-              <button class="btn btn--sm btn--ghost" :disabled="busy" @click="probeMcp(s.name)">探测</button>
-              <button class="btn btn--sm btn--ghost" :disabled="busy" @click="removeMcp(s.name)">删除</button>
+              <button class="btn btn--sm btn--ghost" :disabled="busy" @click="probeMcp(s.name)">{{ t('engineHealth.probe') }}</button>
+              <button class="btn btn--sm btn--ghost" :disabled="busy" @click="removeMcp(s.name)">{{ t('common.delete') }}</button>
             </td>
           </tr>
         </tbody>
       </table>
-      <div v-else class="engine-note">未配置 MCP 服务器（支持 URL 型 HTTP MCP 与 command 型 stdio MCP）</div>
+      <div v-else class="engine-note">{{ t('engineHealth.mcpEmpty') }}</div>
       <div v-for="(text, name) in probeResults" :key="name" class="engine-note"><b>{{ name }}</b>：{{ text }}</div>
       <div class="engine-form">
-        <div class="engine-form__title">新增 MCP 服务器（URL 或 command）</div>
+        <div class="engine-form__title">{{ t('engineHealth.addMcpTitle') }}</div>
         <div class="engine-form__row">
-          <input v-model="newMcp.name" class="engine-input" placeholder="名称" />
-          <input v-model="newMcp.url" class="engine-input" placeholder="http://127.0.0.1:18799/mcp（可选）" />
-          <input v-model="newMcp.command" class="engine-input" placeholder="command（如 npx -y @modelcontextprotocol/server-filesystem）" />
-          <button class="btn btn--sm btn--primary" :disabled="busy || !newMcp.name || (!newMcp.url && !newMcp.command)" @click="addMcp">新增</button>
+          <input v-model="newMcp.name" class="engine-input" :placeholder="t('engineHealth.mcpNamePlaceholder')" />
+          <input v-model="newMcp.url" class="engine-input" :placeholder="t('engineHealth.mcpUrlPlaceholder')" />
+          <input v-model="newMcp.command" class="engine-input" :placeholder="t('engineHealth.mcpCommandPlaceholder')" />
+          <button class="btn btn--sm btn--primary" :disabled="busy || !newMcp.name || (!newMcp.url && !newMcp.command)" @click="addMcp">{{ t('engineHealth.add') }}</button>
         </div>
       </div>
     </section>
 
     <!-- 任务执行质量（长时任务台账） -->
     <section v-if="longTasks.length" class="engine-card">
-      <div class="engine-card__title">Omni-Agent 质量评分卡（long_running.list）</div>
+      <div class="engine-card__title">{{ t('engineHealth.qualityTitle') }}</div>
       <div class="engine-pills">
-        <span class="engine-pill">总数 {{ qualityStats.total }}</span>
-        <span class="engine-pill engine-pill--accent">进行中 {{ qualityStats.running }}</span>
-        <span class="engine-pill">完成 {{ qualityStats.completed }}（{{ qualityStats.completionRate }}%）</span>
-        <span class="engine-pill">失败 {{ qualityStats.failed }}</span>
-        <span class="engine-pill">暂停 {{ qualityStats.paused }}</span>
-        <span class="engine-pill engine-pill--dim">中断 {{ qualityStats.interrupted }}</span>
-        <span class="engine-pill">检查点 {{ qualityStats.checkpoints }}</span>
-        <span class="engine-pill">重试 {{ qualityStats.retries }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qTotal', { count: qualityStats.total }) }}</span>
+        <span class="engine-pill engine-pill--accent">{{ t('engineHealth.qRunning', { count: qualityStats.running }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qCompleted', { count: qualityStats.completed, rate: qualityStats.completionRate }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qFailed', { count: qualityStats.failed }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qPaused', { count: qualityStats.paused }) }}</span>
+        <span class="engine-pill engine-pill--dim">{{ t('engineHealth.qInterrupted', { count: qualityStats.interrupted }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qCheckpoints', { count: qualityStats.checkpoints }) }}</span>
+        <span class="engine-pill">{{ t('engineHealth.qRetries', { count: qualityStats.retries }) }}</span>
       </div>
       <div class="engine-pills engine-pills--score">
-        <span class="engine-pill engine-pill--accent">Omni 质量评分 {{ qualityScore }}</span>
+        <span class="engine-pill engine-pill--accent">{{ t('engineHealth.qScore', { score: qualityScore }) }}</span>
         <span class="engine-pill">{{ qualityGrade }}</span>
-        <span class="engine-pill engine-pill--dim">评分 = 完成率×0.9 + 检查点奖励 − 失败/中断惩罚 − 重试惩罚（0–100）</span>
+        <span class="engine-pill engine-pill--dim">{{ t('engineHealth.qFormula') }}</span>
       </div>
       <table class="engine-table">
-        <thead><tr><th>任务</th><th>状态</th><th>重试</th><th>检查点</th></tr></thead>
+        <thead>
+          <tr>
+            <th>{{ t('engineHealth.colTask') }}</th>
+            <th>{{ t('engineHealth.colStatus') }}</th>
+            <th>{{ t('engineHealth.colRetries') }}</th>
+            <th>{{ t('engineHealth.colCheckpoints') }}</th>
+          </tr>
+        </thead>
         <tbody>
-          <tr v-for="t in recentTasks" :key="t.taskId">
-            <td><b>{{ t.goal || t.taskId }}</b></td>
-            <td>{{ t.status }}</td>
-            <td>{{ t.retryCount }}/{{ t.maxRetries }}</td>
-            <td>{{ t.checkpoints?.length ?? 0 }}</td>
+          <tr v-for="task in recentTasks" :key="task.taskId">
+            <td><b>{{ task.goal || task.taskId }}</b></td>
+            <td>{{ task.status }}</td>
+            <td>{{ task.retryCount }}/{{ task.maxRetries }}</td>
+            <td>{{ task.checkpoints?.length ?? 0 }}</td>
           </tr>
         </tbody>
       </table>
@@ -162,9 +182,9 @@
 
     <!-- 运行时模式 -->
     <section v-if="mode" class="engine-card">
-      <div class="engine-card__title">运行时模式（mode.get / mode.switch）</div>
+      <div class="engine-card__title">{{ t('engineHealth.modeTitle') }}</div>
       <div class="engine-pills">
-        <span class="engine-pill engine-pill--accent">当前：{{ modeLabel }}</span>
+        <span class="engine-pill engine-pill--accent">{{ t('engineHealth.current', { mode: modeLabel }) }}</span>
       </div>
       <div class="engine-actions engine-actions--footer">
         <button
@@ -182,6 +202,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import GateReport from '@/components/model/GateReport.vue'
 import type { GateReport as GateReportData } from '@/components/model/gateTypes'
@@ -189,6 +210,7 @@ import { useRpcStore } from '@/stores/rpc'
 import { useActiveMode, switchActiveMode } from '@/composables/useActiveMode'
 
 const rpc = useRpcStore()
+const { t } = useI18n()
 
 interface RuntimeItem { kind: string; label: string; bundled: boolean; status: string; engine: string; download: string; guidance: string }
 interface ModelProfile { id: string; label: string; provider: string; model: string; kind: string; builtin: boolean; active: boolean; copilot: boolean }
@@ -239,32 +261,32 @@ const modeLabel = computed(() => {
 })
 
 const qualityStats = computed(() => {
-  const t = longTasks.value
-  const count = (s: string) => t.filter(x => x.status === s).length
+  const tasks = longTasks.value
+  const count = (s: string) => tasks.filter(x => x.status === s).length
   return {
-    total: t.length,
+    total: tasks.length,
     running: count('running') + count('resumed'),
     paused: count('paused'),
     completed: count('completed'),
     failed: count('failed'),
     interrupted: count('interrupted'),
-    checkpoints: t.reduce((n, x) => n + (x.checkpoints?.length ?? 0), 0),
-    retries: t.reduce((n, x) => n + (x.retryCount ?? 0), 0),
-    completionRate: t.length ? Math.round((count('completed') / t.length) * 100) : 0,
+    checkpoints: tasks.reduce((n, x) => n + (x.checkpoints?.length ?? 0), 0),
+    retries: tasks.reduce((n, x) => n + (x.retryCount ?? 0), 0),
+    completionRate: tasks.length ? Math.round((count('completed') / tasks.length) * 100) : 0,
   }
 })
 
 const qualityScore = computed(() => {
-  const t = longTasks.value
-  if (!t.length) return 0
-  const done = t.filter(x => x.status === 'completed').length
-  const fail = t.filter(x => x.status === 'failed').length
-  const intr = t.filter(x => x.status === 'interrupted').length
-  const retries = t.reduce((n, x) => n + (x.retryCount ?? 0), 0)
-  const cps = t.reduce((n, x) => n + (x.checkpoints?.length ?? 0), 0)
-  const completion = (done / t.length) * 100
-  const penalty = ((fail + intr) / t.length) * 45
-  const checkpointBonus = Math.min((cps / t.length) * 8, 12)
+  const tasks = longTasks.value
+  if (!tasks.length) return 0
+  const done = tasks.filter(x => x.status === 'completed').length
+  const fail = tasks.filter(x => x.status === 'failed').length
+  const intr = tasks.filter(x => x.status === 'interrupted').length
+  const retries = tasks.reduce((n, x) => n + (x.retryCount ?? 0), 0)
+  const cps = tasks.reduce((n, x) => n + (x.checkpoints?.length ?? 0), 0)
+  const completion = (done / tasks.length) * 100
+  const penalty = ((fail + intr) / tasks.length) * 45
+  const checkpointBonus = Math.min((cps / tasks.length) * 8, 12)
   const retryPenalty = Math.min(retries * 6, 18)
   const raw = completion * 0.9 + checkpointBonus - penalty * 0.6 - retryPenalty
   return Math.max(0, Math.min(100, Math.round(raw)))
@@ -272,10 +294,10 @@ const qualityScore = computed(() => {
 
 const qualityGrade = computed(() => {
   const s = qualityScore.value
-  if (s >= 90) return '优'
-  if (s >= 75) return '良'
-  if (s >= 60) return '合格'
-  return '待改进'
+  if (s >= 90) return t('engineHealth.gradeExcellent')
+  if (s >= 75) return t('engineHealth.gradeGood')
+  if (s >= 60) return t('engineHealth.gradePass')
+  return t('engineHealth.gradeNeedsWork')
 })
 
 const recentTasks = computed(() => [...longTasks.value].sort((a, b) => b.startedAtMs - a.startedAtMs).slice(0, 8))
@@ -301,11 +323,11 @@ async function loadAll() {
     // 当成加载失败，把 `not connected (state: connecting)` 裸串渲染给用户。
     if (!rpc.isConnected) await rpc.waitForConnection(10_000)
     const [rt, mp, caps, mc, lr] = await Promise.all([
-      safe(() => rpc.call<RuntimeItem[]>('runtime.status', {}), '加载失败'),
-      safe(() => rpc.call<ModelsPayload>('models.profiles.list', {}), '加载失败'),
-      safe(() => rpc.call<CapabilitiesPayload>('plans.capabilities', {}), '加载失败'),
-      safe(() => rpc.call<McpPayload>('mcp.servers.list', {}), '加载失败'),
-      safe(() => rpc.call<LongTasksPayload>('long_running.list', {}), '加载失败'),
+      safe(() => rpc.call<RuntimeItem[]>('runtime.status', {}), t('engineHealth.loadFailed')),
+      safe(() => rpc.call<ModelsPayload>('models.profiles.list', {}), t('engineHealth.loadFailed')),
+      safe(() => rpc.call<CapabilitiesPayload>('plans.capabilities', {}), t('engineHealth.loadFailed')),
+      safe(() => rpc.call<McpPayload>('mcp.servers.list', {}), t('engineHealth.loadFailed')),
+      safe(() => rpc.call<LongTasksPayload>('long_running.list', {}), t('engineHealth.loadFailed')),
     ])
     if (rt) runtimes.value = Array.isArray(rt) ? rt : []
     if (mp) models.value = mp
@@ -316,7 +338,7 @@ async function loadAll() {
     if (mc) mcp.value = mc
     if (lr) longTasks.value = Array.isArray(lr.tasks) ? lr.tasks : []
   } catch (e) {
-    error.value = `加载失败: ${e instanceof Error ? e.message : String(e)}`
+    error.value = `${t('engineHealth.loadFailed')}: ${e instanceof Error ? e.message : String(e)}`
   } finally {
     busy.value = false
   }
@@ -352,16 +374,16 @@ async function openModelConfig() {
   try {
     const info = await safe(
       () => rpc.call<{ ok: boolean; path: string; exists: boolean }>('models.config_path', {}),
-      '取模型配置文件路径失败',
+      t('engineHealth.configPathFailed'),
     )
     if (!info?.path) return
     if (!info.exists) {
-      error.value = `模型配置文件尚不存在（首次修改模型档案后才会生成）：${info.path}`
+      error.value = t('engineHealth.configMissing', { path: info.path })
       return
     }
     const opened = await safe(
       () => rpc.call('artifacts.open_in_system', { path: info.path }),
-      '打开模型配置文件失败',
+      t('engineHealth.openConfigFailed'),
     )
     if (opened) error.value = ''
   } finally {
@@ -396,10 +418,10 @@ async function addModel() {
     newModel.value = { id: '', provider: 'custom', model: '', baseUrl: '', kind: 'cloud', catalogId: '', weightsPresent: false, runtimeSupports: true, requireGate: true, force: false }
   } else if (r) {
     // 命中 shipped gate 阻断时透明回显错误与错误码（如 gate.blocked），并渲染六要素报告。
-    modelError.value = (r.error ?? '新增失败') + (r.code ? `（${r.code}）` : '')
+    modelError.value = (r.error ?? t('engineHealth.addFailed')) + (r.code ? ` (${r.code})` : '')
     gateResult.value = r.gate ?? null
   } else {
-    modelError.value = '新增失败'
+    modelError.value = t('engineHealth.addFailed')
     gateResult.value = null
   }
   busy.value = false
@@ -430,8 +452,10 @@ async function probeMcp(name: string) {
   busy.value = true
   const r = await safe(() => rpc.call<ProbePayload>('mcp.servers.probe', { name }))
   if (r) {
-    const names = (r.tools ?? []).map(t => t.name).join(', ')
-    probeResults.value[name] = r.ok ? '连通：' + ((r.tools ?? []).length) + ' 个工具（' + names + '）' : (r.error ?? '探测失败')
+    const names = (r.tools ?? []).map(tool => tool.name).join(', ')
+    probeResults.value[name] = r.ok
+      ? t('engineHealth.probeOk', { count: (r.tools ?? []).length, names })
+      : (r.error ?? t('engineHealth.probeFailed'))
   }
   busy.value = false
 }

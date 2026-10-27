@@ -43,6 +43,8 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
             "apply_patch",
             "glob_file_search",
             "todo_write",
+            // R14：媒体域必须真的注册进注册表（否则工具存在但模型永远看不到它）
+            "media",
         ] {
             assert!(reg.has_tool(name), "missing tool: {}", name);
         }
@@ -164,6 +166,59 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 能力域必须整体可用：任何「可选域」缺失都不得连累核心工具面。
+    ///
+    /// 事故背景（2026-10-23 真机）：`BlenderTool::with_discovered_binary(...)?` 在
+    /// **未安装 Blender** 的机器上返回 Err，错误发生在构造工具向量的过程中 ——
+    /// 于是 `for t in tools { register_local(t) }` 一行都没执行，注册表为空。
+    /// 用户侧表现就是「没有 Office 生成、没有文件写入、没有浏览器自动化、
+    /// 没有电脑操控 / 系统操控、没有脚本运行」，而日志只有一句「部分工具不可用」。
+    ///
+    /// 本用例按**用户能感知到的能力域**逐个断言，机器上有没有 Blender 都必须通过。
+    #[tokio::test]
+    async fn core_capability_domains_survive_optional_tool_failures() {
+        let dir = std::env::temp_dir().join(format!("marguerite_caps_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut reg = ToolRegistry::new();
+        register_builtin_tools(&mut reg, &dir, None, None, None)
+            .expect("可选域（如 Blender）缺失不得让整体注册失败");
+
+        for (domain, tool) in [
+            ("文件写入", "write_file"),
+            ("文件编辑", "str_replace_editor"),
+            ("脚本 / 命令运行", "shell_exec"),
+            ("代码执行", "code_exec"),
+            ("浏览器自动化", "browser"),
+            ("联网抓取", "web_fetch"),
+            ("联网搜索", "web_search"),
+            ("系统操控", "system_control"),
+            ("窗口管理", "window_manage"),
+            ("进程管理", "process_manage"),
+            ("剪贴板", "clipboard"),
+            ("Office 生成", "office_automation"),
+            ("电脑操控（键鼠）", "computer_use"),
+            // 2026-10-23：多模态与 RPA 录放必须和上面同口径守门 —— 这六个工具
+            // 是「AI 有电脑、有眼睛、有嘴巴、有记性」的落点，缺一个就是用户侧断链。
+            ("多模态生图", "image_generate"),
+            ("多模态生视频", "video_generate"),
+            ("音频转写", "audio_transcribe"),
+            ("语音合成", "audio_speak"),
+            ("操作录制", "auto_record"),
+            ("操作回放", "auto_replay"),
+            // 2026-10-24：本地生视频三条路径（代码打字 / 网页逐帧 / Manim）
+            ("代码生视频", "code_video"),
+            ("网页动效视频", "web_video"),
+            ("Manim 动画", "manim_video"),
+        ] {
+            assert!(
+                reg.has_tool(tool),
+                "能力域「{domain}」缺失：{tool} 未注册进工具面"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 历史别名兼容：注册非法名后，**旧名与新名都必须可派发**，且不再 WARN。
     #[tokio::test]
     async fn illegal_registration_name_keeps_legacy_alias_callable() {
@@ -206,6 +261,40 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
         );
     }
 
+    /// 回归：无论绑定 1 / 2 / 3 个工作区根，核心工具面都不得为空。
+    ///
+    /// 真机事故（2026-10-23）：Blender 未安装让 `register_builtin_tools` 提前返回
+    /// Err，调用方只打一行日志，结果**一个工具都没注册**，子智能体退化成只能聊天。
+    /// 多根化之后再出现同类「注册链路静默失效」会更难发现，所以钉住这条不变量。
+    #[test]
+    fn tool_surface_is_never_empty_regardless_of_root_count() {
+        let base = std::env::temp_dir().join(format!(
+            "mgt_roots_matrix_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let roots: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = base.join(format!("r{i}"));
+                std::fs::create_dir_all(&p).unwrap();
+                p
+            })
+            .collect();
+        for n in 1..=roots.len() {
+            let mut reg = ToolRegistry::new();
+            register_builtin_tools_with_roots(&mut reg, &roots[..n], None, None, None)
+                .expect("注册不得失败");
+            assert!(
+                reg.local_tool_count() >= 20,
+                "{n} 个根时工具数应 ≥20，实际 {}",
+                reg.local_tool_count()
+            );
+            for name in ["read_file", "write_file", "shell_exec", "browser", "grep"] {
+                assert!(reg.has_tool(name), "{n} 个根时缺少核心工具：{name}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn read_and_write_roundtrip() {
         let (reg, dir) = setup();
@@ -223,6 +312,78 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
             _ => panic!("read failed"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P2-9 多项目工作区：文件域工具跨根读写；新建文件仍落主根。
+    ///
+    /// 这是「工具侧多根」的端到端证据：读附加根已有文件 → 改附加根文件 →
+    /// 写新文件落主根 → list_dir 无参时能看到两个根。
+    #[tokio::test]
+    async fn multi_root_tools_rw_across_roots() {
+        let base = std::env::temp_dir().join(format!(
+            "marguerite_multiroot_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let primary = base.join("primary");
+        let extra = base.join("extra");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(primary.join("mine.txt"), "primary\n").unwrap();
+        std::fs::write(extra.join("theirs.txt"), "line-extra\n").unwrap();
+
+        let mut reg = ToolRegistry::new();
+        register_builtin_tools_with_roots(
+            &mut reg,
+            &[primary.clone(), extra.clone()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 1) 读附加根已有文件（相对路径按根顺序命中真实存在的根）
+        let mut a = HashMap::new();
+        put(&mut a, "path", "theirs.txt");
+        match reg.execute_local_tool("read_file", &a).await.unwrap() {
+            ToolResult::Success { data, .. } => assert!(data.contains("line-extra"), "{data}"),
+            other => panic!("read extra root failed: {other:?}"),
+        }
+
+        // 2) 改附加根文件：必须写回附加根，不能在主根造一个同名空文件
+        let mut e = HashMap::new();
+        put(&mut e, "path", "theirs.txt");
+        put(&mut e, "old_string", "line-extra");
+        put(&mut e, "new_string", "line-edited");
+        assert!(reg.execute_local_tool("edit_file", &e).await.unwrap().is_success());
+        let extra_text = std::fs::read_to_string(extra.join("theirs.txt")).unwrap();
+        assert!(extra_text.contains("line-edited"), "{extra_text}");
+        assert!(
+            !primary.join("theirs.txt").exists(),
+            "不得在主根凭空创建同名文件"
+        );
+
+        // 3) 新文件落主根（与单根时代的语义一致）
+        let mut w = HashMap::new();
+        put(&mut w, "path", "brand-new.txt");
+        put(&mut w, "content", "new");
+        assert!(reg.execute_local_tool("write_file", &w).await.unwrap().is_success());
+        assert!(primary.join("brand-new.txt").exists());
+        assert!(!extra.join("brand-new.txt").exists());
+
+        // 4) 无参 list_dir 同时展示两个根
+        let r = reg
+            .execute_local_tool("list_dir", &HashMap::new())
+            .await
+            .unwrap();
+        match r {
+            ToolResult::Success { data, .. } => {
+                assert!(data.contains("mine.txt"), "{data}");
+                assert!(data.contains("theirs.txt"), "{data}");
+            }
+            other => panic!("list_dir multi-root failed: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

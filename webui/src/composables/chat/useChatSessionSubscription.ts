@@ -61,6 +61,8 @@ export interface UseChatSessionSubscriptionOptions {
     generation: number,
     metadata: {
       workspaceId?: string
+      /** 会话级全部项目目录（多根；首项为主根）。 */
+      projectPaths?: string[]
       projectWorkspace?: SessionProjectWorkspaceSnapshot | null
     },
   ) => void
@@ -87,6 +89,20 @@ export function isAuthoritativeSessionSubscription(
 ): boolean {
   if (typeof value === 'object' && value !== null) return value.authoritative === true
   return value !== false
+}
+
+/** 会话多根路径归一化：去空、去重、保序；未下发时返回 undefined（不覆盖已有状态）。 */
+function normalizeProjectPaths(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const paths: string[] = []
+  for (const raw of value) {
+    const path = typeof raw === 'string' ? raw.trim() : ''
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    paths.push(path)
+  }
+  return paths
 }
 
 const UNAVAILABLE_SUBSCRIPTION: SessionSubscriptionOutcome = {
@@ -178,6 +194,8 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
     if (metadataGeneration !== undefined) {
       options.onSessionMetadata?.(key, metadataGeneration, {
         workspaceId: res.workspaceId,
+        // 双 key 归一（camelCase 优先）：多根是会话级事实，附加项目靠它回填。
+        projectPaths: normalizeProjectPaths(res.projectPaths ?? res.project_paths),
         projectWorkspace: res.projectWorkspace,
       })
     }

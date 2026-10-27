@@ -496,3 +496,44 @@ fn probe_auth_times_out_to_indeterminate() {
     }
 }
 
+/// 本地/回环端点（Ollama）**不需要 API Key**：诊断不得再报「未配置密钥」。
+///
+/// 回归背景（2026-10-21 实测）：此前无条件按 `api_key.is_empty()` 判 DEGRADED，
+/// 于是本地模型在诊断里永远「未配置密钥」→ 设置页横幅「需要配置」→ 用户反复去配
+/// 服务商却消不掉（「问题越改越多」的直接来源之一）。
+#[tokio::test]
+async fn check_model_api_exempts_keyless_local_endpoints() {
+    let mut config = Config::default();
+    config.model.provider = "ollama".to_string();
+    config.model.model_name = "omnipilot17:latest".to_string();
+    // 端口 1 必然拒绝：本用例只验证「不再按缺密钥判降级」，不验证连通性。
+    config.model.base_url = "http://127.0.0.1:1".to_string();
+    config.model.api_key.clear();
+
+    let item = check_model_api_async(&config, AuthProbeTier::Off).await;
+    assert!(
+        !item.detail.contains("未配置密钥"),
+        "本地端点不得报「未配置密钥」: {}",
+        item.detail
+    );
+    assert!(
+        item.detail.contains("TCP 不可达") || item.detail.contains("本地端点"),
+        "应走到 TCP 探活分支: {}",
+        item.detail
+    );
+}
+
+/// 云端端点仍必须要求密钥（豁免只针对本地/回环，不能顺手放过云服务）。
+#[tokio::test]
+async fn check_model_api_still_requires_key_for_cloud_providers() {
+    let mut config = Config::default();
+    config.model.provider = "deepseek".to_string();
+    config.model.model_name = "deepseek-v4-flash".to_string();
+    config.model.base_url = "https://api.deepseek.com".to_string();
+    config.model.api_key.clear();
+
+    let item = check_model_api_async(&config, AuthProbeTier::Off).await;
+    assert_eq!(item.status, Status::Degraded, "{}", item.detail);
+    assert!(item.detail.contains("未配置密钥"), "{}", item.detail);
+}
+

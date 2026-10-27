@@ -6,6 +6,8 @@
 
 use std::cmp;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalTask {
     pub id: String,
@@ -193,9 +195,142 @@ pub fn loop_flywheel(
     results
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// 加速度报告 —— 区分「迭代」与「递归」
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 一轮自改进的加速度报告。
+///
+/// RSI 的判据不是「这轮涨了多少」，而是「这轮有没有让下一轮更容易涨」：
+/// - `delta`（速度）= 本轮相对上轮的提升
+/// - `delta_of_delta`（加速度）= 速度的变化；只有它 > 0 才谈得上递归
+/// - `reuse_rate`（复用率）= 上轮沉淀的知识，本轮实际被调用的比例
+///
+/// `reuse_rate` 是最关键的一列：长期为 0 说明系统只是每轮重新学，
+/// 沉淀没有进入下一轮 —— 这正是「看起来在进步、其实没复利」的机器判据。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccelerationReport {
+    /// 轮次（从 1 开始）
+    pub round: usize,
+    /// 本轮得分
+    pub score: f64,
+    /// 相对上轮的提升（速度）
+    pub delta: f64,
+    /// 速度的变化（加速度）；首轮无历史时为 0
+    pub delta_of_delta: f64,
+    /// 每单位提升消耗的 token；提升 <= 0 时为 `None`
+    ///
+    /// 刻意用 `Option` 而不是 `f64::INFINITY`：后者无法被 `serde_json` 序列化，
+    /// 会在落盘或回传时直接报错 —— 这类错误只在真正落盘那天才暴露。
+    pub cost_per_gain: Option<f64>,
+    /// 上轮沉淀被本轮复用的比例（0..=1）
+    pub reuse_rate: f64,
+}
+
+impl AccelerationReport {
+    /// 是否具备「递归」特征：加速度为正 **且** 上轮沉淀确实被复用。
+    ///
+    /// 只满足其一的都不是递归：加速度正但复用 0，提升来自本轮运气；
+    /// 复用高但加速度 <= 0，是在吃老本。
+    pub fn is_compounding(&self) -> bool {
+        self.delta_of_delta > 0.0 && self.reuse_rate > 0.0
+    }
+}
+
+/// 计算一轮的加速度报告。
+///
+/// `prev_delta` 传上一轮报告的 `delta`；首轮传 `None`（加速度记 0）。
+/// `reused` / `available` 是**上轮沉淀**的知识条数中被本轮调用的数量与总数。
+pub fn acceleration_report(
+    round: usize,
+    score: f64,
+    prev_score: f64,
+    prev_delta: Option<f64>,
+    tokens: u64,
+    reused: usize,
+    available: usize,
+) -> AccelerationReport {
+    let delta = score - prev_score;
+    let delta_of_delta = match prev_delta {
+        Some(d) => delta - d,
+        None => 0.0,
+    };
+    let cost_per_gain = if delta > 0.0 {
+        Some(tokens as f64 / delta)
+    } else {
+        None
+    };
+    let reuse_rate = if available == 0 {
+        0.0
+    } else {
+        (reused.min(available) as f64) / (available as f64)
+    };
+    AccelerationReport {
+        round,
+        score,
+        delta,
+        delta_of_delta,
+        cost_per_gain,
+        reuse_rate,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acceleration_distinguishes_recursive_from_iterative() {
+        // 首轮：无历史，加速度记 0，不可能是递归
+        let r1 = acceleration_report(1, 0.5, 0.0, None, 1_000, 0, 0);
+        assert!((r1.delta - 0.5).abs() < 1e-9);
+        assert_eq!(r1.delta_of_delta, 0.0);
+        assert_eq!(r1.reuse_rate, 0.0);
+        assert!(!r1.is_compounding(), "首轮不可能是递归");
+
+        // 第二轮：涨 0.2，慢于上轮的 0.5 → 加速度为负
+        let r2 = acceleration_report(2, 0.7, 0.5, Some(r1.delta), 1_000, 3, 10);
+        assert!((r2.delta - 0.2).abs() < 1e-9);
+        assert!(r2.delta_of_delta < 0.0, "速度变慢，加速度应为负");
+        assert!((r2.reuse_rate - 0.3).abs() < 1e-9);
+        assert!(!r2.is_compounding(), "加速度为负不算递归");
+
+        // 第三轮：涨 0.25，快于上轮的 0.2，且复用了沉淀 → 递归
+        let r3 = acceleration_report(3, 0.95, 0.7, Some(r2.delta), 1_000, 8, 10);
+        assert!((r3.delta - 0.25).abs() < 1e-9);
+        assert!(r3.delta_of_delta > 0.0);
+        assert!((r3.reuse_rate - 0.8).abs() < 1e-9);
+        assert!(r3.is_compounding(), "加速度正 + 有复用 = 递归");
+    }
+
+    #[test]
+    fn acceleration_requires_both_acceleration_and_reuse() {
+        // 加速度正但零复用 → 提升来自本轮运气，不算递归
+        let a = acceleration_report(2, 0.9, 0.5, Some(0.1), 100, 0, 10);
+        assert!(a.delta_of_delta > 0.0);
+        assert_eq!(a.reuse_rate, 0.0);
+        assert!(!a.is_compounding());
+
+        // 复用高但加速度为负 → 吃老本，也不算递归
+        let b = acceleration_report(2, 0.55, 0.5, Some(0.5), 100, 10, 10);
+        assert!(b.delta_of_delta < 0.0);
+        assert!((b.reuse_rate - 1.0).abs() < 1e-9);
+        assert!(!b.is_compounding());
+    }
+
+    #[test]
+    fn acceleration_report_is_json_safe() {
+        // 无提升时不得用 Infinity（serde_json 会直接报错），必须是 null
+        let flat = acceleration_report(1, 0.5, 0.5, Some(0.0), 100, 0, 0);
+        assert!(flat.cost_per_gain.is_none(), "无提升时不得用 Infinity");
+        let s = serde_json::to_string(&flat).expect("必须可序列化");
+        assert!(s.contains("\"cost_per_gain\":null"), "实际：{s}");
+
+        // 有提升时给出可读的每单位成本
+        let up = acceleration_report(1, 0.8, 0.5, None, 1_500, 0, 0);
+        let c = up.cost_per_gain.expect("有提升应有成本");
+        assert!((c - 5000.0).abs() < 1e-6, "1500 / 0.3 = 5000，实际 {c}");
+    }
 
     #[test]
     fn levenshtein_basics() {

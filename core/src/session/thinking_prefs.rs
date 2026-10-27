@@ -229,6 +229,20 @@ pub fn set_effort(
     Ok(prefs)
 }
 
+/// 清除会话档位覆盖（「继承全局 / 自适应」）。
+///
+/// 语义区别很关键：`effort = Off` 是**显式要求模型不思考**，
+/// 而「清除」是**没有覆盖**、让模式/任务分类自适应决定 —— 两者不能互相代替。
+/// 因此清除 = 删除偏好文件（`load()` 返回 None），而不是把档位写成 Off。
+pub fn clear(session: &str) -> Result<()> {
+    let path = path_for(session);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
 /// 记录一次请求的成本锚点（不改变持久档位）。best-effort：写盘失败仅告警。
 pub fn note_request(session: &str, effort: ThinkingEffort, note: impl Into<String>) {
     let mut prefs = load_or_new(session);

@@ -227,6 +227,27 @@ export interface UsageDay {
   totals: UsageTotals
 }
 
+/** `usage.daily` 的单日桶（UTC 日边界，见 core `usage::daily`）。 */
+export interface UsageDailyPoint {
+  dayMs: number
+  totalTokens: number
+  calls: number
+}
+
+export interface UsageDailyWireDay {
+  day?: number | string | null
+  dayMs?: number | string | null
+  day_ms?: number | string | null
+  total_tokens?: number | string | null
+  totalTokens?: number | string | null
+  calls?: number | string | null
+  count?: number | string | null
+}
+
+export interface UsageDailyResponse {
+  days?: UsageDailyWireDay[]
+}
+
 export interface UsageCoverage {
   status: string
   timeAttribution: string
@@ -356,6 +377,8 @@ export interface SortedRow {
   inputTokens: number | null
   outputTokens: number | null
   cacheReadTokens: number | null
+  /** 会话级缓存命中率（0..100）；无 prompt/cache_read 观测时为 null。 */
+  cacheHitRate: number | null
   cacheWriteTokens: number | null
   cost: number | null
   hasModelBreakdown: boolean

@@ -4,6 +4,120 @@ use super::*;
 
 use super::tests::{setup, put};
 
+/// 词典/翻译噪音门禁：用**真实抓取样本**锁定（2026-09-24 cn.bing 实测）。
+///
+/// 原始 8 条里有 4 条是词典词条，子智能体的实际反应是「搜索受到中文词典结果干扰」，
+/// 随后改道 web_fetch 直抓并白烧十余秒。门禁必须精确剔掉这 4 条、保留技术站点。
+#[test]
+fn dictionary_noise_gate_drops_real_bing_dictionary_results() {
+    let mk = |title: &str, url: &str| SearchResult {
+        title: title.to_string(),
+        url: Some(url.to_string()),
+        snippet: String::new(),
+    };
+    // 真实样本（标题逐字取自 cn.bing 抓取结果）
+    let results = vec![
+        mk("Three.js – JavaScript 3D 库 - Three.js 3D 库", "https://threejs.org/"),
+        mk(
+            "three是什么意思_three的翻译_音标_读音_用法_例句_爱词霸 ...",
+            "https://www.iciba.com/word?w=three",
+        ),
+        mk("Three.js – JavaScript 3D Library", "https://threejs.org/"),
+        mk(
+            "THREE中文 (简体)翻译：剑桥词典",
+            "https://dictionary.cambridge.org/zhs/词典/英语-汉语-简体/three",
+        ),
+        mk(
+            "three（表示数字3的英文单词）_百度百科",
+            "https://baike.baidu.com/item/three",
+        ),
+        mk("Three.js中文网", "http://www.webgl3d.cn/"),
+    ];
+    let query = "Three.js floating island 3D scene tutorial low poly";
+    let (kept, removed) = filter_dictionary_noise(results, query);
+    assert_eq!(removed.len(), 3, "应剔掉 3 条词典条目，实际 {:?}", removed);
+    assert_eq!(kept.len(), 3);
+    // 技术站点必须保留
+    assert!(kept.iter().any(|r| r.title.contains("Three.js – JavaScript 3D Library")));
+    assert!(kept.iter().any(|r| r.title == "Three.js中文网"));
+    // 保留的条目里不得有词典噪音（防误杀反向断言）
+    for x in kept.iter() {
+        assert!(!is_dictionary_noise(x), "误杀真实结果: {}", x.title);
+    }
+}
+
+/// 反向守卫：查询本身在查词义时，词典结果**必须保留**（不能把「查词典」也拦掉）。
+#[test]
+fn dictionary_gate_yields_when_query_asks_for_meaning() {
+    assert!(query_seeks_definition("serendipity 意思"));
+    assert!(query_seeks_definition("define serendipity"));
+    assert!(query_seeks_definition("three 翻译"));
+    assert!(!query_seeks_definition(
+        "Three.js floating island 3D scene tutorial low poly"
+    ));
+
+    let results = vec![SearchResult {
+        title: "three是什么意思_three的翻译".to_string(),
+        url: Some("https://www.iciba.com/word?w=three".to_string()),
+        snippet: String::new(),
+    }];
+    let (kept, removed) = filter_dictionary_noise(results, "three 是什么意思");
+    assert_eq!(removed.len(), 0, "查词义时不得剔除词典结果");
+    assert_eq!(kept.len(), 1);
+}
+
+/// 词典域黑名单本身也要生效（标题不含任何特征词，但域名是词典站）。
+#[test]
+fn dictionary_gate_drops_by_host_even_without_title_marker() {
+    let r = SearchResult {
+        title: "three - 牛津高阶词典".to_string(), // 命中「词典」；再用纯英文标题验证 host 规则
+        url: Some("https://dict.youdao.com/result?word=three".to_string()),
+        snippet: String::new(),
+    };
+    assert!(is_dictionary_noise(&r));
+    let plain = SearchResult {
+        title: "three".to_string(),
+        url: Some("https://dict.youdao.com/result?word=three".to_string()),
+        snippet: String::new(),
+    };
+    assert!(is_dictionary_noise(&plain), "纯标题也应按域名判定为词典噪音");
+    let normal = SearchResult {
+        title: "three".to_string(),
+        url: Some("https://threejs.org/docs/".to_string()),
+        snippet: String::new(),
+    };
+    assert!(!is_dictionary_noise(&normal));
+}
+
+
+/// 搜索市场必须跟随查询语言。
+///
+/// 注意：这条**不能**修掉词典噪音（实测 mkt/setlang/ensearch 三种改法结果逐字相同，
+/// 真正的拦截在 `dictionary_noise_gate_*`）。它修的是另一件事：英文查询不该被安上
+/// 中文市场偏好，否则排序天然偏向中文站点。
+#[test]
+fn search_market_follows_query_language() {
+    // 英文技术查询 → 英文市场
+    assert_eq!(
+        super::web_search::search_market("Three.js floating island 3D scene tutorial low poly"),
+        ("en-US", "en")
+    );
+    // 纯数字/符号也算英文市场（没有 CJK）
+    assert_eq!(super::web_search::search_market("three.js r185"), ("en-US", "en"));
+    // 中文查询 → 中文市场
+    assert_eq!(super::web_search::search_market("今天的 AI 新闻"), ("zh-CN", "zh-hans"));
+    // 中英混排：含 CJK 即走中文市场（判据可预测，不做比例阈值）
+    assert_eq!(
+        super::web_search::search_market("Three.js 中文文档"),
+        ("zh-CN", "zh-hans")
+    );
+    // 日文假名 / 韩文同样归入东亚市场
+    assert_eq!(super::web_search::search_market("スリージェイエス"), ("zh-CN", "zh-hans"));
+    assert_eq!(super::web_search::search_market("쓰리제이에스"), ("zh-CN", "zh-hans"));
+    // 空查询不 panic，按英文市场兜底
+    assert_eq!(super::web_search::search_market(""), ("en-US", "en"));
+}
+
     #[test]
     fn parse_ddg_results_extracts_links() {
         let html = r#"<div class="result__body">

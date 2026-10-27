@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  _resetSessionNavigationDiagWarningForTests,
   clearSessionNavigationDiag,
   readSessionNavigationDiag,
   recordSessionNavigationDiag,
@@ -26,6 +27,7 @@ class MemoryStorage implements SessionNavigationDiagStorage {
 describe('sessionNavigationDiag', () => {
   afterEach(() => {
     setSessionNavigationDiagStorageForTest(null)
+    _resetSessionNavigationDiagWarningForTests()
   })
 
   it('records newest entries first with session context', () => {
@@ -62,5 +64,24 @@ describe('sessionNavigationDiag', () => {
     clearSessionNavigationDiag()
 
     expect(readSessionNavigationDiag()).toEqual([])
+  })
+
+  it('读取失败只告警一次（带稳定前缀，不刷屏、不弹 toast）', () => {
+    _resetSessionNavigationDiagWarningForTests()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      setSessionNavigationDiagStorageForTest({
+        getItem: () => { throw new Error('storage denied') },
+        setItem: () => {},
+        removeItem: () => {},
+      })
+
+      expect(readSessionNavigationDiag()).toEqual([])
+      expect(readSessionNavigationDiag()).toEqual([])
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0][0])).toContain('[sessionNavigationDiag]')
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

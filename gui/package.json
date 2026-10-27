@@ -1,22 +1,19 @@
 {
   "name": "marguerite-gui",
   "private": true,
-  "version": "0.2.13",
+  "version": "0.2.17",
   "type": "module",
+  "description": "Marguerite 桌面端的 Tauri 壳（Rust）。界面是 webui/（Vue 3），本包不再包含前端源码。",
   "scripts": {
-    "dev": "vite",
-    "build": "npm run typecheck && vite build",
-    "preview": "vite preview",
     "tauri": "tauri",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src",
-    "test:unit": "vitest run",
-    "test": "npm run typecheck && npm run test:unit",
-    "check": "npm run typecheck && npm run lint && npm run test:unit && npm run build",
-    "deps:lockfile-sync": "npm ci --dry-run"
+    "deps:lockfile-sync": "npm ci --dry-run",
+    "shell:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "shell:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "verify:no-frontend": "node -e \"const fs=require('fs');if(fs.existsSync('src')){console.error('gui/src 不应存在：前端已收敛到 webui/（Vue），源码归档在 docs/legacy/gui-react-2026-10-21/');process.exit(1)}console.log('OK — gui 为纯 Tauri 壳，无前端源码')\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-notification": "^2.7.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

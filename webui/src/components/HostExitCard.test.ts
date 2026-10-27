@@ -18,11 +18,21 @@ import i18n from '@/i18n'
 // The card reads its state through `useHostExitEvidence()`, whose only external
 // dependency is the RPC store. Mock it so the composable builds without a live
 // gateway; the tests drive the payload directly, so `call` is never awaited.
+const rpcMock = vi.hoisted(() => ({
+  isConnected: false,
+  state: 'disconnected' as string,
+  calls: [] as string[],
+}))
+
 vi.mock('@/stores/rpc', () => ({
   useRpcStore: () => ({
-    isConnected: false,
-    state: 'disconnected',
-    call: vi.fn(async () => ({})),
+    get isConnected() { return rpcMock.isConnected },
+    get state() { return rpcMock.state },
+    call: vi.fn(async (method: string) => {
+      rpcMock.calls.push(method)
+      return { exited: true, source: 'record', evidence: null, sidecar_present: false, sidecar_uptime_ms: null }
+    }),
+    waitForConnection: vi.fn(async () => undefined),
   }),
 }))
 
@@ -119,7 +129,7 @@ describe('HostExitCard — visibility tracks the CURRENT sidecar, not a stale re
     expect(card.el.querySelector('.host-exit')).toBeNull()
   })
 
-  it('shows the card when an exit was recorded and NO sidecar is present', async () => {
+  it('NEVER shows a cross-restart historical record (startup false-alarm fix)', async () => {
     const card = await mountCard()
     await card.setPayload(
       payload({
@@ -130,10 +140,27 @@ describe('HostExitCard — visibility tracks the CURRENT sidecar, not a stale re
       }),
     )
 
-    const root = card.el.querySelector('.host-exit')
-    expect(root).not.toBeNull()
-    // A real exit still surfaces the localized headline with structured facts.
-    expect(card.state().sidecarPresent.value).toBe(false)
+    // 真机缺陷（2026-10-23）：落盘记录是上一次运行的历史，且 `sidecar_present`
+    // 在网关侧不可靠（python 明明在跑也报 false）。历史记录**永不**上屏 ——
+    // 它属于诊断页，不该做成启动横幅。
+    expect(card.el.querySelector('.host-exit')).toBeNull()
+    // 历史事实仍然可读（供诊断页复用），只是不驱动这张卡片。
+    expect(card.state().hasEvidence.value).toBe(true)
+    expect(card.state().source.value).toBe('record')
+  })
+
+  it('shows a CURRENT-run exit immediately (no settle delay for a real failure)', async () => {
+    const card = await mountCard()
+    await card.setPayload(
+      payload({
+        exited: true,
+        source: 'memory',
+        evidence: { code: 1, uptime_ms: 2000, stderr_tail: '' },
+        sidecar_present: false,
+      }),
+    )
+
+    expect(card.el.querySelector('.host-exit')).not.toBeNull()
     expect(card.el.querySelector('.error-state__message')?.textContent).toContain('exit')
   })
 
@@ -145,5 +172,95 @@ describe('HostExitCard — visibility tracks the CURRENT sidecar, not a stale re
 
     expect(card.state().hasEvidence.value).toBe(false)
     expect(card.el.querySelector('.host-exit')).toBeNull()
+  })
+})
+
+describe('HostExitCard — retry actually restarts the host process', () => {
+  afterEach(() => {
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
+  })
+
+  it('calls sidecar_stop + sidecar_start instead of only re-reading evidence', async () => {
+    const calls: string[] = []
+    ;(window as unknown as { __TAURI__?: unknown }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string) => {
+          calls.push(cmd)
+          if (cmd === 'sidecar_status') return { status: 'failed' }
+          if (cmd === 'sidecar_stop') return null
+          if (cmd === 'sidecar_start') return { status: 'running' }
+          return null
+        },
+      },
+    }
+
+    const card = await mountCard()
+    await card.setPayload(
+      payload({
+        exited: true,
+        source: 'memory',
+        evidence: { code: null, uptime_ms: 56 * 60 * 1000, stderr_tail: 'boom' },
+        sidecar_present: false,
+      }),
+    )
+
+    const retry = card.el.querySelector<HTMLButtonElement>('.error-state__retry')
+    expect(retry).not.toBeNull()
+    retry?.click()
+    // 让 restart() 里的 await 链跑完
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+
+    expect(calls).toContain('sidecar_status')
+    expect(calls).toContain('sidecar_stop')
+    expect(calls).toContain('sidecar_start')
+  })
+})
+
+describe('HostExitCard — a stale record must not stick after the sidecar comes up', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rpcMock.isConnected = true
+    rpcMock.state = 'connected'
+    rpcMock.calls.length = 0
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    rpcMock.isConnected = false
+    rpcMock.state = 'disconnected'
+  })
+
+  it('re-reads evidence while visible and stops once the card hides', async () => {
+    const card = await mountCard()
+    await card.setPayload(
+      payload({
+        exited: true,
+        // 用本次运行的真实退出：历史记录要等宽限窗口，轮询起点会随之后移，
+        // 本用例验的是「可见即轮询、隐藏即停」这条逻辑，与来源无关。
+        source: 'memory',
+        evidence: { code: null, uptime_ms: 1000, stderr_tail: '' },
+        sidecar_present: false,
+      }),
+    )
+
+    // 可见 → 每 3s 复读一次（首轮由 onMounted 触发）。
+    await vi.advanceTimersByTimeAsync(3000)
+    const whileVisible = rpcMock.calls.filter(method => method === 'host.exit_evidence').length
+    expect(whileVisible).toBeGreaterThanOrEqual(2)
+
+    // 侧车已注册 → 卡片隐藏 → 轮询停止，不再发请求。
+    await card.setPayload(
+      payload({
+        exited: true,
+        source: 'record',
+        evidence: { code: null, uptime_ms: 1000, stderr_tail: '' },
+        sidecar_present: true,
+      }),
+    )
+    const atHide = rpcMock.calls.filter(method => method === 'host.exit_evidence').length
+    await vi.advanceTimersByTimeAsync(9000)
+    const afterHide = rpcMock.calls.filter(method => method === 'host.exit_evidence').length
+    expect(afterHide).toBe(atHide)
   })
 })

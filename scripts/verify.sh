@@ -16,7 +16,7 @@
 #   bash scripts/verify.sh --release       # --all + cargo tauri build（发版门禁）
 #   bash scripts/verify.sh --core          # 仅 Rust core 栈
 #   bash scripts/verify.sh --webui         # 仅 webui 栈（typecheck + 单测）
-#   bash scripts/verify.sh --gui           # 仅 gui（React）栈（typecheck + lint + 单测 + 构建）
+#   bash scripts/verify.sh --gui           # 仅 gui（纯 Tauri 壳：无前端源码守卫 + 壳编译 + 壳 clippy）
 #   bash scripts/verify.sh --pyengine      # 仅 Python 侧车栈（tests/unit + tests/test_gateway + 契约族六个目录，无网络/无 LLM）
 #   bash scripts/verify.sh --e2e          # 仅 Web 端 Playwright e2e（自起隔离网关，跑确定性子集）
 #   bash scripts/verify.sh --fast          # 提交快闸：core 测试 + clippy + webui typecheck
@@ -128,6 +128,26 @@ check_core_tests() {
 check_core_build() {
   run_check "core CLI 构建 (cargo build -p marguerite-core --bin marguerite-core)" \
     cargo build -p marguerite-core --bin marguerite-core
+}
+
+# core/tests/*.rs 曾是「无人执行的死树」：verify.sh 只跑 --lib，集成测试树没有门禁。
+# W10 把**离线且确定性**的 4 个二进制接进来；third_party_integration 依赖不随仓库
+# 发布的 third_party/plugin-examples，缺失时登记 [SKIP]（跳过 ≠ 通过）。
+# macro_live 故意不选（需要真实 API key）；perf 是性能基准，仅手动跑（scripts/bench）。
+check_core_integration_tests() {
+  local tests="e2e plugin_manifest_gate plugin_patch_gate tui_model_panel"
+  local args=()
+  local t
+  for t in $tests; do args+=(--test "$t"); done
+  if [ -d third_party/plugin-examples ]; then
+    run_check "core 集成测试 (e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel,third_party_integration)" \
+      cargo test -p marguerite-core "${args[@]}" --test third_party_integration
+  else
+    run_check "core 集成测试 (e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel)" \
+      cargo test -p marguerite-core "${args[@]}"
+    skip_check "core 集成测试 (third_party_integration)" \
+      "third_party/plugin-examples 不随仓库发布（AGENTS.md §7）"
+  fi
 }
 
 # ensure_webui_dist <用途说明>
@@ -361,11 +381,14 @@ check_readme_claims() {
 
 check_tokens_sync() {
   if command -v node >/dev/null 2>&1 && [ -f scripts/check-tokens-sync.mjs ]; then
-    run_check "设计令牌三端同步 (design/tokens.json)" \
+    # 标签于 2026-10-22 从「三端」改为「端点」：GUI（gui/src）已归档，
+    # 现在的消费端是 WebUI 10 个主题 + TUI。同时该脚本内含两条归档守卫
+    # （gui/src 不得重现）与各主题 57 个语义色的登记校验。
+    run_check "设计令牌端点同步 (design/tokens.json)" \
       node scripts/check-tokens-sync.mjs
   else
     echo "${C_HEAD}[SKIP]${C_RST} node 或 check-tokens-sync.mjs 不可用，跳过"
-    SKIPPED+=("设计令牌三端同步 (design/tokens.json) — node 或脚本不可用")
+    SKIPPED+=("设计令牌端点同步 (design/tokens.json) — node 或脚本不可用")
   fi
 }
 
@@ -419,11 +442,11 @@ check_gui_lockfile_sync() {
 # 该检查依赖已安装的 node_modules，在没有装依赖的环境里不应把门禁判红。
 check_dependency_audit() {
   if ! command -v npm >/dev/null 2>&1; then
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过依赖审计"
+    skip_check "webui 依赖审计 (npm audit --audit-level=moderate)" "npm 不可用"
     return 0
   fi
   if [ ! -d webui/node_modules ]; then
-    echo "${C_HEAD}[SKIP]${C_RST} webui/node_modules 不存在（未安装依赖），跳过依赖审计"
+    skip_check "webui 依赖审计 (npm audit --audit-level=moderate)" "webui/node_modules 不存在（未安装依赖）"
     return 0
   fi
   run_check "webui 依赖审计 (npm audit --audit-level=moderate)" \
@@ -435,7 +458,7 @@ check_webui_typecheck() {
     run_check "webui 类型+架构门禁 (npm run typecheck)" \
       bash -c "cd webui && npm run typecheck"
   else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 webui typecheck"
+    skip_check "webui 类型+架构门禁 (npm run typecheck)" "npm 不可用"
   fi
 }
 
@@ -444,7 +467,7 @@ check_webui_test() {
     run_check "webui 单测 (npm run test:unit)" \
       bash -c "cd webui && npm run test:unit"
   else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 webui 单测"
+    skip_check "webui 单测 (npm run test:unit)" "npm 不可用"
   fi
 }
 
@@ -490,6 +513,10 @@ WEBUI_E2E_GREEN=(
 WEBUI_E2E_BASELINE=95
 WEBUI_E2E_BACKLOG=18
 WEBUI_E2E_PORT="${WEBUI_E2E_PORT:-18877}"
+# 并发度：4 worker 在 12 核机上仍会偶发「菜单点击时组件重渲染 → URL 未变」与
+# 「实时快照重置 turn → 审批卡消失」。棘轮要的是确定性，不是最快；默认 2，
+# 可用 WEBUI_E2E_WORKERS 覆盖（仅在确认更高并发稳定时）。
+WEBUI_E2E_WORKERS="${WEBUI_E2E_WORKERS:-2}"
 
 check_webui_e2e() {
   local name="webui e2e (Playwright 确定性子集)"
@@ -501,21 +528,40 @@ check_webui_e2e() {
     skip_check "$name" "webui/node_modules 未安装（先 npm ci）"
     return 0
   fi
-  # 网关要托管真实产物
-  if ! ensure_webui_dist "e2e 由网关托管 webui/dist"; then
+  # 网关托管的是 webui/dist，必须是**当前源码**的构建产物。ensure_webui_dist 只在
+  # 缺失时构建，于是改完前端后它会静默托管上一次的产物 —— 与「只在缺失时编 core」
+  # 同一类假证据（2026-10-26 W0 实测两者并存）。e2e 一律先重建产物。
+  local dist_log
+  dist_log="$(mktemp)"
+  echo "${C_HEAD}-- 托管产物: cd webui && npm run build${C_RST}"
+  if ! bash -c "cd webui && npm run build" >"$dist_log" 2>&1; then
+    tail -n 20 "$dist_log" | sed 's/^/    /'
+    rm -f "$dist_log"
     FAILED+=("$name")
+    echo "${C_FAIL}[FAIL]${C_RST} $name — webui/dist 构建失败（e2e 拒绝跑陈旧产物）"
     return 1
   fi
+  rm -f "$dist_log"
+  # 每次都以当前源码重建/重链网关 —— 「只在缺失时构建」曾被真实命中（2026-10-26 W0）：
+  # core 构建因 os error 5（常驻 daemon 持有 exe）失败，e2e 于是拿**上一次构建的旧 exe**
+  # 跑出 11 个假红（旧二进制没有 pet.triggerAction 的 ok:true，也还没有 3D 渲染路径）。
+  # e2e 断言的是**当前源码**的行为，绝不能静默跑旧二进制。
   local bin="target/debug/marguerite-core"
-  [ -x "$bin.exe" ] && bin="$bin.exe"
-  if [ ! -x "$bin" ]; then
-    echo "${C_HEAD}-- 预置网关二进制: cargo build -p marguerite-core --bin marguerite-core${C_RST}"
-    cargo build -p marguerite-core --bin marguerite-core 2>&1 | tail -n 3
+  local build_log
+  build_log="$(mktemp)"
+  echo "${C_HEAD}-- 预置网关二进制: cargo build -p marguerite-core --bin marguerite-core${C_RST}"
+  if ! cargo build -p marguerite-core --bin marguerite-core >"$build_log" 2>&1; then
+    tail -n 20 "$build_log" | sed 's/^/    /'
+    rm -f "$build_log"
+    FAILED+=("$name")
+    echo "${C_FAIL}[FAIL]${C_RST} $name — 网关二进制构建失败（e2e 拒绝跑陈旧二进制）"
+    return 1
   fi
+  rm -f "$build_log"
   [ -x "$bin.exe" ] && bin="$bin.exe"
   if [ ! -x "$bin" ]; then
     FAILED+=("$name")
-    echo "${C_FAIL}[FAIL]${C_RST} $name — 网关二进制缺失且构建失败"
+    echo "${C_FAIL}[FAIL]${C_RST} $name — 构建成功但网关二进制仍不存在"
     return 1
   fi
 
@@ -548,10 +594,34 @@ check_webui_e2e() {
   done
   [ "$ready" -eq 1 ] && sleep 2
 
+  # 侧车（pyengine）比 Rust 网关晚得多才就绪（冷启动曾到 ~90s），而 logs-detail
+  # 的用例依赖 logs.tail → pyengine 的 debug.log：等不到日志就按「环境没日志」
+  # 跳过，棘轮随之掉到 94 < 95（2026-10-26 W0 实测同一份代码跑出 95/2、94/3、
+  # 93+1/3 三种结果）。这里在起 Playwright 前等侧车真正接管：带网关 token 请求
+  # /api/config，在线时由侧车回 200，离线时 Rust 回 501；不带 token 会先被鉴权层
+  # 拦成 401（无法区分在线/离线）。
+  local token_file="$home/AppData/Local/Marguerite/gateway-token" token=""
+  [ -f "$token_file" ] && token="$(tr -d '\r\n' < "$token_file")"
+  local sidecar_ready=0 status_line i
+  for i in $(seq 1 120); do
+    if exec 3<>"/dev/tcp/127.0.0.1/$WEBUI_E2E_PORT" 2>/dev/null; then
+      printf 'GET /api/config HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n' \
+        "$WEBUI_E2E_PORT" "$token" >&3
+      IFS= read -r -t 3 status_line <&3
+      exec 3<&- 3>&- 2>/dev/null
+      case "$status_line" in
+        *" 200 "*) sidecar_ready=1; break ;;
+      esac
+    fi
+    sleep 1
+  done
+  [ "$sidecar_ready" -eq 1 ] || echo \
+    "${C_HEAD}-- 警告: 侧车 120s 内未接管 /api/config（logs-detail 将按环境跳过，棘轮会因此判红）${C_RST}"
+
   local out rc passed
   if [ "$ready" -eq 1 ]; then
     out="$(cd webui && OPENSQUILLA_WEBUI_BASE_URL="http://127.0.0.1:$WEBUI_E2E_PORT" \
-      npx playwright test "${WEBUI_E2E_GREEN[@]}" --retries=0 --workers=4 2>&1)"; rc=$?
+      npx playwright test "${WEBUI_E2E_GREEN[@]}" --retries=0 --workers="$WEBUI_E2E_WORKERS" 2>&1)"; rc=$?
   else
     out="隔离网关 40s 内未就绪（$WEBUI_E2E_PORT）$(tail -n 5 "$home/gw.log" 2>/dev/null)"
     rc=1
@@ -593,42 +663,46 @@ check_workspace_build() {
     cargo build --workspace
 }
 
-check_gui_typecheck() {
-  if command -v npm >/dev/null 2>&1; then
-    run_check "gui 类型门禁 (npm run typecheck)" \
-      bash -c "cd gui && npm run typecheck"
+# gui 的前端门禁已于 2026-10-21 全部废止：`gui/src`（React）从未进入安装包
+# （`tauri.conf.json` 的 `url` 指向网关 `http://localhost:18790/control/`，
+# `bundle.resources` 也不含 `gui/dist`），已归档到 `docs/legacy/gui-react-2026-10-21/`。
+# 前端改为**只在 webui（Vue）**一处维护，那边的门禁见 check_webui_*。
+#
+# 但「gui 层」不能变成空壳检查——它现在承载的是**真生效的那一半**：Rust 壳。
+# 下面三项替换原有的 typecheck/lint/test/build。
+
+# 守卫 1：确认前端源码没有被误加回来（双前端是本仓已付过代价的债）。
+check_gui_no_frontend() {
+  if command -v node >/dev/null 2>&1; then
+    run_check "gui 无前端源码守卫 (verify:no-frontend)" \
+      bash -c "cd gui && npm run --silent verify:no-frontend"
   else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 gui typecheck"
+    run_check "gui 无前端源码守卫（node 缺失时用 shell 判据）" \
+      bash -c "test ! -d gui/src"
   fi
 }
 
-check_gui_lint() {
-  if command -v npm >/dev/null 2>&1; then
-    run_check "gui ESLint 门禁 (npm run lint)" \
-      bash -c "cd gui && npm run lint"
-  else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 gui lint"
-  fi
+# 守卫 2：壳的类型/借用检查（等价于原 typecheck 的位置，但查的是真生效的 Rust）。
+check_gui_shell_check() {
+  run_check "gui 壳编译 (cargo check -p marguerite-gui)" \
+    cargo check -p marguerite-gui
 }
 
-check_gui_test() {
-  if command -v npm >/dev/null 2>&1; then
-    run_check "gui 单测 (npm run test:unit)" \
-      bash -c "cd gui && npm run test:unit < /dev/null"
-  else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 gui 单测"
-    SKIPPED+=("gui 单测 (npm run test:unit) — npm 不可用")
-  fi
-}
-
-check_gui_build() {
-  if command -v npm >/dev/null 2>&1; then
-    run_check "gui 构建 (npm run build)" \
-      bash -c "cd gui && npm run build"
-  else
-    echo "${C_HEAD}[SKIP]${C_RST} npm 不可用，跳过 gui 构建"
-    SKIPPED+=("gui 构建 (npm run build) — npm 不可用")
-  fi
+# 守卫 3：壳的架构不变量（原 lint 的位置）。
+#
+# 为什么不是 clippy：L3「零 warning」的判据属于 **workspace/core 层**
+# （那里已有 `cargo clippy -p marguerite-core -p marguerite-gui --all-targets -- -D warnings`）。
+# 在 gui 层再跑一遍，只会因为 core 的历史 lint 债务让 `--gui` 变红，
+# 把「壳坏了」和「core 有 lint 债」两种完全不同的故障混成同一个红灯 —— 诊断价值为负。
+#
+# 这一项守的是**今天这次改造本身**：单一前端架构一旦被悄悄改回去
+# （主窗口重新指向本地 dist、或 webui/dist 不再是打包源），必须立刻报错。
+# 若早在两年前就有这条守卫，就不会出现「审计了 22 个面板才发现它们不可达」。
+check_gui_shell_config() {
+  # 先跑 --self-check（8 个合成夹具，证明判定函数本身有牙），再跑真实仓库。
+  # 串成一条检查，避免汇总里出现两条同名项。
+  run_check "gui 壳架构不变量 (tauri.conf.json)" \
+    bash -c "python scripts/check_gui_shell_config.py --self-check && python scripts/check_gui_shell_config.py"
 }
 
 # pyengine（Python 侧车）单测 —— 关闭「1280 个 Python 测试文件零门禁覆盖」的盲区。
@@ -639,6 +713,12 @@ check_gui_build() {
 #
 # 刻意**不用** `--timeout`：pytest-timeout 不是本仓库声明的测试依赖，在干净环境里加它
 # 只会让门禁因为缺插件而变红，而不是因为代码有问题。
+#
+# `PYTHONUTF8=1` 是**必需项**，不是优化：yoyo 的迁移读取器（yoyo/migrations.py:175）
+# 用 locale 编码打开 .py 迁移，中文 Windows 的默认 locale 是 cp936 → 读 UTF-8 源码
+# 必抛 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x94`。实测同一代码在
+# UTF-8 locale 的 CI 上全绿、在本机红 20 例（test_ci 7 + test_migrations 13）。三条
+# pyengine 检查都带上它，避免「红在开发机、绿在 CI」的不可复现差异。
 check_pyengine_tests() {
   require_python "pyengine 单测 (tests/unit，无网络/无 LLM)" "${PYENGINE_PY_MODULES[@]}" || return 0
   if [ ! -d pyengine/tests/unit ]; then
@@ -646,7 +726,7 @@ check_pyengine_tests() {
     return 0
   fi
   run_check "pyengine 单测 (tests/unit，无网络/无 LLM)" \
-    bash -c "cd pyengine && '$PY' -m pytest tests/unit -q --no-header -p no:cacheprovider -m 'not (llm or llm_smoke or llm_costly or llm_tools or llm_embedding or llm_reasoning or llm_gateway or llm_image or llm_router_acc or local_golden or webui_browser or tui_real_terminal or live_channel or live_search)'"
+    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/unit -q --no-header -p no:cacheprovider -m 'not (llm or llm_smoke or llm_costly or llm_tools or llm_embedding or llm_reasoning or llm_gateway or llm_image or llm_router_acc or local_golden or webui_browser or tui_real_terminal or live_channel or live_search)'"
 }
 
 # pyengine 网关契约层（tests/test_gateway）—— 侧车的第二道门禁。
@@ -674,7 +754,7 @@ check_pyengine_gateway_tests() {
     return 0
   fi
   run_check "pyengine 网关契约 (tests/test_gateway，无网络/无 LLM)" \
-    bash -c "cd pyengine && '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rs"
+    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rs"
 }
 
 # pyengine 契约族（tests/test_ci / test_migrations / test_sandbox /
@@ -715,7 +795,7 @@ check_pyengine_contract_tests() {
   echo
   echo "${C_HEAD}=== [CHECK] $name ===${C_RST}"
   for suite in test_ci test_migrations test_sandbox test_onboarding test_tools test_recovery; do
-    out="$(bash -c "cd pyengine && '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rs" 2>&1)"
+    out="$(bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rs" 2>&1)"
     rc=$?
     local evidence summary
     # 失败/收集错误逐条打印；跳过的具名理由留在下面的汇总行里（-rs）。
@@ -772,6 +852,16 @@ check_workbench_tests() {
 check_workbench_version() {
   run_py_doc_check "workbench 版本一致 (VERSION ↔ backend/frontend)" \
     workbench/packaging/check_version_sync.py
+}
+
+# RSI 断点 B5：8 团 43 成员存在两份真相源 —— 仓库内 `expert_teams.py`
+# 与客户端 `my-experts` 插件。两处独立维护必然漂移（2026-10-26 已实证：
+# 改了客户端 8 包，仓库内 43 角色零变化）。
+# 本检查默认只验**仓库内自洽**（CI 可跑、不 import、不执行被检代码）；
+# 本地开发机可另跑 `--client-dir <my-experts/plugins>` 做双端比对。
+check_expert_parity() {
+  run_py_doc_check "专家定义自洽 (check-expert-parity.py)" \
+    scripts/check-expert-parity.py
 }
 
 # ---------------------------------------------------------------------------
@@ -882,6 +972,7 @@ fi
 
 if [ "$MODE_CORE" -eq 1 ]; then
   check_core_tests
+  check_core_integration_tests
   check_core_build
   check_clippy_core
   check_doc_drift
@@ -894,17 +985,18 @@ fi
 if [ "$MODE_WEBUI" -eq 1 ]; then
   check_webui_typecheck
   check_webui_test
+  # 令牌同步于 2026-10-22 起承载 webui 10 个主题、57 个语义色的登记校验，
+  # 因此必须进 webui 层（此前只在 --all 里跑，单跑 --webui 会漏）。
+  check_tokens_sync
   check_webui_lockfile_sync
   check_dependency_audit
 fi
 
 if [ "$MODE_GUI" -eq 1 ]; then
-  check_gui_typecheck
-  check_gui_lint
-  check_gui_test
-  check_gui_build
-  # 顺序放在最后：lockfile 漂移时前面四项会因为 node_modules 早已装好而「假绿」，
-  # 这一项才是「全新 clone 上 npm ci 能不能跑」的真判据。
+  check_gui_no_frontend
+  check_gui_shell_check
+  check_gui_shell_config
+  # lockfile 仍需自洽：package.json 还有 tauri-cli 等依赖，全新 clone 要能 npm ci。
   check_gui_lockfile_sync
 fi
 
@@ -921,10 +1013,12 @@ fi
 if [ "$MODE_WORKBENCH" -eq 1 ]; then
   check_workbench_tests
   check_workbench_version
+  check_expert_parity
 fi
 
 if [ "$MODE_ALL" -eq 1 ]; then
   check_core_tests
+  check_core_integration_tests
   check_core_build
   check_clippy_ws
   check_doc_drift
@@ -947,10 +1041,9 @@ if [ "$MODE_ALL" -eq 1 ]; then
   check_webui_e2e
   check_webui_lockfile_sync
   check_dependency_audit
-  check_gui_typecheck
-  check_gui_lint
-  check_gui_test
-  check_gui_build
+  check_gui_no_frontend
+  check_gui_shell_check
+  check_gui_shell_config
   check_gui_lockfile_sync
   check_workspace_build
 fi
@@ -980,7 +1073,11 @@ if [ "${#FAILED[@]}" -gt 0 ]; then
   exit 1
 fi
 echo
-if [ "${#SKIPPED[@]}" -gt 0 ]; then
+if [ "${#PASSED[@]}" -eq 0 ] && [ "${#SKIPPED[@]}" -gt 0 ]; then
+  # 0 项通过 = 本层没有取得任何新鲜证据。工具缺失不该判红（故意 SKIP 而非 FAIL），
+  # 但也绝不能叫「全绿」——§8：跳过 ≠ 通过，不得据此声称完成。
+  echo "${C_HEAD}闸门结果: 无有效结论 (0 项通过，${#SKIPPED[@]} 项跳过) —— 跳过项未获验证，不得声称完成。${C_RST}"
+elif [ "${#SKIPPED[@]}" -gt 0 ]; then
   echo "${C_PASS}闸门结果: 全绿 (${#PASSED[@]} 项通过，${#SKIPPED[@]} 项跳过)。可据此声称完成——但跳过项未获验证。${C_RST}"
 else
   echo "${C_PASS}闸门结果: 全绿 (${#PASSED[@]} 项通过)。可据此声称完成。${C_RST}"

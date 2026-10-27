@@ -6,13 +6,16 @@
 pub mod bloom_failover;
 pub mod byok;
 pub mod cap;
+pub mod deepseek_recipe;
 pub mod dual;
 pub mod ensemble;
 pub mod error_taxonomy;
 pub mod ensemble_deep;
 pub mod fleet;
 pub mod llm;
+pub mod media_capability;
 pub mod omni;
+pub mod tokenizer;
 pub mod omni_execution;
 pub mod persona;
 pub mod prefetch;
@@ -23,6 +26,7 @@ pub mod router;
 pub mod selector;
 pub mod thinking;
 pub mod tier;
+pub mod wire;
 
 pub use bloom_failover::{
     CandidateCredential, ExecutionResult, FailoverDecision, FailoverError, FailoverPolicy, SkipReason,

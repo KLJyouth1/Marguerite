@@ -1,6 +1,8 @@
 import { desktopCapabilities } from './capabilities'
 import type {
+  ArtifactOpenRequest,
   CliInvocation,
+  DesktopSettingsPayload,
   DesktopUpdateErrorCode,
   DesktopUpdateInstallMode,
   DesktopUpdateSource,
@@ -265,7 +267,19 @@ async function desktopUpdateCapabilities(api: MargueriteDesktopApi): Promise<{
 
 async function desktopUpdateFallbackState(api: MargueriteDesktopApi): Promise<DesktopUpdateState> {
   const capabilities = await desktopUpdateCapabilities(api)
-  return idleUpdateState(capabilities.canNativeInstall, capabilities.managed)
+  const state = idleUpdateState(capabilities.canNativeInstall, capabilities.managed)
+  // 壳没有 updater 命令时仍要显示「当前版本」：否则 Runtime 面板的版本行永远是空的，
+  // 用户会以为版本检测坏了。版本由壳按同源 `/api/health` 提供（getAppVersion）；
+  // 读不到就留空 —— 绝不伪造版本号。
+  if (typeof api.getAppVersion === 'function') {
+    try {
+      const version = await api.getAppVersion()
+      if (typeof version === 'string' && version) state.currentVersion = version
+    } catch {
+      /* 留空 */
+    }
+  }
+  return state
 }
 
 async function normalizeDesktopUpdatePayload(
@@ -285,13 +299,21 @@ async function normalizeDesktopUpdatePayload(
 export function createDesktopPlatform(): Platform {
   const desktopApi = requireDesktopApi()
   const nativeWorkbench = desktopNativeWorkbenchApi(desktopApi)
+  // 桥可能是**部分实现**（WebUI 侧的 desktopBridge 只映射后端真实存在的命令）。
+  // 能力位必须跟着方法是否存在走，否则 UI 会渲染出点了就 TypeError 的入口。
+  const has = (key: string): boolean =>
+    typeof (desktopApi as unknown as Record<string, unknown>)[key] === 'function'
   return {
     id: 'desktop',
     capabilities: {
       ...desktopCapabilities,
+      canRestartGateway: has('retryStartup'),
+      canRevealGatewayLog: has('revealGatewayLog'),
+      canOpenArtifactsNatively: has('openArtifact'),
+      hasDesktopOnboarding: has('getOnboardingDefaults') && has('saveOnboarding') && has('cancelOnboarding'),
       hasNativeWorkbenchSurfaces: nativeWorkbench !== undefined,
     },
-    getOsLocale: () => requireDesktopApi().getOsLocale(),
+    getOsLocale: () => (has('getOsLocale') ? desktopApi.getOsLocale() : Promise.resolve(undefined)),
     async setNativeTheme(payload) {
       const api = requireDesktopApi()
       if (typeof api.setNativeTheme !== 'function') return undefined
@@ -309,8 +331,8 @@ export function createDesktopPlatform(): Platform {
     },
     gateway: {
       getStatus: () => requireDesktopApi().getGatewayStatus(),
-      revealLog: () => requireDesktopApi().revealGatewayLog(),
-      retryStartup: () => requireDesktopApi().retryStartup(),
+      ...(has('revealGatewayLog') ? { revealLog: () => desktopApi.revealGatewayLog!() } : {}),
+      ...(has('retryStartup') ? { retryStartup: () => desktopApi.retryStartup!() } : {}),
       async getCliInvocation(): Promise<CliInvocation | null> {
         const api = requireDesktopApi()
         if (typeof api.getCliInvocation !== 'function') return null
@@ -324,9 +346,15 @@ export function createDesktopPlatform(): Platform {
       },
     },
     settings: {
-      getDesktopSettings: () => requireDesktopApi().getDesktopSettings(),
-      saveDesktopSettings: (payload) => requireDesktopApi().saveDesktopSettings(payload),
-      resetDesktopSettings: () => requireDesktopApi().resetDesktopSettings(),
+      ...(has('getDesktopSettings')
+        ? { getDesktopSettings: () => desktopApi.getDesktopSettings!() }
+        : {}),
+      ...(has('saveDesktopSettings')
+        ? { saveDesktopSettings: (payload: DesktopSettingsPayload) => desktopApi.saveDesktopSettings!(payload) }
+        : {}),
+      ...(has('resetDesktopSettings')
+        ? { resetDesktopSettings: () => desktopApi.resetDesktopSettings!() }
+        : {}),
       ...(typeof window.MargueriteDesktop?.getDesktopPreferences === 'function'
         && typeof window.MargueriteDesktop?.saveDesktopPreferences === 'function'
         ? {
@@ -345,12 +373,20 @@ export function createDesktopPlatform(): Platform {
         : {}),
     },
     onboarding: {
-      getDefaults: () => requireDesktopApi().getOnboardingDefaults(),
-      save: (payload) => requireDesktopApi().saveOnboarding(payload),
-      cancel: () => requireDesktopApi().cancelOnboarding(),
+      ...(has('getOnboardingDefaults')
+        ? { getDefaults: () => desktopApi.getOnboardingDefaults() }
+        : {}),
+      ...(has('saveOnboarding')
+        ? { save: (payload: unknown) => desktopApi.saveOnboarding(payload) }
+        : {}),
+      ...(has('cancelOnboarding')
+        ? { cancel: () => desktopApi.cancelOnboarding() }
+        : {}),
     },
     files: {
-      openArtifact: (payload) => requireDesktopApi().openArtifact(payload),
+      ...(has('openArtifact')
+        ? { openArtifact: (payload: ArtifactOpenRequest) => desktopApi.openArtifact!(payload) }
+        : {}),
       async chooseProjectDirectory(request) {
         const api = requireDesktopApi()
         if (typeof api.chooseProjectDirectory !== 'function') return null

@@ -1,5 +1,6 @@
 import { defineConfig, devices } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { bootOrchestraSeenStorage } from './e2e/bootSeen'
 
 const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined
 const baseURL = process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791'
@@ -29,6 +30,14 @@ const webServer = managedServer === 'gateway'
       }
     : undefined
 
+// Every Playwright test gets a brand-new browser context, so without this seed
+// the first-run boot orchestra (a full-screen `aria-modal` overlay held for at
+// least 10 s — `src/components/boot/bootSequence.ts`) would mount in *every*
+// spec and swallow clicks until its floor expires. Seed the same "already seen"
+// flag a real launch writes after its first run. A spec that wants to exercise
+// the boot sequence can still override `storageState` for its own context.
+const bootOrchestraSeen = bootOrchestraSeenStorage(parsedBaseURL.origin)
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -38,6 +47,7 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL,
+    storageState: bootOrchestraSeen,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },

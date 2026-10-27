@@ -2,62 +2,80 @@
   <!-- V2.1-P2：桌宠悬浮窗独立舞台（透明 body + 无壳）。
        背景 100% 透明，无 UI 骨架——桌面级「仅宠物」体验。
        事件：
-         · 顶栏 drag-handle 拖拽 → 上报 Tauri：pet_overlay_move（经 ipc 桥）
+         · 手柄按下 → Tauri 原生 startDragging（OS 接管，可拖到屏幕任意位置）
+         · 舞台拖拽 → 越过 4px 阈值后同样交给原生拖拽，保留双击抚摸
          · 舞台双击 → triggerAction('pet') 抚摸（与 PetView 语义一致）
-         · 舞台右键 → 显示简化菜单（换肤/隐藏/置顶信息）
-       渲染：PetSvg（SVG 矢量 + 伪 3D 光照）+ detectPetRuntime（档位只调特效预算）。 -->
+         · 舞台右键 → 桌宠自有菜单（互动 / 隐藏 / 设置）
+       渲染：优先三维（three 动态加载）；WebGL 不可用/构建失败回退 PetSvg（矢量 + 伪 3D 光照）。
+       detectPetRuntime 只调特效预算。 -->
   <div
     class="pet-overlay"
     @contextmenu.prevent="onContextMenu"
   >
-    <!-- 拖拽手柄：16px 高顶部细条，半透明淡蓝，hover 时高亮提示可拖动 -->
+    <!-- 拖拽手柄：顶部细条，hover 高亮。原生 startDragging（OS 接管），
+         光标不会在拖出窗体边界时丢掉事件。 -->
     <div
       class="pet-overlay__handle"
-      @mousedown="startDrag"
-      title="拖拽移动桌宠 · 双击抚摸 · 右键菜单"
+      aria-hidden="true"
+      @pointerdown="onHandlePointerDown"
+      :title="t('pet.menu.dragHint')"
     />
 
-    <!-- SVG 舞台（透明背景）；SVG 无 WebGL 依赖，任何环境都完整渲染。
+    <!-- 舞台（透明背景）：优先真三维，无 WebGL 时回退 2.5D 矢量。
          悬停 → 局部聚焦注视（视线/瞳孔幅度放大） -->
     <div
       ref="stage3dEl"
       class="pet-overlay__stage"
-      :class="{ 'is-focused': focused }"
-      role="img"
-      aria-label="Marguerite 桌面桌宠"
+      :class="{ 'is-focused': focused, 'is-3d': pet3d }"
+      role="button"
+      tabindex="0"
+      :aria-label="t('petOverlay.stageAria')"
+      aria-haspopup="menu"
+      :aria-expanded="menuOpen"
+      :title="t('pet.menu.dragHint')"
+      @pointerdown="onStagePointerDown"
+      @keydown="onStageKeydown"
       @dblclick="onPet"
       @pointerenter="onStageEnter"
       @pointerleave="onStageLeave"
     ></div>
-    <!-- 右键菜单（Tauri Window 级菜单一部分；此处保留 DOM 菜单，供 Web 用户态测试） -->
+    <!-- 桌宠自有右键菜单（互动 / 隐藏 / 设置）。
+         Esc 关闭、↑↓ 在菜单项间移动、打开后焦点落到第一项；
+         浏览器默认菜单已在 pet 窗口内全局 preventDefault。 -->
     <transition name="fade">
       <div
         v-if="menuOpen"
+        ref="menuEl"
         class="pet-overlay__menu"
+        role="menu"
+        :aria-label="t('pet.menu.title')"
         :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
+        @contextmenu.prevent
         @click.stop
       >
-        <div class="pet-overlay__menu-title">桌宠菜单</div>
-        <button class="pet-overlay__menu-item" @click="onPet">✋ 顺毛抚摸</button>
-        <button class="pet-overlay__menu-item" @click="onFeed">🐟 投喂猫条</button>
-        <button class="pet-overlay__menu-item" @click="openPetView">🖥 打开设置面板</button>
-        <div class="pet-overlay__menu-sep" />
-        <div class="pet-overlay__menu-sub">切换皮肤</div>
-        <div class="pet-overlay__menu-skins">
-          <button
-            v-for="s in skinButtons"
-            :key="s.id"
-            class="pet-overlay__skin"
-            :class="{ 'is-active': s.id === currentSkinId }"
-            :style="previewSkinStyle(s)"
-            :title="s.name"
-            @click="selectSkin(s.id)"
-          >
-            {{ s.emoji }}
-          </button>
-        </div>
-        <div class="pet-overlay__menu-sep" />
-        <button class="pet-overlay__menu-item is-danger" @click="hideMe">🚪 隐藏悬浮窗</button>
+        <div class="pet-overlay__menu-title">{{ t('pet.menu.title') }}</div>
+        <button
+          type="button"
+          class="pet-overlay__menu-item"
+          role="menuitem"
+          @click="onInteract"
+        >✋ {{ t('pet.menu.interact') }}</button>
+        <button
+          type="button"
+          class="pet-overlay__menu-item"
+          role="menuitem"
+          @click="hideMe"
+        >🚪 {{ t('pet.menu.hide') }}</button>
+        <!-- 悬浮窗是独立 webview，没有路由也没拿到主窗口句柄：设置入口如实禁用，
+             而不是点开一个空白页假装能设置。 -->
+        <button
+          type="button"
+          class="pet-overlay__menu-item"
+          role="menuitem"
+          disabled
+          aria-disabled="true"
+          :title="settingsUnavailableHint"
+        >⚙ {{ t('pet.menu.settings') }}</button>
       </div>
     </transition>
 
@@ -72,7 +90,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick, reactive, type CSSProperties } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick, reactive } from 'vue'
 import {
   usePetRpc,
   PET_SKIN_IDS,
@@ -81,12 +99,15 @@ import {
   type PetSkinEntry,
   type PetStatus,
 } from '@/rpc/petContract'
-import { PetSvg } from '@/components/pet/petSvg'
+import { createPetRenderer, type PetRenderer } from '@/components/pet/petRenderer'
 import { getPetBrain, type BrainFrame } from '@/components/pet/petBrain'
 import { moodMap } from '@/components/pet/petContract'
 import { getPetModelSpec } from '@/components/pet/petSpec'
 import { detectPetRuntime, renderTierOf } from '@/components/pet/detectPetRuntime'
+import { setPetOverlayEnabled } from '@/composables/usePetOverlay'
+import { useI18n } from 'vue-i18n'
 
+const { t } = useI18n()
 const petRpc = usePetRpc()
 
 /* ─── 皮肤目录 + 状态（与 PetView 同源：R6 单一权威来源 = 后端 pet.list/pet.status）─── */
@@ -109,15 +130,15 @@ const skins = ref<UiSkin[]>(OFFLINE)
 const currentSkin = ref<UiSkin>(OFFLINE[0])
 const statusReady = computed(() => !!status.value)
 
-/* ─── 舞台（SVG 渲染器；无 WebGL 依赖，任何环境都完整渲染） ─── */
+/* ─── 舞台（优先真三维；WebGL 不可用/构建失败才回退 2.5D 矢量） ─── */
+// 2026-10-24：桌面悬浮窗此前固定用 `PetSvg`，而页内桌宠是 3D ——
+// 同一个皮肤在悬浮窗里是「扁的」。现在两处都经 `createPetRenderer` 先试三维。
 const stage3dEl = ref<HTMLElement | null>(null)
-function previewSkinStyle(s: UiSkin): CSSProperties {
-  const a = s.accent.startsWith('#') ? s.accent : '#60A5FA'
-  return { background: `radial-gradient(circle at 50% 40%, color-mix(in srgb, ${a} 34%, transparent), transparent 76%)` }
-}
+const pet3d = ref(false)
+let sceneToken = 0
 
-/* ─── 矢量渲染器（SVG 随容器自适应，无需 resize） ─── */
-let petScene: PetSvg | null = null
+/* ─── 渲染器（SVG 随容器自适应，无需 resize；三维自带 ResizeObserver） ─── */
+let petScene: PetRenderer | null = null
 
 /** 悬停聚焦：光标进入/离开舞台 → 聚焦权重 0/1（局部注视：视线/瞳孔幅度放大） */
 const focused = ref(false)
@@ -130,22 +151,43 @@ function onStageLeave() {
   petScene?.setHover(0)
 }
 
-function initStage() {
-  if (currentSkin.value.kind === 'image') { petScene?.dispose(); petScene = null; return }
-  if (!stage3dEl.value) return
+async function initStage(): Promise<void> {
+  const token = ++sceneToken
+  if (currentSkin.value.kind === 'image') { petScene?.dispose(); petScene = null; pet3d.value = false; return }
+  await nextTick()
+  const container = stage3dEl.value
+  if (!container) return
   petScene?.dispose(); petScene = null
+  pet3d.value = false
   const runtime = detectPetRuntime()
   const accent = currentSkin.value.accent.startsWith('#')
     ? parseInt(currentSkin.value.accent.slice(1), 16)
     : 0x60a5fa
   try {
     const spec = getPetModelSpec(currentSkin.value.model ?? currentSkin.value.id)
-    petScene = new PetSvg({ container: stage3dEl.value, accent, spec, quality: renderTierOf(runtime.quality) })
+    const result = await createPetRenderer({
+      container,
+      accent,
+      spec,
+      quality: renderTierOf(runtime.quality),
+    })
+    // 异步建模期间可能已换肤/卸载
+    if (token !== sceneToken) { result.renderer.dispose(); return }
+    petScene = result.renderer
+    pet3d.value = result.kind === '3d'
+    if (result.fallbackReason) {
+      // eslint-disable-next-line no-console
+      console.warn('[PetOverlayView] 三维不可用，已回退 2.5D 矢量:', result.fallbackReason)
+    }
     // 重建后补上当前悬停态（重挂载不丢失聚焦）
     petScene.setHover(focused.value ? 1 : 0)
-  } catch {
-    // 构建期异常：SVG 无 WebGL 依赖，不存在「精简模式」降级分支
+  } catch (err) {
+    // createPetRenderer 内部已把三维失败降级成 SVG，走到这里说明连 SVG 都没建起来。
+    // 不再静默：留 console 证据，否则舞台空白时无法判断是「还在加载」还是「已失败」。
+    // eslint-disable-next-line no-console
+    console.error('[PetOverlayView] 渲染器构建失败（舞台将保持空白）:', err)
     petScene = null
+    pet3d.value = false
   }
 }
 
@@ -169,8 +211,8 @@ async function loadSkins() {
     skins.value = mapped.length ? mapped : OFFLINE
     const match = mapped.find((s) => s.id === currentSkin.value.id) || mapped[0]
     if (match) currentSkin.value = match
-    if (!match && mapped.length > 0) currentSkin.value = mapped[0]
-    void nextTick(initStage)
+    // 换肤由 watch(currentSkinId) 重建舞台；这里不再显式 initStage ——
+    // 渲染器**不等待** pet.list（见 onMounted：先用 OFFLINE 目录画出来）。
     // 断言守卫：与后端皮肤数漂移时不打断用户，但记录（console），便于 R5 漂移检测
     if (res.skins.length !== PET_EXPECTED_SKIN_COUNT) {
       // eslint-disable-next-line no-console
@@ -187,7 +229,7 @@ async function loadStatus() {
     const match = skins.value.find((x) => x.id === s.skin)
     if (match && match.id !== currentSkin.value.id) {
       currentSkin.value = match
-      void nextTick(initStage)
+      void initStage()
     }
   } catch {
     // 悬浮窗冷启动常在 WebSocket 就绪前：失败后短暂重试（最多 5 次，间隔 1.5s），
@@ -209,10 +251,14 @@ const moodLabel = computed(() => {
   if (pm && map[pm as string]) return map[pm as string]
   return ''
 })
-const skinButtons = computed(() => skins.value)
 
 /* ─── 互动 ─── */
 async function onPet() {
+  // 拖拽结束后的那次 dblclick 是副作用，不是"抚摸"意图。
+  if (swallowNextPet) {
+    swallowNextPet = false
+    return
+  }
   if (busy.value) return
   busy.value = true
   brain.petted()
@@ -227,62 +273,121 @@ async function onPet() {
     }
   } finally { busy.value = false }
 }
-async function onFeed() {
-  if (busy.value) return
-  busy.value = true
-  brain.feed('done')
-  petScene?.triggerMoodAction('excited')
-  try {
-    const res = await petRpc.triggerAction('feed')
-    if (res.ok && typeof res.energy === 'number' && typeof res.affection === 'number' && res.mood) {
-      status.value = { ...(status.value ?? currentAsFallback()), energy: res.energy, affection: res.affection, mood: res.mood } as PetStatus
-    } else {
-      void loadStatus()
-    }
-  } finally { busy.value = false }
-}
-async function selectSkin(id: PetSkinId | string) {
-  if (busy.value) return
-  busy.value = true
-  try {
-    const res = await petRpc.setSkin(id)
-    if (res.ok) {
-      const match = skins.value.find((s) => s.id === res.skin)
-      if (match) { currentSkin.value = match; void nextTick(initStage) }
-    }
-  } finally { busy.value = false; menuOpen.value = false }
-}
 function currentAsFallback(): Record<string, unknown> {
   return { skin: currentSkin.value.id, kind: currentSkin.value.kind === 'canvas' ? 'beast' : 'humanoid', mood: 'normal', energy: 100, affection: 0, running: true, accent_hex: currentSkin.value.accent }
 }
 
-/* ─── 拖拽（浏览器原生鼠标事件 + Tauri 拖拽移动：pet_overlay_move） ─── */
-let dragStart: { mx: number; my: number; wx: number; wy: number } | null = null
-function startDrag(ev: MouseEvent) {
-  // 走 Tauri Window.startDragging() 若可用（桌面端最顺滑）；否则回退自实现
+/* ─── 拖拽 ───
+ * 用户实测「桌宠拖不动 / 拖不出窗体」的根因（两层，缺一不可）：
+ *
+ * 1) 旧实现只有顶部 16px 手柄能拖，按着宠物本体拖完全不动 —— 命中区域太小；
+ * 2) 手柄把 `startDragging()` 包在同步 try/catch 里并直接 return：
+ *    `startDragging()` 返回 Promise，权限不足（本窗口不在 capabilities 的
+ *    `windows` 名单里 → ACL 拒绝）时是 **reject**，同步 try/catch 接不住；
+ *    而函数已经 return，下面的回退实现永远不会执行 → 装包后「怎么拖都不动」。
+ * 3) 即便走回退分支（逐帧 invoke `pet_overlay_move`），也没有 pointer capture：
+ *    IPC 慢半拍时光标就跑出窗体，pointermove 立刻停止 —— 观感正是
+ *    「拖到窗体边上就卡住，出不去」。
+ *
+ * 现在：手柄按下立即原生拖拽（OS 接管鼠标）；舞台越过 4px 阈值后转原生拖拽
+ * （保留双击抚摸）；原生不可用才回退，并补上 setPointerCapture。
+ */
+const DRAG_THRESHOLD = 4
+interface StageDragState {
+  mx: number
+  my: number
+  wx: number
+  wy: number
+  moved: boolean
+  /** 已交给 OS 原生拖拽：后续 pointermove 不再逐帧改窗口 */
+  native: boolean
+  pointerId: number
+}
+let stageDrag: StageDragState | null = null
+/** 拖拽刚结束时置为真，用来吞掉尾随的 dblclick（否则松手会莫名抚摸一次）。 */
+let swallowNextPet = false
+
+/** 原生窗口拖拽。返回是否已接管（Promise reject 时才回退）。 */
+function startNativeDrag(ev: PointerEvent): boolean {
   const w = getWindow()
-  if (w?.startDragging) {
-    try { w.startDragging(); return } catch { /* 回退自实现 */ }
+  if (!w?.startDragging) return false
+  try {
+    const pending = w.startDragging()
+    if (pending && typeof (pending as Promise<void>).then === 'function') {
+      // 关键：ACL 拒绝是 reject —— 必须 .catch，否则既不报错也不移动
+      void (pending as Promise<void>).catch(() => beginFallbackDrag(ev))
+    }
+    return true
+  } catch {
+    return false
   }
-  dragStart = {
-    mx: ev.clientX, my: ev.clientY,
-    wx: window.screenX, wy: window.screenY,
-  }
-  window.addEventListener('mousemove', onDragMove, { capture: true })
-  window.addEventListener('mouseup', endDrag, { once: true, capture: true })
+}
+
+/** 回退实现：没有原生拖拽能力时，逐帧把窗口挪到指针新位置。 */
+function beginFallbackDrag(ev: PointerEvent) {
   ev.preventDefault()
+  const target = ev.currentTarget as HTMLElement | null
+  stageDrag = {
+    mx: ev.clientX,
+    my: ev.clientY,
+    wx: window.screenX,
+    wy: window.screenY,
+    moved: false,
+    native: false,
+    pointerId: ev.pointerId,
+  }
+  try { target?.setPointerCapture?.(ev.pointerId) } catch { /* 捕获失败也能靠 window 级监听 */ }
+  window.addEventListener('pointermove', onStagePointerMove, { capture: true })
+  window.addEventListener('pointerup', endStageDrag, { once: true, capture: true })
+  window.addEventListener('pointercancel', endStageDrag, { once: true, capture: true })
 }
-function onDragMove(ev: MouseEvent) {
-  if (!dragStart) return
-  const dx = ev.clientX - dragStart.mx
-  const dy = ev.clientY - dragStart.my
-  const nx = dragStart.wx + dx
-  const ny = dragStart.wy + dy
-  moveWindow(nx, ny)
+
+function onHandlePointerDown(ev: PointerEvent) {
+  if (ev.button !== 0) return
+  if (startNativeDrag(ev)) return
+  beginFallbackDrag(ev)
 }
-function endDrag() {
-  dragStart = null
-  window.removeEventListener('mousemove', onDragMove, { capture: true })
+
+function onStagePointerDown(ev: PointerEvent) {
+  if (ev.button !== 0) return // 右键交给 contextmenu
+  stageDrag = {
+    mx: ev.clientX,
+    my: ev.clientY,
+    wx: window.screenX,
+    wy: window.screenY,
+    moved: false,
+    native: false,
+    pointerId: ev.pointerId,
+  }
+  window.addEventListener('pointermove', onStagePointerMove, { capture: true })
+  window.addEventListener('pointerup', endStageDrag, { once: true, capture: true })
+  window.addEventListener('pointercancel', endStageDrag, { once: true, capture: true })
+}
+
+function onStagePointerMove(ev: PointerEvent) {
+  if (!stageDrag || stageDrag.native) return
+  const dx = ev.clientX - stageDrag.mx
+  const dy = ev.clientY - stageDrag.my
+  if (!stageDrag.moved) {
+    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return
+    stageDrag.moved = true
+    // 越过阈值 → 交给 OS 原生拖拽：指针跨出窗体也不会断流
+    if (startNativeDrag(ev)) {
+      stageDrag.native = true
+      return
+    }
+  }
+  // 窗口随指针移动：宠物可以被拖到屏幕任意位置（含拖出原来的窗体范围）。
+  moveWindow(stageDrag.wx + dx, stageDrag.wy + dy)
+}
+
+function endStageDrag() {
+  if (stageDrag?.moved) swallowNextPet = true
+  const drag = stageDrag
+  stageDrag = null
+  window.removeEventListener('pointermove', onStagePointerMove, { capture: true })
+  if (!drag) return
+  try { stage3dEl.value?.releasePointerCapture?.(drag.pointerId) } catch { /* 已随 pointerup 释放 */ }
 }
 interface WindowBridge {
   startDragging?: () => Promise<void> | void
@@ -328,30 +433,100 @@ function getWindow(): WindowBridge | null {
 function moveWindow(x: number, y: number) {
   const w = getWindow()
   if (!w?.invoke) return
-  void w.invoke('pet_overlay_move', { x, y })
+  // 回退路径：失败（旧壳 / ACL）时不要抛未处理拒绝，原生拖拽仍是首选
+  void Promise.resolve(w.invoke('pet_overlay_move', { x, y })).catch(() => {})
 }
 
-/* ─── 右键菜单 ─── */
+/* ─── 右键菜单（桌宠自有菜单） ─── */
+const MENU_W = 208
+const MENU_H = 152
 const menuOpen = ref(false)
+const menuEl = ref<HTMLElement | null>(null)
 const menuPos = reactive({ x: 0, y: 0 })
-function onContextMenu(ev: MouseEvent) {
-  menuPos.x = Math.min(ev.clientX, window.innerWidth - 220)
-  menuPos.y = Math.min(ev.clientY, window.innerHeight - 340)
+/** 设置入口缺失的如实说明（悬浮窗没有路由，也拿不到主窗口句柄）。 */
+const settingsUnavailableHint = computed(
+  () => `${t('pet.menu.settings')}：桌宠悬浮窗没有独立设置入口，请在主窗口「设置 → 宠物」中调整`,
+)
+
+function openMenuAt(x: number, y: number) {
+  // 贴边时把菜单收回可视区（窗体只有 360×420，别让菜单被裁掉）
+  menuPos.x = Math.max(6, Math.min(x, window.innerWidth - MENU_W - 6))
+  menuPos.y = Math.max(6, Math.min(y, window.innerHeight - MENU_H - 6))
   menuOpen.value = true
+  void nextTick(() => {
+    menuEl.value?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus()
+  })
 }
-function hideMe() {
+
+function onContextMenu(ev: MouseEvent) {
+  ev.preventDefault()
+  openMenuAt(ev.clientX, ev.clientY)
+}
+
+function closeMenu(restoreFocus = false) {
+  if (!menuOpen.value) return
   menuOpen.value = false
-  const w = getWindow()
-  if (!w?.invoke) {
-    // Web 测试态：直接关闭窗口（诚实提示无 Tauri）
-    alert('Web 模式下请关闭当前标签页；桌面端可通过托盘菜单再开启。')
+  if (restoreFocus) stage3dEl.value?.focus()
+}
+
+/** 键盘打开菜单：Enter / 空格 / 菜单键 / Shift+F10（与原生右键等价）。 */
+function onStageKeydown(ev: KeyboardEvent) {
+  const wantsMenu =
+    ev.key === 'ContextMenu' ||
+    (ev.key === 'F10' && ev.shiftKey) ||
+    (ev.key === 'Enter' && !menuOpen.value) ||
+    (ev.key === ' ' && !menuOpen.value)
+  if (!wantsMenu) return
+  ev.preventDefault()
+  const rect = stage3dEl.value?.getBoundingClientRect()
+  openMenuAt(
+    rect ? rect.left + rect.width / 2 : window.innerWidth / 2,
+    rect ? rect.top + 24 : 24,
+  )
+}
+
+/** 菜单内键盘导航：Esc 关闭并回到舞台，↑↓ 循环移动焦点。 */
+function onMenuKeydown(ev: KeyboardEvent) {
+  if (!menuOpen.value) return
+  if (ev.key === 'Escape') {
+    ev.preventDefault()
+    closeMenu(true)
     return
   }
-  void w.invoke('pet_overlay_hide')
+  if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return
+  const items = Array.from(
+    menuEl.value?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [],
+  )
+  if (items.length === 0) return
+  ev.preventDefault()
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const step = ev.key === 'ArrowDown' ? 1 : -1
+  items[(current + step + items.length) % items.length]?.focus()
 }
-function openPetView() {
-  menuOpen.value = false
-  window.open('/control/pet', '_blank')
+
+function onInteract() {
+  closeMenu()
+  void onPet()
+}
+
+async function hideMe() {
+  closeMenu()
+  // 复用既有「桌面悬浮窗开关」能力（自带 Web 端诚实降级）
+  const res = await setPetOverlayEnabled(false)
+  if (res.ok) return
+  const w = getWindow()
+  if (w?.invoke) {
+    try {
+      await w.invoke('pet_overlay_hide')
+      return
+    } catch { /* 落到下面的如实提示 */ }
+  }
+  alert('当前环境没有桌面壳，无法隐藏悬浮窗；桌面端可通过托盘菜单重新显示。')
+}
+
+/** pet 窗口内全局禁用浏览器默认菜单（右键只出桌宠自己的菜单）。 */
+function suppressNativeContextMenu(ev: MouseEvent) {
+  ev.preventDefault()
 }
 
 /* ─── 大脑 + 动画循环（和 PetView 共用同一数学：R6 单一权威 moodMap） ─── */
@@ -377,14 +552,21 @@ onMounted(async () => {
   body.style.overflow = 'hidden'
   html.style.overflow = 'hidden'
 
+  // 先画：渲染器不依赖任何 RPC。旧顺序是 `await loadSkins()` 之后才 initStage，
+  // 于是 pet.list 慢/握手未就绪时舞台会长时间空白（e2e 实测 15s 等不到渲染器）。
+  // OFFLINE 目录已含全部皮肤元数据；权威皮肤返回后由 watch 重建。
+  void initStage()
   await loadSkins()
   void loadStatus()
-  void nextTick(initStage)
   raf = requestAnimationFrame(loop)
   pollTimer = setInterval(() => void loadStatus(), 15000)
 
   // 外部点击关闭菜单
   window.addEventListener('mousedown', onOutsideMenu)
+  // 菜单键盘：Esc 关闭 / ↑↓ 移动焦点
+  window.addEventListener('keydown', onMenuKeydown)
+  // 整个 pet 窗口禁用浏览器默认右键菜单
+  window.addEventListener('contextmenu', suppressNativeContextMenu)
 })
 function onOutsideMenu(ev: MouseEvent) {
   if (!menuOpen.value) return
@@ -396,11 +578,13 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   petScene?.dispose(); petScene = null
   window.removeEventListener('mousedown', onOutsideMenu)
-  window.removeEventListener('mousemove', onDragMove, { capture: true })
+  window.removeEventListener('keydown', onMenuKeydown)
+  window.removeEventListener('contextmenu', suppressNativeContextMenu)
+  window.removeEventListener('pointermove', onStagePointerMove, { capture: true })
 })
 
 /* 皮肤切换 → 重建 3D 舞台 */
-watch(currentSkinId, () => { void nextTick(initStage) })
+watch(currentSkinId, () => { void initStage() })
 </script>
 
 <style scoped>
@@ -429,9 +613,26 @@ watch(currentSkinId, () => { void nextTick(initStage) })
   background:
     radial-gradient(ellipse at 50% 48%, color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text) 3%, transparent)) 0%, var(--bg-transparent, transparent) 70%);
   overflow: hidden;
+  /* 整卡可拖（2026-10-25）：光标本身就是"这里能拖"的唯一可见提示 */
+  cursor: grab;
   box-shadow:
     0 20px 60px -20px color-mix(in srgb, var(--accent) 40%, color-mix(in srgb, var(--scrim, var(--text)) 60%, transparent)),
     0 1px 0 0 color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 三维画布只负责渲染：双击抚摸 / 右键菜单 / 拖拽手柄都由外层接收。
+   否则画布自己的 pointerdown 会把「抚摸宠物」变成「旋转模型」。 */
+.pet-overlay__stage:active {
+  cursor: grabbing;
+}
+/* 键盘可达：Tab 聚焦到舞台时给一条可见焦点环（不抢鼠标态视觉） */
+.pet-overlay__stage:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -2px;
+}
+
+.pet-overlay__stage.is-3d :deep(canvas) {
+  pointer-events: none;
 }
 
 /* 心情 & 好感度胶囊（左下） */
@@ -460,25 +661,18 @@ watch(currentSkinId, () => { void nextTick(initStage) })
   font-size: 12.5px;
 }
 .pet-overlay__menu-title { font-weight: 700; padding: 4px 8px 8px; color: var(--text); font-size: 12px; }
-.pet-overlay__menu-sub { padding: 6px 8px 4px; font-size: 11px; color: var(--text-dim); letter-spacing: 0.03em; text-transform: uppercase; }
 .pet-overlay__menu-item {
   width: 100%; text-align: left; padding: 6px 8px; border-radius: var(--radius-sm);
   border: none; background: transparent; color: var(--text); cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out);
 }
 .pet-overlay__menu-item:hover { background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
-.pet-overlay__menu-item.is-danger { color: var(--danger); }
-.pet-overlay__menu-item.is-danger:hover { background: color-mix(in srgb, var(--danger) 12%, var(--card)); }
-.pet-overlay__menu-sep { height: 1px; margin: 6px 6px; background: var(--hairline); opacity: 0.6; }
-.pet-overlay__menu-skins { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 2px 4px 4px; }
-.pet-overlay__skin {
-  aspect-ratio: 1 / 1; border-radius: var(--radius-md);
-  border: 1px solid var(--hairline); cursor: pointer;
-  display: flex; align-items: center; justify-content: center; font-size: 18px;
-  transition: transform var(--dur-fast) var(--ease-out);
+.pet-overlay__menu-item:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
 }
-.pet-overlay__skin:hover { transform: translateY(-1px); }
-.pet-overlay__skin.is-active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+.pet-overlay__menu-item:disabled:hover { background: transparent; }
+.pet-overlay__menu-sep { height: 1px; margin: 6px 6px; background: var(--hairline); opacity: 0.6; }
 
 /* 过渡 */
 .fade-enter-active, .fade-leave-active { transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }

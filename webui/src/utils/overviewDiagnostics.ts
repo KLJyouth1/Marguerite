@@ -103,6 +103,146 @@ export function withoutLegacyMigrationFinding<T extends DiagnosticReportLike>(re
   }
 }
 
+// ---------------------------------------------------------------------------
+// doctor.status 双引擎形状归一化
+// ---------------------------------------------------------------------------
+
+/**
+ * 传输层失败（连接换代 / 断线窗口）不是「体检失败」。
+ *
+ * 真机反馈：长耗时任务进行中打开概览或医生页，会看到
+ * 「网关健康报告不可用 —— Connection recycled after
+ * sessions.messages.subscribe terminated」。这条失败与 doctor 毫无关系：
+ * 会话订阅被中止时整条 socket 换代，恰好同连接上在飞的只读请求被牵连。
+ * `RpcClient` 已对只读调用做透明重放；调用方再用本判据做一次有界重试，
+ * 避免任何残留竞态把**可恢复**的传输波动渲染成红色错误卡。
+ */
+export function isTransportFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  const lower = message.toLowerCase()
+  return lower.includes('connection')
+    || lower.includes('socket')
+    || lower.includes('not connected')
+    || lower.includes('disconnected')
+}
+
+/** Rust 内核 `doctor.status` 的形状：`items` + `summary` 计数对象。 */
+interface RustDoctorItem {
+  id?: string
+  label?: string
+  status?: string
+  detail?: string
+  fix_hint?: string
+}
+
+/** 把一个 Rust item 的 `status` 映射为 severity。 */
+function severityOfDoctorStatus(status: unknown): 'error' | 'warn' | 'info' | 'ok' {
+  switch (String(status ?? '').toUpperCase()) {
+    case 'OK': return 'ok'
+    case 'DEGRADED': return 'warn'
+    case 'MISSING': return 'error'
+    default: return 'info'
+  }
+}
+
+const IMPACT_BY_SEVERITY: Record<string, string> = {
+  error: 'blocks_ready',
+  warn: 'degrades',
+  info: 'optional',
+  ok: 'none',
+}
+
+/** `fix_hint` 是多行人类文案；首行作 label，其余作 detail，复用 AdvancedCliSteps 的渲染。 */
+function fixStepsFromHint(hint: unknown): DiagnosticFindingLike['fixSteps'] {
+  const text = typeof hint === 'string' ? hint.trim() : ''
+  if (!text) return undefined
+  const [first, ...rest] = text.split('\n')
+  const detail = rest.join('\n').trim()
+  return [{ label: first.trim(), detail: detail || undefined }]
+}
+
+/**
+ * 把 `doctor.status` 报告**归一化**为 WebUI 通用的 findings 形状。
+ *
+ * 【为什么必须做】同一个 RPC 名，**两个引擎各答一套形状**：
+ *   - pyengine 侧车 → `{ findings[], counts, impactCounts, ready, gatewayUrl }`
+ *   - Rust 内核 → `{ items[], summary{ ok, degraded, missing, total } }`
+ * 前端此前只实现了侧车那一套 ⇒ 在 **Rust 托管**下（本机实际运行的就是它，
+ * `/api/health` 自报 `engine:"rust"`）`findings` 取到 `undefined`，详情列表恒为空，
+ * 而顶部 `summary` 是**对象**（被 Vue 序列化后渲染成 JSON 字面量）。
+ *
+ * 线上帧实测（2026-10-20）：`status: "DEGRADED"` + `summary: {"degraded":2,...}`
+ * 而列表写着"未返回任何发现项"——即**契约迁移只做了后端那一半**。
+ *
+ * 归一化刻意放在**纯函数**里（不依赖组件、不碰 DOM），让所有消费点共用一份；
+ * 只修医生页会漏掉总览页（两者都渲染 findings 列表）。
+ *
+ * 形状无法识别时**原样返回**，绝不伪造数据。
+ */
+export function normalizeDoctorReport<T extends DiagnosticReportLike>(report: T | null | undefined): T {
+  // 线边界防御性直通：`doctor.status` 的返回是未定型的（双引擎各答一套），
+  // 非对象/空值一律原样交回调用方。真实调用方传的是非空 `HealthReport`，
+  // 故此处的断言只为过 TS 对裸泛型与 null 的重叠性检查，运行期不改任何行为。
+  if (!report || typeof report !== 'object') return report as unknown as T
+  // 已是目标形状（侧车应答）→ 放行，不做无谓改写。
+  if (Array.isArray(report.findings)) return report
+
+  const items = Array.isArray((report as unknown as { items?: unknown }).items)
+    ? ((report as unknown as { items: RustDoctorItem[] }).items)
+    : []
+  if (items.length === 0) return report
+
+  const counts: Record<string, number> = { error: 0, warn: 0, info: 0, ok: 0 }
+  const impactCounts: Record<string, number> = {
+    blocks_ready: 0,
+    degrades: 0,
+    optional: 0,
+    none: 0,
+  }
+  const findings: DiagnosticFindingLike[] = items.map((item) => {
+    const severity = severityOfDoctorStatus(item?.status)
+    const readinessImpact = IMPACT_BY_SEVERITY[severity]
+    counts[severity] += 1
+    impactCounts[readinessImpact] += 1
+    const id = String(item?.id ?? '')
+    return {
+      id: id || undefined,
+      title: item?.label || id || undefined,
+      detail: item?.detail || undefined,
+      severity,
+      readinessImpact,
+      fixSteps: fixStepsFromHint(item?.fix_hint),
+    }
+  })
+
+  const blocks = impactCounts.blocks_ready
+  const degrades = impactCounts.degrades
+  const optional = impactCounts.optional
+  const summaryParts: string[] = []
+  if (blocks > 0) summaryParts.push(`${blocks} ${blocks === 1 ? 'action' : 'actions'} required`)
+  if (degrades > 0) {
+    const degraded = `${degrades} degraded ${degrades === 1 ? 'check' : 'checks'}`
+    summaryParts.push(blocks > 0 ? degraded : `Ready, ${degraded}`)
+  }
+  const summary = summaryParts.length > 0
+    ? summaryParts.join(', ')
+    : optional > 0
+      ? `Ready, ${optional} optional setup ${optional === 1 ? 'item' : 'items'}`
+      : 'Ready'
+
+  return {
+    ...report,
+    // `status` 统一成小写规范值：后端给的是 "DEGRADED"，而 `statusLabel()` 的
+    // 本地化查表只认小写键，大写会让界面回落到打印原始英文枚举（实测现象）。
+    status: blocks > 0 ? 'action_required' : degrades > 0 ? 'degraded' : 'ready',
+    ready: blocks === 0,
+    summary,
+    counts,
+    impactCounts,
+    findings,
+  }
+}
+
 // A home directory embedded in serialized diagnostics leaks the local account
 // name. Collapse `/Users/<name>/` (macOS) and `/home/<name>/` (Linux) to `~/`.
 // The username segment excludes `/`, `"` and `\` so the match never crosses a

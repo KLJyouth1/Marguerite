@@ -32,6 +32,9 @@ fn model_config_to_llm(m: &ModelConfig) -> crate::model::llm::LLMConfig {
         },
         thinking: ThinkingEffort::Off,
         context_window: CONTEXT_WINDOW_DEFAULT,
+        // 舰队成员沿用主配置声明的协议：这里映射的就是 `config.model`，
+        // 若在此处填默认值，用户配了 responses 但舰队仍打 chat。
+        wire_api: m.wire_api,
     }
 }
 

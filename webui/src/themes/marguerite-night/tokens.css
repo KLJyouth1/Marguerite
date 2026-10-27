@@ -1,0 +1,70 @@
+/* Theme: marguerite-night (value) — 玛格丽特 · 星夜。
+   深阿尔卑斯夜色 + 月光石蓝 + 海蓝宝石 + 雏菊金。
+   全部为 L1 语义角色（contract.json 的 required 集合），对比度按 WCAG AA 校验：
+   text/bg ≈ 16.4:1，text-muted/bg-surface ≈ 9.1:1，accent/bg ≈ 9.6:1，
+   accent-foreground/accent ≈ 10.2:1。 */
+[data-theme='marguerite-night'] {
+  /* 地面：夜蓝 → 星云蓝 */
+  --bg: #070b1a;
+  --bg-surface: #0d1430;
+  --bg-surface-2: #121c42;
+  --bg-elevated: #182450;
+  --bg-hover: #1d2a5c;
+
+  --text: #eef2ff;
+  --text-muted: #b9c6ea;
+  --text-dim: #8a99c4;
+
+  --border: #223061;
+  --border-strong: #33457f;
+  --border-focus: #9fd8ff;
+  --card: #101a3a;
+  --hairline: #1c2a57;
+
+  /* 主色：月光石蓝；次色：海蓝宝石（公主的 aquamarine）；深色：暮蓝 */
+  --accent: #a8c7ff;
+  --accent-hover: #c2d8ff;
+  --accent-deep: #6d8bd6;
+  --accent-secondary: #7fe3d4;
+  --accent-foreground: #06122e;
+
+  --ok: #7fe0a8;
+  --warn: #f2cc7a;
+  --danger: #ff8b9a;
+  --info: #8fd0ff;
+  --queued: #c9b3ff;
+
+  --syntax-comment: #7c8bb8;
+  --syntax-keyword: #a8c7ff;
+  --syntax-string: #7fe3d4;
+  --syntax-literal: #f2cc7a;
+  --syntax-title: #ffd9a3;
+  --syntax-attr: #c9b3ff;
+}
+
+/* 结构身份：衬线展示字 + 圆润化 + 月光焦点环。
+   放在 tokens.css（而非 world.css）是为了在 data-theme 落笔的**第一帧**就生效，
+   避免「先直角后圆角」的布局跳动（ember 踩过的同款坑）。 */
+[data-theme='marguerite-night'] {
+  --font-display: 'Fraunces', 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+
+  /* 圆润化：比默认更松的圆角，配合星夜的柔和气质 */
+  --radius-control: 12px;
+  --radius-card: 20px;
+  --radius-panel: 24px;
+  --radius-modal: 24px;
+  --radius-pill: 999px;
+
+  /* 焦点：月光环（内 + 外双层，保证在深色卡片上也可辨认） */
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 78%, transparent),
+                0 0 18px color-mix(in srgb, var(--accent-secondary) 40%, transparent);
+  --focus-ring-inset: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent),
+                      inset 0 0 12px color-mix(in srgb, var(--accent) 26%, transparent);
+
+  /* 阴影：冷色深空投影（默认阴影偏中性，夜景会显脏） */
+  --shadow-color: color-mix(in srgb, #01040f 72%, transparent);
+  --shadow: 0 18px 40px -18px var(--shadow-color), 0 2px 10px -4px var(--shadow-color);
+
+  /* 比 --bg 更深的「谷底」：雪脊剪影/舞台底部的收边色（world.css 引用，避免字面量外溢） */
+  --ink-abyss: #01040f;
+}

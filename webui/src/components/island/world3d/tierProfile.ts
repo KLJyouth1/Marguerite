@@ -91,10 +91,17 @@ export function tierForRoutingMode(mode: ModelRoutingMode): World3dTier {
 /**
  * 从真实引擎快照推导神力档（Agent→游戏方向的档位来源）。
  *
- * 优先用 modeKind（bloom/omni-transcend → 重档），其次 reasoningEffort。
+ * 优先用 `model.tier.get.effective_tier`（真实三档决策），其次 modeKind
+ * （bloom/omni-transcend → 重档），最后 reasoningEffort。
  * 快照未连接/字段缺失 → 保守回退 'efficient'（不假装「极速」也不冒充「旗舰」）。
  */
 export function tierForSnapshot(engine: EngineSnapshot): World3dTier {
+  // 真实档位优先：它是路由层算出来的结论，比从 mode/effort 二次推导更准确。
+  const tier = (engine.effectiveTier ?? '').toLowerCase()
+  if (tier === 'flagship') return 'flagship'
+  if (tier === 'turbo') return 'sprint'
+  if (tier === 'balanced') return 'efficient'
+
   const kind = engine.modeKind ?? ''
   if (kind === 'omni-transcend') return 'omni'
   if (kind === 'bloom') return 'flagship'

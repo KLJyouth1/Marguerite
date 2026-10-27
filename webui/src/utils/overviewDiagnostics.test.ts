@@ -4,11 +4,89 @@ import {
   buildAgentDiagnosisHandoff,
   formatLatencyLine,
   normalizeHomePaths,
+  normalizeDoctorReport,
   providerBlocksAgent,
   settingsLinkForFinding,
   withoutLegacyMigrationFinding,
   xmlEscape,
+  type DiagnosticReportLike,
 } from './overviewDiagnostics'
+
+// `doctor.status` 的线上 payload 是**未定型**的（两个引擎各答一套），
+// 故测试用 unknown 断言收口，避免为测试形状去污染生产类型。
+const normalize = (raw: unknown) => normalizeDoctorReport(raw as DiagnosticReportLike)
+
+describe('normalizeDoctorReport', () => {
+  const rustItems = [
+    { id: 'python', label: 'Python 3.12+', status: 'OK', detail: 'detected=C:\\Python314', fix_hint: '' },
+    {
+      id: 'backend',
+      label: 'WSL / Docker',
+      status: 'DEGRADED',
+      detail: '本机无 WSL 且无 Docker',
+      fix_hint: '安装引导：\n1) WSL2\n2) Docker Desktop',
+    },
+    { id: 'gpu', label: 'GPU', status: 'MISSING', detail: '未检测到' },
+  ]
+
+  it('maps the Rust items+summary shape onto findings so the detail list is not empty', () => {
+    const out = normalize({
+      status: 'DEGRADED',
+      summary: { ok: 1, degraded: 1, missing: 1, total: 3 },
+      items: rustItems,
+    })
+    expect(out.findings).toHaveLength(3)
+    expect(out.findings?.map((f) => f.severity)).toEqual(['ok', 'warn', 'error'])
+    expect(out.findings?.map((f) => f.readinessImpact)).toEqual(['none', 'degrades', 'blocks_ready'])
+    expect(out.findings?.[1].title).toBe('WSL / Docker')
+    expect(out.findings?.[1].detail).toBe('本机无 WSL 且无 Docker')
+    expect(out.counts).toMatchObject({ ok: 1, warn: 1, error: 1 })
+    // MISSING 映射为 blocks_ready → 状态必须是 action_required 且不可就绪
+    expect(out.status).toBe('action_required')
+    expect(out.ready).toBe(false)
+    expect(out.summary).toContain('1 action')
+  })
+
+  it('lowers the status into the canonical key the localized label table expects', () => {
+    const out = normalize({ items: [rustItems[0], rustItems[1]] })
+    // 后端给的是 "DEGRADED"（大写），statusLabel() 的查表只认小写
+    expect(out.status).toBe('degraded')
+    // 只有 OK + DEGRADED（无 blocks_ready）→ 仍算可就绪
+    expect(out.ready).toBe(true)
+  })
+
+  it('turns a multi-line fix_hint into one advanced CLI step', () => {
+    const out = normalize({ items: [rustItems[1]] })
+    expect(out.findings?.[0].fixSteps).toEqual([
+      { label: '安装引导：', detail: '1) WSL2\n2) Docker Desktop' },
+    ])
+  })
+
+  it('passes a sidecar-shaped report through by reference', () => {
+    const report = {
+      findings: [{ id: 'a', severity: 'warn' }],
+      counts: { warn: 1 },
+      status: 'degraded',
+      ready: false,
+    }
+    expect(normalize(report)).toBe(report)
+  })
+
+  it('returns unrecognized shapes untouched instead of inventing findings', () => {
+    const noItems = { status: 'DEGRADED' }
+    expect(normalize(noItems)).toBe(noItems)
+    const emptyItems = { items: [] }
+    expect(normalize(emptyItems)).toBe(emptyItems)
+    expect(normalize(null)).toBe(null)
+  })
+
+  it('reports ready when nothing blocks or degrades', () => {
+    const out = normalize({ items: [rustItems[0]] })
+    expect(out.status).toBe('ready')
+    expect(out.ready).toBe(true)
+    expect(out.summary).toBe('Ready')
+  })
+})
 
 describe('normalizeHomePaths', () => {
   it('collapses macOS and Linux home prefixes to ~/', () => {

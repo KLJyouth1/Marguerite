@@ -22,7 +22,9 @@ describe('browser Workbench items', () => {
       url: 'https://example.com/private?q=secret',
     })
     expect(item?.id).not.toContain('example.com')
-    expect(item?.hostKind).toBe('native-webcontents')
+    // 2026-10-24：面板改由 DOM 渲染的 CDP 镜像承载（壳没有原生表面命令，
+    // 走 native 的结果是面板打不开），这里锁住宿主类型不回退。
+    expect(item?.hostKind).toBe('dom')
     expect(item && browserUrlFromWorkbenchItem(item)).toBe(
       'https://example.com/private?q=secret',
     )

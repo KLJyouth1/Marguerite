@@ -25,6 +25,12 @@
       <div class="stat-value mono control-stat__value control-stat__value--mono">{{ avgCost }}</div>
       <div class="stat-hint control-stat__hint">{{ t('usageLogs.summary.runningAverage') }}</div>
     </div>
+    <!-- 缓存命中率：会话级口径（台账 prompt + cache_read），不用进程级 client_hit_rate -->
+    <div class="stat control-stat">
+      <div class="stat-label control-stat__label">{{ t('usageLogs.cache.hitRate') }}</div>
+      <div class="stat-value mono control-stat__value control-stat__value--mono">{{ cacheHitRate }}</div>
+      <div class="stat-hint control-stat__hint">{{ cacheHitRateHint }}</div>
+    </div>
   </section>
 </template>
 
@@ -41,6 +47,8 @@ defineProps<{
   costHintTitle: string
   sessionCount: string
   avgCost: string
+  cacheHitRate: string
+  cacheHitRateHint: string
 }>()
 </script>
 

@@ -96,6 +96,19 @@ class SessionStreamRegistry:
         events.append(event)
         self._trim_session_events(events)
         self._record_live_event(session_key, event)
+        # P2-10: also feed the global bounded resync ring so a WS client that
+        # reconnects can replay a small gap (or align to a snapshot when it has
+        # fallen out of the ring). Best-effort and must never break recording.
+        try:
+            from opensquilla.gateway.event_resync import get_event_resync_buffer
+
+            get_event_resync_buffer().record(
+                event_name,
+                enriched,
+                channel=session_key,
+            )
+        except Exception:  # noqa: BLE001 - resync ring is an optimization only.
+            pass
         return enriched
 
     @staticmethod

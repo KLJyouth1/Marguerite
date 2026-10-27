@@ -50,6 +50,12 @@
               <td data-label="Input" class="usage-mono">{{ row.inputTokens != null ? row.inputTokens.toLocaleString() : '-' }}</td>
               <td data-label="Output" class="usage-mono">{{ row.outputTokens != null ? row.outputTokens.toLocaleString() : '-' }}</td>
               <td data-label="Cache R" class="usage-mono usage-dim">{{ row.cacheReadTokens != null ? row.cacheReadTokens.toLocaleString() : '-' }}</td>
+              <!-- 会话级命中率：cache_read / (prompt_tokens + cache_read)，与汇总区同公式 -->
+              <td
+                :data-label="t('usageLogs.columns.cacheHitRate')"
+                class="usage-mono usage-dim"
+                :title="t('usageLogs.cache.hitRateFormula')"
+              >{{ row.cacheHitRate != null ? `${row.cacheHitRate}%` : '-' }}</td>
               <td data-label="Cache W" class="usage-mono usage-dim">{{ row.cacheWriteTokens != null ? row.cacheWriteTokens.toLocaleString() : '-' }}</td>
               <td data-label="Cost" class="usage-mono usage-cost">{{ fmtCost(row.cost, { source: row.raw }) }}</td>
               <td data-label="Source">

@@ -10,7 +10,7 @@
 //!
 //! 本模块零外部依赖（仅 `std`），可直接被 `model::llm` 与上层调度复用。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -317,7 +317,15 @@ impl PrefixCache {
     /// 这是 KV-Cache 原则 P1 的客户端观测：相同稳定前缀的请求会让服务端复用已计算的 KV 块
     /// （prompt caching），无需重新预填充。`prefix_tokens` 为该前缀 token 数，如实计入
     /// `CacheStats.prefix_saved_tokens`，不冒充为「客户端命中」（那需要逐字节一致的全请求）。
+    ///
+    /// **空前缀（`prefix_tokens == 0`）一律不计复用**：所有没有稳定前缀的请求哈希都相同
+    /// （空串的哈希），若照常计数，「复用次数」会一路增长而「省下 token」恒为 0 ——
+    /// 真机页脚就出现过「省前缀 token 0（复用 8 次）」这种自相矛盾的读数。没有字节被复用，
+    /// 就没有节省可记。
     pub fn note_prefix(&self, hash: u64, prefix_tokens: u32) -> bool {
+        if prefix_tokens == 0 {
+            return false;
+        }
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.prefix_seen.contains(&hash) {
             g.stats.record_prefix_reuse(prefix_tokens);
@@ -485,23 +493,44 @@ pub fn now_ms() -> u64 {
 ///   在发出「应被服务端缓存的不变前缀」时登记其规范指纹，后续调用校验字节一致——
 ///   直接封堵「非规范重序列化」这一头号缓存杀手（四点缓存失效模式之二：工具结果
 ///   重序列化致字节漂移，前缀永不命中）。与 W-4 `ToolCompressor` 的逐字节确定性相辅相成。
+/// - [`PrefixCacheTracker::observe_stable_prefix_scoped`]（W5.3）按 **scope** 分域登记：
+///   `agent.stable_half` / `compress.tool_results` 各自独立指纹与漂移计数，
+///   让「漂移发生在哪一层」可归因（`cache.status` 的 `stable_prefix_drift_by_scope`）。
+///   旧的单 scope API 保留为 `scope = "default"` 的包装。
+///
+/// `Debug` 是给持有它的 `AgentRuntime`（本身 `#[derive(Debug)]`）与单测断言用的：
+/// 它只打印 scope 计数，不含任何凭据。
+#[derive(Debug)]
 pub struct PrefixCacheTracker {
     inner: Mutex<PrefixCacheTrackerInner>,
 }
 
+/// 单个 scope 的稳定前缀状态（指纹 + 漂移计数各自独立）。
+#[derive(Debug, Clone, Copy, Default)]
+struct ScopedPrefixState {
+    /// 该 scope 最近一次登记的规范指纹；`None` 表示该 scope 尚未登记过。
+    fingerprint: Option<u64>,
+    /// 该 scope 的漂移次数（同一 scope 两次指纹不同 = +1）。
+    drift: u64,
+}
+
+#[derive(Debug)]
 struct PrefixCacheTrackerInner {
     /// 上报次数（LLM 调用次数）
     calls: u64,
-    /// 累计 prompt token（含命中 + 写入 + 未缓存）
-    prompt_tokens_total: u64,
+    /// 累计**归一后**的总输入 token（Anthropic = input + read + creation；
+    /// OpenAI/DeepSeek = prompt_tokens，其中 cached 是子集）。
+    total_input_tokens: u64,
     /// 累计服务端前缀缓存命中 token（DeepSeek `prompt_cache_hit_tokens` 归一）
     cache_read_total: u64,
     /// 累计服务端前缀缓存写入 token（首次为该前缀建立 KV 缓存）
     cache_creation_total: u64,
-    /// 稳定前缀规范指纹（FNV-1a）；`None` 表示尚未登记
-    stable_prefix_fp: Option<u64>,
-    /// 稳定前缀漂移次数（同一逻辑前缀两次登记指纹不同 = 缓存前缀被破坏）
-    stable_prefix_drift: u64,
+    /// 达到 provider 最小可缓存长度的请求数（`request_hit_rate` 的分母）
+    eligible_requests: u64,
+    /// 合格请求中至少命中一次的请求数（分母是 `eligible_requests`）
+    hit_requests: u64,
+    /// scope → 稳定前缀状态（W5.3：各 scope 独立指纹与漂移计数）。
+    stable_prefix_by_scope: BTreeMap<String, ScopedPrefixState>,
 }
 
 impl PrefixCacheTracker {
@@ -510,56 +539,109 @@ impl PrefixCacheTracker {
         Self {
             inner: Mutex::new(PrefixCacheTrackerInner {
                 calls: 0,
-                prompt_tokens_total: 0,
+                total_input_tokens: 0,
                 cache_read_total: 0,
                 cache_creation_total: 0,
-                stable_prefix_fp: None,
-                stable_prefix_drift: 0,
+                eligible_requests: 0,
+                hit_requests: 0,
+                stable_prefix_by_scope: BTreeMap::new(),
             }),
         }
     }
 
-    /// 上报一次 LLM 调用的前缀缓存用量（已归一：cache_read = 命中，cache_creation = 写入）。
-    pub fn report(&self, prompt_tokens: u64, cache_read: u64, cache_creation: u64) {
+    /// 上报一次 LLM 调用的前缀缓存用量。
+    ///
+    /// - `total_input_tokens`：**归一后**的总输入（Anthropic 需把 input/read/creation 相加，
+    ///   见 [`total_input_tokens`]）；分母错了后面所有百分比都是错的。
+    /// - `cache_read` / `cache_creation`：服务端命中 / 写入 token。
+    /// - `min_cache_tokens`：provider 的最小可缓存前缀长度；达到才计入 `eligible_requests`。
+    pub fn report(
+        &self,
+        total_input_tokens: u64,
+        cache_read: u64,
+        cache_creation: u64,
+        min_cache_tokens: u64,
+    ) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.calls += 1;
-        g.prompt_tokens_total += prompt_tokens;
+        g.total_input_tokens += total_input_tokens;
         g.cache_read_total += cache_read;
         g.cache_creation_total += cache_creation;
+        if total_input_tokens >= min_cache_tokens {
+            g.eligible_requests += 1;
+            if cache_read > 0 {
+                g.hit_requests += 1;
+            }
+        }
     }
 
-    /// 登记 / 校验「稳定前缀」：传入应被服务端缓存的不变前缀规范串。
+    /// 登记 / 校验「稳定前缀」：旧单 scope API，等价于 `scope = "default"`。
     ///
-    /// - 首次登记：记录指纹并返回 `true`（视作基线）。
-    /// - 后续一致：返回 `true`（无漂移，前缀可稳定命中）。
-    /// - 后续不一致：累加 [`PrefixCacheTrackerInner::stable_prefix_drift`]、更新指纹、返回 `false`
-    ///   （漂移告警——压缩/序列化破坏了缓存前缀，需排查）。
+    /// 生产调用点请改用 [`Self::observe_stable_prefix_scoped`] 并给出真实来源 scope
+    /// （如 `agent.stable_half` / `compress.tool_results`），这样漂移才能归因到层。
     pub fn observe_stable_prefix(&self, prefix: &str) -> bool {
+        self.observe_stable_prefix_scoped(DEFAULT_PREFIX_SCOPE, prefix)
+    }
+
+    /// 按 scope 登记 / 校验「稳定前缀」（W5.3）。
+    ///
+    /// - 每个 scope 有**独立**的指纹与漂移计数，互不影响；
+    /// - 该 scope 首次登记：记录指纹并返回 `true`（视作基线）；
+    /// - 同一 scope 后续一致：返回 `true`（无漂移，前缀可稳定命中）；
+    /// - 同一 scope 后续不一致：该 scope 漂移计数 +1、更新指纹、返回 `false`。
+    ///
+    /// 首次出现一个新 scope 时**不**继承其它 scope 的指纹 —— 否则「新层接入」
+    /// 会被误判成漂移。
+    pub fn observe_stable_prefix_scoped(&self, scope: &str, prefix: &str) -> bool {
         let fp = hash_text(prefix);
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        match g.stable_prefix_fp {
+        let state = g.stable_prefix_by_scope.entry(scope.to_string()).or_default();
+        match state.fingerprint {
             Some(prev) if prev == fp => true,
             Some(_) => {
-                g.stable_prefix_drift += 1;
-                g.stable_prefix_fp = Some(fp);
+                state.drift += 1;
+                state.fingerprint = Some(fp);
                 false
             }
             None => {
-                g.stable_prefix_fp = Some(fp);
+                state.fingerprint = Some(fp);
                 true
             }
         }
     }
 
+    /// 按 scope 归因的漂移明细（W5.3）。
+    ///
+    /// 包含所有已登记 scope（稳态下计数值为 0 —— 「agent 稳态 0 次漂移」本身
+    /// 就是需要被看见的证据，而不是把该 scope 隐藏）。
+    pub fn drift_by_scope(&self) -> BTreeMap<String, u64> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stable_prefix_by_scope
+            .iter()
+            .map(|(scope, state)| (scope.clone(), state.drift))
+            .collect()
+    }
+
     /// 快照当前可观测指标。
     pub fn stats(&self) -> PrefixCacheTrackerStats {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let stable_prefix_drift_by_scope: BTreeMap<String, u64> = g
+            .stable_prefix_by_scope
+            .iter()
+            .map(|(scope, state)| (scope.clone(), state.drift))
+            .collect();
         PrefixCacheTrackerStats {
             calls: g.calls,
-            prompt_tokens_total: g.prompt_tokens_total,
+            total_input_tokens: g.total_input_tokens,
             cache_read_total: g.cache_read_total,
             cache_creation_total: g.cache_creation_total,
-            stable_prefix_drift: g.stable_prefix_drift,
+            eligible_requests: g.eligible_requests,
+            hit_requests: g.hit_requests,
+            // 总量 = 各 scope 之和（旧字段语义不变：>0 即「有层破坏了前缀」）。
+            stable_prefix_drift: stable_prefix_drift_by_scope.values().sum(),
+            stable_prefix_drift_by_scope,
         }
     }
 
@@ -577,12 +659,17 @@ impl PrefixCacheTracker {
         }
     }
 
-    /// 稳定前缀漂移次数（>0 表示压缩/序列化破坏了缓存前缀，应告警）。
+    /// 稳定前缀漂移次数总和（>0 表示压缩/序列化破坏了缓存前缀，应告警）。
+    ///
+    /// 需要「漂移在哪一层」时用 [`Self::drift_by_scope`]。
     pub fn stable_prefix_drift(&self) -> u64 {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .stable_prefix_drift
+            .stable_prefix_by_scope
+            .values()
+            .map(|state| state.drift)
+            .sum()
     }
 }
 
@@ -592,14 +679,104 @@ impl Default for PrefixCacheTracker {
     }
 }
 
+/// 旧的单 scope API 使用的默认 scope 名（兼容包装，不参与分域归因）。
+pub const DEFAULT_PREFIX_SCOPE: &str = "default";
+
+/// W5.3 scope：`AgentRuntime::build_model_messages` 装配出的稳定半区
+/// （模式段 / 工作区 / 规则 / 能力自述 / 工具指引，即开头连续 System 段的正文）。
+///
+/// 该 scope 漂移 = 会话级工具面或静态提示变了；配合 `face_changed` 日志可归因。
+///
+/// ⚠️ 口径说明：scope 是**进程级单序列**，不是每会话一条指纹。多个会话交替请求时
+/// 每次切换都会计一次漂移——这不是误报：服务端前缀缓存按整个 prompt 前缀复用，
+/// 会话切换确实让上一前缀不可复用。单会话稳态下应为 0。
+pub const AGENT_STABLE_HALF_SCOPE: &str = "agent.stable_half";
+/// W5.3 scope：工具输出压缩器（`ToolCompressor`）的不变前缀。
+pub const COMPRESS_TOOL_RESULTS_SCOPE: &str = "compress.tool_results";
+
 /// 进程级前缀缓存追踪器快照。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PrefixCacheTrackerStats {
     pub calls: u64,
-    pub prompt_tokens_total: u64,
+    /// provider 归一后的总输入 token（**coverage 的分母**）。
+    pub total_input_tokens: u64,
     pub cache_read_total: u64,
     pub cache_creation_total: u64,
+    pub eligible_requests: u64,
+    pub hit_requests: u64,
+    /// 全部 scope 的漂移总和（兼容旧字段；明细见下一字段）。
     pub stable_prefix_drift: u64,
+    /// W5.3：按 scope 归因的漂移明细（含计数为 0 的 scope）。
+    pub stable_prefix_drift_by_scope: BTreeMap<String, u64>,
+}
+
+impl PrefixCacheTrackerStats {
+    /// 缓存覆盖率：被服务端复用 token / 全部输入 token ∈ [0, 100]。
+    ///
+    /// 这是**唯一**可以跨 provider 比较的主指标；旧指标 `read/(read+creation)`
+    /// 在 DeepSeek（creation 常为 0）上恒等于 100%，会骗人。
+    pub fn cache_coverage_pct(&self) -> f64 {
+        if self.total_input_tokens == 0 {
+            0.0
+        } else {
+            (self.cache_read_total as f64 / self.total_input_tokens as f64 * 100.0)
+                .clamp(0.0, 100.0)
+        }
+    }
+
+    /// 合格请求命中率：达到最小可缓存长度的请求中，至少命中一次的比例。
+    pub fn request_hit_rate_pct(&self) -> f64 {
+        if self.eligible_requests == 0 {
+            0.0
+        } else {
+            (self.hit_requests as f64 / self.eligible_requests as f64 * 100.0).clamp(0.0, 100.0)
+        }
+    }
+
+    /// 旧指标（保留为诊断）：read / (read + creation)，不跨 provider、不当主指标。
+    pub fn write_adjusted_hit_rate_pct(&self) -> f64 {
+        let denominator = self.cache_read_total + self.cache_creation_total;
+        if denominator == 0 {
+            0.0
+        } else {
+            (self.cache_read_total as f64 / denominator as f64 * 100.0).clamp(0.0, 100.0)
+        }
+    }
+}
+
+/// provider 归一后的总输入 token。
+///
+/// OpenAI / DeepSeek 的 `prompt_tokens` **已包含**缓存命中（cached 是子集），
+/// 而 Anthropic 的 `input_tokens` **不含** `cache_read_input_tokens` /
+/// `cache_creation_input_tokens` —— 漏加会让 Anthropic 的覆盖率被算到 900%。
+pub fn total_input_tokens(
+    prompt_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    anthropic: bool,
+) -> u64 {
+    if anthropic {
+        prompt_tokens
+            .saturating_add(cache_read)
+            .saturating_add(cache_creation)
+    } else {
+        prompt_tokens
+    }
+}
+
+/// 最小可缓存前缀长度（低于它服务端不会建立缓存，故不计入合格请求）。
+///
+/// Anthropic 视模型为 1024/2048；这里取保守下界 1024（1024~2047 的请求会被
+/// 计入合格但永远命中不了 → 只会**低估**命中率，不会虚高）。
+pub const MIN_CACHE_TOKENS_OPENAI_COMPAT: u64 = 1024;
+pub const MIN_CACHE_TOKENS_ANTHROPIC: u64 = 1024;
+
+pub fn min_cache_tokens(anthropic: bool) -> u64 {
+    if anthropic {
+        MIN_CACHE_TOKENS_ANTHROPIC
+    } else {
+        MIN_CACHE_TOKENS_OPENAI_COMPAT
+    }
 }
 
 static PREFIX_CACHE_TRACKER: OnceLock<PrefixCacheTracker> = OnceLock::new();
@@ -609,18 +786,24 @@ pub fn prefix_cache_tracker() -> &'static PrefixCacheTracker {
     PREFIX_CACHE_TRACKER.get_or_init(|| PrefixCacheTracker {
         inner: Mutex::new(PrefixCacheTrackerInner {
             calls: 0,
-            prompt_tokens_total: 0,
+            total_input_tokens: 0,
             cache_read_total: 0,
             cache_creation_total: 0,
-            stable_prefix_fp: None,
-            stable_prefix_drift: 0,
+            eligible_requests: 0,
+            hit_requests: 0,
+            stable_prefix_by_scope: BTreeMap::new(),
         }),
     })
 }
 
 /// 便捷上报：LLM 调用点归一 usage 后调用，累积进程级前缀缓存命中率。
-pub fn report_prefix_cache_usage(prompt_tokens: u64, cache_read: u64, cache_creation: u64) {
-    prefix_cache_tracker().report(prompt_tokens, cache_read, cache_creation);
+pub fn report_prefix_cache_usage(
+    total_input_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    min_cache_tokens: u64,
+) {
+    prefix_cache_tracker().report(total_input_tokens, cache_read, cache_creation, min_cache_tokens);
 }
 
 #[cfg(test)]
@@ -807,6 +990,27 @@ mod tests {
         assert_eq!(c.stats().prefix_hits, 0);
     }
 
+    /// 真机页脚读数「省前缀 token 0（复用 8 次）」的回归：空前缀不得计为复用。
+    ///
+    /// 所有「没有稳定前缀」的请求哈希都是同一个空串哈希；此前每次都被记成一次复用，
+    /// 于是复用次数一路涨、省下的 token 恒为 0 —— 读数自相矛盾，也掩盖了「前缀其实是空的」。
+    #[test]
+    fn empty_prefix_is_never_counted_as_reuse() {
+        let c = PrefixCache::new(8);
+        let empty = hash_text("");
+        for _ in 0..8 {
+            assert!(!c.note_prefix(empty, 0), "空前缀不得返回复用");
+        }
+        let s = c.stats();
+        assert_eq!(s.prefix_hits, 0, "空前缀不应累计复用次数");
+        assert_eq!(s.prefix_saved_tokens, 0);
+        // 真实的非空前缀照常工作
+        assert!(!c.note_prefix(empty, 64));
+        assert!(c.note_prefix(empty, 64));
+        assert_eq!(c.stats().prefix_hits, 1);
+        assert_eq!(c.stats().prefix_saved_tokens, 64);
+    }
+
     #[test]
     fn prefix_seen_is_bounded() {
         // 缺陷回归：`prefix_seen` 曾无界增长（每个不同稳定前缀一条，且随落盘膨胀）。
@@ -836,13 +1040,73 @@ mod tests {
     fn prefix_cache_tracker_reports_and_hit_rate() {
         let t = PrefixCacheTracker::new();
         // 3 次调用：稳态（cache_read 远大于 creation）应趋近高命中率。
-        t.report(1000, 800, 0);
-        t.report(1000, 800, 0);
-        t.report(1000, 800, 0);
+        t.report(1000, 800, 0, MIN_CACHE_TOKENS_OPENAI_COMPAT);
+        t.report(1000, 800, 0, MIN_CACHE_TOKENS_OPENAI_COMPAT);
+        t.report(1000, 800, 0, MIN_CACHE_TOKENS_OPENAI_COMPAT);
         let s = t.stats();
         assert_eq!(s.calls, 3);
         assert_eq!(s.cache_read_total, 2400);
-        assert!((t.hit_rate() - 1.0).abs() < 1e-9, "稳态应 100% 命中");
+        assert_eq!(s.eligible_requests, 0, "1000 < 1024：不应计入合格请求");
+        assert!((t.hit_rate() - 1.0).abs() < 1e-9, "稳态应 100% 命中（诊断口径）");
+    }
+
+    #[test]
+    fn cache_coverage_and_request_hit_rate_use_honest_denominators() {
+        let t = PrefixCacheTracker::new();
+        // OpenAI/DeepSeek：prompt=1000（含 900 cached），read=900，creation=0
+        t.report(
+            total_input_tokens(1000, 900, 0, false),
+            900,
+            0,
+            min_cache_tokens(false),
+        );
+        let s = t.stats();
+        assert_eq!(s.total_input_tokens, 1000);
+        assert!((s.cache_coverage_pct() - 90.0).abs() < 1e-9);
+        // 旧口径 read/(read+creation) = 100% —— 正是会骗人的那个数。
+        assert!((s.write_adjusted_hit_rate_pct() - 100.0).abs() < 1e-9);
+        assert_eq!(s.eligible_requests, 0, "1000 < 1024");
+
+        // 合格请求：1500 输入、命中 1200 → eligible=1, hit=1
+        t.report(
+            total_input_tokens(1500, 1200, 0, false),
+            1200,
+            0,
+            min_cache_tokens(false),
+        );
+        let s = t.stats();
+        assert_eq!(s.eligible_requests, 1);
+        assert_eq!(s.hit_requests, 1);
+        assert!((s.request_hit_rate_pct() - 100.0).abs() < 1e-9);
+        assert!((s.cache_coverage_pct() - (2100.0 / 2500.0 * 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anthropic_input_tokens_must_include_cache_read_and_creation() {
+        // Anthropic：input=100，read=900 → 总输入必须是 1000，而不是 100（否则 900%）。
+        let total = total_input_tokens(100, 900, 0, true);
+        assert_eq!(total, 1000);
+        let t = PrefixCacheTracker::new();
+        t.report(total, 900, 0, min_cache_tokens(true));
+        let s = t.stats();
+        assert!((s.cache_coverage_pct() - 90.0).abs() < 1e-9, "{s:?}");
+
+        // 冷启动：input=100，creation=900 → 总 1000，coverage 0（不是 900%）。
+        let cold = PrefixCacheTracker::new();
+        cold.report(total_input_tokens(100, 0, 900, true), 0, 900, min_cache_tokens(true));
+        let s = cold.stats();
+        assert!((s.cache_coverage_pct() - 0.0).abs() < 1e-9, "{s:?}");
+        assert_eq!(s.eligible_requests, 0, "1000 < 1024");
+    }
+
+    #[test]
+    fn below_threshold_requests_are_not_eligible() {
+        let t = PrefixCacheTracker::new();
+        t.report(500, 0, 0, min_cache_tokens(false));
+        let s = t.stats();
+        assert_eq!(s.eligible_requests, 0);
+        assert_eq!(s.request_hit_rate_pct(), 0.0);
+        assert_eq!(s.cache_coverage_pct(), 0.0);
     }
 
     #[test]
@@ -861,6 +1125,97 @@ mod tests {
             "前缀变化应检出漂移并返回 false"
         );
         assert_eq!(t.stable_prefix_drift(), 1, "应记录 1 次漂移");
+        // W5.3：旧 API 固定落在 default scope，且明细可查。
+        assert_eq!(
+            t.drift_by_scope().get(DEFAULT_PREFIX_SCOPE),
+            Some(&1),
+            "旧 observe_stable_prefix 必须映射到 default scope"
+        );
+        assert_eq!(t.stats().stable_prefix_drift, 1);
+        assert_eq!(
+            t.stats().stable_prefix_drift_by_scope.get(DEFAULT_PREFIX_SCOPE),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn stable_prefix_scopes_keep_independent_fingerprints_and_counts() {
+        let t = PrefixCacheTracker::new();
+
+        // 两个 scope 各自首次登记，都视作基线（互不继承指纹）。
+        assert!(t.observe_stable_prefix_scoped("agent.stable_half", "agent-v1"));
+        assert!(t.observe_stable_prefix_scoped("compress.tool_results", "compress-v1"));
+        // 同一 scope 变化 → 只有它 +1。
+        assert!(!t.observe_stable_prefix_scoped("agent.stable_half", "agent-v2"));
+
+        let by_scope = t.drift_by_scope();
+        assert_eq!(by_scope.get("agent.stable_half"), Some(&1), "{by_scope:?}");
+        assert_eq!(
+            by_scope.get("compress.tool_results"),
+            Some(&0),
+            "{by_scope:?}"
+        );
+        // 总和 = 各 scope 之和。
+        assert_eq!(t.stable_prefix_drift(), 1);
+        let stats = t.stats();
+        assert_eq!(stats.stable_prefix_drift, 1);
+        assert_eq!(
+            stats.stable_prefix_drift_by_scope.get("agent.stable_half"),
+            Some(&1)
+        );
+        assert_eq!(
+            stats
+                .stable_prefix_drift_by_scope
+                .get("compress.tool_results"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn stable_prefix_same_scope_change_counts_one_drift() {
+        let t = PrefixCacheTracker::new();
+        assert!(t.observe_stable_prefix_scoped("agent.stable_half", "v1"));
+        assert!(!t.observe_stable_prefix_scoped("agent.stable_half", "v2"));
+        assert!(!t.observe_stable_prefix_scoped("agent.stable_half", "v3"));
+        assert_eq!(t.drift_by_scope().get("agent.stable_half"), Some(&2));
+        assert_eq!(t.stable_prefix_drift(), 2);
+    }
+
+    #[test]
+    fn stable_prefix_agent_scope_is_stable_across_five_steady_turns() {
+        let t = PrefixCacheTracker::new();
+        for turn in 0..5 {
+            assert!(
+                t.observe_stable_prefix_scoped("agent.stable_half", "same-stable-half"),
+                "第 {turn} 轮稳态不应漂移"
+            );
+        }
+        let by_scope = t.drift_by_scope();
+        assert_eq!(by_scope.get("agent.stable_half"), Some(&0));
+        assert_eq!(t.stable_prefix_drift(), 0);
+        assert_eq!(t.stats().stable_prefix_drift_by_scope["agent.stable_half"], 0);
+    }
+
+    #[test]
+    fn stable_prefix_compress_drift_does_not_leak_into_agent_scope() {
+        let t = PrefixCacheTracker::new();
+        assert!(t.observe_stable_prefix_scoped("agent.stable_half", "agent-v1"));
+        assert!(t.observe_stable_prefix_scoped("compress.tool_results", "compress-v1"));
+
+        // 压缩器抖动（工具结果重序列化）不得影响 agent 稳定半区的判定。
+        assert!(!t.observe_stable_prefix_scoped(
+            "compress.tool_results",
+            "compress-v2"
+        ));
+        assert!(
+            t.observe_stable_prefix_scoped("agent.stable_half", "agent-v1"),
+            "compress 漂移后 agent 稳态仍应返回 true"
+        );
+
+        let by_scope = t.drift_by_scope();
+        assert_eq!(by_scope.get("agent.stable_half"), Some(&0));
+        assert_eq!(by_scope.get("compress.tool_results"), Some(&1));
+        assert_eq!(t.stable_prefix_drift(), 1, "总和只计 compress 的 1 次");
     }
 
     #[test]

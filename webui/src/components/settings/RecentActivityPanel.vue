@@ -5,6 +5,7 @@
  * 经网关 activity.recent 拉取，含 12 类产品事件。
  */
 import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 
 interface ActivityEntry {
@@ -13,31 +14,38 @@ interface ActivityEntry {
   session: string
   method: string
   event: string | null
+  /** `product::audit` 写入的事件把业务字段嵌在 fields 里（`product::emit` 则是平铺）。 */
+  fields?: Record<string, unknown> | null
   [key: string]: unknown
 }
 
 const rpc = useRpcStore()
+const { t } = useI18n()
 const entries = ref<ActivityEntry[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-const EVENT_META: Record<string, { label: string; kind: 'task' | 'approval' | 'mode' | 'usage' | 'tool' }> = {
-  'task.initiated': { label: '任务发起', kind: 'task' },
-  'plan.confirmed': { label: '计划确认', kind: 'task' },
-  'tool.call': { label: '工具调用', kind: 'tool' },
-  'task.completed': { label: '任务完成', kind: 'task' },
-  'task.failed': { label: '任务失败', kind: 'task' },
-  'task.cancelled': { label: '任务取消', kind: 'task' },
-  'mode.changed': { label: '切换模式', kind: 'mode' },
-  'trust.changed': { label: '信任档位变更', kind: 'mode' },
-  'approval.requested': { label: '确认请求', kind: 'approval' },
-  'approval.granted': { label: '确认授权', kind: 'approval' },
-  'approval.denied': { label: '确认拒绝', kind: 'approval' },
-  'budget.warning': { label: '预算告警', kind: 'usage' },
+const EVENT_META: Record<string, { key: string; kind: 'task' | 'approval' | 'mode' | 'usage' | 'tool' }> = {
+  'task.initiated': { key: 'eventTaskInitiated', kind: 'task' },
+  'plan.confirmed': { key: 'eventPlanConfirmed', kind: 'task' },
+  'tool.call': { key: 'eventToolCall', kind: 'tool' },
+  'task.completed': { key: 'eventTaskCompleted', kind: 'task' },
+  'task.failed': { key: 'eventTaskFailed', kind: 'task' },
+  'task.cancelled': { key: 'eventTaskCancelled', kind: 'task' },
+  'mode.changed': { key: 'eventModeChanged', kind: 'mode' },
+  'trust.changed': { key: 'eventTrustChanged', kind: 'mode' },
+  'approval.requested': { key: 'eventApprovalRequested', kind: 'approval' },
+  'approval.granted': { key: 'eventApprovalGranted', kind: 'approval' },
+  'approval.denied': { key: 'eventApprovalDenied', kind: 'approval' },
+  'budget.warning': { key: 'eventBudgetWarning', kind: 'usage' },
 }
 
 function metaFor(event: string | null) {
-  return (event && EVENT_META[event]) || { label: event ?? '未知事件', kind: 'tool' as const }
+  const meta = event ? EVENT_META[event] : undefined
+  if (!meta) {
+    return { label: event ?? t('settings.recentActivity.unknownEvent'), kind: 'tool' as const }
+  }
+  return { label: t(`settings.recentActivity.${meta.key}`), kind: meta.kind }
 }
 
 function fmtTime(ts: string): string {
@@ -47,21 +55,61 @@ function fmtTime(ts: string): string {
   return d.toLocaleString()
 }
 
+/**
+ * 读取事件字段：`product::emit` 把字段平铺在条目上，而 `product::audit`
+ * （`mode.changed` 走这条）把字段包在 `fields` 里。两种形状都要支持。
+ */
+function fieldOf(entry: ActivityEntry, key: string): unknown {
+  const fields = entry.fields
+  if (fields && typeof fields === 'object' && key in fields) {
+    return fields[key]
+  }
+  return entry[key]
+}
+
+function hasValue(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== ''
+}
+
 function detailFor(entry: ActivityEntry): string {
   const ev = entry.event
-  if (ev === 'plan.confirmed') return `修订 ${entry.revision_id ?? '—'} · run ${entry.run_id ?? '—'}`
-  if (ev === 'tool.call') return `工具 ${entry.tool ?? '—'}`
-  if (ev === 'task.initiated') return `${entry.title ?? ''}（${entry.status ?? 'queued'}）`
-  if (ev === 'task.completed' || ev === 'task.failed' || ev === 'task.cancelled') {
-    return `task ${entry.task_id ?? '—'}${entry.error ? ` · ${entry.error}` : ''}`
+  if (ev === 'plan.confirmed') {
+    return t('settings.recentActivity.detailRevision', { revision: entry.revision_id ?? '—', run: entry.run_id ?? '—' })
   }
-  if (ev === 'mode.changed') return `${entry.from ?? '—'} → ${entry.to ?? '—'}`
-  if (ev === 'trust.changed') return `${entry.action ?? '—'}${entry.level ? ` · ${entry.level}` : ''}`
+  if (ev === 'tool.call') return t('settings.recentActivity.detailTool', { tool: entry.tool ?? '—' })
+  if (ev === 'task.initiated') {
+    return t('settings.recentActivity.detailTaskStatus', { title: entry.title ?? '', status: entry.status ?? 'queued' })
+  }
+  if (ev === 'task.completed' || ev === 'task.failed' || ev === 'task.cancelled') {
+    const task = entry.task_id ?? '—'
+    return entry.error
+      ? t('settings.recentActivity.detailTaskError', { task, error: entry.error })
+      : t('settings.recentActivity.detailTask', { task })
+  }
+  if (ev === 'mode.changed') {
+    const from = fieldOf(entry, 'from')
+    const to = fieldOf(entry, 'to')
+    // 真正缺前后值时只保留事件摘要（「切换模式 core」），不渲染「—」→「—」
+    // 这种看起来像数据丢失的空洞占位。
+    if (!hasValue(from) || !hasValue(to)) return ''
+    return t('settings.recentActivity.detailMode', { from, to })
+  }
+  if (ev === 'trust.changed') {
+    const action = entry.action ?? '—'
+    return entry.level
+      ? t('settings.recentActivity.detailTrustLevel', { action, level: entry.level })
+      : t('settings.recentActivity.detailTrust', { action })
+  }
   if (ev === 'approval.requested' || ev === 'approval.granted' || ev === 'approval.denied') {
-    return `${entry.approval ?? '—'} · ${entry.state ?? '—'}`
+    return t('settings.recentActivity.detailApproval', { approval: entry.approval ?? '—', state: entry.state ?? '—' })
   }
   if (ev === 'budget.warning') {
-    return `阈值 ${entry.threshold_tokens ?? 0} tok / $${entry.threshold_usd ?? 0} · 已用 ${entry.total_tokens ?? 0} tok / $${entry.cost_usd ?? 0}`
+    return t('settings.recentActivity.detailBudget', {
+      thresholdTokens: entry.threshold_tokens ?? 0,
+      thresholdUsd: entry.threshold_usd ?? 0,
+      usedTokens: entry.total_tokens ?? 0,
+      usedCost: entry.cost_usd ?? 0,
+    })
   }
   return ''
 }
@@ -88,17 +136,17 @@ onMounted(refresh)
 <template>
   <section class="control-section">
     <div class="control-section__head">
-      <h3 class="control-section__title">最近活动（产品行为事件）</h3>
+      <h3 class="control-section__title">{{ t('settings.recentActivity.title') }}</h3>
       <p class="control-section__desc">
-        M3-D1 行为事件时间线：任务发起/计划确认/工具调用/完成/失败/取消、模式与信任档位切换、审批流、预算告警，均来自 core 本地审计日志，展示最近 {{ entries.length }} 条。
+        {{ t('settings.recentActivity.description', { count: entries.length }) }}
       </p>
     </div>
     <div class="activity-toolbar">
-      <span class="activity-toolbar__count">{{ entries.length }} 条事件</span>
-      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">刷新</button>
+      <span class="activity-toolbar__count">{{ t('settings.recentActivity.countLabel', { count: entries.length }) }}</span>
+      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">{{ t('settings.recentActivity.refresh') }}</button>
     </div>
     <div v-if="error" class="activity-banner activity-banner--err" role="alert">{{ error }}</div>
-    <div v-if="loading" class="activity-empty">加载中…</div>
+    <div v-if="loading" class="activity-empty">{{ t('settings.recentActivity.loading') }}</div>
     <ol v-else-if="entries.length" class="activity-list">
       <li v-for="entry in entries" :key="entry.id" class="activity-row" :data-testid="`activity-entry-${entry.id}`">
         <span class="activity-dot" :class="`activity-dot--${metaFor(entry.event).kind}`" aria-hidden="true" />
@@ -112,7 +160,7 @@ onMounted(refresh)
         <time class="activity-time" :datetime="entry.ts">{{ fmtTime(entry.ts) }}</time>
       </li>
     </ol>
-    <div v-else class="activity-empty">暂无行为事件。触发任务、切换模式或审批操作后此处将出现时间线。</div>
+    <div v-else class="activity-empty">{{ t('settings.recentActivity.empty') }}</div>
   </section>
 </template>
 

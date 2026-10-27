@@ -10,10 +10,12 @@ import type {
   ChatSteerCapability,
 } from '@/types/chat'
 import type { ModelRoutingMode } from '@/types/modelRouting'
+import type { EffortLevel } from '@/types/effort'
 import type { CollaborationMode } from '@/types/plans'
 import type { SandboxRunMode } from '@/types/sandbox'
 import { normalizeSandboxRunMode } from '@/types/sandbox'
 import type {
+  ChatDispatchBrief,
   ChatSendParams,
   ChatSendResponse,
   SessionSteerV2Params,
@@ -26,6 +28,7 @@ import type {
   PendingQueueOwnerContext,
 } from '@/composables/chat/useChatPendingQueue'
 import { recordSessionNavigationDiag } from '@/utils/chat/sessionNavigationDiag'
+import { clearContextRefs, snapshotContextRefs } from '@/composables/chat/contextRefs'
 import {
   hasSendableModelInputImageAttachment,
   isSendableAttachment,
@@ -35,6 +38,7 @@ import {
 } from '@/utils/chat/attachments'
 import { localizedChatErrorMessage } from '@/utils/chat/errors'
 import { rehomePromotedSteerRows } from '@/utils/chat/historyMerge'
+import { uniqueProjectRootIds } from '@/composables/chat/useChatProjectRoots'
 import { isControlInput } from '@/utils/chat/inputSemantics'
 import { createClientMessageId, createClientRequestId } from '@/utils/chat/messageIdentity'
 import {
@@ -80,17 +84,41 @@ interface SendAttempt {
   initialCollaborationMode: CollaborationMode | null
   forkBeforeMessageId: string | null
   workspaceId: string | null
+  /** 附加项目 id（不含主根）；幂等回放比较必须连同它一起比。 */
+  workspaceIds: string[]
   params: ChatSendParams
   requiresIdempotentReplay?: boolean
 }
 
 export type ChatSendOutcome = 'accepted' | 'deferred' | 'not_sent' | 'retryable_failure'
 
+/**
+ * 后端 `SESSION_BUSY` 的落点：**入队**，不是报错。
+ *
+ * 为什么单独抽出来：这是「用户输入不许丢」的契约点，值得被测试钉住。
+ * 返回 `null` 表示不是 busy 错误，调用方继续走原有错误处理。
+ *
+ * - 入队成功 → `'deferred'`（前端按「已排队」处理，气泡进队列，不产生 error 行）
+ * - 入队失败（队列满）→ 仍返回 `'deferred'`，但提示用户队列已满
+ *   （此时文本仍在 composer 里，用户可以直接重发，不会被静默吞掉）
+ */
+export function handleSessionBusySend(
+  err: unknown,
+  enqueue: () => boolean,
+  notifyQueueFull: () => void,
+): ChatSendOutcome | null {
+  if (errorCode(err) !== 'SESSION_BUSY') return null
+  const queued = enqueue()
+  if (!queued) notifyQueueFull()
+  return 'deferred'
+}
+
 interface ExplicitSendPayload {
   attachments: Attachment[]
   intent: string | null
   forkBeforeMessageId: string | null
   workspaceId?: string | null
+  workspaceIds?: string[]
   initialCollaborationMode?: CollaborationMode | null
 }
 
@@ -102,6 +130,7 @@ interface ComposerSnapshot {
   intent: string | null
   forkBeforeMessageId: string | null
   workspaceId: string | null
+  workspaceIds: string[]
   initialCollaborationMode: CollaborationMode | null
 }
 
@@ -254,6 +283,11 @@ function sameSendableAttachments(
   })
 }
 
+function sameWorkspaceIds(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((id, index) => id === b[index])
+}
+
 function matchesRecoveredDraft(
   attempt: SendAttempt,
   input: {
@@ -264,6 +298,7 @@ function matchesRecoveredDraft(
     initialCollaborationMode: CollaborationMode | null
     forkBeforeMessageId: string | null
     workspaceId: string | null
+    workspaceIds: string[]
   },
 ): boolean {
   return (
@@ -273,8 +308,50 @@ function matchesRecoveredDraft(
     attempt.initialCollaborationMode === input.initialCollaborationMode &&
     attempt.forkBeforeMessageId === input.forkBeforeMessageId &&
     attempt.workspaceId === input.workspaceId &&
+    sameWorkspaceIds(attempt.workspaceIds, input.workspaceIds) &&
     sameSendableAttachments(input.attachments, attempt)
   )
+}
+
+/**
+ * 本轮 chat.send 要携带的项目绑定。
+ *
+ * 规则：
+ * 1. 调用方显式给了 `workspaceId`（payload 里带该字段）→ 以它为准（null 表示显式解绑）。
+ * 2. 新任务（`intent === 'new_chat'`）→ 用草稿的 pending 绑定。
+ * 3. 其它轮 → 用会话已绑定的 boundWorkspaceId（自愈：首轮漏绑后，下一条消息补上）。
+ *
+ * 旧实现只在第 2 条生效，于是首轮错过绑定的会话永远停在「未绑定项目」，
+ * 智能体只能看到应用数据目录（真机 2026-10-24）。
+ */
+export function resolveSendWorkspaceId(input: {
+  hasWorkspaceField: boolean
+  payloadWorkspaceId: string | null
+  intent: string | null
+  pendingWorkspaceId: string | null
+  boundWorkspaceId: string | null
+}): string | null {
+  if (input.hasWorkspaceField) return input.payloadWorkspaceId
+  if (input.intent === 'new_chat') return input.pendingWorkspaceId
+  return input.boundWorkspaceId
+}
+
+/**
+ * 本轮 `chat.send` 的**多根**参数（`workspaceIds`）。
+ *
+ * - 单根（只有主根、无附加项目）返回空数组：调用方据此完全不发该字段，
+ *   让后端继续走旧的 `workspaceId` 路径；
+ * - 多根时主根固定首位（后端以首项为主根），去重保序；
+ * - 没有主根时也返回空数组 —— 「只有附加项目、没有主根」的绑定没有意义。
+ */
+export function resolveSendWorkspaceIds(
+  primaryId: string | null,
+  extraIds: readonly string[],
+): string[] {
+  const primary = String(primaryId || '').trim()
+  if (!primary) return []
+  const ids = uniqueProjectRootIds([primary, ...extraIds])
+  return ids.length > 1 ? ids : []
 }
 
 function chatSourceMetadata(options: UseChatSendOptions): ChatSendParams['_source'] {
@@ -298,6 +375,14 @@ export interface UseChatSendOptions {
   modelRoutingSettingsBusy: Readonly<Ref<boolean>>
   /** 深度思考开关：true 时此轮 chat.send 透传 thinking=true（DeepSeek 推理链）。 */
   enableThinking?: Readonly<Ref<boolean>>
+  /**
+   * 推理等级（off/normal/deep/max）→ 每轮透传 `chat.send` 的 `effort` 参数。
+   *
+   * 为什么**每轮都发**（连 off 也发）：服务端会把显式档位持久化到会话偏好里，
+   * 只在「非 off」时才发，会让用户把滑块拖回关闭后服务端仍停在上一档，
+   * 表现为「关了还在深度思考」。显式每轮覆盖是唯一不会留残留的写法。
+   */
+  reasoningEffort?: Readonly<Ref<EffortLevel>>
   elevatedMode: Ref<string>
   runMode: Ref<SandboxRunMode>
   pendingAttachments: Ref<Attachment[]>
@@ -306,6 +391,15 @@ export interface UseChatSendOptions {
   initialCollaborationMode: Readonly<Ref<CollaborationMode>>
   pendingForkBeforeMessageId: Ref<string | null>
   pendingWorkspaceId?: Ref<string | null>
+  /** 会话已绑定的项目（来自会话元数据）。每轮随 chat.send 重发，首轮漏绑时可自愈。 */
+  boundWorkspaceId?: Readonly<Ref<string | null>>
+  /** 会话级附加项目（不含主根）。非空时本轮以多根 `workspaceIds` 上行。 */
+  pendingWorkspaceIds?: Ref<string[]>
+  /**
+   * 输入框编排简报（模式/智能体/蜂群/团队/能力）。每轮随 chat.send 上行，
+   * 后端注入「先出调度计划再执行」的纪律段。
+   */
+  dispatchBrief?: Readonly<Ref<ChatDispatchBrief | null>>
   sendBlockedReason?: Readonly<Ref<string | null>>
   validateActiveProjectBeforeSend?: () => Promise<string | null>
   acceptPendingWorkspaceBinding?: (workspaceId: string | null) => void
@@ -407,6 +501,7 @@ export function useChatSend(options: UseChatSendOptions) {
       intent,
       forkBeforeMessageId: options.pendingForkBeforeMessageId.value,
       workspaceId: pendingWorkspaceForIntent(intent),
+      workspaceIds: [...(options.pendingWorkspaceIds?.value || [])],
       initialCollaborationMode: initialModeForIntent(intent),
     }
   }
@@ -422,6 +517,7 @@ export function useChatSend(options: UseChatSendOptions) {
       && options.pendingSessionIntent.value === snapshot.intent
       && options.pendingForkBeforeMessageId.value === snapshot.forkBeforeMessageId
       && pendingWorkspaceForIntent(options.pendingSessionIntent.value) === snapshot.workspaceId
+      && sameWorkspaceIds(options.pendingWorkspaceIds?.value || [], snapshot.workspaceIds)
       && options.pendingAttachments.value.length === snapshot.attachmentRefs.length
       && options.pendingAttachments.value.every(
         (attachment, index) => attachment === snapshot.attachmentRefs[index],
@@ -434,7 +530,11 @@ export function useChatSend(options: UseChatSendOptions) {
       attachments: snapshot.payloadAttachments,
       intent: snapshot.intent,
       forkBeforeMessageId: snapshot.forkBeforeMessageId,
-      workspaceId: snapshot.workspaceId,
+      // 只有草稿真的选了项目才算「显式 workspaceId」。快照里的 null 是「本轮没有
+      // pending 绑定」，不是「显式解绑」——否则后续轮次会用一个 null 字段覆盖掉
+      // 会话已绑定的 boundWorkspaceId（自愈路径失效，2026-10-24 真机缺陷的复现口）。
+      ...(snapshot.workspaceId ? { workspaceId: snapshot.workspaceId } : {}),
+      workspaceIds: [...snapshot.workspaceIds],
       initialCollaborationMode: snapshot.initialCollaborationMode,
     }
   }
@@ -1174,6 +1274,7 @@ export function useChatSend(options: UseChatSendOptions) {
         initialCollaborationMode: composerSnapshot.initialCollaborationMode,
         forkBeforeMessageId: composerSnapshot.forkBeforeMessageId,
         workspaceId: composerSnapshot.workspaceId,
+        workspaceIds: composerSnapshot.workspaceIds,
       })
     ) {
       await dispatchSend(text, {
@@ -1390,9 +1491,25 @@ export function useChatSend(options: UseChatSendOptions) {
     // Only the first new-task attempt owns the pending workspace. Follow-up
     // queue/steer sends may run before it is accepted, but must neither inherit
     // nor clear that project binding.
-    const workspaceId = sendOpts.payload && 'workspaceId' in sendOpts.payload
-      ? sendOpts.payload.workspaceId ?? null
-      : pendingWorkspaceForIntent(intent)
+    //
+    // 但**已绑定**的会话必须每轮都带上 workspaceId（真机缺陷，2026-10-24）：
+    // 首轮一旦错过绑定（草稿从 URL/恢复态进来、pending 尚未 hydrate），会话的
+    // project_path 就永久是 null —— 智能体只能看到应用数据目录，于是回答
+    // 「本次会话未绑定到真实项目目录」。带上 boundWorkspaceId 让下一条消息自愈。
+    const hasWorkspaceField = Boolean(sendOpts.payload && 'workspaceId' in sendOpts.payload)
+    const workspaceId = resolveSendWorkspaceId({
+      hasWorkspaceField,
+      payloadWorkspaceId: sendOpts.payload?.workspaceId ?? null,
+      intent,
+      pendingWorkspaceId: options.pendingWorkspaceId?.value || null,
+      boundWorkspaceId: options.boundWorkspaceId?.value || null,
+    })
+    // 附加项目：显式 payload 快照优先（重放/队列不得被后来的选择污染），
+    // 否则读当前会话级选择。空数组 = 单根，不发 `workspaceIds`。
+    const extraWorkspaceIds = sendOpts.payload && 'workspaceIds' in sendOpts.payload
+      ? [...(sendOpts.payload.workspaceIds || [])]
+      : [...(options.pendingWorkspaceIds?.value || [])]
+    const sendWorkspaceIds = resolveSendWorkspaceIds(workspaceId, extraWorkspaceIds)
     const initialCollaborationMode = (
       sendOpts.payload
       && 'initialCollaborationMode' in sendOpts.payload
@@ -1421,6 +1538,7 @@ export function useChatSend(options: UseChatSendOptions) {
           initialCollaborationMode,
           forkBeforeMessageId,
           workspaceId,
+          workspaceIds: extraWorkspaceIds,
         })
         && retryCandidate.queueMode === sendOpts.queueMode
       ),
@@ -1490,16 +1608,31 @@ export function useChatSend(options: UseChatSendOptions) {
       }
       params._source = chatSourceMetadata(options)
       if (intent) params.intent = intent
-      if (intent === 'new_chat' && workspaceId) params.workspaceId = workspaceId
+      // 任何一轮都带（不再只限 new_chat）：见上方 workspaceId 计算处的注释。
+      if (workspaceId) params.workspaceId = workspaceId
+      // 多根：仅在确有附加项目时上行（单根继续走旧 workspaceId 路径）。
+      if (sendWorkspaceIds.length > 1) params.workspaceIds = sendWorkspaceIds
+      const dispatchBrief = options.dispatchBrief?.value
+      if (dispatchBrief) params.dispatch = dispatchBrief
       if (initialCollaborationMode === 'plan') {
         params.collaborationMode = initialCollaborationMode
       }
       if (forkBeforeMessageId) params.forkBeforeMessageId = forkBeforeMessageId
-      if (options.enableThinking?.value) params.thinking = true
+      if (options.reasoningEffort?.value) {
+        params.effort = options.reasoningEffort.value
+        // `thinking` 与 `effort` 同源冗余：保留它只为兼容仍读 `thinking` 的旧编排路径
+        // （服务端优先级 effort > thinking，两值一致时无副作用）。
+        params.thinking = options.reasoningEffort.value !== 'off'
+      } else if (options.enableThinking?.value) {
+        params.thinking = true
+      }
       if (attachmentsToSend.length > 0) {
         params.displayText = userText
         params.attachments = attachmentsToSend.map(serializeSendableAttachment)
       }
+      // 「@」引用：快照进本轮参数。发送成功后清空（失败保留，重试沿用同一份 params）。
+      const contextRefs = snapshotContextRefs()
+      if (contextRefs.length > 0) params.contextRefs = contextRefs
       attempt = {
         clientRequestId: params.clientRequestId!,
         clientMessageId,
@@ -1512,6 +1645,7 @@ export function useChatSend(options: UseChatSendOptions) {
         initialCollaborationMode,
         forkBeforeMessageId,
         workspaceId,
+        workspaceIds: extraWorkspaceIds,
         params,
       }
       const now = new Date().toISOString()
@@ -1560,6 +1694,8 @@ export function useChatSend(options: UseChatSendOptions) {
 
     try {
       const res = await options.rpc.call<ChatSendResponse>('chat.send', attempt.params)
+      // 引用已被本轮消费：只有仍是同一会话时才清空，避免切会话后误清新一轮的引用。
+      if (options.sessionKey.value === requestSessionKey) clearContextRefs()
       if (recoveredAttempt?.clientRequestId === attempt.clientRequestId) {
         recoveredAttempt = null
       }
@@ -1657,6 +1793,15 @@ export function useChatSend(options: UseChatSendOptions) {
       }
       return 'accepted'
     } catch (err: unknown) {
+      // R69：后端对同一会话的并发 send 会返回 `SESSION_BUSY`（前端状态滞后、
+      // 或多端/多标签页同时发送）。这不是失败，而是「这一条该排队」——
+      // 直接报错会把用户刚打的字丢掉，那是比慢更糟的体验。
+      const busyOutcome = handleSessionBusySend(
+        err,
+        () => options.enqueuePendingInput(text, pendingQueueOwner()),
+        () => pushToast(i18n.global.t('chat.toast.sessionBusy'), { tone: 'info' }),
+      )
+      if (busyOutcome) return busyOutcome
       const acceptedError = acceptedErrorInfo(err)
       if (
         acceptedError
@@ -1783,6 +1928,9 @@ export function useChatSend(options: UseChatSendOptions) {
     }
     if (options.pendingWorkspaceId && !options.pendingWorkspaceId.value) {
       options.pendingWorkspaceId.value = attempt.workspaceId
+    }
+    if (options.pendingWorkspaceIds && !options.pendingWorkspaceIds.value.length) {
+      options.pendingWorkspaceIds.value = [...attempt.workspaceIds]
     }
     recoveredAttempt = {
       ...attempt,

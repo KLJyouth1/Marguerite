@@ -20,7 +20,24 @@
       </label>
       <p class="ext-hint">{{ t('settings.ext.pet.hint') }}</p>
 
-      <h4 class="ext-subtitle">选择皮肤</h4>
+      <!-- 桌面悬浮窗：真壳的独立置顶窗口（pet-overlay）。页内桌宠与它是两件事，
+           以前只有页内开关、没有任何入口能打开悬浮窗（用户反馈「桌宠不显示」）。 -->
+      <label class="control-row" for="pet-overlay-toggle">
+        <span class="control-label">{{ t('settings.ext.pet.overlayLabel') }}</span>
+        <input
+          id="pet-overlay-toggle"
+          v-model="petOverlayOn"
+          type="checkbox"
+          class="control-input"
+          role="switch"
+          :disabled="!petOverlaySupported"
+          @change="persistPetOverlay"
+        />
+      </label>
+      <p class="ext-hint">{{ petOverlaySupported ? t('settings.ext.pet.overlayHint') : t('settings.ext.pet.overlayUnavailable') }}</p>
+      <p v-if="petOverlayError" class="ext-hint ext-hint--warn">{{ t('settings.ext.pet.overlayFailed', { error: petOverlayError }) }}</p>
+
+      <h4 class="ext-subtitle">{{ t('settings.ext.pet.skinTitle') }}</h4>
       <div class="pet-skin-grid">
         <button
           v-for="s in petSkins"
@@ -57,17 +74,13 @@
       <p v-else class="ext-hint">{{ t('settings.ext.pluginMarket.loading') }}</p>
     </section>
 
-    <!-- 企业协同 · SSH：本地回环不变量下的远程协同时代指南（Radmin VPN 组网） -->
+    <!-- 企业协同 · SSH：直连 / 隧道两种方式，不引导安装第三方组网工具 -->
     <section v-else-if="sectionId === 'collabSsh'" class="ext-card">
       <p class="ext-hint">{{ t('settings.ext.collabSsh.localNote') }}</p>
 
       <h4 class="ext-subtitle">{{ t('settings.ext.collabSsh.vpnTitle') }}</h4>
       <ol class="ext-steps">
-        <li>{{ t('settings.ext.collabSsh.step1') }}
-          <a class="ext-link" href="https://www.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
-            {{ t('settings.ext.collabSsh.download') }} ↗
-          </a>
-        </li>
+        <li>{{ t('settings.ext.collabSsh.step1') }}</li>
         <li>{{ t('settings.ext.collabSsh.step2') }}</li>
         <li>{{ t('settings.ext.collabSsh.step3') }}</li>
         <li>{{ t('settings.ext.collabSsh.step4') }}</li>
@@ -86,15 +99,6 @@
         <li>{{ t('settings.ext.collabSsh.sec2') }}</li>
         <li>{{ t('settings.ext.collabSsh.sec3') }}</li>
       </ul>
-
-      <div class="ext-actions">
-        <a class="btn btn--secondary" href="https://www.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
-          {{ t('settings.ext.collabSsh.download') }}
-        </a>
-        <a class="btn btn--ghost" href="https://help.radmin-vpn.com/" target="_blank" rel="noopener noreferrer">
-          {{ t('settings.ext.collabSsh.docs') }} ↗
-        </a>
-      </div>
     </section>
 
     <!-- 通用：说明 + 打开入口 -->
@@ -117,6 +121,11 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 import { PET_SKINS, getCurrentSkin, setCurrentSkin } from '@/components/pet/skins'
+import {
+  petOverlayAvailable,
+  petOverlayPreferred,
+  setPetOverlayEnabled,
+} from '@/composables/usePetOverlay'
 
 const props = defineProps<{ sectionId: string }>()
 const { t } = useI18n()
@@ -124,9 +133,23 @@ const rpc = useRpcStore()
 
 const PET_ENABLED_KEY = 'pet.desktopEnabled'
 
-const petEnabled = ref(localStorage.getItem(PET_ENABLED_KEY) === 'true')
+// 与 DesktopPet 同一判据：缺省开启，只有显式关过（'false'）才算关。
+// 两处若判据不一致，开关会显示「开」而桌宠不出现（或反之）——用户看到的就是坏掉。
+const petEnabled = ref(localStorage.getItem(PET_ENABLED_KEY) !== 'false')
 const petSkins = PET_SKINS
 const currentPetSkin = ref(getCurrentSkin().id)
+// 桌面悬浮窗：能力与状态都取真实值（Web 端置灰，不假装可用）
+const petOverlaySupported = petOverlayAvailable()
+const petOverlayOn = ref(petOverlaySupported && petOverlayPreferred())
+const petOverlayError = ref('')
+async function persistPetOverlay() {
+  petOverlayError.value = ''
+  const result = await setPetOverlayEnabled(petOverlayOn.value)
+  if (!result.ok) {
+    petOverlayOn.value = false
+    petOverlayError.value = result.error ?? 'unknown'
+  }
+}
 function persistPetEnabled() {
   localStorage.setItem(PET_ENABLED_KEY, String(petEnabled.value))
   window.dispatchEvent(new StorageEvent('storage', { key: PET_ENABLED_KEY }))
@@ -154,12 +177,12 @@ const ctas = computed(() =>
 )
 
 // ---- Collab & SSH：示例命令 + 复制回执（纯前端能力，不伪造后端 SSH RPC）----
-const sshSampleCommand = 'ssh <user>@26.x.x.x   # Radmin VPN 分配的虚拟 IP'
+const sshSampleCommand = computed(() => t('settings.ext.collabSsh.sampleComment'))
 const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
 async function copySshCommand() {
   try {
-    await navigator.clipboard.writeText(sshSampleCommand)
+    await navigator.clipboard.writeText(sshSampleCommand.value)
     copied.value = true
     if (copiedTimer) clearTimeout(copiedTimer)
     copiedTimer = setTimeout(() => { copied.value = false }, 1500)
@@ -200,6 +223,7 @@ onMounted(loadMarket)
 .control-row { align-items: center; display: flex; gap: var(--sp-3); justify-content: space-between; }
 .control-label { font-size: var(--fs-sm); font-weight: 600; }
 .ext-hint { color: var(--text-muted); font-size: var(--fs-sm); margin: 0; }
+.ext-hint--warn { color: var(--warn); }
 .ext-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .ext-error { color: var(--danger); font-size: var(--fs-sm); }
 .ext-list { display: flex; flex-direction: column; gap: var(--sp-2); list-style: none; margin: 0; padding: 0; }

@@ -1,9 +1,13 @@
+// 必须是第一个 import：router/index.ts 在模块顶层就 getPlatform() 并捕走结果，
+// 晚于 import 求值安装桥会被永久固化成 web 平台。详见该文件头部注释。
+import './platform/desktopBridgeBoot'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import { router } from './router'
 import i18n from './i18n'
 import { migrateLegacyStorageKeys } from './utils/storageMigration'
+import { installAppControl } from './utils/appControl'
 import { useAppStore } from './stores/app'
 import { useRpcStore } from './stores/rpc'
 import { startBootWatchdog } from './shell/boot/watchdog'
@@ -18,6 +22,8 @@ import './styles/ink-typeset.css' // Track F: ink/CLReq typography layer (ink th
 import './styles/chat-shared.css'
 import './styles/apple-modern.css'
 
+// 桌面桥已在首个 import（desktopBridgeBoot）中安装完毕，此处不再重复。
+
 // 旧版 marguerite.* 存储键 → marguerite.* 一次性迁移，必须在任何读取
 // storage 的模块（appStore.initTheme / rpcStore.init）初始化之前执行。
 migrateLegacyStorageKeys()
@@ -26,6 +32,10 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 app.use(i18n)
+
+// 应用自控：把「枚举/点击/填写/按键/逐路由巡检」挂到 window.MargueriteAppControl，
+// 供页面内面板与外部浏览器自动化共用（router 就绪后安装，避免循环依赖）。
+installAppControl(router)
 
 const appStore = useAppStore()
 appStore.initTheme()

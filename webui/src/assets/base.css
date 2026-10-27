@@ -1923,6 +1923,46 @@ pre {
   overflow: hidden;
 }
 
+/* 壁纸可见性：用户选了壁纸（`html[data-wallpaper="1"]`），内容面板必须半透明。
+   否则 `.content` 的 `--bg-surface` 不透明底会把 body 上的壁纸 100% 盖住 ——
+   真机表现为「提示已应用壁纸，但整页看不到任何图」。保留一定不透明度是为了
+   正文对比度，不做全透明。
+
+   不透明度由 `--wp-panel-alpha` / `--wp-chat-alpha` 驱动（壁纸页滑块 + 冷启动恢复时
+   由 `utils/wallpaper.ts` 写到 `<html>`；图片壁纸还会按采样亮度做对比度守卫）。
+   缺省 62% / 70% 与旧行为一致，未设置变量时不会跳变。 */
+html[data-wallpaper='1'] .content {
+  background: color-mix(in srgb, var(--bg-surface) var(--wp-panel-alpha, 62%), transparent);
+}
+
+html[data-wallpaper='1'] .content--chat {
+  background: color-mix(in srgb, var(--sidebar-bg) var(--wp-chat-alpha, 70%), transparent);
+}
+
+/* 桌宠悬浮窗（Tauri 独立透明窗口，360×420）只允许宠物可见。
+   该窗口宽度必然落在移动断点：顶栏、底部 tabbar、侧栏与 toast 会全部盖在宠物上
+   （真机截图：宠物身上压着「标准·方案 / 就绪」和四个 tab）。
+   `data-surface` 由 App.vue 按路由 meta.viewKey 单一开关写入，避免在十几处外壳
+   节点逐个加 v-if。 */
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .sidebar,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .topbar,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .mobile-tabbar,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .desktop-pet,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .app-host-exit,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .toast-host,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .command-palette {
+  display: none !important;
+}
+
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) body,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) #app,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .main,
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .content {
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+}
+
 .main .content--chat .chat {
   border-right: 0;
   border-top: 0;
@@ -1984,16 +2024,39 @@ pre {
     position: relative;
     inset: auto;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    flex-basis: calc(56px + env(safe-area-inset-top, 0px));
+    /* 移动端顶栏有 4 个子项（左/路由头/模式徽标/右），3 列网格会把第 4 个挤到第二行；
+       固定 56px 高度下第二行会溢出并压住页面标题（真机 390px 实测：与"深度打磨"重叠）。
+       改为高度随内容增长，行距留 4px，min-height 仍守住 56 + 安全区。 */
+    flex-basis: auto;
     box-sizing: border-box;
-    height: calc(56px + env(safe-area-inset-top, 0px));
+    height: auto;
     min-height: calc(56px + env(safe-area-inset-top, 0px));
     margin: var(--sp-1) 0 0 var(--sp-1);
-    padding: env(safe-area-inset-top, 0px) 10px 0 8px;
+    padding: env(safe-area-inset-top, 0px) 10px var(--sp-1) 8px;
     gap: var(--sp-1);
+    row-gap: var(--sp-1);
   }
 
+  /* 移动端输入区底部工具条：桌面是单行，390px 下子项总宽实测 785px（面板只有 360px），
+     发送键被挤出屏幕且页面不产生横向滚动 —— 这里允许换行，发送键回到可视区。 */
+  .chat-input-footer {
+    flex-wrap: wrap;
+    min-width: 0;
+    row-gap: var(--sp-1);
+  }
+
+  /* 工具条内部的按钮组同样要能换行：否则整组以固有宽度溢出，右侧 chip 被裁掉 */
+  .chat-input-actions {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    row-gap: var(--sp-1);
+  }
+
+  /* 换到第二行后让右侧簇独占整行并右对齐，读起来像"第二排工具条"而不是残留控件 */
   .topbar--chat .topbar-right {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
     gap: var(--sp-1);
   }
 

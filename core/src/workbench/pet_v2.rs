@@ -211,6 +211,9 @@ impl PetV2 {
     // ── 持久化 ──
 
     /// 持久化到 `data_dir()/pet_v2.json`。失败返回 Err（不 panic）。
+    ///
+    /// R13（2026-10-18）：改原子写。桌宠的等级/亲密度是用户长期养成资产，
+    /// 半截文件会让 `load()` 回退 `PetV2::new()`——用户看到的是「宠物回到了 1 级」。
     pub fn save(&self) -> Result<(), String> {
         let path = Config::data_dir().join("pet_v2.json");
         if let Some(parent) = path.parent() {
@@ -219,7 +222,7 @@ impl PetV2 {
             }
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        crate::persistence::write_json_atomic(&path, &json).map_err(|e| e.to_string())
     }
 
     /// 从 `data_dir()/pet_v2.json` 读取；IO 或 JSON 错误 / 路径不存在均回退

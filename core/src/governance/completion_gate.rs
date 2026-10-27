@@ -318,6 +318,10 @@ impl PlacationDetector {
 // ============================================================================
 
 /// 任务类型预估最小执行时间（秒）。
+///
+/// 2026-10-24：不再只按关键词写死，而是先取**自适应预算**的任务档位给一个下限，
+/// 再叠加动作关键词（同一档内「打包」显然比「改一行」久）。这样「一句话问答」
+/// 不会被 5s 门槛误判，而「重构 + 验证」也不会被 3s 门槛放过。
 fn estimate_min_time(task_description: &str) -> f64 {
     let desc = task_description.to_lowercase();
     let rules: &[(&[&str], f64)] = &[
@@ -337,19 +341,44 @@ fn estimate_min_time(task_description: &str) -> f64 {
             matched = matched.max(*t);
         }
     }
-    matched
+    // 档位下限：任务越重，「快得离谱」的嫌疑越大。
+    let floor = match crate::agent::budget_policy::resolve(task_description, 0, 0).scale {
+        crate::agent::budget_policy::TaskScale::Simple => 0.0,
+        crate::agent::budget_policy::TaskScale::Standard => 1.0,
+        crate::agent::budget_policy::TaskScale::Complex => 5.0,
+        crate::agent::budget_policy::TaskScale::Deep => 15.0,
+    };
+    matched.max(floor)
 }
 
-fn check_time_pressure(task_description: &str, duration: f64) -> (bool, String) {
+/// 时间压力检测。
+///
+/// 关键改动：**有客观证据（产物 / 通过的验证）时不因「快」而阻断**。
+/// 旧实现只看耗时，快速但真做完的任务会被判「草率完成」——那是最伤信任的
+/// 假阳性。没有证据 + 明显低于预估，才视为可疑。
+fn check_time_pressure(
+    task_description: &str,
+    duration: f64,
+    has_evidence: bool,
+) -> (bool, String) {
     let min_time = estimate_min_time(task_description);
     if min_time <= 0.0 {
         return (false, String::new());
     }
     if duration < min_time * 0.5 {
+        if has_evidence {
+            return (
+                false,
+                format!(
+                    "任务执行时间 {}s 低于预估 {}s，但已有客观产物/验证证据，不判为草率完成",
+                    duration, min_time
+                ),
+            );
+        }
         return (
             true,
             format!(
-                "任务执行时间 {}s 低于预估最小时间 {}s 的 50%，可能是时间压力导致的草率完成",
+                "任务执行时间 {}s 低于预估最小时间 {}s 的 50%，且无产物/验证证据，可能是时间压力导致的草率完成",
                 duration, min_time
             ),
         );
@@ -566,10 +595,15 @@ impl CompletionGate {
         evidence.insert("artifacts_count".into(), artifact_count.to_string());
         if artifact_count == 0 {
             let res = claim.execution_result.trim();
+            let scale = crate::agent::budget_policy::resolve(claim.task_description, 0, 0).scale;
             if res.is_empty() {
                 blocked_by.push(BlockReason::EmptyResult);
                 warnings.push("执行结果为空，无任何产出".to_string());
-            } else if res.chars().count() < 10 {
+            } else if res.chars().count() < 10
+                && scale != crate::agent::budget_policy::TaskScale::Simple
+            {
+                // 只有非简单任务才把「极短回复」当未执行：寒暄/确认类任务一句话就是
+                // 完整答案，按 10 字符一刀切会把正常回答判成空结果。
                 blocked_by.push(BlockReason::EmptyResult);
                 warnings.push(format!(
                     "执行结果过短（{} 字符），可能未实际执行",
@@ -580,7 +614,13 @@ impl CompletionGate {
 
         // ---- 检查 3：时间压力检测 ----
         if let Some(d) = claim.execution_duration {
-            let (suspicious, msg) = check_time_pressure(claim.task_description, d);
+            // 有客观证据（产物 / 通过的验证）时不再因「快」阻断。
+            let has_evidence = artifact_count > 0
+                || claim
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| v.all_passed);
+            let (suspicious, msg) = check_time_pressure(claim.task_description, d, has_evidence);
             if suspicious {
                 blocked_by.push(BlockReason::TimePressure);
                 warnings.push(msg);
@@ -643,15 +683,28 @@ impl CompletionGate {
         });
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
+        // 认得出的交付物扩展名：无分隔符的文件名（「已创建 hello.txt」）也要核验，
+        // 否则模型只要省掉 `./` 就能绕过反幻觉核验（虚假完成的真实绕过路径）。
+        // 用白名单而不是「任意点号后缀」，避免把「已创建 v1.0」这类版本号当文件。
+        const KNOWN_EXTS: &[&str] = &[
+            "md", "txt", "html", "htm", "py", "js", "ts", "tsx", "jsx", "vue", "rs", "json",
+            "yaml", "yml", "csv", "pptx", "docx", "xlsx", "pdf", "png", "jpg", "jpeg", "svg",
+            "mp4", "zip", "sh", "ps1", "toml", "css", "scss", "sql",
+        ];
         for re in res {
             for cap in re.captures_iter(reply) {
                 if let Some(m) = cap.get(1) {
                     let p = m.as_str().to_string();
-                    // 仅纳入含分隔符的相对路径，过滤散文中的孤立文件名
-                    if (p.contains('/') || p.contains('\\'))
-                        && p.len() <= 120
-                        && seen.insert(p.clone())
-                    {
+                    if p.len() > 120 || !seen.insert(p.clone()) {
+                        continue;
+                    }
+                    let has_sep = p.contains('/') || p.contains('\\');
+                    let ext_ok = p
+                        .rsplit('.')
+                        .next()
+                        .map(|e| KNOWN_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+                        .unwrap_or(false);
+                    if has_sep || ext_ok {
                         out.push(Criterion::FileExists(p));
                     }
                 }
@@ -933,6 +986,47 @@ mod tests {
         assert!(d.blocked_by.contains(&BlockReason::TimePressure));
     }
 
+    /// 快但有产物：不再判「时间压力」——旧实现只看耗时，会把「读缓存秒完成」
+    /// 这类真实完成误判为草率。
+    #[test]
+    fn fast_completion_with_artifacts_is_not_time_pressure() {
+        let gate = CompletionGate::new();
+        let claim = CompletionClaim {
+            task_description: "编译整个项目 cargo build",
+            execution_result: "build done",
+            artifacts: &["dist/app.exe"],
+            verification: None,
+            verification_attempted: false,
+            execution_duration: Some(0.1),
+        };
+        let d = gate.check_completion(claim);
+        assert!(
+            !d.blocked_by.contains(&BlockReason::TimePressure),
+            "有产物时不得因快而阻断: {d:?}"
+        );
+        assert!(d.allowed, "有产物且无其它问题时应放行: {d:?}");
+    }
+
+    /// 简单任务的极短回复是完整答案，不再按 10 字符一刀切判空。
+    #[test]
+    fn short_answer_for_simple_task_is_not_empty_result() {
+        let gate = CompletionGate::new();
+        let claim = CompletionClaim {
+            task_description: "你好",
+            execution_result: "你好！",
+            artifacts: &[],
+            verification: None,
+            verification_attempted: false,
+            execution_duration: None,
+        };
+        let d = gate.check_completion(claim);
+        assert!(
+            !d.blocked_by.contains(&BlockReason::EmptyResult),
+            "简单寒暄不应被判空结果: {d:?}"
+        );
+        assert!(d.allowed, "{d:?}");
+    }
+
     #[test]
     fn placation_blocks_without_substance() {
         let gate = CompletionGate::new();
@@ -1013,6 +1107,24 @@ mod tests {
         let reply = "请参考 login.rs 这个文件的设计。";
         let crit = gate.extract_claimed_artifacts(reply);
         assert!(crit.is_empty(), "无分隔符的孤立文件名不应被提取");
+    }
+
+    /// 虚假完成的真实绕过路径：模型声称「已创建 hello.txt」，只要省略 `./`，
+    /// 旧实现就提取不到判据 → 门禁拿不到证据 → 直接放行。
+    #[test]
+    fn extract_artifacts_keeps_bare_name_in_creation_claim() {
+        let gate = CompletionGate::new();
+        let crit = gate.extract_claimed_artifacts("已创建 hello.txt，内容是一句问候。");
+        assert_eq!(crit.len(), 1, "创建声明里的无分隔符文件名也必须核验");
+        assert!(matches!(crit[0], Criterion::FileExists(ref p) if p == "hello.txt"));
+    }
+
+    /// 版本号/普通词不能被白名单吞成文件判据。
+    #[test]
+    fn extract_artifacts_rejects_unknown_extension_in_claim() {
+        let gate = CompletionGate::new();
+        let crit = gate.extract_claimed_artifacts("已创建 v1.0 版本说明。");
+        assert!(crit.is_empty(), "未知扩展名（版本号）不应被当成产物");
     }
 
     #[test]

@@ -22,6 +22,7 @@ from opensquilla.gateway.approval_events import build_approval_snapshot_item
 from opensquilla.gateway.approval_queue import get_approval_queue
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.control_ui import create_control_ui_routes
+from opensquilla.gateway.loop_heartbeat import stall_threshold_secs, staleness
 from opensquilla.gateway.middleware import (
     AuthMiddleware,
     ErrorHandlingMiddleware,
@@ -166,12 +167,25 @@ def create_gateway_app(
     async def ready(request: Request) -> JSONResponse:
         uptime = int((time.time() - _start_time) * 1000)
         is_ready = bool(getattr(request.app.state, "gateway_ready", True))
+        # Event-loop liveness self-proof (P0-2): the heartbeat task in boot.py
+        # writes loop_last_tick once per second while the event loop turns.
+        # A stale tick means the loop wedged even though TCP still answers, so
+        # the readiness probe flips to 503 instead of reporting a living-but-dead
+        # process. Pure judgement — see loop_heartbeat.staleness.
+        last_tick = getattr(request.app.state, "loop_last_tick", None)
+        verdict = staleness(time.time(), last_tick, stall_threshold_secs())
+        loop_ok = is_ready and not verdict["stalled"]
         payload = {
-            "ready": is_ready,
-            "status": "ready" if is_ready else "starting",
+            "ready": loop_ok,
+            "status": (
+                "ready" if loop_ok else ("loop_stalled" if verdict["stalled"] else "starting")
+            ),
             "uptime_ms": uptime,
+            "stalled": bool(verdict["stalled"]),
         }
-        return JSONResponse(payload, status_code=200 if is_ready else 503)
+        if verdict["stalled"] and verdict["age_secs"] is not None:
+            payload["stall_secs"] = round(verdict["age_secs"], 1)
+        return JSONResponse(payload, status_code=200 if loop_ok else 503)
 
     async def api_config(request: Request) -> JSONResponse:
         ctx = _make_ctx(request)

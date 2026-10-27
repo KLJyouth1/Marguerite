@@ -993,6 +993,40 @@ export const ELF_SPECS: Record<string, PetModelSpec> = {
     emotionPoses: ELF_POSES,
     motion: girlMotion(),
   },
+  /**
+   * 玛格丽特公主 · 星夜（与 `marguerite-night` 主题同源）。
+   *
+   * 造型依据（只取设计语汇，不使用任何受版权保护的图像）：
+   * - 玛格丽特 = 雏菊（marguerite daisy）→ 雏菊花冠 + 白色花瓣裙；
+   * - 玛格丽特公主 → 银紫发、象牙色长裙、海蓝宝石（aquamarine）点缀、
+   *   芭蕾鞋与精灵尖耳（童话化，不做写实王室服饰）；
+   * - 玛格丽特补给站（罗莎峰 4554m）→ 星夜/雪线的冷色，落在发梢与翼的微光里。
+   * 不使用新几何：花冠仍走 `ornament: 'daisy'`，因此 2.5D 与 3D 同时生效。
+   */
+  'princess': {
+    id: 'princess',
+    label: '玛格丽特公主 · 星夜',
+    kind: 'humanoid',
+    accent: 0x7fe3d4,
+    appearance: {
+      // 发：银紫主色 + 淡紫发梢。
+      // 【2026-10-23 真机截图】原来是 0xece6ff / 0xcbb9ff，与象牙肤色 0xfff0e6 明度几乎相同，
+      // 3D 正面会糊成「一颗光头」（皮肤与头发分不开）。压深一档后发色与肤色才有层次。
+      furColor: 0xd9cbf6, furAccent: 0xb7a0ee,
+      skin: 0xfff0e6,
+      // 裙：象牙主色 + 海蓝宝石外纱
+      dressColor: 0xfff8f0, dressAccent: 0x9fe6dc,
+      shoeColor: 0xe9e2ff,
+      earStyle: 'elf', ornament: 'daisy', tailStyle: 'none',
+      hairStyle: 'long_wave',
+      dressStyle: 'petal_dress',
+      wingStyle: 'fairy',
+      hasBouquet: true,
+    },
+    proportions: HUMANOID_PROPS,
+    emotionPoses: ELF_POSES,
+    motion: girlMotion(),
+  },
 }
 
 /**

@@ -7,12 +7,13 @@
 终端优先、本地优先的智能体工作台 —— CLI、TUI、Tauri 桌面端与回环 Web 控制台
 共用同一个引擎、同一份会话、同一套记忆。无需账号，不经云端中转，不带遥测。
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/KLJyouth1/Marguerite/actions/workflows/ci.yml/badge.svg)](https://github.com/KLJyouth1/Marguerite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
 [![Tests](https://img.shields.io/badge/core%20tests-2704%20passing-brightgreen.svg)](#-质量门禁)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-安全模型)
+[![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-递归自我改进)
 
 [文档索引](docs/README.md) · [架构](docs/architecture.md) · [CLI 手册](docs/cli-reference.md) · [贡献指南](CONTRIBUTING.md)
 
@@ -78,6 +79,48 @@ Marguerite 拒绝这个取舍 —— 一个 Rust 内核暴露四个界面，而�
 3. **治理是闭环的。** 执行前 `PlanGate` 校验宪法条款，产出后 `CompletionGate`
    核验自称落盘的文件是否真的在磁盘上 —— 声称写了文件却没写，会在自己的完成门禁上失败。
 
+## 🧬 递归自我改进
+
+多数智能体工具停在「跑通了」。Marguerite 追问下一句：
+**这一轮，有没有让下一轮更容易？** 循环只是重复，飞轮才会复利 —— 整个 harness 围绕这条差别构建。
+
+零件已经在了：`harness/meta.rs` 跑「监控 → 诊断 → 规划 → 沙箱评估 → 版本闭环」，
+`evolve.rs` 保存轮次历史并可回滚，`eval.rs` 给每轮打分，`ledger.rs` 做确定性回放。
+现在补的是**覆盖面**（哪些对象可以被改进）与**门**（哪些改进允许留下）。
+
+| 层 | 职责 | 位置 |
+|---|---|---|
+| **L1** 内层循环 | 观察 → 决策 → 执行 → 再观察；每步产出**完成证据**，而不只是「做完了」 | `agent/stream_loop.rs` |
+| **L2** 共享执行栈 | 工具 / 技能 / 交接 / 验证 —— 四层跨任务复用，改一处多处受益 | `tools/`、`agent/` |
+| **L3** 外层循环 | 诊断 → 定向补经验 → 生成候选 → 沙箱回放 → 采纳或回滚 | `harness/evolve.rs` |
+| **L4** 门控 | 选择门（收益）· 回归门（每任务损失上限）· 成本闸（token 与时延） | `harness/meta.rs` |
+| **L5** 元改进 | 门控本身、补数据策略、评测集，都成为可改对象 | `harness/meta.rs` |
+
+**十个对象，一个闭环。** 可改进的不只是 system prompt：
+
+> 主智能体 · 子代理 · 子智能体 · 专家（43 角色）· 团队（8 个）·
+> 蜂群 · 记忆 · 经验 · 知识库 · 技能与工具
+
+**三条边界，由类型强制，而不是靠文档口号：**
+
+| 边界 | 怎么保证 |
+|---|---|
+| **不许改核心源码** | `ChangeTarget` 没有这个变体，护栏测试断言其不存在 |
+| **绝不自动上线** | `MetaPolicy::auto_apply` 默认 `false`，提案进待审队列，人工批准后才灰度 |
+| **成本进闸** | token 与时延相对基线的涨幅会被测量 —— 「变好了但贵一倍」会被拒绝 |
+
+**为什么要回归门，而不只看总分。** 公开记录里有个真实案例：总成功率从 50 项中的 7 项升到 11 项，
+但某个任务悄悄丢掉了两个原本能成功的状态。总分看起来是进步，**仍被拒绝**。
+*数字上升而能力下降，不是改进* —— 所以候选必须先过「每任务损失上限」与「保护任务清单」，
+才轮得到看总分。
+
+**怎么区分「递归」与「只是迭代」。** 每轮报三个数：`delta`（速度）、`delta_of_delta`（加速度）、
+`reuse_rate`（上轮沉淀的知识本轮实际被调用的比例）。如果上轮学的东西一次都没用上，
+系统只是在重新学，不是复利。
+
+<sub>L1–L4 今天已具备。把可改对象扩到当前六类之外、补上回归门与加速度报告，是正在进行的工作 ——
+见 [docs/prd/2026-10-26-rsi-roadmap.md](docs/prd/2026-10-26-rsi-roadmap.md)。</sub>
+
 ## 🚀 快速开始
 
 ### 环境要求
@@ -101,7 +144,7 @@ Tauri 2 在 Linux 上还需 WebKitGTK 开发包，确切清单见
 ### 不配任何 API Key 先试（约 60 秒）
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
+git clone https://github.com/KLJyouth1/Marguerite.git
 cd REPO
 
 # 最快路径：只编 CLI，一两分钟即可
@@ -221,6 +264,7 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 | 门禁 | 结果 |
 |---|---|
 | `cargo test -p marguerite-core --lib` | 2704 passed / 0 failed / 17 ignored |
+| core 集成测试（`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`） | 离线且确定性；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过） |
 | `webui` 单测（Vitest） | 3509 passed / 0 failed（331 个文件） |
 | `pyengine` 单测（pytest，`tests/unit`） | 768 passed / 0 failed / 6 skipped |
 | `pyengine` 网关契约（pytest，`tests/test_gateway`） | 2929 passed / 0 failed / 11 skipped |
@@ -294,7 +338,7 @@ scripts/     verify.sh 与打包流水线
 Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 
 - 四个前端的版本号现已全部钉到 `core/Cargo.toml`，由 `scripts/check-version-sync.py`
-  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.13`）。
+  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.17`）。
 - 桌面端需要 Web 控制台产物在它旁边。请从安装包或从仓库目录运行 ——
   单独拷一个 `.exe` 出去，它没有控制台可托管。这种情况**不再静默失败**：
   网关对 `/control/` 返回 `503` 加一张自包含诊断页（列出它探测过的每一条路径），
@@ -304,13 +348,15 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 - `workbench/` 是一个**独立子项目**，不是 Rust 引擎的第五个前端：它有自己的 Python 后端
   （`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`）、自己由 FastAPI 在 `:8011`
   同源托管的 React SPA、自己的打包流水线，以及**自己的版本线**
-  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.13` 相互独立）。它经 `core_bridge`
+  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.17` 相互独立）。它经 `core_bridge`
   桥接核心 store，思路与 `pyengine/` 一致；Rust 二进制并不 import 它。
   它的 71 个离线用例与版本门禁**此前没有任何门禁跑过**，而它是会随仓库发布的 ——
   现在由 `verify.sh --workbench` 覆盖。
-- `gui/src` 里有一套 React 前端**当前在产品界面中不可达**：Tauri 主窗口加载的是网关地址
-  （`http://127.0.0.1:18790/control/`），由它托管 Vue 控制台，所以这套 React 应用会被 CI
-  构建、却永远不会显示。需要接线或移除 —— 目前计划移除。
+- `gui/src` 里那套 React 前端 —— CI 会构建、但产品界面从未显示过 —— **已被移除**。
+  Tauri 主窗口加载的是网关地址（`http://127.0.0.1:18790/control/`），由它托管 Vue 控制台，
+  所以 `gui/` 现在是**纯壳**，`webui/` 是唯一前端。归档保留在
+  `docs/legacy/gui-react-2026-10-21/`；三道守卫（`check_gui_shell_config.py`、
+  `check-tokens-sync.mjs` 末尾、`verify:no-frontend`）会在它重现时失败。
 - README 只有英文与简体中文，而应用界面已本地化为 6 种语言（en / zh-Hans / ja / fr / de / es）。
   本地化一致性守卫把缺失的 README 翻译当作**提示**而非构建失败。
 - **控制台已本地化，引擎生成的内容还没有。** Rust 内核的 `decompose()` 产出的是中文计划步骤
@@ -376,7 +422,7 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 |---|---|
 | **[Marguerite](https://github.com/KLJyouth1/Marguerite)** —— 本仓库 | Rust 引擎、TUI、Tauri 桌面端、回环 Web 控制台、Python 侧车 |
 | **[Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases)** | 安装包：`.msi`（WiX）与 `-setup.exe`（NSIS），每个版本附 `SHA256SUMS.txt` |
-| **[OmniPilot](https://github.com/KLJyouth1/OmniPilot)** | 配套本地智能体模型：fp16 GGUF / safetensors 权重、7-Zip 分卷、推理与量化说明 |
+| **[KLJyouth-office-Modle](https://github.com/KLJyouth1/KLJyouth-office-Modle)** | 配套本地决策模型（Qwen2.5-1.5B + 4-bit QLoRA，约 4.4M 可训练参数）：工具域/工具选择、采纳-拒绝打分、弃答。fp16 GGUF / safetensors / q4_K_M，附 SHA256SUMS。 |
 
 只想**运行** Marguerite？去
 [Marguerite-Releases](https://github.com/KLJyouth1/Marguerite-Releases/releases/latest) 下载安装包。

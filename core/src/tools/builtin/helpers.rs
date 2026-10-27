@@ -120,6 +120,15 @@ pub(crate) fn gate(decision: &PreflightDecision) -> Option<Result<ToolResult>> {
 // 辅助函数
 // ---------------------------------------------------------------------------
 
+/// 多根安全裁决的根列表入参（`PREFLIGHT.check_*_multi` 需要 `&[PathBuf]`）。
+///
+/// 单根工作区退化为只含主根的一元素列表，与旧的单根检查等价。
+pub(crate) fn guard_roots(ws: &RootSet) -> Vec<PathBuf> {
+    // 与 `normalize_workspace` 同一口径：根先归一化，否则 canonicalize 过的目标
+    // 与未归一的根字符串前缀对不上，会把根内写入误判为越界。
+    ws.all().iter().map(|r| normalize_workspace(r)).collect()
+}
+
 /// 递归收集工作区内文件（跳过巨型无关目录）
 pub(crate) fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(root) {

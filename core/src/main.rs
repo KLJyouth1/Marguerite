@@ -28,7 +28,14 @@ fn main() -> Result<()> {
 
     if args.len() == 1 {
         // 无参数，启动 TUI 模式（加载真实配置）
-        let config = marguerite_core::persistence::config::Config::load().unwrap_or_default();
+        //
+        // 「用户选了哪个模型」由 `models.json` 的 active 档案决定（`model use` / 控制台
+        // `llmProfile.activate` 写的就是它），而执行侧只认 `config.model.*`。不叠加则
+        // 会出现「切换了模型、TUI 里回答仍来自旧 provider」——在**会话入口**叠加一次，
+        // 让三端（CLI / TUI / 网关）看到同一个生效模型。
+        let config = marguerite_core::model::selector::apply_effective_model(
+            &marguerite_core::persistence::config::Config::load().unwrap_or_default(),
+        );
         // 按配置初始化嵌入后端（默认 local；backend=model 加载真实模型，失败回退）
         marguerite_core::memory::EmbeddingProvider::configure(&config);
         if std::env::var("MARGUERITE_LEGACY_UI").is_ok() {

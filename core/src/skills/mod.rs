@@ -8,6 +8,7 @@
 
 pub mod engine;
 pub mod loader;
+pub mod plugin_bridge;
 pub mod registry;
 
 pub use engine::{CombinationOutput, SkillEngine, SkillOutput};

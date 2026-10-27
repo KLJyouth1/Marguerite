@@ -1,81 +1,74 @@
 <template>
-  <div v-if="open" class="tool-sheet-overlay" @click.self="$emit('close')">
-    <aside ref="rootRef" class="tool-sheet" role="dialog" aria-modal="true" :aria-label="dialogLabel">
-      <header class="tool-sheet__header">
-        <div class="tool-sheet__titles">
-          <p v-if="filePath" class="tool-sheet__operation">{{ title }}</p>
-          <h3 class="tool-sheet__title">{{ displayTitle }}</h3>
-          <div class="tool-sheet__meta">
-            <span>{{ contentMeta }}</span>
-            <span v-if="filePath" class="tool-sheet__path" :title="filePath">{{ filePath }}</span>
-          </div>
-        </div>
-        <div class="tool-sheet__actions">
-          <button
-            v-if="treeHtml"
-            type="button"
-            class="btn btn--ghost tool-sheet__mode"
-            @click="rawMode = !rawMode"
-          >
-            {{ rawMode ? t('chat.toolModal.tree') : t('chat.toolModal.raw') }}
-          </button>
-          <button
-            v-if="!treeHtml || rawMode"
-            type="button"
-            class="btn btn--ghost tool-sheet__mode"
-            :aria-pressed="wrapLines"
-            @click="wrapLines = !wrapLines"
-          >
-            {{ wrapLines ? t('chat.toolModal.preserveLines') : t('chat.toolModal.wrapLines') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn--icon btn--ghost tool-sheet__copy"
-            :class="{ 'is-copied': copied }"
-            :title="copyLabel"
-            :aria-label="copyLabel"
-            @click="copyContent"
-          >
-            <Icon :name="copied ? 'check' : 'copy'" :size="16" />
-          </button>
-          <button ref="closeBtn" type="button" class="btn btn--icon btn--ghost" :title="t('common.close')" :aria-label="t('common.close')" @click="$emit('close')">
-            <Icon name="x" :size="16" />
-          </button>
-        </div>
-      </header>
-
-      <div class="tool-sheet__body">
-        <div
-          v-if="treeHtml && !rawMode"
-          class="tool-sheet__tree"
-          role="region"
-          tabindex="0"
-          :aria-label="viewerRegionLabel"
-          v-html="treeHtml"
-        />
-        <div
-          v-else
-          class="tool-sheet__code"
-          :class="{ 'tool-sheet__code--wrap': wrapLines }"
-          role="region"
-          tabindex="0"
-          :aria-label="viewerRegionLabel"
-        >
-          <pre v-if="showLineNumbers" class="tool-sheet__line-numbers" aria-hidden="true">{{ lineNumberText }}</pre>
-          <pre class="tool-sheet__pre"><!-- eslint-disable-next-line vue/no-v-html -- Highlight.js escapes source and DOMPurify allow-lists its generated spans. --><code v-if="highlightedContent" class="hljs" :class="`language-${viewerLanguage}`" v-html="highlightedContent" /><code v-else>{{ content }}</code></pre>
+  <ContentSheet :open="open" :label="dialogLabel" @close="$emit('close')">
+    <template #header>
+      <div class="tool-sheet__titles">
+        <p v-if="filePath" class="tool-sheet__operation">{{ title }}</p>
+        <h3 class="tool-sheet__title">{{ displayTitle }}</h3>
+        <div class="tool-sheet__meta">
+          <span>{{ contentMeta }}</span>
+          <span v-if="filePath" class="tool-sheet__path" :title="filePath">{{ filePath }}</span>
         </div>
       </div>
-    </aside>
-  </div>
+    </template>
+    <template #actions>
+      <button
+        v-if="treeHtml"
+        type="button"
+        class="btn btn--ghost tool-sheet__mode"
+        @click="rawMode = !rawMode"
+      >
+        {{ rawMode ? t('chat.toolModal.tree') : t('chat.toolModal.raw') }}
+      </button>
+      <button
+        v-if="!treeHtml || rawMode"
+        type="button"
+        class="btn btn--ghost tool-sheet__mode"
+        :aria-pressed="wrapLines"
+        @click="wrapLines = !wrapLines"
+      >
+        {{ wrapLines ? t('chat.toolModal.preserveLines') : t('chat.toolModal.wrapLines') }}
+      </button>
+      <button
+        type="button"
+        class="btn btn--icon btn--ghost tool-sheet__copy"
+        :class="{ 'is-copied': copied }"
+        :title="copyLabel"
+        :aria-label="copyLabel"
+        @click="copyContent"
+      >
+        <Icon :name="copied ? 'check' : 'copy'" :size="16" />
+      </button>
+    </template>
+
+    <div
+      v-if="treeHtml && !rawMode"
+      class="tool-sheet__tree"
+      role="region"
+      tabindex="0"
+      :aria-label="viewerRegionLabel"
+      v-html="treeHtml"
+    />
+    <div
+      v-else
+      class="tool-sheet__code"
+      :class="{ 'tool-sheet__code--wrap': wrapLines }"
+      role="region"
+      tabindex="0"
+      :aria-label="viewerRegionLabel"
+    >
+      <pre v-if="showLineNumbers" class="tool-sheet__line-numbers" aria-hidden="true">{{ lineNumberText }}</pre>
+      <pre class="tool-sheet__pre"><!-- eslint-disable-next-line vue/no-v-html -- Highlight.js escapes source and DOMPurify allow-lists its generated spans. --><code v-if="highlightedContent" class="hljs" :class="`language-${viewerLanguage}`" v-html="highlightedContent" /><code v-else>{{ content }}</code></pre>
+    </div>
+  </ContentSheet>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import Icon from '@/components/Icon.vue'
-import { useDialogA11y } from '@/composables/useDialogA11y'
+import ContentSheet from '@/components/chat/ContentSheet.vue'
 import { useToasts } from '@/composables/useToasts'
 import type { ToolResultContext } from '@/types/chat'
 import { copyTextWithFallback } from '@/utils/browser'
@@ -143,13 +136,7 @@ const LANGUAGE_LABEL: Record<string, string> = {
 const rawMode = ref(false)
 const wrapLines = ref(false)
 const copied = ref(false)
-const closeBtn = ref<HTMLButtonElement | null>(null)
-const rootRef = ref<HTMLElement | null>(null)
 let copiedResetId: ReturnType<typeof setTimeout> | null = null
-
-// Trap Tab focus inside the sheet, close on Escape, and restore focus to the
-// invoker on close; initial focus lands on the close button.
-useDialogA11y(rootRef, toRef(props, 'open'), () => emit('close'), { initialFocus: closeBtn })
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -325,46 +312,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.tool-sheet-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 300;
-  background: var(--scrim);
-  display: flex;
-  justify-content: flex-end;
-}
-
-.tool-sheet {
-  background: var(--bg-surface);
-  border-left: 1px solid var(--border);
-  box-shadow: var(--shadow-lg);
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  width: min(780px, 76vw);
-  animation: toolSheetIn var(--dur-base) var(--ease-out);
-}
-
-@keyframes toolSheetIn {
-  from { transform: translateX(24px); opacity: 0.4; }
-  to { transform: translateX(0); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tool-sheet {
-    animation: none;
-  }
-}
-
-.tool-sheet__header {
-  align-items: center;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: var(--sp-3);
-  justify-content: space-between;
-  padding: var(--sp-3) var(--sp-4);
-}
-
 .tool-sheet__titles {
   flex: 1 1 12rem;
   min-width: 0;
@@ -409,30 +356,12 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.tool-sheet__actions {
-  align-items: center;
-  display: flex;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  justify-content: flex-end;
-}
-
 .tool-sheet__mode {
   font-size: var(--fs-xs);
 }
 
 .tool-sheet__copy.is-copied {
   color: var(--ok);
-}
-
-.tool-sheet__body {
-  background: var(--bg);
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  padding: var(--sp-3);
 }
 
 .tool-sheet__code,
@@ -569,19 +498,5 @@ onBeforeUnmount(() => {
 .tool-sheet__code :deep(.hljs-section),
 .tool-sheet__code :deep(.hljs-name) {
   color: var(--syntax-title);
-}
-
-@media (max-width: 700px) {
-  .tool-sheet {
-    width: 100%;
-  }
-
-  .tool-sheet__header {
-    align-items: flex-start;
-  }
-
-  .tool-sheet__body {
-    padding: var(--sp-2);
-  }
 }
 </style>

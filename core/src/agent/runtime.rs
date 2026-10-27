@@ -20,13 +20,17 @@ pub use crate::types::Message;
 use crate::workspace::Workspace;
 
 use crate::agent::stream_loop::{
-    detect_doom_loop, run_tool_loop_streaming_with_disclosure, AgentEvent, DOOM_LOOP_ABORT,
-    DOOM_LOOP_THRESHOLD,
+    detect_doom_loop, run_tool_loop_streaming_with_disclosure_and_session, AgentEvent,
+    DOOM_LOOP_ABORT, DOOM_LOOP_THRESHOLD,
 };
 use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
-use crate::agent::tool_schema::{discovery_query, ToolDisclosure, DISCOVER_TOOLS_NAME};
+use crate::agent::tool_schema::{
+    discovery_query, SessionToolFace, ToolDisclosure, DISCOVER_TOOLS_NAME,
+};
+use crate::cache::AGENT_STABLE_HALF_SCOPE;
 use crate::events::{Envelope, EventBus, EventType};
 use crate::mcp::registry::ToolRegistry;
+use crate::mode::ModeKind;
 use crate::model::llm::ToolDef;
 use crate::model::StreamReceiver;
 use serde_json::json;
@@ -117,12 +121,56 @@ impl SessionContext {
 /// 互相矛盾的行为指令（例如一处说"别联网"、另一处没说）。抽成单一函数后
 /// 只允许存在一个事实源。注意 `\x20` 是续行后 intended 的前导空格（Rust 的
 /// `\` 续行会吞掉下一行全部前导空白）。
-fn tool_guide_text(tools: &[ToolDef]) -> String {
-    let names = tools
+/// 从历史中取最后一条助手正文（用于预算熔断/异常时回传 partial_text）。
+pub(crate) fn last_assistant_text(history: &[Message]) -> String {
+    history
         .iter()
-        .map(|t| t.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+        .rev()
+        .find_map(|m| match m {
+            Message::Assistant { content, .. } if !content.is_empty() => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// W4.5：按**本轮真实工具面**生成能力自述（确定性文本）。
+///
+/// 每个 turn 计算一次；工具面不变时逐字节相同，可直接进入 KV 稳定半区。
+fn capability_brief_for(tools: &[ToolDef]) -> String {
+    let names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+    let (skills, mcp) = crate::agent::capability::surface_counts();
+    crate::agent::capability::brief_from(&names, skills, mcp)
+}
+
+/// 稳定半区的规范文本（W5.3 指纹输入）：**开头连续** `System` 段的正文。
+///
+/// 直接复用 [`crate::context::optimize::stable_prefix_text`]——那是 `SharedPrefixCache`
+/// （`agent::prefix_scope`）计算前缀键用的同一个规范文本，两处不会各说各话。
+/// 它刻意只取正文、不取 `timestamp`：时间戳逐轮变化，若一并序列化，
+/// 稳态会话会表现为「轮轮漂移」，这个观测就变成了噪音源。
+fn stable_half_text(messages: &[Message]) -> Option<String> {
+    let text = crate::context::optimize::stable_prefix_text(messages);
+    // 没有任何静态段 = 没有可复用的前缀，不登记（否则空串与首条引导会被算成一次漂移）。
+    (!text.is_empty()).then_some(text)
+}
+
+fn tool_guide_text(tools: &[ToolDef]) -> String {
+    // 空工具面 = 当前模式封禁了全部工具（或调用方未提供任何工具）。
+    // W4.2 起直答判定（`is_direct_answer_request`）**不再清空**工具面，只作观测；
+    // 因此这里的空分支不能再被理解成「寒暄轮」。
+    // 此时**不能**输出「可调用工具共 0 个」再加一整套工具使用规则——那会诱导模型编造工具调用。
+    if tools.is_empty() {
+        return "本轮未提供任何工具：请直接作答。\n\
+                规则：\n\
+                1. 不要声称你调用了工具、检索了网络或读取了文件；没有证据就说没有。\n\
+                2. 只用已有知识回答；不确定就明确说明不确定，不要编造事实或来源。\n\
+                3. 需要外部动作或实时信息时，如实告诉用户「这一步需要工具能力」，并说明需要什么。\n\
+                输出格式要求：Markdown；先给结论，再给细节。"
+            .to_string();
+    }
+    // W5.2：这里**不再**写「本轮可调用工具共 N 个：a, b, c」——
+    // 工具面随发现增长，这行每变一次就让服务端 KV 前缀整段失配；工具清单
+    // 只通过 function schema 与能力自述呈现（两处都已做确定性排序）。
     let discovery_rule = if tools.iter().any(|tool| tool.name == DISCOVER_TOOLS_NAME) {
         format!(
             "当前只暴露了常用工具和本任务相关工具；若缺少能力，先调用 `{DISCOVER_TOOLS_NAME}`，\n\
@@ -133,15 +181,41 @@ fn tool_guide_text(tools: &[ToolDef]) -> String {
         "本轮已提供当前可用的完整工具面；请直接选择最相关的工具调用。".to_string()
     };
     format!(
-        "你是 Marguerite AI 助手，具备以下 {n} 个可调用工具：{names}。\n\
-         重要规则：\n\
+        // 身份声明已移除（2026-10-18）：此处只描述**工具面**，不宣布「你是谁」。
+        // 此前它固定写「你是 Marguerite AI 助手」，与本轮真正生效的人设
+        // （主智能体「严工」/ 用户选的专家）在同一请求里互相打架——
+        // 与 `merged_turn_hint` 里 viky 默认人格的冲突是同一类缺陷，只是更隐蔽：
+        // 它出现在**每一次**请求里（含 CLI/TUI/桌面/Web 四个入口）。
+        // 人设的唯一权威是 agent 台账（`agent::store::personality_for`）。
+        "重要规则：\n\
+         0. **先判断这轮到底要不要用工具**（默认直答，拿不准才用；工具不是装饰）：\n\
+         \x20 - 无需工具：稳定知识、观点/寒暄/评价、文本改写与推理、代码或方案的讲解；\n\
+         \x20 - 必须用工具：有副作用的动作（写文件、发消息、执行命令、操作浏览器/桌面）、\n\
+         \x20   训练数据之外的实时事实（天气/股价/新闻/最新文档）、必须跑一遍才能确认的结论\n\
+         \x20   （编译、测试、命令输出、页面实际渲染）；\n\
+         \x20 - 上下文里已有的信息不要重复检索；一次检索/一次读文件就够时，不要连搜多次；\n\
+         \x20 - 证据已足够支撑结论时立即停止调用并给出答案，不要为了「多做几步」继续调工具；\n\
+         \x20 - 需要的能力不在工具列表里 → 按第 7 条先发现，绝不声称该能力不存在。\n\
          1. **仅当任务确实需要外部实时信息**（新闻/天气/股价/最新文档/需要联网核实的\n\
          \x20 事实）时，才调用 web_search 或 web_research；其余情况一律不要联网。\n\
          \x20 **创建/生成/整理/转换本地文件**（如「做一个 Excel/Word/PPT/HTML/报告并保存」）\n\
          \x20 **不需要联网**，直接用 write_file 等工具产出即可——为这类任务检索属于纯浪费\n\
          \x20 （会显著拖长耗时，且检索结果与交付无关）。\n\
          2. 需要操作浏览器时，调用 browser 工具（open/click/type/screenshot/a11y/vision_click）。\n\
-         3. 需要操控电脑桌面时，调用 system_control 或 computer_use 工具。\n\
+         3. 需要操控电脑桌面时，**优先 `computer_use`**（屏幕感知 + 元素定位，抗分辨率变化）；\n\
+         \x20 `system_control` 作为兜底（纯键鼠坐标操作，用于 computer_use 覆盖不到的场景：\n\
+         \x20 全屏游戏、无 UIA 树的自绘界面、需要精确物理坐标的拖拽）。\n\
+         3b. 多模态与 RPA：\n\
+         \x20 - 生图 → `image_generate`（需当前档案勾选「图像输出」，否则先让用户去设置页勾选）；\n\
+         \x20 - 生视频 → `video_generate`（需当前档案勾选「视频输出」；仅同步端点，\n\
+         \x20   返回 task_id 的异步端点要用 http_request 轮询）；\n\
+         \x20 - 本地生视频（不联网、不花 token，只要本机 ffmpeg）→\n\
+         \x20   `code_video`（代码打字动画）、`web_video`（HTML/CSS/JS 逐帧渲染）、\n\
+         \x20   `manim_video`（数学/算法动画，需本机 Python 装 manim）；\n\
+         \x20 - 音频转文字 → `audio_transcribe`；文本转语音 → `audio_speak`；\n\
+         \x20 - 「我手动做一遍，你照做」→ `auto_record start` → 用户操作 → `auto_record stop`\n\
+         \x20   → `auto_replay run`（回放前确认窗口位置未变，必要时先沟通）。\n\
+         \x20 这些能力不在时（工具不存在或提示未配置），如实告知缺什么、去哪里配置，不要假装完成。\n\
          4. 需要读写文件/执行命令时，调用 read_file/write_file/edit_file/shell_exec 等工具。\n\
          5. 需要专业能力时，先调用 list_skills 查看可用技能，再用 use_skill 加载。\n\
          6. 可以用 create_skill 创建新的可复用技能，用 kb_search 检索本地知识库，用 kb_ingest 灌入文档。\n\
@@ -155,10 +229,35 @@ fn tool_guide_text(tools: &[ToolDef]) -> String {
          - 搜索结果必须标注来源链接。\n\
          - 先给结论/答案，再给细节，最后给下一步建议。\n\
          - 复杂任务先列出执行计划，逐步执行，每步报告进度。",
-        n = tools.len(),
-        names = names,
         discovery_rule = discovery_rule
     )
+}
+
+
+/// 组合系统提示里的工具段：基础工具规则 + 能力目录（内置表面/技能索引/MCP/决策规则）。
+///
+/// 直答轮（工具面为空）**不追加**能力目录：那时规则是「直接作答、不要声称调用工具」，
+/// 再把「本机有什么」塞回去只会诱导模型编造调用。
+fn compose_guide(tools: &[ToolDef], snap: &crate::agent::tool_catalog::CapabilitySnapshot) -> String {
+    let mut out = tool_guide_text(tools);
+    if !tools.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&crate::agent::tool_catalog::catalog_text(tools, snap));
+    }
+    out
+}
+
+/// 会话级工具面槽位（W4.2）：按事件会话键 + 模式持有，跨 turn 复用。
+///
+/// 键或模式变化 = 新会话，调用方直接换掉整个槽位（不继承上一会话的发现结果）。
+#[derive(Debug)]
+struct SessionToolFaceSlot {
+    /// 绑定的会话键（`event_session`；None = 无会话概念的 CLI/测试调用）。
+    key: Option<String>,
+    /// 创建该面时的运行时模式（模式切换会改变允许的工具集）。
+    mode: ModeKind,
+    /// 共享句柄：本 turn 的 `ToolDisclosure::discover()` 直接扩展它。
+    face: Arc<std::sync::Mutex<SessionToolFace>>,
 }
 
 /// Agent 运行时
@@ -208,6 +307,16 @@ pub struct AgentRuntime {
     /// 默认 None：直接使用 `AgentRuntime` 的调用方（CLI/测试）没有工作区概念，
     /// 不凭空编一段目录信息骗模型。
     workspace: Option<Workspace>,
+    /// 会话级稳定工具面（W4.2）：首次 turn 创建，同会话后续复用，
+    /// 会话切换 / `reset()` / 模式切换时重建。`Mutex` 内部可变：`run_tool_loop*`
+    /// 是 `&self`，需要跨轮保留发现结果。
+    session_tool_face: std::sync::Mutex<Option<SessionToolFaceSlot>>,
+    /// W5.3：稳定半区指纹的单测观测目标。`Some` 时 `build_model_messages` 把
+    /// `agent.stable_half` 的指纹写进这个独立 tracker，而不是进程级单例——
+    /// 否则并行用例会互相改变全局漂移计数，「稳态 drift == 0」类断言必然抖动。
+    /// 生产路径没有该字段（编译期不存在），仍写 [`crate::cache::prefix_cache_tracker`]。
+    #[cfg(test)]
+    stable_half_tracker: Option<Arc<crate::cache::PrefixCacheTracker>>,
 }
 
 impl Clone for AgentRuntime {
@@ -243,6 +352,25 @@ impl Clone for AgentRuntime {
                     .clone(),
             ),
             workspace: self.workspace.clone(),
+            session_tool_face: std::sync::Mutex::new(
+                self.session_tool_face
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .map(|slot| SessionToolFaceSlot {
+                        key: slot.key.clone(),
+                        mode: slot.mode,
+                        // 克隆出独立快照：克隆体后续的发现不污染原运行时。
+                        face: Arc::new(std::sync::Mutex::new(
+                            slot.face
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone(),
+                        )),
+                    }),
+            ),
+            #[cfg(test)]
+            stable_half_tracker: self.stable_half_tracker.clone(),
         }
     }
 }
@@ -269,14 +397,33 @@ impl AgentRuntime {
             mode_section: None,
             pending_steer: std::sync::Mutex::new(Vec::new()),
             workspace: None,
+            session_tool_face: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            stable_half_tracker: None,
         }
+    }
+
+    /// 单测专用：把 `agent.stable_half` 的观测目标换成独立 tracker，
+    /// 让漂移断言不受同进程并行用例污染（生产路径恒为进程级单例）。
+    #[cfg(test)]
+    fn use_stable_half_tracker(&mut self, tracker: Arc<crate::cache::PrefixCacheTracker>) {
+        self.stable_half_tracker = Some(tracker);
     }
 
     /// 注册事件总线与会话标识（A4.4 事件流埋点接口）
     ///
     /// `session` 与会话标识对齐，使事件路由键 `{session}.{type}` 命中
     /// TUI 的 `bus.subscribe("{session}.*")` 订阅。
+    ///
+    /// W4.2：会话键变化即新会话 → **丢弃会话级工具面**，下一次 turn 从初始面重建
+    /// （新会话不得携带上一会话通过 `discover()` 加进来的工具）。
     pub fn set_event_bus(&mut self, bus: Arc<EventBus>, session: String) {
+        if self.event_session.as_deref() != Some(session.as_str()) {
+            *self
+                .session_tool_face
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.events = Some(bus);
         self.event_session = Some(session);
     }
@@ -370,6 +517,109 @@ impl AgentRuntime {
         self.workspace.as_ref()
     }
 
+    /// 取（必要时创建）本会话的工具面句柄（W4.2）。
+    ///
+    /// 复用条件：会话键与运行时模式都没变。任一变化即视为新会话/新模式，
+    /// 用当前工具目录重建初始面——**旧面的发现结果不继承**。
+    fn session_tool_face(
+        &self,
+        tools: &[ToolDef],
+        mode: ModeKind,
+    ) -> Arc<std::sync::Mutex<SessionToolFace>> {
+        let key = self.event_session.clone();
+        let mut slot = self
+            .session_tool_face
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let reusable = slot
+            .as_ref()
+            .is_some_and(|current| current.key == key && current.mode == mode);
+        if !reusable {
+            // W5.3：新会话/新模式 = 工具面重建（下一次装配必然漂移一次，之后稳定）。
+            // 留一条与 `agent.stable_half` 漂移对齐的归因日志，便于区分「重建」与「目录变了」。
+            tracing::info!(
+                event = "face_changed",
+                scope = "agent.tool_face",
+                source = "session_bootstrap",
+                session_key = ?key,
+                mode = ?mode,
+                catalog_tools = tools.len(),
+                "会话工具面重建（首次 turn / 会话切换 / 模式切换 / reset）"
+            );
+            *slot = Some(SessionToolFaceSlot {
+                key,
+                mode,
+                face: Arc::new(std::sync::Mutex::new(SessionToolFace::bootstrap(
+                    tools.to_vec(),
+                    mode,
+                ))),
+            });
+        }
+        match slot.as_ref() {
+            Some(current) => Arc::clone(&current.face),
+            // 上面刚赋值（或已有可复用槽位），None 分支不可达；兜底给一个空面而非 panic。
+            None => Arc::new(std::sync::Mutex::new(SessionToolFace::bootstrap(
+                Vec::new(),
+                mode,
+            ))),
+        }
+    }
+
+    /// 本 turn 的工具暴露句柄：**复用会话面**，不再按本轮请求文本重选（W4.2）。
+    fn tool_disclosure(&self, tools: &[ToolDef], request_text: &str) -> ToolDisclosure {
+        let mode = crate::mode::runtime_mode();
+        self.tool_disclosure_with_mode(tools, request_text, mode)
+    }
+
+    /// 同上，显式指定模式（单测用于摆脱进程级 `runtime_mode()` 的并行干扰）。
+    fn tool_disclosure_with_mode(
+        &self,
+        tools: &[ToolDef],
+        request_text: &str,
+        mode: ModeKind,
+    ) -> ToolDisclosure {
+        ToolDisclosure::with_face(
+            tools,
+            request_text,
+            mode,
+            self.session_tool_face(tools, mode),
+        )
+    }
+
+    /// 稳定半区指纹的观测目标：生产路径是进程级单例，单测可注入独立实例。
+    fn stable_half_target(&self) -> &crate::cache::PrefixCacheTracker {
+        #[cfg(test)]
+        {
+            if let Some(tracker) = &self.stable_half_tracker {
+                return tracker.as_ref();
+            }
+        }
+        crate::cache::prefix_cache_tracker()
+    }
+
+    /// 登记本轮稳定半区的规范指纹（W5.3，scope = `agent.stable_half`）。
+    ///
+    /// 这是「完整前缀」级的漂移观测：此前只有压缩器（`compress.tool_results`）
+    /// 有指纹，工具面/静态提示变了无人知晓。现在两层各自计数，`cache.status` 的
+    /// `stable_prefix_drift_by_scope` 能直接回答「漂移发生在哪一层」。
+    fn observe_stable_half(&self, messages: &[Message]) {
+        let Some(text) = stable_half_text(messages) else {
+            return;
+        };
+        if !self
+            .stable_half_target()
+            .observe_stable_prefix_scoped(AGENT_STABLE_HALF_SCOPE, &text)
+        {
+            // 归因线索：`face_changed`（工具面变了）或技能目录快照变了。
+            // debug 级：多会话交替时每次切换都会命中这里，不该刷屏。
+            tracing::debug!(
+                event = "stable_prefix_drift",
+                scope = AGENT_STABLE_HALF_SCOPE,
+                "agent 稳定半区指纹变化"
+            );
+        }
+    }
+
     /// 统一装配模型消息序列（`process_input` / `chat_stream` / `run_tool_loop` /
     /// `run_tool_loop_stream` 四个入口共用，消除四份重复装配逻辑）。
     ///
@@ -391,10 +641,20 @@ impl AgentRuntime {
     /// 位于末尾还享有注意力上的近因优势（召回内容更不容易被忽略）。
     /// mode_section / tool_guide 为会话级静态内容，保持前置。
     ///
+    /// W5.3：静态区装配完成后立即把「开头连续 System 段」的正文（不含时间戳）
+    /// 登记为 `agent.stable_half` 指纹；稳态轮次 drift 应为 0，任何变化都可在
+    /// `cache.status.stable_prefix_drift_by_scope` 里看到，并与 `face_changed` 日志对上。
+    ///
     /// 装配末尾对超长序列应用 StreamingLLM 滑动窗口（[`compact_window`]，见下方不变式）：
     /// `sink` 取 [`leading_stable_prefix`]（开头连续 System），保证稳定前缀逐字节原位保留。
-    fn build_model_messages(&self, history: &[Message], tool_guide: Option<&str>) -> Vec<Message> {
+    fn build_model_messages(
+        &self,
+        history: &[Message],
+        tool_guide: Option<&str>,
+        capability_brief: Option<&str>,
+    ) -> Vec<Message> {
         let extra = usize::from(tool_guide.is_some())
+            + usize::from(capability_brief.is_some())
             + usize::from(self.stable_prefix.is_some())
             + usize::from(self.mode_section.is_some())
             + usize::from(self.workspace.is_some())
@@ -409,11 +669,36 @@ impl AgentRuntime {
                 timestamp: Utc::now(),
             });
         }
+        // 思考档位指令（不思考 / 思考 / 深度思考 / 极限推理）：同一档位字节一致，
+        // 属会话级静态内容，放静态区不破坏 KV 前缀。此前该指令**从未被注入**，
+        // 档位只改了请求体字段，模型不知道自己该想多深。
+        if let Some(hint) = crate::model::thinking::reasoning_system_prompt_for_turn() {
+            model_messages.push(Message::System {
+                content: hint.to_string(),
+                timestamp: Utc::now(),
+            });
+        }
         // 工作区指引（P0-1b）：常开，先于工具指引——工具指引可能被锚定期扣住，
         // 而「文件该写到哪」在任何轮次都不能缺。
         if let Some(ws) = &self.workspace {
             model_messages.push(Message::System {
                 content: ws.guidance(),
+                timestamp: Utc::now(),
+            });
+        }
+        // 用户规则（个人/项目）：会话级静态内容，紧随工作区段。
+        // 放在这里而不是动态区——规则不随轮次变化，前置才能保住 KV 前缀复用。
+        if let Some(section) = crate::rules::active_text() {
+            model_messages.push(Message::System {
+                content: section,
+                timestamp: Utc::now(),
+            });
+        }
+        // 能力自述（W4.5）：真实工具面 + 意图→工具映射 + 禁止脚本替代。
+        // 会话级静态内容（工具面不变则逐字节相同），放在规则之后、工具指引之前。
+        if let Some(brief) = capability_brief {
+            model_messages.push(Message::System {
+                content: brief.to_string(),
                 timestamp: Utc::now(),
             });
         }
@@ -423,6 +708,9 @@ impl AgentRuntime {
                 timestamp: Utc::now(),
             });
         }
+        // W5.3：稳定半区（此刻 = 上面全部 System 段）装配完成 → 登记完整前缀指纹。
+        // 放在**历史之前**：history 逐轮增长，不属于「应被缓存的不变前缀」。
+        self.observe_stable_half(&model_messages);
         // v3.3.1 运行中插话并入：作为 User 消息追加到历史末尾（先于当前输入），
         // 让模型把用户的补充/纠正视为对本次生成的实时指引——而非仅回合末附录。
         // 并入后清空缓冲；无插话时零开销。
@@ -563,7 +851,7 @@ impl AgentRuntime {
 
         // 4. 构造模型消息序列（统一装配：稳定前缀 → 经验提示 → 路由片段 → 历史，
         //    不污染可见会话历史）
-        let model_messages = self.build_model_messages(&self.session.messages, None);
+        let model_messages = self.build_model_messages(&self.session.messages, None, None);
 
         // 5. 调用 LLM 生成回复（注入经验后的消息序列）
         // 锚定 bootstrap：首个请求注入 max_tokens 上限后立即剥离（一次性，
@@ -645,7 +933,7 @@ impl AgentRuntime {
     /// 供 CLI 直接模式（`-p`）与交互式 REPL 做逐 token 流式渲染。
     /// 不修改会话状态机（只读消费历史），调用方负责将本轮回复回写历史。
     pub async fn chat_stream(&self, history: &[Message]) -> Result<StreamReceiver> {
-        let model_messages = self.build_model_messages(history, None);
+        let model_messages = self.build_model_messages(history, None, None);
         self.model_router.chat_stream(&model_messages).await
     }
 
@@ -669,11 +957,25 @@ impl AgentRuntime {
         registry: Arc<ToolRegistry>,
         tools: &[ToolDef],
     ) -> Result<String> {
+        // 预算阈值默认从 env 读（P2-9）；测试/内部调用可经 with_limits 直接注入。
+        let limits = crate::agent::turn_budget::limits_from_env();
+        self.run_tool_loop_with_limits(history, registry, tools, limits)
+            .await
+    }
+
+    /// 与 [`run_tool_loop`](Self::run_tool_loop) 相同，但显式注入单 turn 预算
+    /// （P2-9），便于在不修改进程 env 的前提下做回路集成测试。
+    pub(crate) async fn run_tool_loop_with_limits(
+        &self,
+        history: &mut Vec<Message>,
+        registry: Arc<ToolRegistry>,
+        tools: &[ToolDef],
+        budget_limits: crate::agent::turn_budget::TurnBudgetLimits,
+    ) -> Result<String> {
         if tools.is_empty() {
             return Err(anyhow!("run_tool_loop 需要非空 tools 定义"));
         }
         let cycle = ToolCycle::new(registry);
-        let max_rounds: u32 = 20;
         let request_text = history
             .iter()
             .rev()
@@ -682,22 +984,49 @@ impl AgentRuntime {
                 _ => None,
             })
             .unwrap_or_default();
-        let mut disclosure = ToolDisclosure::new(tools, request_text, crate::mode::runtime_mode());
+        // 轮数不再写死 20：按本轮用户请求与工具面自适应（模型可在计划里写
+        // `[[budget:deep]]` 显式升档；硬护栏 64 轮）。
+        let max_rounds: u32 =
+            crate::agent::budget_policy::resolve(request_text, 0, tools.len()).tool_rounds as u32;
+        let mut disclosure = self.tool_disclosure(tools, request_text);
+        let capability_brief = capability_brief_for(tools);
 
+        // P2-9：单 turn 预算硬熔断（阈值由调用方注入）。
+        let turn_started = std::time::Instant::now();
+        let mut tokens_used: u64 = 0;
         // doom-loop 记账：按时序记录 `(工具名, 入参原文)`，判定只看逐字节一致。
         let mut call_log: Vec<(String, String)> = Vec::new();
-        for _ in 0..max_rounds {
+        // W4.4：反脚本守卫的「本 turn 已纠偏能力」必须**跨轮**保留——契约是
+        // 每 turn 每能力只纠偏一次，第二次放行。放在 round 循环内会让模型每轮
+        // 重试都再撞一次 CAPABILITY_MISROUTE，直到预算耗尽。
+        let mut corrected_capabilities = std::collections::HashSet::new();
+        for round in 0..max_rounds {
+            // 每轮开头先做预算硬熔断（步数/时长/token），命中即返回可识别结果。
+            if let Some(breach) = crate::agent::turn_budget::check_turn_budget(
+                &budget_limits,
+                round,
+                &turn_started,
+                tokens_used,
+            ) {
+                let partial = last_assistant_text(history);
+                let body = breach.to_json(&partial, None);
+                return Err(anyhow!("budget_exhausted: {body}"));
+            }
             let active_tools = disclosure.active_tools();
             // 锚定 deferred skill-catalog：扣住时不注入技能目录指引（晋升 + grace 步数
             // 越过前保持扣住，由编排器按会话锚定态置位）。工具发现仍由 function schema 可见。
             let tool_guide = if self.defer_skill_catalog() {
                 None
             } else {
-                Some(tool_guide_text(&active_tools))
+                let skills_dir =
+                    crate::tools::skill_tools::resolve_skills_dir(&self.config.skills.skills_dir);
+                let snap = crate::agent::tool_catalog::snapshot(&skills_dir);
+                Some(compose_guide(&active_tools, &snap))
             };
             // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
             //（旧实现漏装配稳定前缀，与其余入口不一致，且工具指引非最前）
-            let model_messages = self.build_model_messages(history, tool_guide.as_deref());
+            let model_messages =
+                self.build_model_messages(history, tool_guide.as_deref(), Some(&capability_brief));
 
             // 锚定 bootstrap：首个请求注入 max_tokens 上限后立即剥离（一次性）
             let bootstrap_cap = self.take_bootstrap_max_tokens();
@@ -710,6 +1039,31 @@ impl AgentRuntime {
                     .chat_with_tools(&model_messages, &active_tools)
                     .await?
             };
+            // P2-9：累计本 turn 已用 token（服务端 usage；缺省时按 0 累加）。
+            tokens_used = tokens_used.saturating_add(resp.usage.total_tokens as u64);
+            // 非流式回路**不发** Thinking 事件：把本轮 reasoning_content 攒进共享缓冲，
+            // assistant 行落盘时写进 `thinking` 列（复盘要能读到「智能体思路」）。
+            if let (Some(sess), Some(thought)) =
+                (self.event_session.as_deref(), resp.thinking.as_deref())
+            {
+                crate::persistence::session::note_pending_thinking(sess, thought);
+            }
+            // 思考可见：非流式回路的 reasoning 也要实时下发。此前只在落盘缓冲里留了一份，
+            // 前端实时只能渲染出空的「思考」折叠块（用户看不到模型在想什么）。
+            // 流式回路本就逐块下发，这里补的是计划子步骤等仍走非流式的路径。
+            if let (Some(bus), Some(sess), Some(thought)) = (
+                self.events.as_ref(),
+                self.event_session.as_deref(),
+                resp.thinking.as_deref(),
+            ) {
+                if !thought.trim().is_empty() {
+                    bus.publish(Envelope::new(
+                        EventType::Thinking,
+                        json!({ "text": thought }),
+                        sess,
+                    ));
+                }
+            }
             // P2-B 兼容层：本地权重常把动作写在 content 里而不是 tool_calls（见
             // `model::llm::bridge_content_action` 的说明）。这里桥接一次，
             // 否则整轮会被当成"只是在聊天"，一个工具都不会被调用。
@@ -741,8 +1095,79 @@ impl AgentRuntime {
             let repeated_tool: Option<String> =
                 detect_doom_loop(&call_log, DOOM_LOOP_THRESHOLD).map(|(tool, _)| tool);
             let tool_batch_started = std::time::Instant::now();
+            // 补发工具事件：此前非流式回路**不发** ToolCall/ToolResult（见下方 E12 注释），
+            // 后果是前端实时工具卡永远不出现，只有事后复盘能看到。这里按与编排/流式回路
+            // **完全相同的 payload 形状**补发，前端无需改动；无事件总线时静默跳过。
+            let event_sink = self
+                .events
+                .clone()
+                .zip(self.event_session.clone())
+                .filter(|(_, sess)| !sess.is_empty());
+            let batch_started_ms = Utc::now().timestamp_millis();
+            // 真实审批裁决（与对话页档位同源）：只对「直接驱动本机」的高自主工具
+            // （computer_use / system_control …）产出 `approval`，其余工具不伪造字段。
+            let approval_session = self.event_session.clone().unwrap_or_default();
+            let approvals: Vec<Option<crate::guard::permission_matrix::ToolApproval>> = resp
+                .tool_calls
+                .iter()
+                .map(|tc| crate::guard::permission_matrix::decide_tool(&tc.name, &approval_session))
+                .collect();
+            if let Some((bus, sess)) = &event_sink {
+                for (i, tc) in resp.tool_calls.iter().enumerate() {
+                    let input: serde_json::Value = serde_json::from_str(&tc.arguments)
+                        .unwrap_or_else(|_| json!(tc.arguments));
+                    let approval = approvals.get(i).and_then(|a| a.as_ref());
+                    let mut payload = json!({
+                        "id": tc.id, "tool_use_id": tc.id,
+                        "name": tc.name, "input": input,
+                        "started_at": batch_started_ms,
+                        // 风险档位：真实分类表（只读/写/高自主），供监管卡标注，
+                        // 避免前端自己按工具名猜「这算不算危险操作」。
+                        "autonomy": crate::guard::permission_matrix::classify_tool_autonomy(&tc.name).as_key(),
+                    });
+                    if let Some(a) = approval {
+                        payload["approval"] = json!(a.status);
+                        payload["approvalAutonomy"] = json!(a.autonomy.as_key());
+                        if let Some(reason) = &a.reason {
+                            payload["approvalReason"] = json!(reason);
+                        }
+                        if let Some(audit) = a.audit {
+                            payload["approvalAudit"] =
+                                serde_json::to_value(audit).unwrap_or(serde_json::Value::Null);
+                        }
+                    }
+                    bus.publish(Envelope::new(EventType::ToolCall, payload, sess));
+                }
+            }
+            // W4.4：反脚本守卫（每 turn 每个能力只纠偏一次；集合在 round 循环外）。
             let mut results = Vec::with_capacity(resp.tool_calls.len());
-            for tc in &resp.tool_calls {
+            for (i, tc) in resp.tool_calls.iter().enumerate() {
+                // 矩阵拒绝 / 需确认但无宿主 → 不执行（fail-closed），结果里写明真实原因。
+                if let Some(a) = approvals.get(i).and_then(|a| a.as_ref()) {
+                    if a.status == "denied" {
+                        results.push(ToolResult::Error {
+                            message: format!(
+                                "审批拒绝（denied）：{}",
+                                a.reason.as_deref().unwrap_or("权限矩阵拒绝")
+                            ),
+                            code: "APPROVAL_DENIED".to_string(),
+                        });
+                        continue;
+                    }
+                    if a.status == "pending"
+                        && !crate::guard::gateway::agent_approval_host_present()
+                    {
+                        results.push(ToolResult::Error {
+                            message: format!(
+                                "审批待定（pending）：{}；当前没有可用的宿主审批通道，\
+                                 已按 fail-closed 拒绝执行。",
+                                a.reason.as_deref().unwrap_or("需要人工确认")
+                            ),
+                            code: "APPROVAL_PENDING".to_string(),
+                        });
+                        continue;
+                    }
+                }
                 if disclosure.is_discovery_tool(&tc.name) {
                     let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)
                         .unwrap_or(serde_json::Value::Null);
@@ -761,6 +1186,16 @@ impl AgentRuntime {
                         ),
                         code: "TOOL_SCHEMA_NOT_LOADED".to_string(),
                     });
+                } else if let Some(blocked) = crate::agent::capability_guard::check(
+                    &tc.name,
+                    &parse_tool_args(&tc.arguments),
+                    &active_tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>(),
+                    &mut corrected_capabilities,
+                ) {
+                    results.push(blocked);
                 } else {
                     let call = CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments));
                     results.extend(cycle.execute_sequential(vec![call]).await?);
@@ -776,7 +1211,8 @@ impl AgentRuntime {
                 thinking: resp.thinking.clone(),
                 timestamp: Utc::now(),
             });
-            for (tc, res) in resp.tool_calls.iter().zip(results) {
+            for (i, (tc, res)) in resp.tool_calls.iter().zip(results).enumerate() {
+                let ok = matches!(&res, ToolResult::Success { .. });
                 let mut output = match &res {
                     ToolResult::Success { data, .. } => data.clone(),
                     ToolResult::Error { message, code } => format!("[工具错误 {code}] {message}"),
@@ -788,6 +1224,56 @@ impl AgentRuntime {
                         "[重复调用提醒] 你已连续 {} 次以**完全相同的参数**调用 `{}`；\
 相同的参数不会得到不同结果。请改变参数、换用其它工具，或直接给出结论。\n\n{output}",
                         DOOM_LOOP_THRESHOLD, tc.name,
+                    );
+                }
+                // E12（已修）：非流式回路原先**不发**工具事件，导致前端实时工具卡缺失、
+                // 上下文台账只能靠事件桥补记（曾系统性低估压力）。现在两件事都做：
+                // ① 在 `Message::Tool` 入历史处按「入参 + 完整输出」记账；
+                // ② 在同一位置补发 ToolResult 事件（ToolCall 已在执行前发出）。
+                // 输出带 `call_id` 幂等键，事件桥/计划 tap 重复看到也不会重复计数或重复落盘。
+                if let Some((bus, sess)) = &event_sink {
+                    let mut payload = json!({
+                        "id": tc.id, "tool_use_id": tc.id,
+                        "name": tc.name, "result": output, "is_error": !ok,
+                        "elapsed_ms": single_tool_batch.then_some(tool_batch_elapsed_ms),
+                        "execution_status": {
+                            "status": if ok { "success" } else { "error" }
+                        },
+                    });
+                    // 与 ToolCall 帧同源的审批裁决（approved / pending / denied）。
+                    if let Some(a) = approvals.get(i).and_then(|a| a.as_ref()) {
+                        payload["approval"] = json!(a.status);
+                        payload["approvalAutonomy"] = json!(a.autonomy.as_key());
+                        if let Some(reason) = &a.reason {
+                            payload["approvalReason"] = json!(reason);
+                        }
+                    }
+                    bus.publish(Envelope::new(EventType::ToolResult, payload, sess));
+                }
+                if let Some(sess) = &self.event_session {
+                    crate::context::session::record_tool_input_at_context(
+                        sess,
+                        tc.id.as_deref(),
+                        &tc.name,
+                        &tc.arguments,
+                    );
+                    crate::context::session::record_tool_output_at_context(
+                        sess,
+                        tc.id.as_deref(),
+                        &tc.name,
+                        &output,
+                    );
+                    // 复盘证据（权威落盘点）：非流式回路不发事件，网关桥与计划 tap
+                    // 都看不到这次调用，只能在这里写 `role='tool'` 行。按 call_id 幂等，
+                    // 与事件桥重复时不会写两行。
+                    crate::persistence::session::append_tool_activity(
+                        sess,
+                        tc.id.as_deref(),
+                        &tc.name,
+                        &tc.arguments,
+                        &output,
+                        single_tool_batch.then_some(tool_batch_elapsed_ms),
+                        Some(ok),
                     );
                 }
                 history.push(Message::Tool {
@@ -835,27 +1321,38 @@ impl AgentRuntime {
                 _ => None,
             })
             .unwrap_or_default();
-        let disclosure = ToolDisclosure::new(tools, request_text, crate::mode::runtime_mode());
+        let disclosure = self.tool_disclosure(tools, request_text);
+        let capability_brief = capability_brief_for(tools);
         let router = &self.model_router;
         let defer_skill_catalog = self.defer_skill_catalog();
-        run_tool_loop_streaming_with_disclosure(
+        // 能力目录（技能索引）在闭包外取一次：闭包是 move 的、拿不到 self；
+        // snapshot 内部按目录缓存，同一会话内不会重复扫盘。
+        let cap_dir =
+            crate::tools::skill_tools::resolve_skills_dir(&self.config.skills.skills_dir);
+        let cap_snap = crate::agent::tool_catalog::snapshot(&cap_dir);
+        // E12：把会话标识交给流式回路——工具输出写进 `Message::Tool` 的同时按完整
+        // 文本计入上下文台账（此前只靠网关事件桥异步兜底，压缩判定读到的是旧值）。
+        let ledger_session = self.event_session.clone();
+        run_tool_loop_streaming_with_disclosure_and_session(
             history,
             registry,
             disclosure,
             events,
             max_rounds,
+            ledger_session,
             move |turn, active_tools| {
                 // 工具目录随发现结果扩展，故每轮按当前可见面重建轻量指引。
                 let tool_guide = if defer_skill_catalog {
                     None
                 } else {
-                    Some(tool_guide_text(&active_tools))
+                    Some(compose_guide(&active_tools, &cap_snap))
                 };
                 // 经验提示以系统消息前置（与 process_input / run_tool_loop 行为一致），
                 // 同时天然落在 P-7 稳定前缀半区，利于 KV-cache 前缀复用。
                 // 统一装配：稳定前缀 → 工具指引 → 经验提示 → 路由片段 → 历史
                 //（修正：旧实现工具指引排在稳定前缀之前，违背 W-6「最前端」契约）
-                let model_messages = self.build_model_messages(&turn, tool_guide.as_deref());
+                let model_messages =
+                    self.build_model_messages(&turn, tool_guide.as_deref(), Some(&capability_brief));
                 async move {
                     router
                         .chat_stream_with_tools(&model_messages, &active_tools)
@@ -937,6 +1434,11 @@ impl AgentRuntime {
         self.clear_interrupt();
         self.session.messages.clear();
         self.session.metadata.clear();
+        // W4.2：会话内容已清空 = 新会话 → 工具面重建，不继承已发现的工具。
+        *self
+            .session_tool_face
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.session.set_state(AgentState::Ready);
     }
 }
@@ -1269,6 +1771,324 @@ mod tests {
         assert_eq!(*runtime.get_state(), AgentState::Ready);
     }
 
+    // ---------- W4.2：会话级稳定工具面 ----------
+
+    fn session_face_tools() -> Vec<ToolDef> {
+        let mut tools: Vec<ToolDef> = crate::agent::tool_schema::FIXED_FACE
+            .iter()
+            .map(|name| ToolDef {
+                name: (*name).to_string(),
+                description: "固定高频面工具".to_string(),
+                parameters: json!({"type": "object"}),
+            })
+            .collect();
+        tools.push(ToolDef {
+            name: "office_automation".to_string(),
+            description: "生成 Excel 工作簿和 Word 文档".to_string(),
+            parameters: json!({"type": "object"}),
+        });
+        tools.push(ToolDef {
+            name: "web_research".to_string(),
+            description: "联网研究网页资料并汇总来源".to_string(),
+            parameters: json!({"type": "object"}),
+        });
+        tools.extend((0..8).map(|i| ToolDef {
+            name: format!("special_{i}"),
+            description: "专用能力".to_string(),
+            parameters: json!({"type": "object"}),
+        }));
+        tools
+    }
+
+    fn active_names(disclosure: &ToolDisclosure) -> Vec<String> {
+        disclosure
+            .active_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
+    #[test]
+    fn session_tool_face_is_byte_stable_across_five_turns() {
+        // 变异说明：把 `AgentRuntime::tool_disclosure` 换回「每轮
+        // `ToolDisclosure::new(tools, request_text, mode)` 后取 active」的旧实现
+        // （按 request_text 逐轮预热），本用例立刻变红——工具数组会随用户文本变化。
+        let runtime = AgentRuntime::new(Config::default());
+        let tools = session_face_tools();
+        let requests = ["你好", "你觉得这个方案怎么样", "谢谢！", "在吗", "晚安"];
+        let first = active_names(&runtime.tool_disclosure_with_mode(
+            &tools,
+            requests[0],
+            ModeKind::Agent,
+        ));
+        assert!(first.contains(&DISCOVER_TOOLS_NAME.to_string()));
+        assert!(first.contains(&"read_file".to_string()));
+        for request in &requests[1..] {
+            let turn = runtime.tool_disclosure_with_mode(&tools, request, ModeKind::Agent);
+            assert_eq!(
+                active_names(&turn),
+                first,
+                "同一会话的工具数组不得随用户文本变化：{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_appends_and_session_switch_rebuilds_the_face() {
+        let mut runtime = AgentRuntime::new(Config::default());
+        let tools = session_face_tools();
+        let initial = active_names(&runtime.tool_disclosure_with_mode(
+            &tools,
+            "你好",
+            ModeKind::Agent,
+        ));
+        assert!(!initial.contains(&"office_automation".to_string()));
+
+        {
+            let mut turn =
+                runtime.tool_disclosure_with_mode(&tools, "你好", ModeKind::Agent);
+            let out = turn.discover("操作 Excel 工作簿");
+            assert!(out.contains("office_automation"), "{out}");
+        }
+        let extended = active_names(&runtime.tool_disclosure_with_mode(
+            &tools,
+            "换个话题",
+            ModeKind::Agent,
+        ));
+        assert!(
+            extended.contains(&"office_automation".to_string()),
+            "发现结果必须跨轮保留（会话面）"
+        );
+        for name in &initial {
+            assert!(extended.contains(name), "发现不得删除既有工具：{name}");
+        }
+
+        // 会话切换 → 重建：新会话不携带上一会话的发现结果。
+        runtime.set_event_bus(Arc::new(EventBus::new(64)), "session-b".to_string());
+        let rebuilt = active_names(&runtime.tool_disclosure_with_mode(
+            &tools,
+            "继续",
+            ModeKind::Agent,
+        ));
+        assert_eq!(rebuilt, initial, "新会话必须回到初始面");
+
+        // reset() 同样视为新会话。
+        {
+            let mut turn =
+                runtime.tool_disclosure_with_mode(&tools, "继续", ModeKind::Agent);
+            assert!(turn.discover("操作 Excel 工作簿").contains("office_automation"));
+        }
+        runtime.reset();
+        let after_reset = active_names(&runtime.tool_disclosure_with_mode(
+            &tools,
+            "继续",
+            ModeKind::Agent,
+        ));
+        assert!(
+            !after_reset.contains(&"office_automation".to_string()),
+            "reset 后必须重建工具面"
+        );
+    }
+
+    #[test]
+    fn runtime_clone_keeps_an_independent_tool_face_snapshot() {
+        let runtime = AgentRuntime::new(Config::default());
+        let tools = session_face_tools();
+        let cloned = runtime.clone();
+        {
+            let mut turn = cloned.tool_disclosure_with_mode(&tools, "你好", ModeKind::Agent);
+            assert!(turn.discover("操作 Excel 工作簿").contains("office_automation"));
+        }
+        assert!(active_names(&cloned.tool_disclosure_with_mode(&tools, "继续", ModeKind::Agent))
+            .contains(&"office_automation".to_string()));
+        assert!(
+            !active_names(&runtime.tool_disclosure_with_mode(&tools, "继续", ModeKind::Agent))
+                .contains(&"office_automation".to_string()),
+            "克隆体的发现不得污染原运行时"
+        );
+    }
+
+    // ---------- W5.3：完整稳定前缀指纹与分 scope 漂移 ----------
+
+    #[test]
+    fn agent_stable_half_drift_is_zero_across_five_steady_turns() {
+        // 契约：同一会话、同一工具面，只有用户文本/历史在变 → 稳定半区逐字节不变
+        // → `agent.stable_half` 漂移必须为 0。
+        // 变异说明：把 `observe_stable_half` 里对时间戳的处理改回「直接序列化 Message」，
+        // 本用例立刻变红（每轮 timestamp 不同 = 每轮 +1 漂移）。
+        let tracker = Arc::new(crate::cache::PrefixCacheTracker::new());
+        let mut runtime = AgentRuntime::new(Config::default());
+        runtime.use_stable_half_tracker(Arc::clone(&tracker));
+        runtime.set_mode_section(Some("模式规则段".into()));
+        let tools = session_face_tools();
+        let brief = capability_brief_for(&tools);
+        let guide = "工具指引（稳态）".to_string();
+
+        for turn in 0..5 {
+            let history = vec![Message::User {
+                content: format!("第 {turn} 轮：完全不同的用户文本"),
+                timestamp: Utc::now(),
+            }];
+            let msgs = runtime.build_model_messages(&history, Some(&guide), Some(&brief));
+            assert!(msgs.len() >= 4, "mode + brief + guide + history");
+        }
+
+        let by_scope = tracker.drift_by_scope();
+        assert_eq!(
+            by_scope.get(AGENT_STABLE_HALF_SCOPE),
+            Some(&0),
+            "稳态 5 轮不得漂移：{by_scope:?}"
+        );
+        assert_eq!(tracker.stable_prefix_drift(), 0);
+    }
+
+    #[test]
+    fn changing_one_tool_name_counts_exactly_one_agent_drift() {
+        // 契约：工具面变化（改名/增删）→ 稳定半区变化一次（drift +1），之后恢复稳定。
+        let tracker = Arc::new(crate::cache::PrefixCacheTracker::new());
+        let mut runtime = AgentRuntime::new(Config::default());
+        runtime.use_stable_half_tracker(Arc::clone(&tracker));
+        let history = vec![Message::User {
+            content: "同一句用户文本".to_string(),
+            timestamp: Utc::now(),
+        }];
+
+        let before_tools = vec![
+            ToolDef {
+                name: "read_file".to_string(),
+                description: "读取文件".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDef {
+                name: "shell_exec".to_string(),
+                description: "执行命令".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+        let mut renamed_tools = before_tools.clone();
+        renamed_tools[1].name = "shell_exec_v2".to_string();
+
+        let brief_before = capability_brief_for(&before_tools);
+        let brief_renamed = capability_brief_for(&renamed_tools);
+        assert_ne!(
+            brief_before, brief_renamed,
+            "改名必须真的进入能力自述（否则本用例测不到漂移）"
+        );
+
+        runtime.build_model_messages(&history, Some("工具指引"), Some(&brief_before));
+        // 改一个工具名 → 稳定半区变化一次。
+        runtime.build_model_messages(&history, Some("工具指引"), Some(&brief_renamed));
+        assert_eq!(
+            tracker.drift_by_scope().get(AGENT_STABLE_HALF_SCOPE),
+            Some(&1),
+            "{:?}",
+            tracker.drift_by_scope()
+        );
+        // 新面重复一轮：不再漂移（变化是「一次」，不是每轮）。
+        runtime.build_model_messages(&history, Some("工具指引"), Some(&brief_renamed));
+        assert_eq!(
+            tracker.drift_by_scope().get(AGENT_STABLE_HALF_SCOPE),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn agent_and_compress_drift_scopes_are_independent() {
+        // 契约：压缩层抖动不得污染 agent 稳定半区的判定，反之亦然。
+        let tracker = Arc::new(crate::cache::PrefixCacheTracker::new());
+        let mut runtime = AgentRuntime::new(Config::default());
+        runtime.use_stable_half_tracker(Arc::clone(&tracker));
+        let history = vec![Message::User {
+            content: "用户输入".to_string(),
+            timestamp: Utc::now(),
+        }];
+
+        runtime.build_model_messages(&history, Some("指引-A"), None);
+        runtime.build_model_messages(&history, Some("指引-A"), None);
+        assert_eq!(tracker.drift_by_scope().get(AGENT_STABLE_HALF_SCOPE), Some(&0));
+
+        // 压缩层连续两个不同指纹 → 只有 compress scope +1。
+        assert!(tracker
+            .observe_stable_prefix_scoped(crate::cache::COMPRESS_TOOL_RESULTS_SCOPE, "compress-v1"));
+        assert!(!tracker
+            .observe_stable_prefix_scoped(crate::cache::COMPRESS_TOOL_RESULTS_SCOPE, "compress-v2"));
+        assert_eq!(
+            tracker.drift_by_scope().get(AGENT_STABLE_HALF_SCOPE),
+            Some(&0),
+            "压缩层漂移不得计入 agent scope"
+        );
+        assert_eq!(
+            tracker
+                .drift_by_scope()
+                .get(crate::cache::COMPRESS_TOOL_RESULTS_SCOPE),
+            Some(&1)
+        );
+
+        // agent 侧再变一次 → 只有 agent scope +1，compress 保持 1。
+        runtime.build_model_messages(&history, Some("指引-B"), None);
+        assert_eq!(tracker.drift_by_scope().get(AGENT_STABLE_HALF_SCOPE), Some(&1));
+        assert_eq!(
+            tracker
+                .drift_by_scope()
+                .get(crate::cache::COMPRESS_TOOL_RESULTS_SCOPE),
+            Some(&1)
+        );
+        assert_eq!(tracker.stable_prefix_drift(), 2, "总和 = 各 scope 之和");
+    }
+
+    #[test]
+    fn build_model_messages_observes_the_global_prefix_tracker() {
+        // 接线守卫：未注入 tracker 时（生产路径）必须写进程级单例的 `agent.stable_half`
+        // scope。断言只看「scope 已登记」（计数是单调量，并行用例不会让本断言变红）。
+        let runtime = AgentRuntime::new(Config::default());
+        let _ = runtime.build_model_messages(
+            &[],
+            Some("全局 tracker 接线探针"),
+            None,
+        );
+        assert!(
+            crate::cache::prefix_cache_tracker()
+                .drift_by_scope()
+                .contains_key(AGENT_STABLE_HALF_SCOPE),
+            "build_model_messages 必须把稳定半区指纹交给进程级 tracker"
+        );
+    }
+
+    #[test]
+    fn stable_half_text_ignores_timestamps_and_history() {
+        // 纯函数层守卫：时间戳与历史都不进入指纹（否则稳态会话恒漂移）。
+        let a = vec![
+            Message::System {
+                content: "静态段".into(),
+                timestamp: Utc::now(),
+            },
+            Message::User {
+                content: "u1".into(),
+                timestamp: Utc::now(),
+            },
+        ];
+        let b = vec![
+            Message::System {
+                content: "静态段".into(),
+                timestamp: Utc::now() + chrono::Duration::seconds(5),
+            },
+            Message::User {
+                content: "u2".into(),
+                timestamp: Utc::now(),
+            },
+        ];
+        assert_eq!(stable_half_text(&a), stable_half_text(&b));
+        assert!(stable_half_text(&a).is_some_and(|t| t.contains("静态段")));
+        // 没有静态段 = 不登记（空半区没有可复用的前缀）。
+        assert_eq!(
+            stable_half_text(&[Message::User {
+                content: "只有用户消息".into(),
+                timestamp: Utc::now(),
+            }]),
+            None
+        );
+    }
+
     #[test]
     fn test_agent_interrupt_flag_initial() {
         let config = Config::default();
@@ -1294,8 +2114,8 @@ mod tests {
         }];
         let guide = "工具指引".to_string();
 
-        let a = runtime.build_model_messages(&history, Some(&guide));
-        let b = runtime.build_model_messages(&history, Some(&guide));
+        let a = runtime.build_model_messages(&history, Some(&guide), None);
+        let b = runtime.build_model_messages(&history, Some(&guide), None);
         let systems = |msgs: &[Message]| -> Vec<String> {
             msgs.iter()
                 .filter_map(|m| match m {
@@ -1327,6 +2147,61 @@ mod tests {
         assert_eq!(content_of(&a[4]), "经验提示", "动态区末位");
     }
 
+    #[test]
+    fn capability_guard_state_is_declared_outside_the_round_loop() {
+        // 契约：每 turn 每能力只纠偏一次、第二次放行。若把集合放进 round 循环，
+        // 模型每次重试都会再撞一次 CAPABILITY_MISROUTE，直到预算耗尽。
+        let runtime_src = include_str!("runtime.rs");
+        let decl = runtime_src
+            .find("let mut corrected_capabilities")
+            .expect("runtime 缺少守卫状态声明");
+        let round = runtime_src
+            .find("for round in 0..max_rounds {")
+            .expect("runtime 缺少 round 循环");
+        assert!(decl < round, "runtime 的 corrected_capabilities 必须在 round 循环外");
+
+        let stream_src = include_str!("stream_loop.rs");
+        let sdecl = stream_src
+            .find("let mut corrected_capabilities")
+            .expect("stream_loop 缺少守卫状态声明");
+        let sround = stream_src
+            .find("for round in 1..=max_rounds {")
+            .expect("stream_loop 缺少 round 循环");
+        assert!(sdecl < sround, "stream_loop 的 corrected_capabilities 必须在 round 循环外");
+    }
+
+    #[test]
+    fn capability_brief_enters_the_stable_half_before_the_tool_guide() {
+        let runtime = AgentRuntime::new(Config::default());
+        let brief = crate::agent::capability::brief_from(
+            &["read_file".to_string(), "shell_exec".to_string()],
+            3,
+            0,
+        );
+        let history = vec![Message::User {
+            content: "用户输入".into(),
+            timestamp: Utc::now(),
+        }];
+        let with_brief = runtime.build_model_messages(&history, Some("工具指引"), Some(&brief));
+        let again = runtime.build_model_messages(&history, Some("工具指引"), Some(&brief));
+        let systems = |msgs: &[Message]| -> Vec<String> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    Message::System { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(systems(&with_brief), systems(&again), "能力自述必须逐字节稳定");
+        let sys = systems(&with_brief);
+        let brief_pos = sys.iter().position(|line| line == &brief).expect("缺少能力自述");
+        let guide_pos = sys.iter().position(|line| line == "工具指引").expect("缺少工具指引");
+        assert!(brief_pos < guide_pos, "能力自述必须在工具指引之前（稳定半区）");
+        // 不传时不得凭空插入（非工具回路保持原样）。
+        let without = runtime.build_model_messages(&history, Some("工具指引"), None);
+        assert!(!systems(&without).contains(&brief));
+    }
+
     fn content_of(m: &Message) -> String {
         match m {
             Message::System { content, .. }
@@ -1354,7 +2229,7 @@ mod tests {
         }];
 
         // 正常路径：静态区 = mode → workspace → guide，全部先于历史
-        let full = runtime.build_model_messages(&history, Some("工具指引"));
+        let full = runtime.build_model_messages(&history, Some("工具指引"), None);
         assert_eq!(content_of(&full[0]), "模式规则段", "静态区首位仍是模式段");
         assert!(
             content_of(&full[1]).contains(&d.display().to_string()),
@@ -1365,7 +2240,7 @@ mod tests {
         assert_eq!(full[3].role(), "user", "历史必须紧跟静态区之后");
 
         // 锚定期：工具指引被扣住，工作区指引不得跟着消失
-        let anchored = runtime.build_model_messages(&history, None);
+        let anchored = runtime.build_model_messages(&history, None, None);
         assert_eq!(anchored.len(), 3, "mode + workspace + history");
         assert!(
             content_of(&anchored[1]).contains("【工作区】"),
@@ -1377,7 +2252,7 @@ mod tests {
 
         // 未注入工作区的调用方（CLI/测试）不得被凭空塞一段目录信息
         let bare = AgentRuntime::new(Config::default());
-        let out = bare.build_model_messages(&history, Some("工具指引"));
+        let out = bare.build_model_messages(&history, Some("工具指引"), None);
         assert_eq!(out.len(), 2, "guide + history，不得注入多余段");
         assert_eq!(content_of(&out[0]), "工具指引");
 
@@ -1396,7 +2271,7 @@ mod tests {
                 timestamp: Utc::now(),
             })
             .collect();
-        let out = runtime.build_model_messages(&history, Some("指引"));
+        let out = runtime.build_model_messages(&history, Some("指引"), None);
         // 阈值内：mode + guide + history(10) = 12，未裁剪
         assert_eq!(out.len(), 12, "低于阈值不得裁剪");
     }
@@ -1417,7 +2292,7 @@ mod tests {
                 timestamp: Utc::now(),
             })
             .collect();
-        let out = runtime.build_model_messages(&history, Some("STATIC-GUIDE"));
+        let out = runtime.build_model_messages(&history, Some("STATIC-GUIDE"), None);
         // 裁剪后 = leading prefix(2 System) + recent(WINDOW_RECENT_MESSAGES)
         assert_eq!(
             out.len(),
@@ -1554,6 +2429,221 @@ mod tests {
             "重复调用提醒必须注进工具结果，模型下一轮才看得到"
         );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// E12 回归：非流式工具回路（桌面 Solo 主路径 / Bloom 自动闭环 / 计划子步骤）
+    /// **不发** ToolCall/ToolResult 事件，事件桥因此拿不到工具输出 →
+    /// `ContextLedger` 漏计。修复后每次工具执行的「入参 + 输出」都记入同一条台账，
+    /// 且增量恰好等于 `history` 中各 `Message::Tool` 的 token 之和。
+    #[tokio::test]
+    async fn test_run_tool_loop_records_tool_output_to_context_ledger() {
+        // 每轮都返回同一个工具调用：回路最终命中 doom-loop，但每次执行都必须记账。
+        let body = r#"{"choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let url = mock_llm_server(200, body).await;
+        let mut runtime = AgentRuntime::new(llm_config(&url));
+        runtime.init().unwrap();
+        let session = format!("mgt-e12-{}", Uuid::new_v4());
+        runtime.set_event_bus(Arc::new(EventBus::default()), session.clone());
+
+        let ws = std::env::temp_dir().join(format!("mgt_rt_ledger_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("probe.txt"), "hello").unwrap();
+        let mut reg = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(&mut reg, &ws, None, None, None).unwrap();
+        let defs: Vec<ToolDef> = reg
+            .describe_tools_for_llm()
+            .into_iter()
+            .map(|(name, description, parameters)| ToolDef {
+                name,
+                description,
+                parameters,
+            })
+            .collect();
+
+        let before = crate::context::session::context_status(&session)["overhead_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        assert_eq!(before, 0, "新会话初始不应有工具开销");
+
+        let mut history = vec![Message::User {
+            content: "列出目录".into(),
+            timestamp: Utc::now(),
+        }];
+        // 恒返回 tool_call → 期望 Err（doom-loop），此处只关心记账。
+        let _ = runtime
+            .run_tool_loop(&mut history, Arc::new(reg), &defs)
+            .await;
+
+        let expected: u64 = history
+            .iter()
+            .filter_map(|m| match m {
+                Message::Tool { input, output, .. } => {
+                    let mut t = crate::context::session::estimate_tokens(input);
+                    if !output.trim().is_empty() {
+                        t += crate::context::session::estimate_tokens(output);
+                    }
+                    Some(t)
+                }
+                _ => None,
+            })
+            .sum();
+        assert!(expected > 0, "回路应至少执行一次工具并产生上下文开销");
+
+        let after = crate::context::session::context_status(&session)["overhead_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        assert!(after > before, "工具输出必须计入台账：{before} -> {after}");
+        assert_eq!(
+            after, expected,
+            "台账增量必须等于各工具消息（入参+输出）token 之和"
+        );
+
+        let _ = std::fs::remove_file(
+            Config::data_dir()
+                .join("context")
+                .join(format!("{session}.json")),
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// E12 反向守卫：没有工具调用的回合**不得**改变台账（向后兼容）。
+    #[tokio::test]
+    async fn test_run_tool_loop_without_tools_keeps_context_ledger_unchanged() {
+        let body = r#"{"choices":[{"message":{"content":"直接回答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let url = mock_llm_server(200, body).await;
+        let mut runtime = AgentRuntime::new(llm_config(&url));
+        runtime.init().unwrap();
+        let session = format!("mgt-e12-notool-{}", Uuid::new_v4());
+        runtime.set_event_bus(Arc::new(EventBus::default()), session.clone());
+
+        let ws = std::env::temp_dir().join(format!("mgt_rt_notool_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut reg = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(&mut reg, &ws, None, None, None).unwrap();
+        let defs: Vec<ToolDef> = reg
+            .describe_tools_for_llm()
+            .into_iter()
+            .map(|(name, description, parameters)| ToolDef {
+                name,
+                description,
+                parameters,
+            })
+            .collect();
+
+        let mut history = vec![Message::User {
+            content: "随便聊聊".into(),
+            timestamp: Utc::now(),
+        }];
+        let reply = runtime
+            .run_tool_loop(&mut history, Arc::new(reg), &defs)
+            .await
+            .expect("无工具调用时应直接返回文本");
+        assert_eq!(reply, "直接回答");
+
+        let status = crate::context::session::context_status(&session);
+        assert_eq!(
+            status["overhead_tokens"].as_u64(),
+            Some(0),
+            "没有工具消息时台账不得变化"
+        );
+        assert_eq!(status["used_tokens"].as_u64(), Some(0));
+
+        let _ = std::fs::remove_file(
+            Config::data_dir()
+                .join("context")
+                .join(format!("{session}.json")),
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// P2-9 回路集成：单 turn 步数预算到达后强制中止，返回**可识别**的
+    /// `budget_exhausted` 结构化结果（含 kind/limit/used/remaining），而不是静默截断。
+    /// 经 `run_tool_loop_with_limits` 直接注入阈值，不修改进程 env，故对并行测试安全。
+    #[tokio::test]
+    async fn test_run_tool_loop_hard_aborts_on_step_budget() {
+        // 每轮都返回同一工具调用（让回路一直有工具可执行，直到步数预算命中）。
+        let body = r#"{"choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let url = mock_llm_server(200, body).await;
+        let mut runtime = AgentRuntime::new(llm_config(&url));
+        runtime.init().unwrap();
+        let mut history = vec![Message::User {
+            content: "列出目录".into(),
+            timestamp: Utc::now(),
+        }];
+        let ws = std::env::temp_dir().join(format!("mgt_rt_budget_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut reg = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(&mut reg, &ws, None, None, None).unwrap();
+        let defs: Vec<ToolDef> = reg
+            .describe_tools_for_llm()
+            .into_iter()
+            .map(|(name, description, parameters)| ToolDef {
+                name,
+                description,
+                parameters,
+            })
+            .collect();
+
+        // 步数预算 = 2：round 0、1 执行，round 2 开头 used=2>=2 命中。
+        let limits = crate::agent::turn_budget::TurnBudgetLimits {
+            max_steps: 2,
+            max_secs: 0,
+            max_tokens: 0,
+        };
+        let err = runtime
+            .run_tool_loop_with_limits(&mut history, Arc::new(reg), &defs, limits)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("budget_exhausted"), "必须返回可识别预算耗尽结果: {msg}");
+        // 结构化预算字段齐全
+        assert!(msg.contains("\"kind\":\"steps\""), "预算 kind 缺失: {msg}");
+        assert!(msg.contains("\"limit\":2"), "limit 缺失: {msg}");
+        // 预算必须在 max_rounds 之前触发（工具结果至多 2 条，而不是跑满 20 轮）。
+        let tool_msgs = history.iter().filter(|m| m.role() == "tool").count();
+        assert!(tool_msgs <= 2, "步数预算应在 2 轮内熔断，实际工具结果 {tool_msgs} 条");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// P2-9 回路集成：token 预算到达同样强制中止（非静默截断）。
+    #[tokio::test]
+    async fn test_run_tool_loop_hard_aborts_on_token_budget() {
+        let body = r#"{"choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}"#;
+        let url = mock_llm_server(200, body).await;
+        let mut runtime = AgentRuntime::new(llm_config(&url));
+        runtime.init().unwrap();
+        let mut history = vec![Message::User {
+            content: "列出目录".into(),
+            timestamp: Utc::now(),
+        }];
+        let ws = std::env::temp_dir().join(format!("mgt_rt_tokbudget_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut reg = ToolRegistry::new();
+        crate::tools::builtin::register_builtin_tools(&mut reg, &ws, None, None, None).unwrap();
+        let defs: Vec<ToolDef> = reg
+            .describe_tools_for_llm()
+            .into_iter()
+            .map(|(name, description, parameters)| ToolDef {
+                name,
+                description,
+                parameters,
+            })
+            .collect();
+
+        // token 预算 = 10：第 1 轮后 used=20 >= 10，第 2 轮开头命中。
+        let limits = crate::agent::turn_budget::TurnBudgetLimits {
+            max_steps: 0,
+            max_secs: 0,
+            max_tokens: 10,
+        };
+        let err = runtime
+            .run_tool_loop_with_limits(&mut history, Arc::new(reg), &defs, limits)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("budget_exhausted"), "token 预算应熔断: {msg}");
+        assert!(msg.contains("\"kind\":\"tokens\""), "预算 kind 应为 tokens: {msg}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

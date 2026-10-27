@@ -1,6 +1,34 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
+// Real Web Audio has no context in tests; the analysis loop is driven by the
+// mocked engine below. The flag starts "context absent" (supported=false) and
+// unlock() flips it true — this reproduces the D1 bug scenario where
+// startAudioReactivity() at initBgm time must stay a silent no-op, and the
+// loop only starts after the first user-gesture unlock.
+const engineMock = vi.hoisted(() => ({
+  supported: false,
+  unlockCalls: 0,
+}))
+
+vi.mock('./audioEngine', () => ({
+  audioEngine: {
+    unlock: vi.fn(async () => {
+      engineMock.supported = true
+      engineMock.unlockCalls += 1
+    }),
+    supported: () => engineMock.supported,
+    // No shared context in tests → useAmbientSynth falls back to its own
+    // AudioContext, which happy-dom lacks → synth.play() resolves false.
+    context: () => null,
+    attachMediaElement: vi.fn(),
+    connectExternalSource: vi.fn(),
+    readFrame: () => ({ bass: 0.6, mid: 0.2, treble: 0.1, energy: 0.8, beat: false }),
+    spectrum: () => new Uint8Array(32).fill(100),
+    waveform: () => new Uint8Array(32).fill(128),
+  },
+}))
+
 // useBgm keeps module-level singleton state (one Audio element app-wide), so
 // each test re-imports a fresh module via vi.resetModules().
 
@@ -10,6 +38,8 @@ class FakeAudio {
   volume = 1
   src = ''
   paused = true
+  duration = Number.NaN
+  currentTime = 0
   static instances: FakeAudio[] = []
   static playError: Error | null = null
   static playDeferred: Promise<void> | null = null
@@ -42,8 +72,7 @@ const PLAYLIST = {
 
 // URL-aware stub: `playlist.local.json` (the gitignored personal manifest) is
 // probed before the tracked `playlist.json`; localPayload=null → local 404s.
-function stubFetch(payload: unknown = PLAYLIST, ok = true, localPayload: unknown = null) {
-  const fetchMock = vi.fn(async (url: unknown) => {
+function stubFetch(payload: unknown = PLAYLIST, ok = true, localPayload: unknown = null) {  const fetchMock = vi.fn(async (url: unknown) => {
     if (String(url).includes('playlist.local.json')) {
       const localOk = localPayload !== null
       return { ok: localOk, status: localOk ? 200 : 404, json: async () => localPayload }
@@ -81,6 +110,8 @@ beforeEach(() => {
   FakeAudio.instances = []
   FakeAudio.playError = null
   FakeAudio.playDeferred = null
+  engineMock.supported = false
+  engineMock.unlockCalls = 0
   vi.stubGlobal('Audio', FakeAudio)
 })
 
@@ -150,7 +181,7 @@ describe('useBgm — init', () => {
   it('never resumes while the feature gate is off, even if playing was persisted', async () => {
     localStorage.setItem(
       'Marguerite-bgm',
-      JSON.stringify({ playing: true, trackId: 'sun-yanzi-yujian' }),
+      JSON.stringify({ enabled: false, playing: true, trackId: 'sun-yanzi-yujian' }),
     )
     stubFetch()
     const { useBgm } = await freshBgm()
@@ -253,16 +284,34 @@ describe('useBgm — init', () => {
     })
   })
 
-  it('prefers the gitignored playlist.local.json over the tracked manifest', async () => {
-    stubFetch(PLAYLIST, true, {
-      tracks: [{ id: 'personal-default', title: '孙燕姿 - 遇见', src: 'yu-jian.mp3' }],
-    })
+  it('uses the personal playlist.local.json when the tracked manifest opts in', async () => {
+    // 2026-10-21 契约变更：个人清单不再靠"先 fetch 再 404"发现（那会让每个页面
+    // 都记一条红色 console 错误），改由官方清单的 localOverlay 显式声明。
+    stubFetch(
+      { ...PLAYLIST, localOverlay: true },
+      true,
+      { tracks: [{ id: 'personal-default', title: '孙燕姿 - 遇见', src: 'yu-jian.mp3' }] },
+    )
     const { useBgm } = await freshBgm()
     const bgm = useBgm()
     await bgm.initBgm()
     expect(bgm.tracks.value.map(t => t.id)).toEqual(['__synth__', 'personal-default'])
     expect(bgm.currentTrackId.value).toBe('personal-default')
     expect(bgm.playlistError.value).toBe(false)
+  })
+
+  it('does not probe playlist.local.json unless the manifest opts in', async () => {
+    // 默认零探测 = 零 404 噪声。这条断言就是防回归的判据：
+    // 一旦有人把"无条件先探测 local"写回来，这里立刻红。
+    const fetchMock = stubFetch(PLAYLIST, true, {
+      tracks: [{ id: 'should-not-load', title: 'x', src: 'x.mp3' }],
+    })
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    const requested = fetchMock.mock.calls.map(c => String(c[0]))
+    expect(requested.some(u => u.includes('playlist.local.json'))).toBe(false)
+    expect(bgm.tracks.value.map(t => t.id)).toEqual(['__synth__', 'sun-yanzi-yujian', 'stream'])
   })
 
   it('treats the deliberately-empty tracked manifest as valid, not an error', async () => {
@@ -296,10 +345,10 @@ describe('useBgm — init', () => {
 })
 
 describe('useBgm — feature gate', () => {
-  it('defaults to disabled on a fresh profile', async () => {
+  it('defaults to enabled on a fresh profile (visible control, silent until gesture)', async () => {
     stubFetch()
     const { useBgm } = await freshBgm()
-    expect(useBgm().enabled.value).toBe(false)
+    expect(useBgm().enabled.value).toBe(true)
   })
 
   it('restores a persisted enable synchronously at module init', async () => {
@@ -341,6 +390,7 @@ describe('useBgm — feature gate', () => {
     const { useBgm } = await freshBgm()
     const bgm = useBgm()
     await bgm.initBgm()
+    bgm.setEnabled(false)
 
     await bgm.toggle()
 
@@ -353,6 +403,7 @@ describe('useBgm — feature gate', () => {
     const { useBgm } = await freshBgm()
     const bgm = useBgm()
     await bgm.initBgm()
+    bgm.setEnabled(false)
 
     await bgm.selectTrack('stream')
 
@@ -367,6 +418,7 @@ describe('useBgm — feature gate', () => {
     const { useBgm } = await freshBgm()
     const bgm = useBgm()
     await bgm.initBgm()
+    bgm.setEnabled(false)
 
     await bgm.playLocalFile(new File(['music'], 'local.mp3', { type: 'audio/mpeg' }))
 
@@ -551,6 +603,9 @@ describe('useBgm — pending playback', () => {
     bgm.setEnabled(true)
 
     const olderPlay = bgm.toggle()
+    // Flush the unlock() microtask so toggle()'s pending el.play() is actually
+    // registered on the deferred promise before we swap it out below.
+    await Promise.resolve()
     FakeAudio.playDeferred = null
     await bgm.selectTrack('stream')
     expect(bgm.currentTrackId.value).toBe('stream')
@@ -565,5 +620,210 @@ describe('useBgm — pending playback', () => {
       trackId: 'stream',
       playing: true,
     })
+  })
+})
+
+describe('useBgm — transport', () => {
+  it('syncs duration/currentTime from media events', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    const el = FakeAudio.instances[0]
+
+    el.duration = 213.4
+    el.currentTime = 12.5
+    el.emit('loadedmetadata')
+    expect(bgm.duration.value).toBe(213.4)
+    expect(bgm.currentTime.value).toBe(12.5)
+
+    el.currentTime = 40
+    el.emit('timeupdate')
+    expect(bgm.currentTime.value).toBe(40)
+  })
+
+  it('seek() clamps into [0, duration] and writes the element', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    const el = FakeAudio.instances[0]
+    el.duration = 200
+    el.emit('loadedmetadata')
+
+    bgm.seek(50)
+    expect(el.currentTime).toBe(50)
+    bgm.seek(9999)
+    expect(el.currentTime).toBe(200)
+    bgm.seek(-5)
+    expect(el.currentTime).toBe(0)
+  })
+
+  it('exposes shared audio-analysis refs (silent until the engine unlocks)', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    expect(typeof bgm.audio.bass.value).toBe('number')
+    expect(bgm.audio.energy.value).toBe(0)
+    expect(bgm.audio.beat.value).toBe(false)
+  })
+
+  it('D1: starts the analysis loop on the first user-gesture unlock, not at init', async () => {
+    // Regression: initBgm used to call startAudioReactivity() while the
+    // AudioContext was still absent (supported=false → silent no-op), and no
+    // unlock path ever restarted the loop afterwards, leaving energy/bass
+    // frozen at 0 forever. Every play path now goes through
+    // ensureEngineUnlocked(), so the loop must actually come up after toggle().
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    expect(bgm.audio.energy.value).toBe(0)
+    bgm.setEnabled(true)
+
+    await bgm.toggle()
+    expect(engineMock.unlockCalls).toBeGreaterThan(0)
+
+    // Flush a couple of rAF ticks; the loop must now publish the mocked frame.
+    await new Promise(r => setTimeout(r, 30))
+
+    expect(bgm.audio.energy.value).toBe(0.8)
+    expect(bgm.audio.bass.value).toBe(0.6)
+
+    // Tear the loop down so it does not run into the following tests.
+    const { stopAudioReactivity } = await import('./useAudioReactivity')
+    stopAudioReactivity()
+  })
+})
+
+describe('useBgm — track rotation', () => {
+  it('next()/prev() walk the list and wrap at the ends', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    expect(bgm.currentTrackId.value).toBe('sun-yanzi-yujian')
+
+    await bgm.next()
+    expect(bgm.currentTrackId.value).toBe('stream')
+    await bgm.next() // wraps past the end
+    expect(bgm.currentTrackId.value).toBe('__synth__')
+    await bgm.prev()
+    expect(bgm.currentTrackId.value).toBe('stream')
+  })
+
+  it('repeat-off stops at the end of the list instead of wrapping', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    await bgm.selectTrack('stream')
+
+    FakeAudio.instances[0].emit('ended')
+
+    expect(bgm.currentTrackId.value).toBe('stream')
+    expect(bgm.playing.value).toBe(false)
+  })
+
+  it('repeat-all advances to the next track on natural end', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    bgm.setRepeat('all')
+
+    FakeAudio.instances[0].emit('ended')
+
+    // handleEnded() fires playTrack() async; flush microtasks + rAF-less ticks.
+    await new Promise(r => setTimeout(r, 10))
+    expect(bgm.currentTrackId.value).toBe('stream')
+    expect(bgm.playing.value).toBe(true)
+  })
+
+  it('repeat-one restarts the same element on end', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    bgm.setRepeat('one')
+    const el = FakeAudio.instances[0]
+    el.currentTime = 99
+
+    el.emit('ended')
+
+    expect(el.currentTime).toBe(0)
+    expect(bgm.currentTrackId.value).toBe('sun-yanzi-yujian')
+    expect(bgm.playing.value).toBe(true)
+  })
+
+  it('shuffle steps cover every track exactly once and persist', async () => {
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    bgm.setEnabled(true)
+    await bgm.toggle()
+    bgm.setShuffle(true)
+
+    const seen = new Set([bgm.currentTrackId.value])
+    for (let i = 0; i < 3; i++) {
+      await bgm.next()
+      seen.add(bgm.currentTrackId.value)
+    }
+    expect(seen.size).toBe(3)
+    expect(JSON.parse(localStorage.getItem('Marguerite-bgm')!)).toMatchObject({ shuffle: true })
+  })
+})
+
+describe('useBgm — mode persistence', () => {
+  it('old saves without repeat/shuffle degrade to defaults', async () => {
+    localStorage.setItem(
+      'Marguerite-bgm',
+      JSON.stringify({ playing: false, trackId: 'stream' }),
+    )
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    expect(bgm.repeat.value).toBe('off')
+    expect(bgm.shuffle.value).toBe(false)
+  })
+
+  it('restores persisted repeat and shuffle', async () => {
+    localStorage.setItem(
+      'Marguerite-bgm',
+      JSON.stringify({ repeat: 'all', shuffle: true }),
+    )
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    expect(bgm.repeat.value).toBe('all')
+    expect(bgm.shuffle.value).toBe(true)
+  })
+
+  it('rejects a garbage persisted repeat value', async () => {
+    localStorage.setItem(
+      'Marguerite-bgm',
+      JSON.stringify({ repeat: 'loop-forever' }),
+    )
+    stubFetch()
+    const { useBgm } = await freshBgm()
+    const bgm = useBgm()
+    await bgm.initBgm()
+    expect(bgm.repeat.value).toBe('off')
   })
 })

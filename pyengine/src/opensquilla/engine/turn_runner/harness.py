@@ -197,6 +197,149 @@ class _TurnRunnerToolBuilderAdapter(ToolBuilderPort):
 # Prompt assembler stage adapters
 # ---------------------------------------------------------------------------
 
+
+def _build_capability_state_block(runner: "TurnRunner", agent_id: str) -> dict[str, str] | None:
+    """Build a per-turn volatile ``Capability State`` block for the built-in
+    main agent so it is promptly informed of plugin/skill/MCP/setting changes.
+
+    Only the ``main`` agent receives this block (custom/sub agents keep their
+    lean prompt). Every discovery call is wrapped so a transient failure never
+    breaks prompt assembly — we simply return ``None`` and the caller merges
+    nothing. The block lands in the per-turn dynamic suffix (via
+    ``extra_context``), so it never poisons the prompt-cache stable prefix.
+
+    Note on plugins: the workbench plugin/marketplace state is owned by the
+    Rust host and has no in-process Python API today. It is surfaced as a
+    host-managed placeholder; ``snapshot["plugins"]`` is the clean extension
+    point for a future host→sidecar manifest bridge.
+    """
+
+    if agent_id != "main":
+        return None
+    try:
+        # --- Skills (in-process catalog, refreshed per turn) ---
+        skills: list[str] = []
+        try:
+            cat = runner._resolve_skill_catalog()
+            for spec in getattr(cat, "skills", ()) or ():
+                name = getattr(spec, "name", None)
+                if name:
+                    skills.append(name)
+        except Exception:
+            skills = []
+
+        # --- MCP (connected + configured) ---
+        mcp_connected: list[str] = []
+        try:
+            from opensquilla.mcp.discovery import active_clients_snapshot
+
+            mcp_connected = sorted(
+                c.server_name
+                for c in active_clients_snapshot()
+                if getattr(c, "server_name", None)
+            )
+        except Exception:
+            mcp_connected = []
+        mcp_configured: list[str] = []
+        try:
+            mcp_cfg = getattr(runner._config, "mcp", None)
+            mcp_configured = sorted(
+                s.name
+                for s in getattr(mcp_cfg, "servers", []) or []
+                if getattr(s, "name", None)
+            )
+        except Exception:
+            mcp_configured = []
+
+        # --- Settings (selected effective subset) ---
+        cfg = runner._config
+        settings: dict[str, object] = {}
+        try:
+            settings["mcp.enabled"] = getattr(getattr(cfg, "mcp", None), "enabled", None)
+        except Exception:
+            pass
+        for key in ("image_generation", "control_ui", "meta_skill", "diagnostics_enabled"):
+            try:
+                settings[key] = getattr(cfg, key, None)
+            except Exception:
+                pass
+        try:
+            settings["router.active_model"] = getattr(
+                getattr(cfg, "squilla_router", None), "active_model", None
+            )
+        except Exception:
+            pass
+
+        # --- Plugins (host-managed; extension point) ---
+        plugins: list[str] = []
+
+        snapshot = {
+            "skills": sorted(skills),
+            "mcp_connected": mcp_connected,
+            "mcp_configured": mcp_configured,
+            "settings": settings,
+            "plugins": plugins,
+        }
+
+        # --- Diff vs last seen (process-local; None on first turn) ---
+        last = getattr(runner, "_last_capability_state", None)
+        runner._last_capability_state = snapshot
+        changes: list[str] = []
+        if last is not None:
+
+            def _set(x: object) -> set[str]:
+                return set(x if isinstance(x, (list, tuple, set)) else ())
+
+            added = _set(snapshot["skills"]) - _set(last.get("skills", []))
+            removed = _set(last.get("skills", [])) - _set(snapshot["skills"])
+            changes += [f"+skill {n}" for n in sorted(added)]
+            changes += [f"-skill {n}" for n in sorted(removed)]
+            added = _set(snapshot["mcp_connected"]) - _set(last.get("mcp_connected", []))
+            removed = _set(last.get("mcp_connected", [])) - _set(snapshot["mcp_connected"])
+            changes += [f"MCP connected +{n}" for n in sorted(added)]
+            changes += [f"MCP connected -{n}" for n in sorted(removed)]
+            added = _set(snapshot["mcp_configured"]) - _set(last.get("mcp_configured", []))
+            removed = _set(last.get("mcp_configured", [])) - _set(snapshot["mcp_configured"])
+            changes += [f"MCP configured +{n}" for n in sorted(added)]
+            changes += [f"MCP configured -{n}" for n in sorted(removed)]
+            old_settings = last.get("settings", {}) or {}
+            for k, v in snapshot["settings"].items():
+                if k in old_settings and old_settings[k] != v:
+                    changes.append(f"setting {k}: {old_settings[k]!r}→{v!r}")
+            added = _set(snapshot["plugins"]) - _set(last.get("plugins", []))
+            removed = _set(last.get("plugins", [])) - _set(snapshot["plugins"])
+            changes += [f"+plugin {n}" for n in sorted(added)]
+            changes += [f"-plugin {n}" for n in sorted(removed)]
+
+        # --- Render a concise block ---
+        lines = [
+            "You are the built-in main agent of Marguerite. The capability "
+            "surface below is the LIVE state as of this turn. When the user "
+            "installs/enables/disables a plugin or skill, connects/disconnects "
+            "an MCP server, or changes a relevant setting, this block reflects "
+            "it on the next turn — read it before assuming a capability exists.",
+            "",
+            "Skills ({} loaded): {}".format(
+                len(snapshot["skills"]),
+                ", ".join(snapshot["skills"]) if snapshot["skills"] else "(none)",
+            ),
+            "MCP servers — connected: {} | configured: {}".format(
+                ", ".join(snapshot["mcp_connected"]) if snapshot["mcp_connected"] else "(none)",
+                ", ".join(snapshot["mcp_configured"]) if snapshot["mcp_configured"] else "(none)",
+            ),
+            "Key settings: "
+            + ", ".join(f"{k}={v!r}" for k, v in snapshot["settings"].items()),
+            "Plugins: managed by the desktop host (live plugin state is surfaced "
+            "once a host→sidecar manifest bridge lands; not yet observable in-process).",
+        ]
+        lines.append(
+            "Changes since your last turn: " + ("; ".join(changes) if changes else "none.")
+        )
+        return {"Capability State": "\n".join(lines)}
+    except Exception:
+        return None
+
+
 class _TurnRunnerPromptAssemblerAdapter(PromptAssemblerPort):
     """Bind ``TurnRunner._assemble_prompt`` as a Protocol-shaped port."""
 
@@ -216,6 +359,11 @@ class _TurnRunnerPromptAssemblerAdapter(PromptAssemblerPort):
         fresh_user_session: bool = False,
         workspace_dir: str | None = None,
     ) -> str | tuple[str, str]:
+        # Surface live plugin/skill/MCP/setting changes to the main agent each
+        # turn via the volatile suffix (does not touch the cacheable prefix).
+        cap_block = _build_capability_state_block(self._runner, agent_id)
+        if cap_block:
+            extra_context = {**(extra_context or {}), **cap_block}
         return self._runner._assemble_prompt(
             agent_id,
             tool_defs,

@@ -96,8 +96,9 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills_dir: PathBuf) {
                 let dir = dir.clone();
                 Box::pin(async move {
                     let loader = SkillLoader::new(dir.as_path());
-                    match loader.load_all() {
-                        Ok(skills) => {
+                    match loader.scan_index() {
+                        Ok(scan) => {
+                            let skills = scan.skills;
                             if skills.is_empty() {
                                 return ok("当前无可用技能。可用 create_skill 创建。".into());
                             }
@@ -185,7 +186,12 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills_dir: PathBuf) {
                 let dir = dir.clone();
                 Box::pin(async move {
                     let name = match args.get("name") {
-                        Some(n) if !n.trim().is_empty() => sanitize_name(n.trim()),
+                        Some(n) if !n.trim().is_empty() => {
+                            match crate::skills::loader::slugify_skill_name(n.trim()) {
+                                Ok(n) => n,
+                                Err(e) => return err(format!("技能名不合法: {e}"), "INVALID_PARAMS"),
+                            }
+                        }
                         _ => return err("create_skill 需要非空 name".into(), "INVALID_PARAMS"),
                     };
                     let description = args.get("description").cloned().unwrap_or_default();
@@ -225,6 +231,89 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills_dir: PathBuf) {
                         Ok(()) => ok(format!("技能 '{name}' 已创建: {}", path.display())),
                         Err(e) => err(format!("写入技能文件失败: {e}"), "IO_ERROR"),
                     }
+                })
+            }),
+        ));
+    }
+
+    // search_skills：按关键词在全部技能里检索（技能多到记不住名字时的入口）
+    {
+        let dir = dir.clone();
+        registry.register_local(crate::tools::make_local_tool(
+            "search_skills",
+            "按关键词检索全部技能（匹配名称/描述/正文），返回技能名、描述与命中片段。\
+             当你不确定该用哪个技能，或技能列表很长时，先 search_skills 定位，再用 use_skill 加载完整流程。\
+             参数: query(必填), limit(可选,默认 5)。",
+            json!({"type":"object","properties":{
+                "query":{"type":"string","description":"关键词，如「规则」「设计稿转代码」「会议纪要」"},
+                "limit":{"type":"integer","description":"返回条数，默认 5，最大 20"}
+            },"required":["query"]}),
+            Arc::new(move |args| {
+                let dir = dir.clone();
+                Box::pin(async move {
+                    let query = match args.get("query") {
+                        Some(q) if !q.trim().is_empty() => q.trim().to_lowercase(),
+                        _ => return err("search_skills 需要非空 query".into(), "INVALID_PARAMS"),
+                    };
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|n| n.clamp(1, 20) as usize)
+                        .unwrap_or(5);
+                    let loader = SkillLoader::new(dir.as_path());
+                    let scan = match loader.scan_index() {
+                        Ok(s) => s,
+                        Err(e) => return err(format!("扫描技能目录失败: {e}"), "SKILL_SCAN_ERROR"),
+                    };
+                    // 打分：名称命中 3 分，描述 2 分，正文 1 分；同分按名称排序保证确定性。
+                    let mut hits: Vec<(u8, String, String, String)> = Vec::new();
+                    for skill in &scan.skills {
+                        let name = skill.name.to_lowercase();
+                        let desc = skill.description.to_lowercase();
+                        let body = skill.prompt_template.to_lowercase();
+                        let score = if name.contains(&query) {
+                            3
+                        } else if desc.contains(&query) {
+                            2
+                        } else if body.contains(&query) {
+                            1
+                        } else {
+                            continue;
+                        };
+                        // 片段取正文里第一处命中的那一行（截断），没有就给描述。
+                        let snippet = skill
+                            .prompt_template
+                            .lines()
+                            .find(|l| l.to_lowercase().contains(&query))
+                            .map(|l| l.trim().chars().take(160).collect::<String>())
+                            .unwrap_or_else(|| skill.description.chars().take(160).collect());
+                        hits.push((score, skill.name.clone(), skill.description.clone(), snippet));
+                    }
+                    if hits.is_empty() {
+                        return ok(format!(
+                            "没有匹配「{query}」的技能（已扫描 {} 个）。可换关键词，或用 list_skills 查看全部。",
+                            scan.skills.len()
+                        ));
+                    }
+                    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                    let total = hits.len();
+                    let lines: Vec<String> = hits
+                        .into_iter()
+                        .take(limit)
+                        .map(|(score, name, desc, snippet)| {
+                            let why = match score {
+                                3 => "名称命中",
+                                2 => "描述命中",
+                                _ => "正文命中",
+                            };
+                            format!("- {name}（{why}）：{desc}\n  片段：{snippet}")
+                        })
+                        .collect();
+                    ok(format!(
+                        "命中 {total} 个技能，返回前 {} 个。用 use_skill(name=...) 加载完整流程：\n{}",
+                        lines.len(),
+                        lines.join("\n")
+                    ))
                 })
             }),
         ));
@@ -297,23 +386,14 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills_dir: PathBuf) {
     }
 }
 
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 /// 渲染 `create_skill` 产出的技能 YAML 内容。
 ///
 /// 抽成纯函数以便落盘前安全扫描与单测复用——`create_skill` 与
 /// `SkillLoader::install_yaml` 共用同一套 L2 恶意扫描标准。
-fn render_create_skill_yaml(
+///
+/// 所有用户可控字段都经 [`crate::skills::loader::yaml_quote`] 转义：
+/// 描述/触发词里的换行、`:`、`#` 否则会改变 YAML 结构甚至注入额外字段。
+pub(crate) fn render_create_skill_yaml(
     name: &str,
     description: &str,
     prompt_template: &str,
@@ -321,11 +401,12 @@ fn render_create_skill_yaml(
 ) -> String {
     let triggers_yaml = triggers
         .iter()
-        .map(|t| format!("  - {t}"))
+        .map(|t| format!("  - {}", crate::skills::loader::yaml_quote(t)))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "name: {name}\ndescription: {description}\nversion: \"1.0.0\"\nauthor: marguerite-agent\nintent:\n{triggers_yaml}\ntools: []\nprompt_template: |\n{}\n",
+        "name: {name}\ndescription: {}\nversion: \"1.0.0\"\nauthor: marguerite-agent\nintent:\n{triggers_yaml}\ntools: []\nprompt_template: |\n{}\n",
+        crate::skills::loader::yaml_quote(description),
         prompt_template
             .lines()
             .map(|l| format!("  {l}"))
@@ -349,7 +430,11 @@ mod tests {
         );
         assert!(content.contains("name: my-skill"));
         assert!(content.contains("prompt_template:"));
-        assert!(content.contains("  - sum"));
+        assert!(content.contains("  - \"sum\""));
+        // 结构字段必须可被 YAML 解析器还原，而不是靠肉眼拼字符串
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(parsed["description"].as_str().unwrap(), "求和技能");
+        assert_eq!(parsed["intent"][0].as_str().unwrap(), "sum");
         let v = crate::security::skill_scan::SkillInstallScanner::new().scan(&content);
         assert!(v.is_allowed(), "良性技能内容应放行: {:?}", v.reason);
     }

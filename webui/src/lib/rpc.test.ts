@@ -312,6 +312,69 @@ describe('RpcClient', () => {
     client.disconnect()
   })
 
+  it('replays collateral read-only calls instead of failing them on recycle', async () => {
+    // 真机缺陷回归：会话订阅被中止会回收整条 socket，连带把同连接上正在飞的
+    // `doctor.status` 打成 "Connection recycled after sessions.messages.subscribe
+    // terminated"。只读请求必须被透明重放，而不是以别人的方法名报错。
+    const client = new RpcClient()
+    const controller = new AbortController()
+    client.connect('ws://rpc.test')
+    const socket = MockWebSocket.instances[0]
+    establishConnection(socket)
+
+    const doctor = client.call('doctor.status', { agentId: 'main' })
+    const doctorFrames = socket.sent.map((raw) => JSON.parse(raw) as { id: string; method?: string })
+    const doctorId = doctorFrames.find((frame) => frame.method === 'doctor.status')?.id
+    expect(doctorId).toBeDefined()
+
+    const subscribe = client
+      .call('sessions.messages.subscribe', {}, { signal: controller.signal, abortAction: 'reconnect' })
+      .catch((error: unknown) => error)
+    controller.abort()
+    expect(await subscribe).toBeInstanceOf(RpcAbortError)
+
+    // 被牵连的 doctor.status 不能被判失败；它应留在等待重放的队列里。
+    let settled: unknown = 'pending'
+    void doctor.then(
+      (value) => { settled = value },
+      (error) => { settled = error },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe('pending')
+
+    const nextSocket = MockWebSocket.instances[1]
+    establishConnection(nextSocket)
+    const replay = nextSocket.sent
+      .map((raw) => JSON.parse(raw) as { id: string; method?: string })
+      .find((frame) => frame.method === 'doctor.status')
+    expect(replay).toBeDefined()
+
+    nextSocket.receive({ type: 'res', id: replay!.id, ok: true, payload: { status: 'DEGRADED' } })
+    await expect(doctor).resolves.toEqual({ status: 'DEGRADED' })
+    client.disconnect()
+  })
+
+  it('does not replay write calls when the socket is recycled', async () => {
+    // 写型调用绝不透明重放：重复副作用比一次失败更糟。
+    const client = new RpcClient()
+    const controller = new AbortController()
+    client.connect('ws://rpc.test')
+    const socket = MockWebSocket.instances[0]
+    establishConnection(socket)
+
+    const write = client.call('config.patch.safe', {}).catch((error: unknown) => error)
+    const subscribe = client
+      .call('sessions.messages.subscribe', {}, { signal: controller.signal, abortAction: 'reconnect' })
+      .catch((error: unknown) => error)
+    controller.abort()
+    await subscribe
+
+    await expect(write).resolves.toMatchObject({
+      message: expect.stringContaining('Connection recycled'),
+    })
+    client.disconnect()
+  })
+
   it('cleans pending calls synchronously on disconnect and socket close', async () => {
     const disconnectedClient = new RpcClient()
     disconnectedClient.connect('ws://rpc.test')
@@ -367,7 +430,14 @@ describe('RpcClient', () => {
     expect(client.state).toBe('connected')
 
     const sibling = client.call('sessions.messages.snapshot')
-    const siblingCaught = sibling.catch((error: unknown) => error)
+    // 只读旁证请求不再被判死：它应进入重放队列（旧行为是 reject 成
+    // "Connection recycled after chat.history terminated"，那正是概览页
+    // doctor.status 报错的成因）。
+    let siblingSettled: unknown = 'pending'
+    void sibling.then(
+      (value) => { siblingSettled = value },
+      (error) => { siblingSettled = error },
+    )
     const result = client.call('chat.history', {}, {
       timeoutMs: 25,
       timeoutAction: 'reconnect',
@@ -378,9 +448,7 @@ describe('RpcClient', () => {
 
     await vi.advanceTimersByTimeAsync(25)
     expect(await caught).toBeInstanceOf(RpcTimeoutError)
-    await expect(siblingCaught).resolves.toMatchObject({
-      message: 'Connection recycled after chat.history terminated',
-    })
+    expect(siblingSettled).toBe('pending')
     await vi.runOnlyPendingTimersAsync()
 
     const secondSocket = MockWebSocket.instances[1]
@@ -388,10 +456,17 @@ describe('RpcClient', () => {
     establishConnection(secondSocket)
     expect(client.state).toBe('connected')
 
+    // 旁证请求必须在新连接上重放，而不是消失。
+    const replay = secondSocket.sent
+      .map((raw) => JSON.parse(raw) as { id: string; method?: string })
+      .find((frame) => frame.method === 'sessions.messages.snapshot')
+    expect(replay).toBeDefined()
+
     staleClose?.()
     firstSocket.receive({ type: 'res', id: request.id, ok: true, payload: 'late' })
 
     expect(client.state).toBe('connected')
+    secondSocket.receive({ type: 'res', id: replay!.id, ok: true, payload: { messages: [] } })
     expect(pendingCount(client)).toBe(0)
     client.disconnect()
   })
@@ -550,6 +625,57 @@ describe('RpcClient', () => {
     client.disconnect()
   })
 
+  // 真机事故（2026-10-24）：一个监听器抛异常曾能吃掉同帧其余监听器（含 '*' 看门狗），
+  // 页面表现为「事件停摆但无报错」。分发必须逐监听器隔离。
+  it('isolates a throwing listener: the rest of the frame and wildcard still dispatch', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const client = new RpcClient()
+    client.connect('ws://rpc.test')
+    const socket = MockWebSocket.instances[0]
+    establishConnection(socket)
+
+    const seen: unknown[] = []
+    client.on('session.event.progress', () => {
+      throw new Error('boom')
+    })
+    client.on('session.event.progress', (payload: unknown) => seen.push(payload))
+    const wild: string[] = []
+    client.on('*', (event: string) => wild.push(event))
+
+    socket.receive({
+      type: 'event',
+      event: 'session.event.progress',
+      payload: { kind: 'orchestration' },
+      seq: 1,
+    })
+    expect(seen).toEqual([{ kind: 'orchestration' }])
+    expect(wild).toEqual(['session.event.progress'])
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
+    client.disconnect()
+  })
+
+  // 断档后必须推进 seq 水位：原实现只在正常帧推进，一旦 close 没走到 onclose，
+  // 之后每一帧都会被判断档而永久丢弃（连接却仍 OPEN、状态仍 connected）。
+  it('advances the seq watermark on a gap so later frames are not all discarded', () => {
+    const client = new RpcClient()
+    client.connect('ws://rpc.test')
+    const socket = MockWebSocket.instances[0]
+    establishConnection(socket)
+    const gaps: unknown[] = []
+    client.on('_gap', (detail: unknown) => gaps.push(detail))
+    const seen: unknown[] = []
+    client.on('session.event.progress', (payload: unknown) => seen.push(payload))
+
+    socket.receive({ type: 'event', event: 'session.event.progress', payload: { n: 1 }, seq: 1 })
+    // 2 丢失、直接来 3：丢掉这一帧并关连接触发对账
+    socket.receive({ type: 'event', event: 'session.event.progress', payload: { n: 3 }, seq: 3 })
+    expect(gaps).toHaveLength(1)
+    expect(seen).toHaveLength(1)
+    expect((client as unknown as { _lastSeq: number })._lastSeq).toBe(3)
+    client.disconnect()
+  })
+
   it('queues a call while disconnected and replays it after reconnect', async () => {
     const client = new RpcClient()
     client.connect('ws://rpc.test')
@@ -599,6 +725,75 @@ describe('RpcClient', () => {
     await expect(
       client.call('chat.send', { text: 'x' }, { queue: false })
     ).rejects.toThrow('Not connected')
+    client.disconnect()
+  })
+})
+
+// 2026-10-22：侧车启动期（约 6 秒窗口）返回的 SIDECAR_STARTING 必须被当作
+// 「加载中」自动重试，而不是弹错误。否则用户看到的就是
+// 「一启动先报错，点重试才连上」。
+describe('RpcClient — 侧车启动期自动重试', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = []
+    localStorage.clear()
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function connected(): { client: RpcClient; socket: MockWebSocket } {
+    const client = new RpcClient()
+    client.connect('ws://rpc.test')
+    const socket = MockWebSocket.instances[0]
+    socket.receive({ type: 'event', event: 'connect.challenge' })
+    socket.receive({ type: 'res', id: '1', ok: true, payload: {} })
+    return { client, socket }
+  }
+
+  it('SIDECAR_STARTING 会自动重发同一请求，而不是立刻失败', async () => {
+    const { client, socket } = connected()
+    const pending = client.call('chat.send', { text: 'hi' })
+    const firstId = (JSON.parse(socket.sent[socket.sent.length - 1]) as { id: string }).id
+
+    socket.receive({
+      type: 'res',
+      id: firstId,
+      ok: false,
+      error: { code: 'SIDECAR_STARTING', message: '引擎启动中' },
+    })
+
+    // 首次失败后不应立刻 reject，而是等待退避后重发
+    await vi.advanceTimersByTimeAsync(900)
+    const sentAfterRetry = socket.sent.map((f) => JSON.parse(f) as { method?: string; id: string })
+      .filter((f) => f.method === 'chat.send')
+    expect(sentAfterRetry.length).toBe(2)
+    expect(sentAfterRetry[1].id).not.toBe(firstId)
+
+    // 第二次成功 → 整体 resolve
+    socket.receive({ type: 'res', id: sentAfterRetry[1].id, ok: true, payload: { ok: true } })
+    await expect(pending).resolves.toEqual({ ok: true })
+    client.disconnect()
+  })
+
+  it('非 SIDECAR_STARTING 的错误不会被重试（避免掩盖真问题）', async () => {
+    const { client, socket } = connected()
+    const pending = client.call('chat.send', { text: 'hi' })
+    const id = (JSON.parse(socket.sent[socket.sent.length - 1]) as { id: string }).id
+    socket.receive({
+      type: 'res',
+      id,
+      ok: false,
+      error: { code: 'INVALID_REQUEST', message: '参数错误' },
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    const count = socket.sent.map((f) => JSON.parse(f) as { method?: string })
+      .filter((f) => f.method === 'chat.send').length
+    expect(count).toBe(1)
     client.disconnect()
   })
 })

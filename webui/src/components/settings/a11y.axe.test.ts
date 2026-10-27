@@ -74,6 +74,28 @@ function trustState() {
   return { ok: true, current: 'medium', persist: false, levels: ['low', 'medium', 'high'] }
 }
 
+function tierState() {
+  return {
+    locked_tier: null,
+    thinking_effort: 'medium',
+    effective_tier: 'balanced',
+    tier_reasons: ['模式=办公 → 均衡档', '预算剩余 78%'],
+    budget: {
+      tokens_cap: 200_000,
+      usd_cap: 2,
+      tokens_used: 44_000,
+      usd_used: 0.42,
+      remaining_ratio: 0.78,
+      state: 'healthy',
+    },
+    tiers: {
+      flagship: ['deepseek-flash', 'openai-gpt-5-5'],
+      balanced: ['deepseek-v4-flash', 'openai-gpt-5-4-mini'],
+      turbo: ['qwen-turbo', 'glm-flash'],
+    },
+  }
+}
+
 function makeRpcCall() {
   return vi.fn(async (method: string) => {
     switch (method) {
@@ -89,6 +111,10 @@ function makeRpcCall() {
       case 'trust.get':
       case 'trust.current':
         return trustState()
+      case 'model.tier.get':
+        return tierState()
+      case 'model.tier.set':
+        return { ok: true }
       default:
         return {}
     }
@@ -136,6 +162,7 @@ const componentLoader: Record<string, () => Promise<{ default: Component }>> = {
   TaskCostPanel: () => import('./TaskCostPanel.vue'),
   TaskQueuePanel: () => import('./TaskQueuePanel.vue'),
   TrustCalibrationPanel: () => import('./TrustCalibrationPanel.vue'),
+  TierLedgerPanel: () => import('./TierLedgerPanel.vue'),
 }
 
 afterEach(() => {
@@ -153,6 +180,7 @@ const M3_COMPONENTS: Array<{ file: string; methods: string[] }> = [
   { file: 'TaskCostPanel', methods: ['usage.taskCost', 'activity.recent'] },
   { file: 'TaskQueuePanel', methods: ['task.queue.list', 'activity.recent'] },
   { file: 'TrustCalibrationPanel', methods: ['trust.get', 'trust.set'] },
+  { file: 'TierLedgerPanel', methods: ['model.tier.get', 'model.tier.set'] },
 ]
 
 describe('M3-E3 WebUI axe 合规扫描 (WCAG A/AA)', () => {

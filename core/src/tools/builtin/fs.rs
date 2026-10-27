@@ -8,16 +8,17 @@ use super::*;
 // 工具工厂
 // ---------------------------------------------------------------------------
 
-pub(crate) fn read_file_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn read_file_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "read_file",
-        "读取工作区内文本文件内容。参数: path(相对路径), limit(可选, 限制行数)",
+        "读取工作区内文本文件内容（多根会话会按注册顺序查找同名文件）。参数: path(相对路径), limit(可选, 限制行数)",
         json!({"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number"}}}),
         Arc::new(move |args| {
             let ws = workspace.clone();
             Box::pin(async move {
                 let p = args.get("path").ok_or_else(|| anyhow!("missing 'path'"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 if !abs.is_file() {
                     return err(format!("not a file: {}", p), "NOT_FOUND");
                 }
@@ -37,9 +38,10 @@ pub(crate) fn read_file_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
 }
 
 pub(crate) fn write_file_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     versions: Arc<Option<VersionManager>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "write_file",
         "写入（覆盖）工作区内文件，写入前自动快照旧版本。参数: path, content",
@@ -52,11 +54,11 @@ pub(crate) fn write_file_tool(
                 let content = args
                     .get("content")
                     .ok_or_else(|| anyhow!("missing 'content'"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 // L3 路径边界 + L2 内容扫描：必须在创建父目录/落盘之前，
                 // 否则被拒的写入仍会留下副作用（空目录）。
                 if let Some(denied) =
-                    gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(&ws), content))
+                    gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(&ws), content))
                 {
                     return denied;
                 }
@@ -96,9 +98,10 @@ pub(crate) fn write_file_tool(
 }
 
 pub(crate) fn append_file_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     versions: Arc<Option<VersionManager>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "append_file",
         "向工作区内文件追加内容，追加前自动快照。参数: path, content",
@@ -111,9 +114,9 @@ pub(crate) fn append_file_tool(
                 let content = args
                     .get("content")
                     .ok_or_else(|| anyhow!("missing 'content'"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 if let Some(denied) =
-                    gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(&ws), content))
+                    gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(&ws), content))
                 {
                     return denied;
                 }
@@ -139,35 +142,58 @@ pub(crate) fn append_file_tool(
     )
 }
 
-pub(crate) fn list_dir_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn list_dir_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "list_dir",
-        "列出目录内容（文件/子目录 + 大小）。参数: path(默认工作区根)",
+        "列出目录内容（文件/子目录 + 大小）。参数: path(默认列出全部工作区根)",
         json!({"type":"object","properties":{"path":{"type":"string"}}}),
         Arc::new(move |args| {
             let ws = workspace.clone();
             Box::pin(async move {
-                let rel = args.get("path").map(|s| s.as_str()).unwrap_or(".");
-                let abs = safe_resolve(&ws, rel)?;
-                if !abs.is_dir() {
-                    return err(format!("not a directory: {}", rel), "NOT_DIR");
+                // 无 path 且是多根会话 → 逐个根分区展示（否则用户以为附加根不存在）
+                let targets: Vec<(String, PathBuf)> = match args.get("path") {
+                    Some(p) => vec![(p.to_string(), ws.resolve(p)?)],
+                    None if ws.is_multi() => ws
+                        .all()
+                        .iter()
+                        .map(|r| (r.display().to_string(), r.clone()))
+                        .collect(),
+                    None => vec![(".".to_string(), ws.resolve(".")?)],
+                };
+                let multi = targets.len() > 1;
+                let mut out_sections: Vec<String> = Vec::new();
+                for (label, abs) in targets {
+                    if !abs.is_dir() {
+                        if multi {
+                            out_sections.push(format!("[{label}]\nnot a directory"));
+                            continue;
+                        }
+                        return err(format!("not a directory: {label}"), "NOT_DIR");
+                    }
+                    let mut lines = Vec::new();
+                    for e in std::fs::read_dir(&abs)?.flatten() {
+                        let p = e.path();
+                        let kind = if p.is_dir() { "dir " } else { "file" };
+                        let size = p.metadata().map(|m| m.len()).unwrap_or(0);
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                        lines.push(format!("{}\t{:>10}\t{}", kind, size, name));
+                    }
+                    lines.sort();
+                    if multi {
+                        out_sections.push(format!("[{label}]\n{}", lines.join("\n")));
+                    } else {
+                        out_sections.push(lines.join("\n"));
+                    }
                 }
-                let mut lines = Vec::new();
-                for e in std::fs::read_dir(&abs)?.flatten() {
-                    let p = e.path();
-                    let kind = if p.is_dir() { "dir " } else { "file" };
-                    let size = p.metadata().map(|m| m.len()).unwrap_or(0);
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                    lines.push(format!("{}\t{:>10}\t{}", kind, size, name));
-                }
-                lines.sort();
-                ok(lines.join("\n"))
+                ok(out_sections.join("\n\n"))
             })
         }),
     )
 }
 
-pub(crate) fn find_files_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn find_files_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "find_files",
         "按名称子串在工作区内查找文件。参数: name(子串), max(可选, 上限)",
@@ -178,7 +204,12 @@ pub(crate) fn find_files_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
                 let name = args.get("name").ok_or_else(|| anyhow!("missing 'name'"))?;
                 let max: usize = args.get("max").and_then(|m| m.parse().ok()).unwrap_or(200);
                 let mut all = Vec::new();
-                walk_files(&ws, &mut all);
+                // 多根：遍历全部根，路径按所属根去前缀展示
+                for root in ws.all() {
+                    walk_files(root, &mut all);
+                }
+                all.sort();
+                all.dedup();
                 let mut hits: Vec<String> = all
                     .iter()
                     .filter(|p| {
@@ -188,7 +219,9 @@ pub(crate) fn find_files_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
                             .contains(name)
                     })
                     .map(|p| {
-                        p.strip_prefix(&ws)
+                        ws.all()
+                            .iter()
+                            .find_map(|root| p.strip_prefix(root).ok())
                             .unwrap_or(p)
                             .to_string_lossy()
                             .replace('\\', "/")
@@ -206,7 +239,8 @@ pub(crate) fn find_files_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
     )
 }
 
-pub(crate) fn file_info_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn file_info_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "file_info",
         "返回文件/目录的元信息（大小、是否为目录、修改时间）。参数: path",
@@ -215,7 +249,7 @@ pub(crate) fn file_info_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
             let ws = workspace.clone();
             Box::pin(async move {
                 let p = args.get("path").ok_or_else(|| anyhow!("missing 'path'"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 let meta = std::fs::metadata(&abs)?;
                 let info = json!({
                     "path": p,
@@ -230,7 +264,8 @@ pub(crate) fn file_info_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
     )
 }
 
-pub(crate) fn grep_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn grep_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "grep",
         "在工作区内按正则搜索文件内容，返回命中行(file:line:text)。参数: pattern, path(可选,限定目录), max(可选)",
@@ -240,13 +275,18 @@ pub(crate) fn grep_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
             Box::pin(async move {
                 let pattern = args.get("pattern").ok_or_else(|| anyhow!("missing 'pattern'"))?;
                 let re = regex::Regex::new(pattern).map_err(|e| anyhow!("invalid regex: {}", e))?;
-                let root = match args.get("path") {
-                    Some(p) => safe_resolve(&ws, p)?,
-                    None => ws.clone(),
+                // 多根：指定 path 时只搜该路径；未指定时搜全部根
+                let roots: Vec<PathBuf> = match args.get("path") {
+                    Some(p) => vec![ws.resolve(p)?],
+                    None => ws.all().to_vec(),
                 };
                 let max: usize = args.get("max").and_then(|m| m.parse().ok()).unwrap_or(200);
                 let mut all = Vec::new();
-                walk_files(&root, &mut all);
+                for root in &roots {
+                    walk_files(root, &mut all);
+                }
+                all.sort();
+                all.dedup();
                 let mut hits: Vec<String> = Vec::new();
                 for f in &all {
                     if hits.len() >= max {
@@ -261,7 +301,12 @@ pub(crate) fn grep_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
-                    let rel = f.strip_prefix(&ws).unwrap_or(f).to_string_lossy().replace('\\', "/");
+                    let rel = roots
+                        .iter()
+                        .find_map(|root| f.strip_prefix(root).ok())
+                        .unwrap_or(f)
+                        .to_string_lossy()
+                        .replace('\\', "/");
                     for (i, line) in content.lines().enumerate() {
                         if re.is_match(line) {
                             hits.push(format!("{}:{}:{}", rel, i + 1, line.trim()));
@@ -277,7 +322,8 @@ pub(crate) fn grep_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
     )
 }
 
-pub(crate) fn codebase_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn codebase_search_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "codebase_search",
         "在工作区内检索关键词，返回按命中次数排序的文件清单（轻量语义定位）。参数: query, max(可选)",
@@ -290,7 +336,11 @@ pub(crate) fn codebase_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> 
                 let re = regex::Regex::new(&regex::escape(query))
                     .map_err(|e| anyhow!("invalid query: {}", e))?;
                 let mut all = Vec::new();
-                walk_files(&ws, &mut all);
+                for root in ws.all() {
+                    walk_files(root, &mut all);
+                }
+                all.sort();
+                all.dedup();
                 let mut scored: Vec<(usize, String)> = Vec::new();
                 for f in &all {
                     let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -303,7 +353,13 @@ pub(crate) fn codebase_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> 
                     };
                     let count = re.find_iter(&content).count();
                     if count > 0 {
-                        let rel = f.strip_prefix(&ws).unwrap_or(f).to_string_lossy().replace('\\', "/");
+                        let rel = ws
+                            .all()
+                            .iter()
+                            .find_map(|root| f.strip_prefix(root).ok())
+                            .unwrap_or(f)
+                            .to_string_lossy()
+                            .replace('\\', "/");
                         scored.push((count, rel));
                     }
                 }
@@ -315,9 +371,10 @@ pub(crate) fn codebase_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> 
     )
 }
 pub(crate) fn edit_file_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     versions: Arc<Option<VersionManager>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "edit_file",
         "在文件中将 old_string 替换为 new_string。参数: path, old_string, new_string, all(可选,'true'替换全部)",
@@ -330,7 +387,7 @@ pub(crate) fn edit_file_tool(
                 let old = args.get("old_string").ok_or_else(|| anyhow!("missing 'old_string'"))?;
                 let new = args.get("new_string").ok_or_else(|| anyhow!("missing 'new_string'"))?;
                 let all = args.get("all").map(|s| s == "true" || s == "1").unwrap_or(false);
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 if !abs.is_file() {
                     return err(format!("not a file: {}", p), "NOT_FOUND");
                 }
@@ -339,7 +396,7 @@ pub(crate) fn edit_file_tool(
                 // 不该让一次无关编辑失败（否则连 scanner_l2.rs 自身都改不了），
                 // 但任何**新注入**的恶意片段都会在这里被挡下。
                 if let Some(denied) =
-                    gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(&ws), new))
+                    gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(&ws), new))
                 {
                     return denied;
                 }

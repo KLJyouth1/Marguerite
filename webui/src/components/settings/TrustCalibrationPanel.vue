@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -17,6 +18,7 @@ interface TrustEntry {
 
 const rpc = useRpcStore()
 const { confirm } = useConfirm()
+const { t } = useI18n()
 
 const entries = ref<TrustEntry[]>([])
 const loading = ref(false)
@@ -28,11 +30,11 @@ const grantLevel = ref<'low' | 'medium' | 'high'>('low')
 const grantTool = ref('*')
 const grantMode = ref('')
 
-const LEVEL_HINTS: Record<string, string> = {
-  low: '低 — 本会话内记住授权，退出即失效（不落盘）',
-  medium: '中 — 记住当前会话的授权',
-  high: '高 — 永久信任，落盘持久化，可随时撤销',
-}
+const levelHints = computed<Record<string, string>>(() => ({
+  low: t('settings.trust.hintLow'),
+  medium: t('settings.trust.hintMedium'),
+  high: t('settings.trust.hintHigh'),
+}))
 
 async function refresh() {
   loading.value = true
@@ -60,7 +62,7 @@ async function grant() {
     })
     grantTool.value = '*'
     grantMode.value = ''
-    message.value = '信任授权已记录'
+    message.value = t('settings.trust.granted')
     await refresh()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -69,15 +71,15 @@ async function grant() {
 
 async function revoke(entry: TrustEntry) {
   const ok = await confirm({
-    title: '撤销信任',
-    body: `确定撤销对「${entry.tool}」（${entry.level_label}）的信任？该授权凭据将被删除，可重新授予。`,
-    primaryLabel: '撤销',
+    title: t('settings.trust.confirmRevokeTitle'),
+    body: t('settings.trust.confirmRevokeBody', { tool: entry.tool, level: entry.level_label }),
+    primaryLabel: t('settings.trust.confirmRevokeAction'),
     primaryClass: 'btn--danger',
   })
   if (!ok) return
   try {
     await rpc.call('trust.revoke', { id: entry.id })
-    message.value = `已撤销 ${entry.tool} 的信任`
+    message.value = t('settings.trust.revoked', { tool: entry.tool })
     await refresh()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -86,15 +88,15 @@ async function revoke(entry: TrustEntry) {
 
 async function revokeAll() {
   const ok = await confirm({
-    title: '撤销全部信任',
-    body: '确定撤销全部信任授权？之后高影响工具将恢复逐次确认。',
-    primaryLabel: '全部撤销',
+    title: t('settings.trust.confirmRevokeAllTitle'),
+    body: t('settings.trust.confirmRevokeAllBody'),
+    primaryLabel: t('settings.trust.confirmRevokeAllAction'),
     primaryClass: 'btn--danger',
   })
   if (!ok) return
   try {
     const data = await rpc.call<{ removed: number }>('trust.revoke_all')
-    message.value = `已撤销 ${data.removed} 条信任`
+    message.value = t('settings.trust.revokedAll', { count: data.removed })
     await refresh()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -112,55 +114,60 @@ onMounted(refresh)
 <template>
   <section class="control-section">
     <div class="control-section__head">
-      <h3 class="control-section__title">信任校准（Trust Calibration）</h3>
+      <h3 class="control-section__title">{{ t('settings.trust.title') }}</h3>
       <p class="control-section__desc">
-        0-确认默认：高影响任务默认逐次确认；可在下方授予工具信任以跳过确认。信任分 low / medium / high 三档，覆盖全部 5 种运行模式，支持跨会话持久化与随时撤销。
+        {{ t('settings.trust.description') }}
       </p>
     </div>
 
     <div class="control-row control-row--stack">
       <div class="control-row__label-block">
-        <span class="control-row__label">授予信任</span>
-        <span class="control-row__desc">选择档位、工具名（含 * 通配）与可选模式；高影响工具命中信任时不再弹确认卡</span>
+        <span class="control-row__label">{{ t('settings.trust.grantTitle') }}</span>
+        <span class="control-row__desc">{{ t('settings.trust.grantDesc') }}</span>
       </div>
       <div class="control-row__control trust-grant">
-        <select v-model="grantLevel" class="control-input control-input--narrow" aria-label="信任档位">
-          <option value="low">low（不落盘）</option>
-          <option value="medium">medium（会话级）</option>
-          <option value="high">high（永久落盘）</option>
+        <select v-model="grantLevel" class="control-input control-input--narrow" :aria-label="t('settings.trust.levelAria')">
+          <option value="low">{{ t('settings.trust.optLow') }}</option>
+          <option value="medium">{{ t('settings.trust.optMedium') }}</option>
+          <option value="high">{{ t('settings.trust.optHigh') }}</option>
         </select>
-        <input v-model="grantTool" class="control-input" placeholder="tool 或 *" aria-label="工具名" />
-        <input v-model="grantMode" class="control-input" placeholder="mode（留空=全部）" aria-label="模式" />
-        <button type="button" class="btn" :disabled="loading || !grantTool.trim()" @click="grant">授予</button>
+        <input v-model="grantTool" class="control-input" :placeholder="t('settings.trust.toolPlaceholder')" :aria-label="t('settings.trust.toolAria')" />
+        <input v-model="grantMode" class="control-input" :placeholder="t('settings.trust.modePlaceholder')" :aria-label="t('settings.trust.modeAria')" />
+        <button type="button" class="btn" :disabled="loading || !grantTool.trim()" @click="grant">{{ t('settings.trust.grantAction') }}</button>
       </div>
-      <p v-if="grantLevel" class="trust-hint">{{ LEVEL_HINTS[grantLevel] }}</p>
+      <p v-if="grantLevel" class="trust-hint">{{ levelHints[grantLevel] }}</p>
     </div>
 
     <div v-if="error" class="trust-banner trust-banner--err" role="alert">{{ error }}</div>
     <div v-else-if="message" class="trust-banner trust-banner--ok" role="status">{{ message }}</div>
 
     <div class="trust-toolbar">
-      <span class="trust-toolbar__count">{{ entries.length }} 条信任</span>
-      <button type="button" class="btn btn--ghost" :disabled="loading || entries.length === 0" @click="revokeAll">撤销全部</button>
-      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">刷新</button>
+      <span class="trust-toolbar__count">{{ t('settings.trust.countLabel', { count: entries.length }) }}</span>
+      <button type="button" class="btn btn--ghost" :disabled="loading || entries.length === 0" @click="revokeAll">{{ t('settings.trust.revokeAll') }}</button>
+      <button type="button" class="btn btn--ghost" :disabled="loading" @click="refresh">{{ t('settings.trust.refresh') }}</button>
     </div>
 
-    <div v-if="loading" class="trust-empty">加载中…</div>
-    <div v-else-if="entries.length === 0" class="trust-empty">暂无信任授权。所有高影响工具均走逐次确认。</div>
+    <div v-if="loading" class="trust-empty">{{ t('settings.trust.loading') }}</div>
+    <div v-else-if="entries.length === 0" class="trust-empty">{{ t('settings.trust.empty') }}</div>
     <table v-else class="trust-table">
       <thead>
         <tr>
-          <th>档位</th><th>工具</th><th>模式</th><th>会话</th><th>授予时间</th><th></th>
+          <th>{{ t('settings.trust.colLevel') }}</th>
+          <th>{{ t('settings.trust.colTool') }}</th>
+          <th>{{ t('settings.trust.colMode') }}</th>
+          <th>{{ t('settings.trust.colSession') }}</th>
+          <th>{{ t('settings.trust.colGranted') }}</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="e in entries" :key="e.id">
           <td><span class="trust-level" :class="'trust-level--' + e.level">{{ e.level_label }}</span></td>
           <td><code>{{ e.tool }}</code></td>
-          <td>{{ e.mode ?? '全部' }}</td>
+          <td>{{ e.mode ?? t('settings.trust.all') }}</td>
           <td>{{ e.session }}</td>
           <td>{{ fmtTime(e.granted_at_ms) }}</td>
-          <td><button type="button" class="btn btn--ghost btn--sm" @click="revoke(e)">撤销</button></td>
+          <td><button type="button" class="btn btn--ghost btn--sm" @click="revoke(e)">{{ t('settings.trust.revoke') }}</button></td>
         </tr>
       </tbody>
     </table>

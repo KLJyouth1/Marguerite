@@ -16,6 +16,8 @@ describe('getWorkNavigationSection', () => {
     expect(getWorkNavigationSection().map((item) => item.path)).toEqual([
       '/task',
       '/island',
+      // 「我的文件」（产物中心，navOrder 38）：跨会话聚合产物，与 /task 互补。
+      '/artifacts',
       '/skills',
       '/cron',
       '/usage',
@@ -98,11 +100,19 @@ describe('getGroupedNavigation (Task #6 collapsible groups)', () => {
     const groups = getGroupedNavigation()
     const byId = Object.fromEntries(groups.map((g) => [g.id, g.items.map((i) => i.path)]))
     // Observe must surface runtime diagnostics that were previously hidden.
-    expect(byId.Observe).toEqual(expect.arrayContaining(['/logs', '/engine']))
+    expect(byId.Observe).toEqual(expect.arrayContaining(['/logs', '/engine', '/team-board']))
     // Operate surfaces execution tools.
     expect(byId.Operate).toEqual(expect.arrayContaining(['/terminal', '/editor', '/browser-cockpit', '/computer-use']))
     // Settings surfaces system/agent subsystems.
-    expect(byId.Settings).toEqual(expect.arrayContaining(['/agents', '/graph', '/expert-center', '/capabilities-hub']))
+    // 2026-10-26：插件改为独立管理页后重新进入侧栏（与 MCP / 工具 / 技能并列）；
+    // /agents 与 /graph 仍由设置页 CTA 承载，不在侧栏重复。
+    expect(byId.Settings).toEqual(expect.arrayContaining(['/expert-center', '/capabilities-hub', '/plugins']))
+    for (const settingsHosted of ['/agents', '/graph']) {
+      expect(byId.Settings).not.toContain(settingsHosted)
+      expect(groups.flatMap((g) => g.items.map((i) => i.path))).not.toContain(settingsHosted)
+    }
+    // Operate also surfaces the standalone tools manager.
+    expect(byId.Operate).toContain('/tools')
     // Extras isolates entertainment features away from the working rail.
     expect(byId.Extras).toEqual(expect.arrayContaining(['/poker', '/games', '/pet', '/wallpaper']))
     // No duplicate paths across groups (dedup by canonical route).
@@ -114,6 +124,18 @@ describe('getGroupedNavigation (Task #6 collapsible groups)', () => {
         expect(paths).not.toContain(primary)
       }
     }
+  })
+
+  it('registers the team board as an Observe diagnostic destination', () => {
+    const route = sharedRoutes.find((candidate) => candidate.path === '/team-board')
+    expect(route?.name).toBe('team-board')
+    expect(route?.meta?.group).toBe('Observe')
+    expect(route?.meta?.nav).toBe('primary')
+    expect(route?.meta?.navLabelKey).toBe('team.board.title')
+    // 轮询视图不缓存：离开路由必须卸载以清理 5s 定时器与事件订阅。
+    expect(route?.meta?.keepAlive).toBeUndefined()
+    const observe = getGroupedNavigation().find((group) => group.id === 'Observe')
+    expect(observe?.items.map((item) => item.path)).toContain('/team-board')
   })
 
   it('orders items inside a group by navOrder', () => {

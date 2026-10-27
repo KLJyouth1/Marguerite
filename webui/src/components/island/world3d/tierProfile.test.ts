@@ -58,6 +58,23 @@ describe('tierForRoutingMode', () => {
   })
 })
 
+describe('tierForSnapshot 真实档位优先', () => {
+  it('model.tier.get.effective_tier 覆盖 mode/effort 的二次推导', () => {
+    // 真实档位是路由层算出的结论，不能被 mode=bloom 之类的粗粒度信号改回去。
+    expect(tierForSnapshot(snap({ effectiveTier: 'flagship', modeKind: 'plan' }))).toBe('flagship')
+    expect(tierForSnapshot(snap({ effectiveTier: 'balanced', modeKind: 'bloom' }))).toBe('efficient')
+    expect(tierForSnapshot(snap({ effectiveTier: 'turbo', reasoningEffort: 'max' }))).toBe('sprint')
+  })
+
+  it('缺失 effectiveTier 时回退到 mode/effort 推导（不改变旧行为）', () => {
+    expect(tierForSnapshot(snap({ modeKind: 'bloom' }))).toBe('flagship')
+    expect(tierForSnapshot(snap({ modeKind: 'omni-transcend' }))).toBe('omni')
+    expect(tierForSnapshot(snap({ reasoningEffort: 'max' }))).toBe('flagship')
+    expect(tierForSnapshot(snap({ reasoningEffort: 'off' }))).toBe('sprint')
+    expect(tierForSnapshot(snap({}))).toBe('efficient')
+  })
+})
+
 describe('tierForSnapshot', () => {
   it('modeKind 优先于 reasoningEffort', () => {
     expect(tierForSnapshot(snap({ modeKind: 'omni-transcend', reasoningEffort: 'off' }))).toBe('omni')

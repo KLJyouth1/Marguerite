@@ -28,6 +28,30 @@ interface ModeGetPayload {
   kind?: string
   mode?: string
 }
+/** `model.tier.get` 的返回（core/gateway/methods.rs）。 */
+interface TierPayload {
+  locked_tier?: string | null
+  thinking_effort?: string
+  effective_tier?: string
+  budget?: {
+    remaining_ratio?: number
+    state?: string
+  }
+}
+/** `cache.status` 的返回；命中率/覆盖率都是 0..100 的百分数（不是 0..1）。 */
+interface CacheStatusPayload {
+  /** W5.1 计划字段名（coverage = cache_read / 归一后总输入） */
+  cache_coverage_pct?: number
+  /** W5.1 计划字段名（合格请求中至少命中一次的比例） */
+  request_hit_rate_pct?: number
+  /** 网关现役字段名（W5.1 实现带 `server_` 前缀；两个拼写都接受，避免版本漂移） */
+  server_cache_coverage_pct?: number
+  server_cache_request_hit_rate_pct?: number
+  /** 本地前缀缓存命中率（独立量纲） */
+  client_hit_rate?: number
+  /** 旧口径别名（= coverage）。只有新字段缺席时才用，并显式标 legacy。 */
+  server_cache_hit_rate?: number
+}
 
 const EMPTY: EngineSnapshot = {
   connected: false,
@@ -37,6 +61,14 @@ const EMPTY: EngineSnapshot = {
   hasTierRpc: false,
   hasBudgetRpc: false,
   hasGameRpc: false,
+  effectiveTier: null,
+  tierLocked: null,
+  budgetState: null,
+  budgetRemaining: null,
+  cacheCoveragePct: null,
+  cacheRequestHitRatePct: null,
+  clientHitRatePct: null,
+  cacheMetricsSource: null,
 }
 
 export interface UseEngineBridge {
@@ -44,6 +76,14 @@ export interface UseEngineBridge {
   refresh: () => Promise<void>
   /** 上次刷新的人类可读状态（用于面板诚实标注） */
   lastError: Ref<string | null>
+}
+
+/** 取第一个有限数值；null/undefined/NaN/Infinity 一律跳过（不编造数字）。 */
+function firstFinite(...values: Array<number | undefined>): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+  }
+  return null
 }
 
 export function useEngineBridge(): UseEngineBridge {
@@ -75,9 +115,11 @@ export function useEngineBridge(): UseEngineBridge {
       return
     }
 
-    const [mode, spec] = await Promise.all([
+    const [mode, spec, tier, cache] = await Promise.all([
       safeCall<ModeGetPayload>('mode.get'),
       safeCall<ModeSpecPayload>('mode.spec'),
+      safeCall<TierPayload>('model.tier.get'),
+      safeCall<CacheStatusPayload>('cache.status'),
     ])
     next.modeKind = mode?.kind ? normalizeModeKind(mode.kind) : null
     const bloom = spec?.bloom
@@ -89,9 +131,51 @@ export function useEngineBridge(): UseEngineBridge {
           : null
     }
 
-    // core 分片正在新增的 RPC：探测一次，存在才点亮对应符文。不存在 = false（不崩）。
-    next.hasTierRpc = (await safeCall<unknown>('tier.get')) !== null
-    next.hasBudgetRpc = (await safeCall<unknown>('budget.get')) !== null
+    // 真实三档分层（core 已落地 model.tier.get）：档位 / 锁定 / 预算台账。
+    // 方法不存在时 tier=null → 保持 false 与 null，UI 诚实显示「未知」。
+    if (tier) {
+      next.hasTierRpc = true
+      next.effectiveTier = typeof tier.effective_tier === 'string' ? tier.effective_tier : null
+      next.tierLocked = typeof tier.locked_tier === 'string' ? tier.locked_tier : null
+      next.budgetState = typeof tier.budget?.state === 'string' ? tier.budget.state : null
+      next.budgetRemaining =
+        typeof tier.budget?.remaining_ratio === 'number' && Number.isFinite(tier.budget.remaining_ratio)
+          ? tier.budget.remaining_ratio
+          : null
+      next.hasBudgetRpc = !!(tier.budget && typeof tier.budget === 'object')
+      // 档位决策给出的思考强度优先于 mode.spec 的模式默认值（前者是本次生效值）。
+      if (typeof tier.thinking_effort === 'string' && tier.thinking_effort) {
+        next.reasoningEffort = tier.thinking_effort
+      }
+    }
+
+    // W5.6：把「服务端前缀覆盖」与「合格请求命中率」**分开**上报。
+    // 旧实现 `Math.max(client, server)` 把两个不同量纲（本地 lookups vs 上游 token）
+    // 合成一个数 —— 任一为零/偏低时它都会虚报，用户无法据此判断缓存是否真的在复用。
+    const coverage = firstFinite(
+      cache?.cache_coverage_pct,
+      cache?.server_cache_coverage_pct,
+    )
+    const requestHitRate = firstFinite(
+      cache?.request_hit_rate_pct,
+      cache?.server_cache_request_hit_rate_pct,
+    )
+    // 旧网关只有 `server_cache_hit_rate`（W5.1 已把它定义为 coverage 的别名）。
+    // 回退时必须显式标 legacy —— 它**不是** request-level 命中率。
+    const legacyCoverage = firstFinite(cache?.server_cache_hit_rate)
+    next.clientHitRatePct = firstFinite(cache?.client_hit_rate)
+    next.cacheCoveragePct = coverage ?? legacyCoverage
+    next.cacheRequestHitRatePct = requestHitRate
+    next.cacheMetricsSource =
+      coverage !== null
+        ? 'live'
+        : legacyCoverage !== null
+          ? 'legacy'
+          : requestHitRate !== null
+            ? 'live'
+            : null
+
+    // 尚无 game.status（保留探测，存在后即可点亮游戏态字段）。
     next.hasGameRpc = (await safeCall<unknown>('game.status')) !== null
 
     snapshot.value = next

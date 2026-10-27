@@ -9,6 +9,31 @@ import { wasCronFinishNotified } from '@/utils/cron/notifications'
 
 interface CronListResponse {
   jobs?: CronJob[]
+  items?: CronJob[]
+}
+
+/**
+ * 归一 `cron.list` 的三种合法形状：数组（pyengine）、`{jobs}`、`{items}`
+ * （Rust 离线兜底与旧网关）。`next_run` 优先；缺失时把 Rust 的
+ * `next_fire_ms`（epoch 毫秒）换算成 ISO——前端所有时间展示都按 ISO 解析。
+ */
+export function normalizeCronJobs(data: unknown): CronJob[] {
+  const list: unknown[] = Array.isArray(data)
+    ? data
+    : (data && typeof data === 'object'
+      ? ((data as CronListResponse).jobs ?? (data as CronListResponse).items ?? [])
+      : [])
+  if (!Array.isArray(list)) return []
+  return list
+    .filter((job): job is CronJob => Boolean(job) && typeof job === 'object')
+    .map(job => {
+      if (job.next_run) return job
+      const rawMs = job.next_fire_ms ?? job.nextFireMs
+      const ms = typeof rawMs === 'number' ? rawMs : Number.NaN
+      if (!Number.isFinite(ms) || ms <= 0) return job
+      const next = new Date(ms)
+      return Number.isNaN(next.getTime()) ? job : { ...job, next_run: next.toISOString() }
+    })
 }
 
 export function useCronJobs() {
@@ -28,11 +53,7 @@ export function useCronJobs() {
     { errorLabel: t('cronSkills.jobs.errLoad') },
   )
 
-  const jobs = computed<CronJob[]>(() => {
-    const d = cronData.value
-    if (!d) return []
-    return Array.isArray(d) ? d : (d.jobs || [])
-  })
+  const jobs = computed<CronJob[]>(() => normalizeCronJobs(cronData.value))
 
   let tickInterval: ReturnType<typeof setInterval> | null = null
   let reloadTimer: ReturnType<typeof setTimeout> | null = null

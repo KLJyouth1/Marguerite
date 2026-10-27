@@ -167,4 +167,30 @@ describe('RunModePanel', () => {
     app.unmount()
     el.remove()
   })
+
+  // 回归（2026-10-24）：「运行模式与路由」最后一段内容缺失。
+  // 两个子面板原本各自 `position: absolute`，塞进父面板的滚动盒后会再弹一层、
+  // 逃出 max-height。契约：它们必须以内联形态渲染在 popover 内，且不再自带标题。
+  it('renders both sub-panels inline inside the scrollable popover', async () => {
+    i18n.global.locale.value = 'en'
+    const { app, el } = mountPanel()
+    chip(el).click()
+    await nextTick()
+
+    const popover = el.querySelector('.run-mode-panel__popover')!
+    const runMode = popover.querySelector('.composer-run-mode')!
+    const routing = popover.querySelector('.composer-model-routing')!
+
+    expect(runMode.classList.contains('is-inline')).toBe(true)
+    expect(routing.classList.contains('is-inline')).toBe(true)
+    // 内联形态不再重复渲染自己的标题/关闭按钮（父面板已有段标题）
+    expect(runMode.querySelector('.composer-run-mode__head')).toBeNull()
+    expect(routing.querySelector('.composer-model-routing__head')).toBeNull()
+    // 三段都在同一个滚动容器里，顺序为 执行模式 → PLAN → 模型路由
+    const sections = Array.from(popover.querySelectorAll('.run-mode-panel__section'))
+    expect(sections).toHaveLength(3)
+    expect(sections[2].querySelectorAll('.composer-model-routing__option')).toHaveLength(5)
+    app.unmount()
+    el.remove()
+  })
 })

@@ -51,13 +51,52 @@ impl WorkspaceSource {
 }
 
 /// 解析后的工作区（根目录 + 来源）。
+///
+/// P2-9：`roots` 为「一个会话可绑定多个项目目录」预留的根集合。当前工具侧仍只
+/// 支持单根，故 `root` 保持为权威主根（= `roots[0]`），其余根仅供数据层/解析层
+/// 记录与后续扩展；`guidance()` 也仍按单根叙述（见函数注释）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub root: PathBuf,
     pub source: WorkspaceSource,
+    /// 本会话的全部项目根（首项恒等于 `root`）。
+    pub roots: Vec<PathBuf>,
 }
 
 impl Workspace {
+    /// 单根构造助手：`root` 同时作为根集合的唯一元素。
+    pub fn new_single(root: PathBuf, source: WorkspaceSource) -> Self {
+        Self {
+            roots: vec![root.clone()],
+            root,
+            source,
+        }
+    }
+
+    /// 多根构造：`primary` 恒为首项，`extra` 去重（保持给定顺序）后追加。
+    ///
+    /// 工具侧仍只消费 `root`；本构造只为数据层保留完整根集合，避免将来加多根
+    /// 支持时再改一遍所有构造点。
+    pub fn with_roots(primary: PathBuf, extra: Vec<PathBuf>, source: WorkspaceSource) -> Self {
+        let mut roots = Vec::with_capacity(extra.len() + 1);
+        roots.push(primary.clone());
+        for p in extra {
+            if p != primary && !roots.contains(&p) {
+                roots.push(p);
+            }
+        }
+        Self {
+            root: primary,
+            roots,
+            source,
+        }
+    }
+
+    /// 本会话绑定的全部根（首项恒为主根）。
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     /// 解析工作区根目录。
     ///
     /// 优先级：`explicit`（会话绑定的项目目录）> 应用数据目录 > 进程 cwd。
@@ -71,22 +110,14 @@ impl Workspace {
                 // 刻意**不** canonicalize：Windows 上会带上 `\\?\` 前缀，
                 // 那会让 guidance / 工具报错里出现一串用户认不出来的路径。
                 // 逃逸判定由 `tools::fs_path::safe_resolve` 自己做（它内部会 canonicalize）。
-                return Self {
-                    root: trimmed,
-                    source: WorkspaceSource::Bound,
-                };
+                return Self::new_single(trimmed, WorkspaceSource::Bound);
             }
             // 显式路径此刻不可用：保留它作为根（首次写入会自动创建），
             // 并由 guidance 说明「这不是默认目录、必要时请重新绑定」。
-            return Self {
-                root: trimmed,
-                source: WorkspaceSource::Missing,
-            };
+            return Self::new_single(trimmed, WorkspaceSource::Missing);
         }
-        Self {
-            root: fallback().0,
-            source: fallback().1,
-        }
+        let (root, source) = fallback();
+        Self::new_single(root, source)
     }
 
     /// 是否已绑定真实项目目录。
@@ -97,6 +128,10 @@ impl Workspace {
     /// 面向模型的系统提示片段（自包含：根目录 + 状态 + 绑定方法）。
     ///
     /// 这不是装饰文案：它是「猜路径 → 1 ms 失败 → 死循环」这条链的第一道防线。
+    ///
+    /// P2-9：文案**刻意保持单根叙述**。工具侧（多根读写）尚未支持，若在这里
+    /// 告诉模型「可以访问 roots 里的其他目录」，它就会去写那些路径并 1ms 失败。
+    /// 多根引导等工具侧支持后再加。
     pub fn guidance(&self) -> String {
         let root = self.root.display().to_string();
         match self.source {
@@ -142,7 +177,101 @@ impl Workspace {
             "source": self.source.as_str(),
             "bound": self.is_bound(),
             "guidance": self.guidance(),
+            "git": git_summary(&self.root),
         })
+    }
+}
+
+/// 只读的 Git 摘要：分支名、是否 detached、本地分支列表。
+///
+/// 刻意**不执行 `git` 进程**：`status_json` 会在对话/诊断面板频繁调用，拉起外部
+/// 进程既慢又依赖用户 PATH。这里只读 `.git/HEAD` 与 `refs`，并处理三种真实布局：
+/// 普通仓库（`.git` 目录）、worktree（`.git` 文件 + `gitdir:`）、以及 `commondir`
+/// 指向主仓库的 refs。读不到就返回 `null`（不是 Git 仓库），UI 据此不显示分支胶囊。
+fn git_summary(root: &Path) -> Option<Value> {
+    let dot = root.join(".git");
+    let git_dir = if dot.is_dir() {
+        dot
+    } else if dot.is_file() {
+        let text = std::fs::read_to_string(&dot).ok()?;
+        let raw = text
+            .lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))?
+            .trim();
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        }
+    } else {
+        return None;
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let (branch, detached) = match head.strip_prefix("ref: refs/heads/") {
+        Some(name) => (Some(name.to_string()), false),
+        None => {
+            let looks_like_sha = head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit());
+            (None, looks_like_sha)
+        }
+    };
+    // worktree 的 refs 在 commondir 里；普通仓库没有 commondir 文件。
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|raw| {
+            let path = PathBuf::from(raw.trim());
+            if path.is_absolute() {
+                path
+            } else {
+                git_dir.join(path)
+            }
+        })
+        .unwrap_or_else(|| git_dir.clone());
+    let mut branches: Vec<String> = Vec::new();
+    collect_branch_refs(&common.join("refs").join("heads"), "", 0, &mut branches);
+    // 已被 `git pack-refs` 打包的分支不在 refs/ 目录里，必须一并读出。
+    if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {
+        for line in packed.lines() {
+            if line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            if let Some((_, name)) = line.split_once(' ') {
+                if let Some(short) = name.trim().strip_prefix("refs/heads/") {
+                    branches.push(short.to_string());
+                }
+            }
+        }
+    }
+    branches.sort();
+    branches.dedup();
+    branches.truncate(200);
+    Some(json!({
+        "branch": branch,
+        "detached": detached,
+        "branches": branches,
+        "gitDir": git_dir.display().to_string(),
+    }))
+}
+
+fn collect_branch_refs(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<String>) {
+    // 分支名允许 `feature/x` 这种层级，但目录深度必须有上限（防止异常仓库拖慢 UI）。
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_branch_refs(&path, &format!("{prefix}{name}/"), depth + 1, out);
+        } else {
+            out.push(format!("{prefix}{name}"));
+        }
     }
 }
 
@@ -183,6 +312,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn with_roots_dedups_and_keeps_primary_first() {
+        let primary = PathBuf::from("/proj/main");
+        let extra = vec![
+            PathBuf::from("/proj/extra"),
+            PathBuf::from("/proj/main"),   // 与主根重复 → 丢弃
+            PathBuf::from("/proj/extra"),  // 自身重复 → 丢弃
+            PathBuf::from("/proj/third"),
+        ];
+        let ws = Workspace::with_roots(primary.clone(), extra, WorkspaceSource::Bound);
+        assert_eq!(
+            ws.roots().to_vec(),
+            vec![
+                PathBuf::from("/proj/main"),
+                PathBuf::from("/proj/extra"),
+                PathBuf::from("/proj/third"),
+            ],
+            "去重后保持给定顺序，且 primary 恒在首位"
+        );
+        assert_eq!(ws.root, primary, "root 必须仍是主根");
+        assert_eq!(ws.roots[0], ws.root, "roots 首项必须等于 root");
+        assert_eq!(ws.roots().len(), 3);
     }
 
     #[test]
@@ -297,6 +450,51 @@ mod tests {
         let d = temp_dir("hint");
         let ws = Workspace::resolve(Some(&d));
         assert!(ws.path_hint().contains(&d.display().to_string()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn status_json_reports_git_branch_without_spawning_git() {
+        let d = temp_dir("git");
+        let git = d.join(".git");
+        std::fs::create_dir_all(git.join("refs").join("heads").join("feature")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("refs").join("heads").join("main"), "deadbeef\n").unwrap();
+        std::fs::write(
+            git.join("refs").join("heads").join("feature").join("chat"),
+            "feedface\n",
+        )
+        .unwrap();
+        std::fs::write(
+            git.join("packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted \n\
+             c0ffee00 refs/heads/release\n",
+        )
+        .unwrap();
+
+        let v = Workspace::resolve(Some(&d)).status_json();
+        assert_eq!(v["git"]["branch"], json!("main"));
+        assert_eq!(v["git"]["detached"], json!(false));
+        let branches = v["git"]["branches"].as_array().cloned().unwrap_or_default();
+        let names: Vec<&str> = branches.iter().filter_map(Value::as_str).collect();
+        assert!(names.contains(&"main"), "实际分支：{names:?}");
+        assert!(names.contains(&"feature/chat"), "嵌套分支必须保留全名：{names:?}");
+        assert!(names.contains(&"release"), "packed-refs 里的分支必须读出：{names:?}");
+
+        // detached HEAD：没有 ref，只有提交号。
+        std::fs::write(git.join("HEAD"), "0123456789abcdef\n").unwrap();
+        let v2 = Workspace::resolve(Some(&d)).status_json();
+        assert_eq!(v2["git"]["branch"], Value::Null);
+        assert_eq!(v2["git"]["detached"], json!(true));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn status_json_git_is_null_outside_a_repository() {
+        let d = temp_dir("nogit");
+        let v = Workspace::resolve(Some(&d)).status_json();
+        assert_eq!(v["git"], Value::Null);
         let _ = std::fs::remove_dir_all(&d);
     }
 

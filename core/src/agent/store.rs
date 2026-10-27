@@ -88,12 +88,19 @@ impl AgentStore {
             .unwrap_or_default()
     }
 
+    /// 落盘（原子写，走 `persistence::write_json_atomic`）。
+    ///
+    /// R13（2026-10-18）：此前用 `std::fs::write` 直写目标文件——该 API **先截断
+    /// 再写**，进程在写入中途被杀/断电就留下半截 JSON；`load()` 解析失败走
+    /// `unwrap_or_default()`，于是**用户自建智能体被静默清空**（内置会被 seed
+    /// 补回，表面看不出丢过东西，丢的是用户数据）。
     fn save(&self) {
-        if let Some(dir) = Self::path().parent() {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(raw) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(), raw);
+            let _ = crate::persistence::write_json_atomic(&path, &raw);
         }
     }
 
@@ -144,6 +151,36 @@ fn store() -> &'static Mutex<AgentStore> {
     })
 }
 
+/// 主智能体（`main`）系统人设：高级开发工程师 · 严工。
+///
+/// 来源：专家包 `my-experts/plugins/senior-dev-engineer/agents/senior-dev-engineer.md`
+/// （正文整篇纳入；仅把原文示例里的异域业务词汇换成 Marguerite Domain 词汇，
+/// 末尾追加本机工程化操作守则）。
+///
+/// 人设是**内容资产**而非代码：正文放在 `agent/personas/senior-dev-engineer.md`，
+/// 编译期 `include_str!` 内联。此前它以 `r#"…"#` 内联在本文件里（160+ 行），
+/// 导致台账逻辑与提示词互相淹没、diff 不可读、改文案要改 Rust。
+///
+/// ⚠️ 两处硬约束（改前必读）：
+/// 1. **不得包含** `<!--persona-complete-->` 独立行——那会让 `strip_complete_marker`
+///    置 complete=true，从而阻断 skills/工具段的追加（`personality_for` 的段顺序）。
+/// 2. 避免 `{{` / `}}`——`resolve_template` 会把未知变量替换为空串。
+const MAIN_AGENT_SYSTEM_PROMPT: &str = include_str!("personas/senior-dev-engineer.md");
+
+/// 主智能体人设正文（编译期内联）。
+///
+/// 存在的唯一理由：让 `agent.selfcheck` 能**证明**"定义真的被读进来了"——
+/// 用户问「你到底有没有加载我的智能体定义」时，答案必须是字节数 + sha256，
+/// 而不是"应该加载了"。
+pub(crate) fn main_agent_prompt() -> &'static str {
+    MAIN_AGENT_SYSTEM_PROMPT
+}
+
+/// UI/UX 负责人的完整人设（与主智能体同一套"内容资产"约定）。
+///
+/// ⚠️ 同样约束：不得出现 `<!--persona-complete-->` 独立行，避免 `{{ }}`。
+const UI_DESIGN_SYSTEM_PROMPT: &str = include_str!("personas/ui-design-engineer.md");
+
 /// 内置预置智能体（可被「自定义」复制为 custom，本身不可编辑）
 fn builtin_agents() -> Vec<AgentRecord> {
     let s = |items: &[&str]| items.iter().map(|x| x.to_string()).collect::<Vec<String>>();
@@ -184,15 +221,49 @@ fn builtin_agents() -> Vec<AgentRecord> {
         "json_query",
         "kb_search",
         "kb_ingest",
+        // 媒体域（R14）：ffmpeg 真实桥 —— probe / convert / frames / thumbnail
+        "media",
+        // 3D 域（R72）：Blender 无头桥 —— run_script / render / probe
+        "blender",
+        // 多模态（2026-10-23）：生图 / 生视频 / 语音转写 / 语音合成
+        "image_generate",
+        "video_generate",
+        // 本地生视频（2026-10-24）：代码打字动画 / 网页动效 / Manim
+        "code_video",
+        "web_video",
+        "manim_video",
+        "audio_transcribe",
+        "audio_speak",
+        // RPA 录放（2026-10-23）：录制用户真实键鼠操作并回放
+        "auto_record",
+        "auto_replay",
     ]);
     let mut agents = vec![
         AgentRecord {
             id: "main".to_string(),
-            name: "主智能体".to_string(),
-            description: "通用助手，负责日常对话、任务编排与工具调用。".to_string(),
+            name: "严工 · 高级开发工程师".to_string(),
+            description: "学霸型高级工程师：先盘点工具再动手、跨学科融合、诊断根因扫全类，联网找现成方案，工匠精神死磕到底，端到端验证后才交付。".to_string(),
             tools: all_tools.clone(),
-            skills: s(&["通用问答", "代码生成", "文件操作", "联网搜索", "浏览器操控"]),
-            system_prompt: "你是 Marguerite 主智能体，一个能力全面的 AI 助手。你拥有文件操作、联网搜索、浏览器自动化、电脑操控、代码执行、知识库、记忆、技能等工具。\n\n核心原则：\n1. 绝不轻易说「无法」「不能」「建议您手动」——你有工具，先调用工具尝试。\n2. 一个工具失败时，换另一个工具或方法继续，不要因一次失败就放弃整个任务。\n3. 已获取的信息要充分利用来完成任务，不要因为缺少某一条信息就宣布失败。\n4. 需要实时信息时用 web_search/web_fetch；需要网页交互时用 browser；需要操控电脑软件时用 system_control/computer_use。**但仅当任务确实需要外部实时信息时才联网**：创建/生成/整理/转换本地文件（Excel/Word/PPT/HTML/报告等）不需要联网，直接产出即可——为这类任务检索纯属浪费（拖长耗时且与交付无关）。\n5. 主动判断何时需要调用工具，不要凭空猜测可查询的信息；也**不要为了显得在做事而调用与任务无关的工具**，优先选最直接的那一个。\n5b. 生成文件（如 Excel/Word/PPT）时若需一次性脚本，**把脚本写到工作区之外的临时目录**（如 %TEMP%）并执行完即删；不要留在工作区——留在工作区的辅助脚本会被当作产物登记，淹没真正的交付物。\n6. 用与用户相同的语言回复，语言简洁、逻辑清晰，给出可执行的结果而非建议。\n\n上下文连续性（最重要）：\n7. 你必须仔细阅读并理解本次对话中的所有历史消息（用户和助手的每一轮），后续指令通常基于前文内容。\n8. 当用户说「整理成网页」「继续」「把上面的内容做成文件」等指代性指令时，必须回溯前文找到对应内容并直接执行，绝不能要求用户重新提供。\n9. 每次回复前先回顾：用户之前说了什么？我之前做了什么？用户现在要我做什么？确保行为连贯。\n10. 跨会话记忆：调用 memory_search 检索历史会话中的相关信息，结合记忆理解用户意图和偏好。\n11. 如果上下文中已有足够信息完成任务，直接完成，不要反问或要求重复输入。".to_string(),
+            skills: s(&[
+                "根因诊断",
+                "举一反三",
+                "边界穷举",
+                "端到端验证",
+                "工具编排",
+                "跨学科分析",
+                "联网研究",
+                "工匠交付",
+                "音视频处理",
+            ]),
+            // 2026-10-12：主智能体人设换为「高级开发工程师 · 严工」（senior-dev-engineer
+            // 专家包整包接入桌面端）。**id 保持 `main` 不变**——新会话默认键
+            // `agent:main:webchat:default`、侧边栏、定时任务 agentId 默认值、`@` 引用
+            // 全部按 `main` 寻址，换 id 会让存量会话与定时任务集体失联。
+            // 人设来源：my-experts/plugins/senior-dev-engineer/agents/senior-dev-engineer.md
+            // （正文整篇纳入，仅把示例中的异域业务换成 Marguerite Domain 词汇）；
+            // 末尾追加本机操作守则（源自原主智能体提示词的工程化条款）。
+            // ⚠️ 内置记录由 `seed_builtins()` 就地热更新，存量 agents.json 下次启动即生效。
+            system_prompt: MAIN_AGENT_SYSTEM_PROMPT.to_string(),
             is_builtin: true,
             ..Default::default()
         },
@@ -224,6 +295,40 @@ fn builtin_agents() -> Vec<AgentRecord> {
             skills: s(&["代码审查", "安全审计", "性能优化", "规范检查"]),
             system_prompt: "你是资深代码审查专家。注重代码规范、安全性、可维护性与边界条件，给出可执行的改进建议。审查时逐项列出问题、严重级别和修复方案。".to_string(),
             is_builtin: true,
+            ..Default::default()
+        },
+        AgentRecord {
+            id: "ui-designer".to_string(),
+            name: "UI 设计团队 · 液态玻璃".to_string(),
+            description: "界面与体验设计负责人（设计系统 / 视觉 / 动效 / 空间 3D / 验收 五个角色）：令牌驱动、先量后调、克制四原则，产出可测量可回归的界面系统。".to_string(),
+            tools: s(&[
+                "read_file",
+                "write_file",
+                "edit_file",
+                "apply_patch",
+                "list_dir",
+                "find_files",
+                "grep",
+                "codebase_search",
+                "shell_exec",
+                "code_exec",
+                "vision",
+                "image_generate",
+                "browser",
+                "computer_use",
+                "web_search",
+                "web_fetch",
+                "memory_search",
+                "memory_save",
+                "list_skills",
+                "use_skill",
+            ]),
+            skills: s(&["设计系统", "视觉层级", "动效设计", "三维背景", "可访问性", "参数化调参", "截图取证"]),
+            // 2026-10-24：把两轮沉淀（液态玻璃的参数面板工作流 + 玛格丽特三维山脊的场景纪律）
+            // 整篇作为人设，与主智能体同一套 include_str! 内容资产约定，改文案不用改 Rust。
+            system_prompt: UI_DESIGN_SYSTEM_PROMPT.to_string(),
+            is_builtin: true,
+            // 默认启用与否由函数末尾的 DEFAULT_ENABLED_BUILTINS 统一决定（那里是唯一生效处）
             ..Default::default()
         },
         AgentRecord {
@@ -270,9 +375,9 @@ fn builtin_agents() -> Vec<AgentRecord> {
             id: "computer-operator".to_string(),
             name: "电脑操控员".to_string(),
             description: "桌面操控、鼠标键盘控制、GUI 自动化。".to_string(),
-            tools: s(&["system_control", "computer_use", "browser", "vision", "screenshot", "shell_exec", "window_manage", "clipboard", "process_manage", "office_automation", "list_skills", "use_skill"]),
+            tools: s(&["system_control", "computer_use", "browser", "vision", "screenshot", "shell_exec", "window_manage", "clipboard", "process_manage", "office_automation", "auto_record", "auto_replay", "image_generate", "video_generate", "audio_transcribe", "audio_speak", "list_skills", "use_skill"]),
             skills: s(&["桌面自动化", "GUI 定位", "键鼠控制", "OCR 识别", "办公软件操控", "窗口管理"]),
-            system_prompt: "你是桌面自动化专家。使用 system_control/computer_use 操控鼠标键盘、截图、OCR；用 window_manage 管理窗口；用 process_manage 启动/关闭程序；用 office_automation 操控 WPS/Office；用 clipboard 读写剪贴板。操作前先截图观察，确认坐标后再执行，避免误操作。绝不轻易说无法完成，先用工具尝试。".to_string(),
+            system_prompt: "你是桌面自动化专家。**优先 computer_use**（屏幕感知 + 元素定位，抗分辨率/DPI 变化）；system_control 作为兜底（全屏游戏、无 UIA 树的自绘界面、需要精确物理坐标的拖拽）。用 window_manage 管理窗口；用 process_manage 启动/关闭程序；用 office_automation 操控 WPS/Office；用 clipboard 读写剪贴板。**「我做一遍你照做」用 auto_record start → stop → auto_replay run**（回放前确认窗口位置未变）。生图用 image_generate，生视频用 video_generate，音频转写用 audio_transcribe，朗读用 audio_speak（未配置就如实说缺口，不要假装完成）。操作前先截图观察，确认坐标后再执行，避免误操作。绝不轻易说无法完成，先用工具尝试。".to_string(),
             is_builtin: true,
             ..Default::default()
         },
@@ -309,14 +414,17 @@ fn builtin_agents() -> Vec<AgentRecord> {
     ];
     // P0-5：内置智能体此前全用 `..Default::default()`，而 `AgentRecord` 的 `Default`
     // 让 `enabled` 落为 `false` → `personality_for()` 对 `!enabled` 直接返回 `None`，
-    // 12 个内置专家的人格永不注入。这里按 id **显式**启用 main + 4 个常用角色，
-    // 其余保持禁用（用户可在界面按需打开）。不依赖 `Default`（其语义会被误读）。
+    // 12 个内置专家的人格永不注入。这里按 id **显式**启用 main + 4 个常用角色 +
+    // UI 设计专家，其余保持禁用（用户可在界面按需打开）。不依赖 `Default`（其语义会被误读）。
+    // ⚠️ 新增内置角色若要默认可用，必须同时加进这个常量——它是唯一生效处，
+    // 记录里的 `enabled` 字段会被下一行无条件覆盖。
     const DEFAULT_ENABLED_BUILTINS: &[&str] = &[
         "main",
         "code-engineer",
         "researcher",
         "data-analyst",
         "code-reviewer",
+        "ui-designer",
     ];
     for a in &mut agents {
         a.enabled = DEFAULT_ENABLED_BUILTINS.contains(&a.id.as_str());
@@ -417,10 +525,17 @@ pub fn personality_for(id: &str) -> Option<String> {
             &format!("技能组合：{}。", record.skills.join("、")),
         ));
     }
+    // 工具段只声明「偏好」，不声明「可用」：本轮真实工具面由运行时动态裁剪
+    // （`agent::runtime::tool_guide_text` 的 discover 规则），台账里的 tools 只是
+    // 声明式清单。此前文案写「可用工具：…」，会让 36 个工具名与「当前只暴露了常用
+    // 工具」的基础指引互相矛盾，诱导模型调用本轮并不存在的工具。
     if !record.tools.is_empty() {
         sections.push(crate::persona::PersonaSection::new(
             "tools",
-            &format!("可用工具：{}。", record.tools.join("、")),
+            &format!(
+                "偏好工具（实际可用以本轮工具清单为准，缺能力时先调用工具发现）：{}。",
+                record.tools.join("、")
+            ),
         ));
     }
     let rendered = crate::persona::render_sections(&sections, &std::collections::BTreeMap::new());
@@ -548,7 +663,60 @@ mod tests {
         assert!(v["skills"].is_array());
     }
 
-    /// P0-5：内置智能体默认启用 main + 4 个常用角色；其余保持禁用。
+    /// 2026-10-12：主智能体（`main`）人设 = 高级开发工程师 · 严工（专家包接入桌面端）。
+    /// 逐条钉死关键身份与两条硬约束（complete 标记 / 模板花括号）。
+    #[test]
+    fn main_agent_persona_is_senior_dev_engineer() {
+        let agents = builtin_agents();
+        let main = agents
+            .iter()
+            .find(|a| a.id == "main")
+            .expect("main 内置智能体应存在");
+        assert!(
+            main.name.contains("严工"),
+            "主智能体名称应体现严工身份；实际: {}",
+            main.name
+        );
+        assert!(
+            main.description.contains("根因"),
+            "描述应说明专家定位；实际: {}",
+            main.description
+        );
+        assert!(!main.skills.is_empty(), "技能组合不应为空");
+        // 人格注入的硬前提：`personality_for` 对 `!enabled` 直接返回 None，
+        // 主智能体一旦被停用，再完整的人设也只会是一段死文本。
+        assert!(main.enabled, "主智能体必须默认启用，否则人格永不注入");
+        // 人设核心条款必须在场（防回归成通用助手）
+        for needle in [
+            "能跑通不算做完，做到极致才算开始",
+            "七条铁律",
+            "九步工作流程",
+            "Marguerite 工作台操作守则",
+        ] {
+            assert!(
+                main.system_prompt.contains(needle),
+                "主智能体人设缺少关键段: {needle}"
+            );
+        }
+        // 硬约束 1：不得含 complete 标记（否则 skills/工具段被阻断不追加）
+        assert!(
+            !main.system_prompt.contains("<!--persona-complete-->"),
+            "人设不得含 complete 标记"
+        );
+        // 硬约束 2：不得含模板花括号（resolve_template 会把未知变量替换为空串）
+        assert!(
+            !main.system_prompt.contains("{{") && !main.system_prompt.contains("}}"),
+            "人设不得含 {{{{ }}}} 模板占位符"
+        );
+        // 工具集保持全量（主智能体要能调度全部工具）
+        assert!(
+            main.tools.len() >= 30,
+            "主智能体应持全量工具；实际 {}",
+            main.tools.len()
+        );
+    }
+
+    /// P0-5：内置智能体默认启用 main + 4 个常用角色 + UI 设计专家；其余保持禁用。
     /// 直接对 `builtin_agents()` 断言（纯内存，不落盘、不触碰用户运行期 agents.json）。
     #[test]
     fn builtins_enable_only_the_common_set() {
@@ -564,6 +732,7 @@ mod tests {
             "researcher",
             "data-analyst",
             "code-reviewer",
+            "ui-designer",
         ] {
             assert!(
                 enabled.contains(&id),
@@ -587,8 +756,8 @@ mod tests {
         }
         assert_eq!(
             enabled.len(),
-            5,
-            "应恰好启用 5 个内置智能体；实际: {enabled:?}"
+            6,
+            "应恰好启用 6 个内置智能体；实际: {enabled:?}"
         );
     }
 
@@ -604,6 +773,7 @@ mod tests {
             "researcher",
             "data-analyst",
             "code-reviewer",
+            "ui-designer",
         ] {
             let persona = personality_for(id)
                 .unwrap_or_else(|| panic!("白名单 builtin {id} 必须能取到人格（enabled 且非空）"));
@@ -613,6 +783,81 @@ mod tests {
         assert!(
             personality_for("writer").is_none(),
             "writer 未在白名单，必须保持禁用（personality_for → None）"
+        );
+    }
+
+    /// `include_str!` 必须真的指向仓库内资产（防止资产被清空/挪走后静默变空串）。
+    #[test]
+    fn main_persona_asset_is_embedded() {
+        assert!(
+            MAIN_AGENT_SYSTEM_PROMPT.starts_with("你是严工"),
+            "人设首行应为身份声明，实际：{}",
+            MAIN_AGENT_SYSTEM_PROMPT.chars().take(20).collect::<String>()
+        );
+        assert!(
+            MAIN_AGENT_SYSTEM_PROMPT.len() > 3000,
+            "人设资产过短（{} 字节），疑似未内联",
+            MAIN_AGENT_SYSTEM_PROMPT.len()
+        );
+    }
+
+    /// 物理边界必须留在**生效**的人设里（R13，2026-10-18）。
+    ///
+    /// 背景：人设曾同时存在三份——专家包源、仓库根 `agents/` 草稿、以及真正被
+    /// `include_str!` 内联的 `core/src/agent/personas/`。**只有最后一份生效**，
+    /// 而「本机硬件边界（RTX 3050 Ti 4GB → 7B 不可本地训练）」那段恰好在**没人
+    /// 引用的草稿**里 → 模型读不到这条约束，就可能承诺本地训练 7B 这类物理
+    /// 不可能的事。现在收敛为单一真相源，并用本测试把它钉住。
+    ///
+    /// 硬件数字取自 2026-10-18 实测（CIM：i5-12500H 12C/16T、31.7 GB、
+    /// RTX 3050 Ti Laptop 4 GB）。若换机器，改人设资产 + 本断言一起改。
+    #[test]
+    fn main_persona_keeps_physical_boundary_of_this_machine() {
+        for needle in [
+            "RTX 3050 Ti",
+            "4 GB 显存",
+            "7B 不可行",
+            "不得把\"集成\"包装成\"训练\"",
+        ] {
+            assert!(
+                MAIN_AGENT_SYSTEM_PROMPT.contains(needle),
+                "生效人设必须保留本机物理边界条款：缺「{needle}」"
+            );
+        }
+    }
+
+    /// 生效人设必须保留「读题台账」与「PRD 门禁」两条前置纪律（2026-10-21）。
+    ///
+    /// 背景：用户连续两轮批评本智能体「老是没有读完我发的提示词」「没写 PRD」。
+    /// 根因不是能力，而是人设里**没有任何可判定的产物要求** —— 于是漏读与范围膨胀
+    /// 无人可查。修复方式是把它们写成硬条款（台账 R1–RN / PRD 未落盘不得写业务代码），
+    /// 并用本测试钉住：任何人删掉这几句，门禁立即变红。
+    ///
+    /// 与 `main_persona_keeps_physical_boundary_of_this_machine` 同一思路：
+    /// **关键约束必须留在真正被 `include_str!` 内联的那一份里**，不能只写在
+    /// 专家包源或草稿里（历史上正是「写在了没人引用的草稿」导致约束失效）。
+    #[test]
+    fn main_persona_keeps_intake_and_prd_gates() {
+        for needle in [
+            "需求台账",
+            "验收信号",
+            "漏读",
+            "等等",
+            "PRD 门禁",
+            "非目标",
+            "改动契约",
+        ] {
+            assert!(
+                MAIN_AGENT_SYSTEM_PROMPT.contains(needle),
+                "生效人设必须保留读题/PRD 门禁条款：缺「{needle}」"
+            );
+        }
+        // 门禁必须在**正文前部**（用户批评的是"动手太快"，条款埋在尾部等于没有）
+        let intake_pos = MAIN_AGENT_SYSTEM_PROMPT.find("第 0 条：先读完").unwrap_or(usize::MAX);
+        let first_capability = MAIN_AGENT_SYSTEM_PROMPT.find("核心能力").unwrap_or(usize::MAX);
+        assert!(
+            intake_pos < first_capability,
+            "读题条款必须排在「核心能力」之前，否则模型会先动手后读题"
         );
     }
 
@@ -673,7 +918,7 @@ mod tests {
         assert!(p.contains("只读我这一句"), "core 段应保留: {p}");
         assert!(!p.contains("<!--persona-complete-->"), "标记应剥除: {p}");
         assert!(!p.contains("技能组合"), "complete 后技能段应被阻断: {p}");
-        assert!(!p.contains("可用工具"), "complete 后工具段应被阻断: {p}");
+        assert!(!p.contains("偏好工具"), "complete 后工具段应被阻断: {p}");
         let _ = delete("persona-complete-agent");
     }
 

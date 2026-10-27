@@ -2,32 +2,47 @@
   <div class="control-stage terminal-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">终端沙箱</h1>
-        <p class="control-stage__subtitle">独立终端页：sandbox.terminal.spawn / input / read / kill（与工作台面板同源）</p>
+        <h1 class="control-stage__title">{{ t('terminal.title') }}</h1>
+        <p class="control-stage__subtitle">{{ t('terminal.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
         <span class="terminal-badge" :class="{ 'is-running': running }">
           <span class="terminal-dot" aria-hidden="true"></span>
-          {{ connected ? (running ? '运行中' : '会话已结束') : '未连接' }}
+          {{ connected ? (running ? t('terminal.running') : t('terminal.ended')) : t('terminal.disconnected') }}
         </span>
+        <button class="btn btn--ghost" :disabled="busy || !connected || !running" @click="interrupt">
+          <Icon name="stop" :size="16" /><span>{{ t('terminal.interrupt') }}</span>
+        </button>
         <button class="btn btn--ghost" :disabled="busy" @click="restart">
-          <Icon name="refresh" :size="16" /><span>重启</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('terminal.restart') }}</span>
         </button>
         <button class="btn btn--ghost" :disabled="busy || !connected" @click="kill">
-          <Icon name="stop" :size="16" /><span>终止</span>
+          <Icon name="x" :size="16" /><span>{{ t('terminal.kill') }}</span>
         </button>
       </div>
     </header>
 
-    <section v-if="error" class="terminal-error">{{ error }}</section>
+    <div v-if="warning" class="terminal-warning" role="status" data-testid="terminal-warning">
+      <Icon name="info" :size="15" /><span>{{ warning }}</span>
+    </div>
+
+    <ErrorState v-if="error" :message="error" :on-retry="restart" />
 
     <section class="terminal-shell">
       <div class="terminal-shell__head">
         <code v-if="cwd">{{ cwd }}</code>
         <code v-else>sandbox shell</code>
-        <span class="terminal-shell__hint">回车执行 · Ctrl+C 语义经 input 发送</span>
+        <span
+          v-if="roots.length > 1"
+          class="terminal-shell__roots"
+          :title="rootsHint"
+          data-testid="terminal-roots"
+        >{{ t('terminal.roots.count', { n: roots.length }) }}</span>
+        <span v-if="shellLabel" class="terminal-shell__shell">{{ shellLabel }}</span>
+        <span class="terminal-shell__hint">{{ t('terminal.hint') }}</span>
       </div>
-      <pre ref="outputRef" class="terminal-output" data-testid="terminal-output">{{ output || '（等待输出…）' }}</pre>
+      <pre ref="outputRef" class="terminal-output" data-testid="terminal-output">{{ output || t('terminal.waitingOutput') }}</pre>
+      <p v-if="lostBytes > 0" class="terminal-lost">{{ t('terminal.lostOutput', { n: lostBytes }) }}</p>
       <form class="terminal-input-row" @submit.prevent="send">
         <span class="terminal-prompt" aria-hidden="true">&gt;</span>
         <input
@@ -37,40 +52,133 @@
           autocomplete="off"
           spellcheck="false"
           :disabled="!connected || !running"
-          placeholder="输入命令（如 pwd / dir / echo hello）"
+          :placeholder="t('terminal.inputPlaceholder')"
           data-testid="terminal-input"
+          @keydown.ctrl.c.prevent="interrupt"
         />
         <button class="btn btn--primary" type="submit" :disabled="!connected || !running || !command.trim()">
-          <Icon name="send" :size="14" /><span>发送</span>
+          <Icon name="send" :size="14" /><span>{{ t('terminal.send') }}</span>
         </button>
       </form>
     </section>
 
-    <p class="terminal-note">终端在工作区沙箱内执行（网关回环托管）；会话随页面销毁而终止。若需长期后台任务请使用 Cron / 任务队列。</p>
+    <p class="terminal-note">{{ t('terminal.note') }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
+import ErrorState from '@/components/ErrorState.vue'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
+import { useSessions } from '@/composables/useSessions'
+import { notifyReadFailure } from '@/utils/readFailureNotice'
 
-interface SpawnResult { ok?: boolean; terminal?: { id: string; cwd: string; running: boolean }; error?: string }
-interface ReadResult { ok?: boolean; output?: string; running?: boolean; error?: string }
+interface SpawnResult {
+  ok?: boolean
+  terminal?: {
+    id: string
+    cwd: string
+    running: boolean
+    shell?: string
+    shellLabel?: string
+    cursor?: number
+  }
+  /** 后端实际接受的合法根（越界回落时与请求值不同）。 */
+  roots?: string[] | null
+  error?: string
+  warning?: string | null
+}
+interface ReadResult {
+  ok?: boolean
+  output?: string
+  cursor?: number
+  lost?: number
+  running?: boolean
+  exitCode?: number | null
+  error?: string
+}
+
+const MAX_BUFFER_CHARS = 400_000
 
 const rpc = useRpcStore()
+const route = useRoute()
+const sessionStore = useSessions()
+const { t } = useI18n()
 const connected = ref(false)
 const running = ref(false)
 const cwd = ref('')
 const output = ref('')
 const command = ref('')
 const error = ref('')
+const warning = ref('')
+const shellLabel = ref('')
+const lostBytes = ref(0)
 const busy = ref(false)
+const roots = ref<string[]>([])
 const outputRef = ref<HTMLElement | null>(null)
 
 let terminalId = ''
 let pollTimer: number | null = null
 let killed = false
+// 游标读取：只追加增量，避免「两次轮询之间有人取走输出」导致丢内容。
+let cursor = 0
+
+const rootsHint = computed(() =>
+  roots.value.length
+    ? `${t('terminal.roots.hint')}\n${roots.value.join('\n')}`
+    : '',
+)
+
+/** 过滤空值、去重（忽略 `\` 与 `/`、尾斜杠差异），保留原有优先级顺序。 */
+function normalizeRoots(input: unknown): string[] {
+  if (!Array.isArray(input)) return []
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const entry of input) {
+    const path = typeof entry === 'string' ? entry.trim() : ''
+    if (!path) continue
+    const key = path.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (seen.has(key)) continue
+    seen.add(key)
+    list.push(path)
+  }
+  return list
+}
+
+/**
+ * 当前会话的工作根：独立终端页没有工作台 item，用全站约定的 `?session=` 查询参数
+ * 定位会话（与 App.vue 的 currentSessionKey 同源），再取 `projectPaths`。
+ *
+ * 拿不到会话（例如直接从导航进入 /terminal）时返回空数组，spawn 保持旧行为，
+ * 由网关决定单一工作根。
+ */
+async function resolveRoots(): Promise<string[]> {
+  const rawSession = route.query.session
+  const sessionKey = typeof rawSession === 'string' ? rawSession.trim() : ''
+  if (!sessionKey) return []
+  try {
+    await sessionStore.loadSessions()
+  } catch {
+    // 工作根读不出来：spawn 会退化成网关默认目录，终端里 `pwd` 与预期不符。
+    // 这是终端类失败，必须提示「手动刷新」，不能静默。
+    notifyReadFailure('terminal.status', 'terminal.statusReadFailed')
+    return []
+  }
+  const hit = sessionStore.sessionsList.value.find((entry) => {
+    if (!entry || typeof entry !== 'object') return false
+    const row = entry as { key?: string; session?: string; sessionKey?: string }
+    return (row.key || row.session || row.sessionKey) === sessionKey
+  }) as { projectPaths?: string[]; projectPath?: string; workspace?: string } | undefined
+  const paths = normalizeRoots(hit?.projectPaths)
+  if (paths.length) return paths
+  const single = typeof hit?.projectPath === 'string' ? hit.projectPath.trim() : ''
+  if (single) return [single]
+  const legacy = typeof hit?.workspace === 'string' ? hit.workspace.trim() : ''
+  return legacy ? [legacy] : []
+}
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -81,25 +189,45 @@ function stopPolling(): void {
 
 function startPolling(): void {
   stopPolling()
-  pollTimer = window.setInterval(() => { void poll() }, 400)
+  pollTimer = window.setInterval(() => { void poll() }, 250)
 }
 
 async function spawn(): Promise<void> {
   busy.value = true
   error.value = ''
+  warning.value = ''
   try {
-    const r = await rpc.call<SpawnResult>('sandbox.terminal.spawn')
+    // 冷加载竞态守卫：WS 仍处于 connecting 时先等连接就绪。
+    if (!rpc.isConnected) await rpc.waitForConnection(10_000)
+    const resolved = await resolveRoots()
+    roots.value = resolved
+    const payload: Record<string, unknown> = {}
+    // 多根传 `roots`（顺序即优先级）；单根仍传 `root`，兼容旧后端。
+    if (resolved.length > 1) payload.roots = resolved
+    else if (resolved.length === 1) payload.root = resolved[0]
+    const r = await rpc.call<SpawnResult>(
+      'sandbox.terminal.spawn',
+      Object.keys(payload).length ? payload : undefined,
+    )
     if (r.ok && r.terminal) {
       terminalId = r.terminal.id
       cwd.value = r.terminal.cwd || ''
+      shellLabel.value = r.terminal.shellLabel || ''
+      cursor = Number(r.terminal.cursor ?? 0)
       connected.value = true
       running.value = r.terminal.running !== false
+      warning.value = r.warning || ''
+      roots.value = normalizeRoots(
+        Array.isArray(r.roots) && r.roots.length ? r.roots : resolved,
+      )
       output.value = ''
+      lostBytes.value = 0
       startPolling()
     } else {
       connected.value = false
       running.value = false
-      error.value = r.error || '终端启动失败'
+      error.value = r.error || t('terminal.spawnFailed')
+      warning.value = r.warning || ''
     }
   } catch (e) {
     connected.value = false
@@ -113,9 +241,14 @@ async function spawn(): Promise<void> {
 async function poll(): Promise<void> {
   if (!terminalId) return
   try {
-    const r = await rpc.call<ReadResult>('sandbox.terminal.read', { terminalId })
+    const r = await rpc.call<ReadResult>('sandbox.terminal.read', { terminalId, cursor })
     if (r.ok) {
-      output.value = String(r.output ?? '')
+      const chunk = String(r.output ?? '')
+      if (chunk) {
+        output.value = (output.value + chunk).slice(-MAX_BUFFER_CHARS)
+      }
+      if (typeof r.cursor === 'number' && r.cursor >= cursor) cursor = r.cursor
+      if (typeof r.lost === 'number' && r.lost > 0) lostBytes.value = r.lost
       running.value = r.running === true
       connected.value = true
       error.value = ''
@@ -139,30 +272,60 @@ async function send(): Promise<void> {
   if (!data || !terminalId || !running.value) return
   command.value = ''
   try {
-    await rpc.call('sandbox.terminal.input', { terminalId, data })
-  } catch {
-    // 输入失败不中断；read 轮询会反映实际状态
+    const res = await rpc.call<{ ok?: boolean; error?: string }>('sandbox.terminal.input', {
+      terminalId,
+      data,
+    })
+    if (res?.ok === false) {
+      output.value = `${output.value}\r\n[拒绝] ${res.error || 'input rejected'}\r\n`.slice(-MAX_BUFFER_CHARS)
+    }
+  } catch (e) {
+    output.value = `${output.value}\r\n[错误] ${e instanceof Error ? e.message : String(e)}\r\n`.slice(-MAX_BUFFER_CHARS)
   }
 }
 
-async function kill(): Promise<void> {
+async function interrupt(): Promise<void> {
+  if (!terminalId || !running.value) return
+  try {
+    await rpc.call('sandbox.terminal.key', { terminalId, sequence: 'ctrl-c' })
+  } catch {
+    // 中断失败不破坏会话
+  }
+}
+
+/** 返回 `false` 表示服务端未确认已停止——不能谎报「已断开」。 */
+async function kill(): Promise<boolean> {
   const id = terminalId
+  if (!id || killed) return true
+  killed = true
+  try {
+    const res = await rpc.call<{ ok?: boolean; error?: string }>('sandbox.terminal.kill', {
+      terminalId: id,
+    })
+    if (res?.ok === false) {
+      error.value = res.error || '终端未能终止，可能仍在运行；请重试'
+      return false
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    return false
+  } finally {
+    killed = false
+  }
   terminalId = ''
   stopPolling()
   connected.value = false
   running.value = false
-  if (!id || killed) return
-  killed = true
-  try {
-    await rpc.call('sandbox.terminal.kill', { terminalId: id })
-  } catch {
-    // 忽略终止失败
-  }
-  killed = false
+  return true
 }
 
 async function restart(): Promise<void> {
-  await kill()
+  // 终止未确认时不重启：避免旧进程留在后台、新进程再占一套资源。
+  if (!(await kill())) return
+  output.value = ''
+  cursor = 0
+  lostBytes.value = 0
+  error.value = ''
   await spawn()
 }
 
@@ -180,12 +343,15 @@ onUnmounted(() => {
 .terminal-badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; background: color-mix(in srgb, var(--text) 8%, var(--card)); font-size: 12px; color: var(--text-dim); }
 .terminal-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
 .terminal-badge.is-running .terminal-dot { background: var(--accent); }
-.terminal-error { margin: 12px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
+.terminal-warning { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 8px 12px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); font-size: 12px; }
 .terminal-shell { background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); overflow: hidden; }
 .terminal-shell__head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); font-size: 12px; color: var(--text-dim); }
 .terminal-shell__head code { font-family: var(--font-mono); }
+.terminal-shell__roots { flex: 0 0 auto; padding: 0 8px; border: 1px solid var(--hairline); border-radius: 999px; font-size: 11px; color: var(--text-dim); cursor: help; white-space: nowrap; }
+.terminal-shell__shell { font-size: 11px; color: var(--accent); }
 .terminal-shell__hint { font-size: 11px; }
 .terminal-output { min-height: 320px; max-height: 60vh; overflow: auto; margin: 0; padding: 14px 12px; background: var(--bg); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text); }
+.terminal-lost { margin: 0; padding: 4px 12px; font-size: 11px; color: var(--warn); border-top: 1px solid var(--hairline); }
 .terminal-input-row { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--hairline); }
 .terminal-prompt { font-family: var(--font-mono); color: var(--accent); font-weight: 700; }
 .terminal-input { flex: 1; padding: 9px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px; }

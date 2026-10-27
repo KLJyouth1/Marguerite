@@ -84,6 +84,22 @@ pub struct ModelRouter {
     cache: Arc<PrefixCache>,
     /// 档位治理状态（M3）。`None` = 未启用，行为与历史完全一致（零回归）。
     tier_governance: Option<TierGovernance>,
+    /// 钉住 active 本地模型（回环端点）。
+    ///
+    /// 当 active 模型的 `base_url` 指向回环端点（`localhost` / `127.0.0.1` /
+    /// `0.0.0.0` / `::1`，典型为本机 Ollama 等本地引擎）时置 true：此后
+    /// [`ModelRouter::resolve_model`] 不再按内置意图/复杂度路由表（默认 deepseek
+    /// 档位，含 priority-50 catch-all）把请求改写到云端模型，所有意图/复杂度都走
+    /// 用户显式激活的本地模型；故障转移链也不引入云 sibling（对本地模型
+    /// `provider_tiers` 本就为空，这里再显式置空做双保险）。
+    ///
+    /// 真机根因（用户「本地模型已就绪，但模型路由保存后仍连不上」）：工具回路
+    /// 经团队/集群执行后，`synthesize` 调 `lead.process_input` → `chat_for` →
+    /// `select_model` 命中静态路由表（如 Code+Medium → deepseek-v4-flash、
+    /// catch-all → deepseek-v4-pro），这些云端模型在本机 base_url 上 404，
+    /// active 的本地模型被忽略。云端部署（非回环 base_url）此位恒 false，
+    /// 路由表行为完全不变（零回归）。
+    pin_active_model: bool,
 }
 
 /// 档位治理状态（M3）：把档位准入真正接到**实际调用链**上所需的最小状态。
@@ -98,6 +114,19 @@ pub struct TierGovernance {
     pub tier: crate::model::tier::ModelTier,
     /// 档案表：既是准入判定的输入，也是候选接入配置的唯一来源
     pub registry: Arc<crate::model::registry::ModelRegistry>,
+    /// 凭证台账：档内候选与主客户端必须**同源解析密钥**。
+    ///
+    /// 为什么必须有这一项（否则接线等于白接）：`ModelProfile.api_key` 按设计恒为空
+    /// ——密钥绝不落 `models.json`，只在发请求时经台账解析。若档内候选直接
+    /// `p.to_llm_config()`，接上档位治理换来的只是一串**必然 401** 的云端回退后端：
+    /// 主模型失败时它们救不了场，却会在离线/CI 环境里对真实云端发起请求。
+    pub credentials: Option<Arc<crate::credentials::CredentialsStore>>,
+    /// 用户显式排序的候选档案 id（`config.yaml model_routing.candidate_models`）。
+    ///
+    /// 语义刻意限定为**排序**、不是**放行**：这些 id 只能把已在档内准入的候选
+    /// 提到前面，不能让被准入线拒绝的档案混进链里。若做成放行，一个手填的 id
+    /// 就能绕过能力/价格门槛，把"档位治理"变成装饰。
+    pub preferred_candidates: Vec<String>,
 }
 
 /// M3：把档位准入结果组装为候选客户端（**不含首选**，由调用方置于链首）。
@@ -110,16 +139,64 @@ pub(crate) fn tier_clients(
     registry: &crate::model::registry::ModelRegistry,
     tier: crate::model::tier::ModelTier,
     cache: &Arc<PrefixCache>,
+    credentials: Option<&Arc<crate::credentials::CredentialsStore>>,
 ) -> (Vec<Arc<LLMClient>>, crate::model::tier::TierChain) {
-    let chain = registry.tier_chain(tier);
+    let mut chain = registry.tier_chain(tier);
     let mut out = Vec::new();
     for id in &chain.candidates {
         // `candidates` 已由 filter_chain 保证命中档案表；这里再取一次以拿到接入配置。
-        if let Some(p) = registry.profiles.get(id) {
-            out.push(Arc::new(LLMClient::new(p.to_llm_config()).with_cache(cache.clone())));
+        let Some(p) = registry.profiles.get(id) else {
+            continue;
+        };
+        let mut cfg = p.to_llm_config();
+        // 与主客户端同源解析密钥（见 `TierGovernance::credentials` 的说明）。
+        if let Some(store) = credentials {
+            cfg.api_key = crate::credentials::resolve_llm_key(store, &p.provider, &cfg.api_key);
         }
+        // 只把**真正可用**的候选放进回退链。缺密钥的云档案只会 401：放进链里既救不了场，
+        // 又会在离线/CI 环境对真实云端发起请求（把"更稳"变成"更慢更吵"）。
+        // 本地档案（Ollama 等，ProfileKind::Local）走本机端点，无需密钥。
+        let usable = p.kind == crate::model::registry::ProfileKind::Local
+            || !cfg.api_key.trim().is_empty();
+        if !usable {
+            chain
+                .rejected
+                .push((id.clone(), vec!["无可用密钥（云档案，凭证台账未命中）".to_string()]));
+            continue;
+        }
+        out.push(Arc::new(LLMClient::new(cfg).with_cache(cache.clone())));
     }
     (out, chain)
+}
+
+/// 按用户声明的候选 id 重排（稳定排序；未命中的保持原位）。
+///
+/// 为什么按 `(base_url, model)` 匹配而不是 id：候选客户端是从档案派生的，
+/// 同一 id 在链里已由 `tier_clients` 转成接入配置；用接入三元组对账才能保证
+/// 「排的是同一条链路」，也不会因为档案被改名而错排到别的模型上。
+pub(crate) fn order_by_preferred(
+    backends: Vec<Arc<LLMClient>>,
+    registry: &crate::model::registry::ModelRegistry,
+    preferred: &[String],
+) -> Vec<Arc<LLMClient>> {
+    if preferred.is_empty() {
+        return backends;
+    }
+    let rank = |c: &Arc<LLMClient>| -> usize {
+        preferred
+            .iter()
+            .position(|id| {
+                registry
+                    .profiles
+                    .get(id)
+                    .map(|p| p.base_url == c.config.base_url && p.model == c.config.model)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(usize::MAX)
+    };
+    let mut out = backends;
+    out.sort_by_key(rank);
+    out
 }
 
 impl ModelRouter {
@@ -141,18 +218,30 @@ impl ModelRouter {
         let template_config = Self::build_template_config(config);
         let default_client =
             Arc::new(LLMClient::new(template_config.clone()).with_cache(cache.clone()));
+        // active 模型为本地推理运行时（Ollama 等）时钉住：不按静态路由表改写、
+        // 不引入云 sibling。注意**不能**只看回环 URL——测试/离线用 `custom` 云端
+        // provider + 不可达回环地址（127.0.0.1:1）模拟云端离线，那不是本地模型，
+        // 必须按 provider 判别，否则会把云端路由表钉死。
+        let pin_active_model =
+            is_local_model_endpoint(&config.model.provider, &config.model.base_url);
 
         Self {
             default_client,
             fallback_client: None,
             // W-4 生产接线：默认即构造故障转移链（派生同提供商备用模型），
             // 使 provider 故障转移在默认构造下激活，无需调用方显式 with_fallback_chain。
-            failover_chain: Self::default_failover_chain(config, &cache),
+            // 钉住本地模型时显式置空（不派生云回退）。
+            failover_chain: if pin_active_model {
+                Vec::new()
+            } else {
+                Self::default_failover_chain(config, &cache)
+            },
             routing_rules: default_routing_rules(),
             clients: Mutex::new(HashMap::new()),
             template_config,
             cache,
             tier_governance: None,
+            pin_active_model,
         }
     }
 
@@ -169,6 +258,12 @@ impl ModelRouter {
     }
 
     /// 凭证缝 + 共享缓存联合构造：`cache` 为 Some 时复用共享实例，None 时新建。
+    ///
+    /// 注意：本构造函数**只认传入的 `config`**（纯函数、可测）。「用户选了哪个模型」这件
+    /// 事由**会话入口**决定（见 [`crate::model::selector::apply_effective_model`]）：
+    /// 会话入口先把 `models.json` 的 active 档案叠加进 config，再交给这里。
+    /// 分层的原因：若在这里读全局 `models.json`，单测就会依赖开发者本机的模型档库
+    /// （「在我机器上通过」的陷阱）。
     pub fn new_with_credentials_and_cache(
         config: &Config,
         credentials: Option<Arc<crate::credentials::CredentialsStore>>,
@@ -323,10 +418,12 @@ impl ModelRouter {
     pub fn tier_candidate_chain(
         &self,
         primary: Arc<LLMClient>,
-        tier: crate::model::tier::ModelTier,
-        registry: &crate::model::registry::ModelRegistry,
+        g: &TierGovernance,
     ) -> (Vec<Arc<LLMClient>>, crate::model::tier::TierChain) {
-        let (backends, chain) = tier_clients(registry, tier, &self.cache);
+        let (backends, chain) =
+            tier_clients(&g.registry, g.tier, &self.cache, g.credentials.as_ref());
+        // 用户显式排序（model_routing.candidate_models）只改顺序、不放行。
+        let backends = order_by_preferred(backends, &g.registry, &g.preferred_candidates);
         let mut out = Vec::with_capacity(backends.len() + 1);
         out.push(primary);
         out.extend(backends);
@@ -346,9 +443,36 @@ impl ModelRouter {
         mut self,
         tier: crate::model::tier::ModelTier,
         registry: Arc<crate::model::registry::ModelRegistry>,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> Self {
-        self.tier_governance = Some(TierGovernance { tier, registry });
+        self.tier_governance = Some(TierGovernance {
+            tier,
+            registry,
+            credentials,
+            preferred_candidates: Vec::new(),
+        });
         self
+    }
+
+    /// 设置用户显式排序的候选档案（`model_routing.candidate_models`）。
+    ///
+    /// 只影响**顺序**，不影响准入（见 `TierGovernance::preferred_candidates`）。
+    /// 必须在 [`Self::with_tier_governance`] / [`Self::with_auto_tier`] 之后调用；
+    /// 未开档位治理时是 no-op —— 历史候选链保持原样，零回归。
+    #[must_use]
+    pub fn with_preferred_candidates(mut self, ids: Vec<String>) -> Self {
+        if let Some(g) = self.tier_governance.as_mut() {
+            g.preferred_candidates = ids;
+        }
+        self
+    }
+
+    /// 当前档位治理状态（`None` = 未启用）。
+    ///
+    /// 供 doctor / 控制中心 / **接线守卫用例**观测"档位准入是否真的在治理候选链"，
+    /// 而不是只能靠读代码判断 —— 这段接线的历史缺陷正是"实现了但零调用点"。
+    pub fn tier_governance(&self) -> Option<&TierGovernance> {
+        self.tier_governance.as_ref()
     }
 
     /// 由请求画像**自动判定**生效档，并据此开启档位治理（M3 闭环入口）。
@@ -362,9 +486,13 @@ impl ModelRouter {
         self,
         req: &crate::model::tier::TierRequest,
         registry: Arc<crate::model::registry::ModelRegistry>,
+        credentials: Option<Arc<crate::credentials::CredentialsStore>>,
     ) -> (Self, crate::model::tier::TierDecision) {
         let decision = crate::model::tier::resolve_tier(req);
-        (self.with_tier_governance(decision.tier, registry), decision)
+        (
+            self.with_tier_governance(decision.tier, registry, credentials),
+            decision,
+        )
     }
 
     /// 一次调用**实际**使用的候选链：开了档位治理走档位准入，否则走历史链。
@@ -376,7 +504,7 @@ impl ModelRouter {
         match &self.tier_governance {
             // 未开启 → 与历史逐字节等价（默认零行为变更）
             None => self.candidate_chain(primary),
-            Some(g) => self.tier_candidate_chain(primary, g.tier, &g.registry).0,
+            Some(g) => self.tier_candidate_chain(primary, g).0,
         }
     }
 
@@ -391,6 +519,10 @@ impl ModelRouter {
     /// 同 priority 的平局保留**表首**（先出现者），使选择结果确定、可复现，
     /// 不再依赖 [`Iterator::max_by_key`] 在平局时返回「末位」的迭代序语义。
     fn resolve_model(&self, intent: &IntentType, complexity: &Complexity) -> String {
+        // 钉住 active 本地模型：所有意图/复杂度都走 active 模型，不扫内置路由表。
+        if self.pin_active_model {
+            return self.default_client.config.model.clone();
+        }
         let mut best: Option<&ModelRoutingRule> = None;
         for rule in &self.routing_rules {
             let intent_matches = match &rule.intent_pattern {
@@ -530,6 +662,11 @@ impl ModelRouter {
             .as_ref()
             .clone()
             .with_adaptive_profile(kind);
+        // 用户显式档位优先于自适应：UI 选 deep/max 时不能被任务分类改回 off。
+        let client = match crate::model::thinking::current_turn_effort() {
+            Some(effort) => client.with_thinking(effort),
+            None => client,
+        };
         client
             .chat_complete_with_tools_cached(messages, tools)
             .await
@@ -627,9 +764,12 @@ impl ModelRouter {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<StreamReceiver> {
-        self.default_client
-            .chat_stream_with_tools(messages, tools)
-            .await
+        // 同上：本轮显式档位覆盖客户端配置，否则流式主路径永远用装配时的 Off。
+        let client = match crate::model::thinking::current_turn_effort() {
+            Some(effort) => Arc::new(self.default_client.as_ref().clone().with_thinking(effort)),
+            None => self.default_client.clone(),
+        };
+        client.chat_stream_with_tools(messages, tools).await
     }
 
     /// 获取默认客户端引用
@@ -654,6 +794,7 @@ impl Clone for ModelRouter {
             clients: Mutex::new(self.clients.lock().unwrap().clone()),
             template_config: self.template_config.clone(),
             cache: self.cache.clone(),
+            pin_active_model: self.pin_active_model,
         }
     }
 }
@@ -838,7 +979,106 @@ fn routing_config() -> &'static RoutingConfigFile {
     })
 }
 
-/// 默认路由规则
+/// 判断 `base_url` 是否指向**回环本地端点**（本机引擎，如 Ollama）。
+///
+/// 解析步骤（纯字符串处理，不依赖外部 URL 解析器）：
+/// 1. 剥离 scheme（`xxx://`，无 scheme 时从头开始）；
+/// 2. 取 authority（首个 `/` `?` `#` 之前），并剥掉 userinfo（`@` 之前）；
+/// 3. 取 host（`[` `]` 包裹的 IPv6 去括号，否则按 `:` 切掉端口）；
+/// 4. host 为 `localhost` / `0.0.0.0` / `::1` / `127.x.x.x` 任一则回环。
+///
+/// `0.0.0.0` 在多数客户端被解析为回环，且本地引擎常监听它，故一并算回环。
+/// 空串判 false（无端点信息，不贸然钉住）。
+pub(crate) fn is_loopback_endpoint(base_url: &str) -> bool {
+    let s = base_url.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // 1. 剥离 scheme
+    let after_scheme = match s.find("://") {
+        Some(i) => &s[i + 3..],
+        None => s,
+    };
+    // 2. 取 authority 并剥 userinfo
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = match authority.rsplit_once('@') {
+        Some((_, hostpart)) => hostpart,
+        None => authority,
+    };
+    // 3. 取 host（IPv6 字面量或切端口）
+    let host = if let Some(close) = authority.strip_prefix('[').and_then(|h| h.find(']')) {
+        &authority[1..close + 1]
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    };
+    let host = host.trim();
+    // 4. 回环判定
+    host.eq_ignore_ascii_case("localhost")
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host.starts_with("127.")
+}
+
+/// 明确的本地推理运行时 provider 标识（经 Ollama deploy 激活时 provider="ollama"）。
+const LOCAL_INFERENCE_PROVIDERS: &[&str] = &[
+    "ollama",
+    "llamacpp",
+    "llama.cpp",
+    "llama_cpp",
+    "lmstudio",
+    "koboldcpp",
+    "local",
+    "ggml",
+    "opencode",
+    "tabby",
+];
+
+/// 明确的云端 provider（即使配了回环地址也不视为本地模型）。
+const CLOUD_PROVIDERS: &[&str] = &[
+    "deepseek",
+    "openai",
+    "anthropic",
+    "custom",
+    "google",
+    "gemini",
+    "mistral",
+    "xai",
+    "openrouter",
+];
+
+/// 该 provider 是否属于已知云端厂商。
+///
+/// 供 `byok::is_keyless_endpoint` 判断「回环地址是不是本地代理」——
+/// 那一侧**不能**直接复用 [`is_local_model_endpoint`]，因为两者语义不同：
+/// 路由侧把 `custom` 当云端（避免把用户自定义端点钉住），
+/// 而凭据侧必须把 `custom` + 回环当本地服务器（LM Studio / llama.cpp 的典型配置）。
+pub(crate) fn is_known_cloud_provider(provider: &str) -> bool {
+    let p = provider.trim().to_ascii_lowercase();
+    !p.is_empty() && CLOUD_PROVIDERS.contains(&p.as_str())
+}
+
+/// active 模型是否为本地推理模型（决定是否钉住、不被静态路由表改写）。
+///
+/// 规则：
+/// 1. provider 明确是本地运行时（Ollama 等）→ 是；
+/// 2. 否则，base_url 回环**且** provider 不是已知云端厂商（也非空）→ 是
+///    （覆盖用户自建的本地 OpenAI 兼容服务器）；
+/// 3. 其它（含 `custom` 云端 provider + 不可达回环地址模拟离线）→ 否。
+pub(crate) fn is_local_model_endpoint(provider: &str, base_url: &str) -> bool {
+    let p = provider.trim().to_ascii_lowercase();
+    if LOCAL_INFERENCE_PROVIDERS.contains(&p.as_str()) {
+        return true;
+    }
+    if p.is_empty() || CLOUD_PROVIDERS.contains(&p.as_str()) {
+        return false;
+    }
+    is_loopback_endpoint(base_url)
+}
+
+/// 默认路由规则。
 ///
 /// 档位分层（沿用既有 priority 风格，定义见 `routing_rules.json`）：
 /// - **强档**（priority 100）：代码 / 推理 / 长上下文 / 视觉 / 复杂问答的中高复杂度
@@ -888,6 +1128,133 @@ mod tests {
         // 翻译任务 → 命中 priority 70 规则
         let client = router.select_model(&IntentType::Translation, Complexity::Simple);
         assert_eq!(client.config.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn is_loopback_endpoint_table() {
+        // 回环
+        for u in [
+            "http://localhost:11434",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434",
+            "http://127.1.2.3:8080",
+            "http://0.0.0.0:18790/control/",
+            "http://[::1]:11434",
+            "localhost:11434",
+            "http://user:pass@127.0.0.1:11434",
+        ] {
+            assert!(is_loopback_endpoint(u), "应判回环: {u}");
+        }
+        // 非回环
+        for u in [
+            "https://api.deepseek.com",
+            "https://openrouter.ai/api/v1",
+            "http://8.8.8.8:11434",
+            "https://192.168.1.10:8080",
+            "https://example.com",
+        ] {
+            assert!(!is_loopback_endpoint(u), "不应判回环: {u}");
+        }
+        // 空串不判
+        assert!(!is_loopback_endpoint(""));
+        assert!(!is_loopback_endpoint("   "));
+    }
+
+    #[test]
+    fn local_model_pinned_for_all_intents_and_complexities() {
+        let mut config = Config::default();
+        config.model.provider = "ollama".into();
+        config.model.model_name = "omnipilot16c:latest".into();
+        config.model.base_url = "http://localhost:11434".into();
+        config.model.api_key = String::new();
+        let router = ModelRouter::new(&config);
+
+        // 所有意图/复杂度都钉住 active 本地模型，不被路由表（deepseek）改写
+        for intent in [
+            IntentType::Code,
+            IntentType::Reasoning,
+            IntentType::Chat,
+            IntentType::Translation,
+            IntentType::Summarization,
+            IntentType::WebSearch,
+            IntentType::Vision,
+            IntentType::LongContext,
+            IntentType::General,
+        ] {
+            for complexity in [Complexity::Simple, Complexity::Medium, Complexity::Complex] {
+                let client = router.select_model(&intent, complexity.clone());
+                assert_eq!(
+                    client.config.model, "omnipilot16c:latest",
+                    "本地模型钉住失败：{intent:?} {complexity:?}"
+                );
+                assert_eq!(client.config.base_url, "http://localhost:11434");
+            }
+        }
+        // 钉住时故障转移链为空（不派生云 sibling）
+        assert!(router.failover_chain().is_empty(), "本地模型钉住不应有云回退链");
+        // 默认客户端仍是 active 模型
+        assert_eq!(router.default_client().config.model, "omnipilot16c:latest");
+    }
+
+    #[test]
+    fn cloud_model_routing_table_unchanged() {
+        let mut config = Config::default();
+        config.model.provider = "deepseek".into();
+        config.model.model_name = "deepseek-chat".into();
+        config.model.base_url = "https://api.deepseek.com".into();
+        let router = ModelRouter::new(&config);
+        // 非回环：路由表照旧生效（零回归）
+        assert_eq!(
+            router.select_model(&IntentType::Code, Complexity::Complex).config.model,
+            "deepseek-v4-pro"
+        );
+        assert_eq!(
+            router.select_model(&IntentType::Code, Complexity::Medium).config.model,
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn custom_cloud_provider_loopback_offline_does_not_pin() {
+        // 离线测试范式：custom 云端 provider + 不可达回环地址模拟云端离线，
+        // 不得当作本地模型钉住，静态路由表仍须正常解析（joint_call 用例钉住此契约）。
+        assert!(!is_local_model_endpoint("custom", "http://127.0.0.1:1"));
+        assert!(!is_local_model_endpoint("deepseek", "http://localhost:1"));
+        assert!(!is_local_model_endpoint("", "http://localhost:11434"));
+        // 明确本地 runtime 钉住
+        assert!(is_local_model_endpoint("ollama", "http://localhost:11434"));
+        // 非云端、回环的自建 OpenAI 兼容服务器钉住
+        assert!(is_local_model_endpoint("my-local", "http://127.0.0.1:8080"));
+        // 非云端但非回环不钉住
+        assert!(!is_local_model_endpoint("my-local", "http://192.168.1.5:8080"));
+
+        // 与 joint_call 同款 config：路由表照常
+        let mut config = Config::default();
+        config.model.provider = "custom".into();
+        config.model.model_name = "deepseek-v4-flash".into();
+        config.model.base_url = "http://127.0.0.1:1".into();
+        config.model.api_key = "offline-test".into();
+        let router = ModelRouter::new(&config);
+        assert_eq!(
+            router.select_model(&IntentType::Code, Complexity::Complex).config.model,
+            "deepseek-v4-pro"
+        );
+    }
+
+    #[test]
+    fn pin_field_preserved_by_clone() {
+        let mut config = Config::default();
+        // 本地 Ollama 模型：provider 必须是 ollama（经 deploy 激活的真实语义），
+        // 仅靠回环 URL 不再足以钉住（避免把 custom+127.0.0.1:1 的云端离线误判）。
+        config.model.provider = "ollama".into();
+        config.model.base_url = "http://127.0.0.1:11434".into();
+        config.model.model_name = "omnipilot17:latest".into();
+        let router = ModelRouter::new(&config);
+        let cloned = router.clone();
+        assert_eq!(
+            cloned.select_model(&IntentType::Code, Complexity::Complex).config.model,
+            "omnipilot17:latest"
+        );
     }
 
     #[test]
@@ -1179,6 +1546,31 @@ mod tests {
     }
 
     // ---- P-8 故障转移链（蒸馏 外部参考 provider-plane） ----
+
+    /// `model_routing.candidate_models` 只影响顺序、不放行（回归：此前该字段只写不读）。
+    #[test]
+    fn test_preferred_candidates_reorder_without_admitting() {
+        let reg = crate::model::registry::ModelRegistry::with_seeds();
+        let mut ids: Vec<&String> = reg.profiles.keys().collect();
+        ids.sort();
+        assert!(ids.len() >= 2, "种子档案不足两条，无法验证排序");
+        let a = reg.profiles.get(ids[0]).unwrap();
+        let b = reg.profiles.get(ids[1]).unwrap();
+        let ca = Arc::new(LLMClient::new(a.to_llm_config()));
+        let cb = Arc::new(LLMClient::new(b.to_llm_config()));
+
+        let ordered = order_by_preferred(
+            vec![ca.clone(), cb.clone()],
+            &reg,
+            &[b.id.clone(), a.id.clone()],
+        );
+        assert_eq!(ordered[0].config.model, b.model);
+        assert_eq!(ordered[1].config.model, a.model);
+
+        // 空列表 = 原序（历史行为零回归）
+        let same = order_by_preferred(vec![ca, cb], &reg, &[]);
+        assert_eq!(same[0].config.model, a.model);
+    }
 
     #[test]
     fn test_router_with_fallback_chain_builds() {
@@ -1533,13 +1925,102 @@ mod tests {
         // 不存在档案的客户端，故障会推迟到真正发请求时才炸，且现场信息丢失。
         let reg = crate::model::registry::ModelRegistry::default();
         let cache = crate::cache::default_prefix_cache();
-        let (clients, chain) =
-            tier_clients(&reg, crate::model::tier::ModelTier::Flagship, &cache);
+        let (clients, chain) = tier_clients(
+            &reg,
+            crate::model::tier::ModelTier::Flagship,
+            &cache,
+            None,
+        );
         assert!(clients.is_empty(), "空档案表不得产出任何候选客户端");
         assert!(chain.candidates.is_empty());
         assert!(
             !chain.missing.is_empty(),
             "链中所有 id 都应被记为 missing（数据漂移必须可见）"
+        );
+    }
+
+    #[test]
+    fn tier_candidates_resolve_keys_from_ledger_and_skip_useless_clouds() {
+        // 这条用例锁死两个真实缺陷，缺任何一个都会让"接线"变成白接：
+        // ① 档内候选若直接用档案里的 api_key（按设计恒为空），云端回退必然全 401；
+        // ② 把缺密钥的云端候选塞进回退链，会让离线/CI 环境对**真实云端**发起请求
+        //    —— 把"更稳"变成"更慢更吵"。
+        let dir =
+            std::env::temp_dir().join(format!("mgt_router_tierkey_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+        crate::vault::set_master_passphrase("test-vault-pass").unwrap();
+        let store = Arc::new(crate::credentials::CredentialsStore::load(
+            &dir.join("credentials.json"),
+        ));
+        store
+            .set_record(
+                &crate::credentials::CredentialKey::new("llm", "deepseek"),
+                crate::credentials::CredentialRecord::api_key("sk-from-store"),
+            )
+            .unwrap();
+
+        let reg = crate::model::registry::ModelRegistry::with_seeds();
+        let cache = crate::cache::default_prefix_cache();
+        let tier = crate::model::tier::ModelTier::Balanced;
+
+        // 无台账：云端候选一律缺密钥 → 全部剔出回退链，且剔除原因可解释
+        let (without, chain_without) = tier_clients(&reg, tier, &cache, None);
+        assert!(
+            without.is_empty(),
+            "缺密钥的云端候选不得进入回退链（否则回退必然 401）"
+        );
+        assert!(
+            !chain_without.rejected.is_empty(),
+            "被剔出链的候选必须留下可解释原因（对齐 RouteDecision.why）"
+        );
+
+        // 有台账：命中 provider 的候选拿到台账密钥，能真正充当回退后端
+        let (with_key, _) = tier_clients(&reg, tier, &cache, Some(&store));
+        assert!(!with_key.is_empty(), "台账命中时档内候选应可用");
+        for c in &with_key {
+            assert_eq!(
+                c.config.api_key, "sk-from-store",
+                "档内候选的密钥必须与主客户端同源解析（凭证台账）"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_profile_candidate_needs_no_api_key() {
+        // 本地档案（Ollama 等）走本机端点、无需密钥：绝不能因为"密钥为空"被误剔出链
+        // —— 否则"低运行环境"路线上的本地候选永远进不了回退链。
+        let mut reg = crate::model::registry::ModelRegistry::with_seeds();
+        let id = "anthropic-claude-haiku-4-5"; // turbo 档链内 id
+        let mut p = reg
+            .profiles
+            .get(id)
+            .cloned()
+            .expect("turbo 档链内应存在该档案");
+        p.kind = crate::model::registry::ProfileKind::Local;
+        p.api_key = String::new();
+        p.base_url = "http://127.0.0.1:11434".to_string();
+        // 必须显式声明「能过本档准入线」的能力：种子里 haiku 的 `tier_caps` 是**声明过**的
+        // （cost_per_m_out=5.0 > Turbo 准入 0.5），会被 filter_chain 正确拒绝 ——
+        // 那属于准入线在起作用，与本用例要验的「本地档案免密钥」是两件事。
+        // 取该档准入线本身作为声明值，使判定唯一取决于本用例关心的变量。
+        p.tier_caps = crate::model::tier::ModelTier::Turbo.caps();
+        p.tier_caps_declared = true;
+        reg.profiles.insert(id.to_string(), p);
+
+        let cache = crate::cache::default_prefix_cache();
+        let (clients, chain) = tier_clients(&reg, crate::model::tier::ModelTier::Turbo, &cache, None);
+        assert!(
+            clients
+                .iter()
+                .any(|c| c.config.base_url == "http://127.0.0.1:11434"),
+            "本地档案应无需密钥即可进入回退链（rejected={:?}），实得 {:?}",
+            chain.rejected,
+            clients
+                .iter()
+                .map(|c| c.config.base_url.clone())
+                .collect::<Vec<_>>()
         );
     }
 }

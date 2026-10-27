@@ -341,6 +341,10 @@ fn looks_like_param_error(detail: &str) -> bool {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// 允许自动修改的对象（**白名单，且不含核心源码**）
+///
+/// 变体保持 `Copy`（无载荷）；**具体是哪个专家/团队/技能，写在
+/// [`ImprovementPlan::mutation`] 的文本里**。这样做的代价是"改哪个对象"不再是
+/// 类型级信息，收益是 `ChangeTarget` 保持 `Copy`、且白名单的穷尽匹配不被破坏。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeTarget {
@@ -356,6 +360,21 @@ pub enum ChangeTarget {
     KnowledgeBase,
     /// few-shot 示例
     FewShot,
+    // ── RSI 扩展：让「专家 / 团队 / 蜂群 / 记忆 / 技能 / 检索 / 评测集」进闭环 ──
+    /// 专家（43 角色）的 checklist 维度与阈值
+    ExpertChecklist,
+    /// 团队（8 个）的 SOP 编排参数（阶段门、并行度）
+    TeamSop,
+    /// 蜂群规模与分工策略
+    SwarmPolicy,
+    /// 记忆分层权重（写入价值门、召回权重）
+    MemoryWeight,
+    /// 技能定义（前置条件 / 完成证据 / 反例）
+    SkillDefinition,
+    /// 检索策略（混合权重、召回阈值）
+    RetrievalPolicy,
+    /// 评测集本身（L5 元改进：改「怎么量」）
+    EvalTaskSet,
 }
 
 impl ChangeTarget {
@@ -367,15 +386,34 @@ impl ChangeTarget {
             Self::ToolScript => "tool_script",
             Self::KnowledgeBase => "knowledge_base",
             Self::FewShot => "few_shot",
+            Self::ExpertChecklist => "expert_checklist",
+            Self::TeamSop => "team_sop",
+            Self::SwarmPolicy => "swarm_policy",
+            Self::MemoryWeight => "memory_weight",
+            Self::SkillDefinition => "skill_definition",
+            Self::RetrievalPolicy => "retrieval_policy",
+            Self::EvalTaskSet => "eval_task_set",
         }
     }
 
     /// 该目标自带的风险级别
+    ///
+    /// 分级依据是**改坏了有多难发现**，不是改了多少行：
+    /// - 评测集是「量尺」，改它等于允许自己给自己出题 → High；
+    /// - 技能与蜂群直接改变可执行行为与并发 → High；
+    /// - 专家 checklist / 团队 SOP / 记忆权重 / 检索策略影响判断但不直接执行 → Medium。
     pub fn risk(self) -> RiskLevel {
         match self {
             Self::SystemPrompt | Self::TaskRules | Self::FewShot => RiskLevel::Low,
-            Self::ToolDefaultParams | Self::KnowledgeBase => RiskLevel::Medium,
-            Self::ToolScript => RiskLevel::High,
+            Self::ToolDefaultParams
+            | Self::KnowledgeBase
+            | Self::ExpertChecklist
+            | Self::TeamSop
+            | Self::MemoryWeight
+            | Self::RetrievalPolicy => RiskLevel::Medium,
+            Self::ToolScript | Self::SwarmPolicy | Self::SkillDefinition | Self::EvalTaskSet => {
+                RiskLevel::High
+            }
         }
     }
 }
@@ -424,6 +462,12 @@ pub struct MetaPolicy {
     pub max_token_growth: f64,
     /// 允许的时延涨幅（1.25 = 最多 +25%）
     pub max_latency_growth: f64,
+    /// 单个任务允许损失的通过回合数（`0` = 一个都不许丢）
+    ///
+    /// 这是**回归门控**的核心：只看总分会放过「总分涨、某任务崩」的情形。
+    pub max_per_task_loss: usize,
+    /// 红线任务 ID：只要退化就拒，不看总分涨多少
+    pub protected_tasks: Vec<String>,
 }
 
 impl Default for MetaPolicy {
@@ -434,6 +478,8 @@ impl Default for MetaPolicy {
             min_success_rate: 0.9,
             max_token_growth: 1.2,
             max_latency_growth: 1.25,
+            max_per_task_loss: 0,
+            protected_tasks: Vec::new(),
         }
     }
 }
@@ -509,11 +555,16 @@ impl EvalOutcome {
 }
 
 /// 采纳判据（阈值由策略给出，可测）
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// 注意：本结构**不是 `Copy`** —— `protected_tasks` 是 `Vec<String>`。
+/// 这是刻意的：红线集一旦被复制就可能出现两份不同的红线，宁可不给 `Copy`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionCriteria {
     pub min_success_rate: f64,
     pub max_token_growth: f64,
     pub max_latency_growth: f64,
+    pub max_per_task_loss: usize,
+    pub protected_tasks: Vec<String>,
 }
 
 impl From<&MetaPolicy> for PromotionCriteria {
@@ -522,8 +573,23 @@ impl From<&MetaPolicy> for PromotionCriteria {
             min_success_rate: p.min_success_rate,
             max_token_growth: p.max_token_growth,
             max_latency_growth: p.max_latency_growth,
+            max_per_task_loss: p.max_per_task_loss,
+            protected_tasks: p.protected_tasks.clone(),
         }
     }
+}
+
+/// 单个任务在一次回放中的结果 —— 任务级门控的输入。
+///
+/// 用 `passed / total` 而不是 `bool`：真实回放里一个任务往往有多个回合
+/// （Recursia 是每任务 50 个状态），丢 1 个和丢 20 个不是一回事。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskOutcome {
+    pub id: String,
+    /// 该任务通过的回合数
+    pub passed: usize,
+    /// 该任务的总回合数
+    pub total: usize,
 }
 
 /// 采纳裁决
@@ -538,6 +604,10 @@ pub enum PromotionVerdict {
     RejectBelowThreshold { rate: f64, required: f64 },
     /// 出现回退（有用例从通过变失败）
     RejectRegression { lost: usize },
+    /// 红线任务退化 —— 无论总分涨多少都拒
+    RejectProtectedTask { task: String },
+    /// 单任务损失超过上限（回归门控）
+    RejectTaskRegression { task: String, lost: usize, limit: usize },
     /// 成本超涨
     RejectCostRegression { growth: f64, limit: f64 },
     /// 时延超涨
@@ -556,10 +626,57 @@ impl PromotionVerdict {
             Self::RejectNoGain => "reject_no_gain",
             Self::RejectBelowThreshold { .. } => "reject_below_threshold",
             Self::RejectRegression { .. } => "reject_regression",
+            Self::RejectProtectedTask { .. } => "reject_protected_task",
+            Self::RejectTaskRegression { .. } => "reject_task_regression",
             Self::RejectCostRegression { .. } => "reject_cost_regression",
             Self::RejectLatencyRegression { .. } => "reject_latency_regression",
         }
     }
+}
+
+/// 任务级回归闸：**先红线、再单任务、最后才轮到总分**。
+///
+/// 返回 `Some(verdict)` 表示已被否决；`None` 表示任务级通过、可继续走
+/// [`evaluate_candidate`] 的聚合判定。
+///
+/// 为什么分成两步而不是一个函数：任务级只需要 [`TaskOutcome`]，聚合级需要
+/// [`EvalOutcome`]，两者数据来源不同。合成一个会让调用方误以为
+/// 「任务级通过 = 整体通过」—— 那正是这条闸要防的错。
+///
+/// 依据：Recursia 的公开案例里，总成功数 7/50 → 11/50，但某任务丢掉两个
+/// 原本通过的状态，候选**仍被拒绝**。只看总分会把这个案例判成进步。
+pub fn task_level_gate(
+    baseline: &[TaskOutcome],
+    candidate: &[TaskOutcome],
+    criteria: &PromotionCriteria,
+) -> Option<PromotionVerdict> {
+    let cand: std::collections::HashMap<&str, usize> =
+        candidate.iter().map(|t| (t.id.as_str(), t.passed)).collect();
+
+    // 1) 红线任务：基线有成功、候选变少 → 直接拒，不看总分
+    for id in &criteria.protected_tasks {
+        let Some(base_passed) = baseline.iter().find(|t| &t.id == id).map(|t| t.passed) else {
+            continue;
+        };
+        let now = cand.get(id.as_str()).copied().unwrap_or(0);
+        if now < base_passed {
+            return Some(PromotionVerdict::RejectProtectedTask { task: id.clone() });
+        }
+    }
+
+    // 2) 单任务损失上限：逐任务比，而不是比总和
+    for t in baseline {
+        let now = cand.get(t.id.as_str()).copied().unwrap_or(0);
+        let lost = t.passed.saturating_sub(now);
+        if lost > criteria.max_per_task_loss {
+            return Some(PromotionVerdict::RejectTaskRegression {
+                task: t.id.clone(),
+                lost,
+                limit: criteria.max_per_task_loss,
+            });
+        }
+    }
+    None
 }
 
 /// 沙箱门禁：候选必须**同时**满足成功率、无回退、成本与时延四条。
@@ -818,6 +935,25 @@ impl MetaAgent {
         baseline: Option<EvalOutcome>,
         candidate: Option<EvalOutcome>,
     ) -> MetaCycleReport {
+        self.run_cycle_with_tasks(signals, baseline, candidate, &[], &[])
+    }
+
+    /// 带任务级回归门的循环 —— **推荐入口**。
+    ///
+    /// 与 [`Self::run_cycle`] 的唯一区别：在聚合裁决之前先过
+    /// [`task_level_gate`]。传空切片时行为与 `run_cycle` **完全一致**。
+    ///
+    /// 为什么需要它：聚合 [`EvalOutcome`] 只记总通过数，表达不了
+    /// 「总分涨、某任务崩」。要拦住这类候选，必须把每任务的
+    /// [`TaskOutcome`] 一并交给裁决 —— 否则回归门形同虚设。
+    pub fn run_cycle_with_tasks(
+        &mut self,
+        signals: &[FailureSignal],
+        baseline: Option<EvalOutcome>,
+        candidate: Option<EvalOutcome>,
+        baseline_tasks: &[TaskOutcome],
+        candidate_tasks: &[TaskOutcome],
+    ) -> MetaCycleReport {
         // 第 2 层：诊断
         let Some(diag) = diagnose(signals) else {
             return MetaCycleReport {
@@ -864,7 +1000,13 @@ impl MetaAgent {
                 };
             }
             (Some(cand), Some(base)) => {
-                let v = evaluate_candidate(base, &cand, &PromotionCriteria::from(&self.policy));
+                let criteria = PromotionCriteria::from(&self.policy);
+                // 任务级回归门先行：总分涨但单任务崩的候选，在这里就被拦下，
+                // 不会走到「总分更高所以采纳」那一步。
+                let v = match task_level_gate(baseline_tasks, candidate_tasks, &criteria) {
+                    Some(reject) => reject,
+                    None => evaluate_candidate(base, &cand, &criteria),
+                };
                 let stage = if v.is_promote() {
                     if self.policy.auto_apply {
                         RolloutStage::Canary
@@ -1213,6 +1355,13 @@ mod tests {
             ChangeTarget::ToolScript,
             ChangeTarget::KnowledgeBase,
             ChangeTarget::FewShot,
+            ChangeTarget::ExpertChecklist,
+            ChangeTarget::TeamSop,
+            ChangeTarget::SwarmPolicy,
+            ChangeTarget::MemoryWeight,
+            ChangeTarget::SkillDefinition,
+            ChangeTarget::RetrievalPolicy,
+            ChangeTarget::EvalTaskSet,
         ];
         for t in all {
             let s = t.as_str();
@@ -1221,7 +1370,49 @@ mod tests {
                 "改动目标不得指向核心源码：{s}"
             );
         }
-        assert_eq!(all.len(), 6, "白名单为 6 类，新增即需重新评审");
+        assert_eq!(
+            all.len(),
+            13,
+            "白名单为 13 类（6 原有 + 7 RSI 扩展），新增即需重新评审"
+        );
+
+        // 每条 as_str 必须唯一，否则台账里无法区分改动对象
+        let mut seen = std::collections::HashSet::new();
+        for t in all {
+            assert!(seen.insert(t.as_str()), "改动目标字符串重复：{}", t.as_str());
+        }
+    }
+
+    /// RSI 扩展的 7 类必须**真的**能被 `risk()` 分级，而不是默认落到某一档。
+    #[test]
+    fn rsi_targets_are_risk_classified() {
+        // 量尺与可执行行为属高危；判断类属中危。任何一类被降级都要显式改测试。
+        let high = [
+            ChangeTarget::SkillDefinition,
+            ChangeTarget::SwarmPolicy,
+            ChangeTarget::EvalTaskSet,
+        ];
+        let medium = [
+            ChangeTarget::ExpertChecklist,
+            ChangeTarget::TeamSop,
+            ChangeTarget::MemoryWeight,
+            ChangeTarget::RetrievalPolicy,
+        ];
+        for t in high {
+            assert_eq!(t.risk(), RiskLevel::High, "{} 应为 High", t.as_str());
+        }
+        for t in medium {
+            assert_eq!(t.risk(), RiskLevel::Medium, "{} 应为 Medium", t.as_str());
+        }
+        // 默认策略上限是 Medium → 高危三类默认进不了提案
+        let policy = MetaPolicy::default();
+        for t in high {
+            assert!(
+                t.risk() > policy.max_risk,
+                "{} 不应在默认策略下被自动提案",
+                t.as_str()
+            );
+        }
     }
 
     #[test]
@@ -1242,6 +1433,119 @@ mod tests {
         let plan = plan_improvement(&diag, &loose).expect("放宽上限后应可提案");
         assert_eq!(plan.target, ChangeTarget::ToolScript);
         assert_eq!(plan.risk, RiskLevel::High);
+    }
+
+    // ── 第 4 层：任务级回归闸（Recursia 回归门控）────────────────────
+
+    #[test]
+    fn task_gate_rejects_when_total_up_but_one_task_down() {
+        // Recursia 公开案例的等价构造：总通过数 13 → 17（涨），
+        // 但 cup_on_plate 从 10 掉到 8（丢 2）。总分看着是进步，必须拒。
+        let baseline = vec![
+            TaskOutcome {
+                id: "cup_on_plate".into(),
+                passed: 10,
+                total: 10,
+            },
+            TaskOutcome {
+                id: "pudding_combo".into(),
+                passed: 3,
+                total: 10,
+            },
+        ];
+        let candidate = vec![
+            TaskOutcome {
+                id: "cup_on_plate".into(),
+                passed: 8,
+                total: 10,
+            },
+            TaskOutcome {
+                id: "pudding_combo".into(),
+                passed: 9,
+                total: 10,
+            },
+        ];
+        let total_before: usize = baseline.iter().map(|t| t.passed).sum();
+        let total_after: usize = candidate.iter().map(|t| t.passed).sum();
+        assert!(total_after > total_before, "构造成立：总分确实上涨");
+
+        let mut c = crit();
+        c.max_per_task_loss = 0;
+        match task_level_gate(&baseline, &candidate, &c) {
+            Some(PromotionVerdict::RejectTaskRegression { task, lost, limit }) => {
+                assert_eq!(task, "cup_on_plate");
+                assert_eq!(lost, 2);
+                assert_eq!(limit, 0);
+            }
+            other => panic!("应被任务级闸拒绝，实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_gate_rejects_protected_task_even_within_loss_budget() {
+        let baseline = vec![TaskOutcome {
+            id: "checkout".into(),
+            passed: 5,
+            total: 5,
+        }];
+        let candidate = vec![TaskOutcome {
+            id: "checkout".into(),
+            passed: 4,
+            total: 5,
+        }];
+        let mut c = crit();
+        c.max_per_task_loss = 3; // 预算宽松到足以容忍
+        c.protected_tasks = vec!["checkout".into()];
+        let v = task_level_gate(&baseline, &candidate, &c);
+        assert!(
+            matches!(v, Some(PromotionVerdict::RejectProtectedTask { .. })),
+            "红线任务退化必须被拒，实际：{v:?}"
+        );
+    }
+
+    #[test]
+    fn task_gate_passes_when_nothing_lost() {
+        let baseline = vec![TaskOutcome {
+            id: "a".into(),
+            passed: 3,
+            total: 5,
+        }];
+        let candidate = vec![TaskOutcome {
+            id: "a".into(),
+            passed: 4,
+            total: 5,
+        }];
+        let c = crit();
+        assert!(task_level_gate(&baseline, &candidate, &c).is_none());
+    }
+
+    #[test]
+    fn task_gate_tolerates_loss_within_budget() {
+        let baseline = vec![TaskOutcome {
+            id: "a".into(),
+            passed: 5,
+            total: 10,
+        }];
+        let candidate = vec![TaskOutcome {
+            id: "a".into(),
+            passed: 3,
+            total: 10,
+        }];
+        let mut c = crit();
+        c.max_per_task_loss = 2;
+        assert!(
+            task_level_gate(&baseline, &candidate, &c).is_none(),
+            "丢 2 恰好等于上限，应通过"
+        );
+
+        c.max_per_task_loss = 1;
+        assert!(
+            matches!(
+                task_level_gate(&baseline, &candidate, &c),
+                Some(PromotionVerdict::RejectTaskRegression { .. })
+            ),
+            "丢 2 超过上限 1，应拒绝"
+        );
     }
 
     #[test]
@@ -1359,6 +1663,78 @@ mod tests {
                 at_ms: 2,
             },
         ]
+    }
+
+    #[test]
+    fn cycle_with_tasks_rejects_aggregate_gain_when_a_task_regresses() {
+        // 端到端：聚合指标变好（5/10 → 9/10），但 cup_on_plate 从 10 掉到 8。
+        // 走 run_cycle_with_tasks 必须被拒；同样聚合数据走 run_cycle（无任务级）
+        // 会被采纳 —— 这个对照证明任务级数据是**必需的**，不是装饰。
+        let dir = tmp_dir("cycle_tasks");
+        let mut agent = MetaAgent::new(&dir, MetaPolicy::default());
+        let base = EvalOutcome {
+            passed: 5,
+            total: 10,
+            tokens: 1000,
+            ms: 5000,
+        };
+        let good = EvalOutcome {
+            passed: 9,
+            total: 10,
+            tokens: 1050,
+            ms: 5100,
+        };
+
+        let base_tasks = vec![
+            TaskOutcome {
+                id: "cup_on_plate".into(),
+                passed: 10,
+                total: 10,
+            },
+            TaskOutcome {
+                id: "pudding_combo".into(),
+                passed: 0,
+                total: 10,
+            },
+        ];
+        let cand_tasks = vec![
+            TaskOutcome {
+                id: "cup_on_plate".into(),
+                passed: 8,
+                total: 10,
+            },
+            TaskOutcome {
+                id: "pudding_combo".into(),
+                passed: 10,
+                total: 10,
+            },
+        ];
+
+        let r = agent.run_cycle_with_tasks(
+            &failing_signals(),
+            Some(base),
+            Some(good),
+            &base_tasks,
+            &cand_tasks,
+        );
+        assert_eq!(r.stage, RolloutStage::Rejected);
+        assert!(
+            matches!(
+                &r.verdict,
+                Some(PromotionVerdict::RejectTaskRegression { .. })
+            ),
+            "应被任务级闸拒绝，实际：{:?}",
+            r.verdict
+        );
+
+        // 对照：不给任务级数据，同样聚合指标会被采纳
+        let mut ctrl = MetaAgent::new(tmp_dir("cycle_tasks_ctrl"), MetaPolicy::default());
+        let r2 = ctrl.run_cycle(&failing_signals(), Some(base), Some(good));
+        assert!(
+            r2.verdict.as_ref().is_some_and(|v| v.is_promote()),
+            "无任务级数据时应按聚合指标采纳，实际：{:?}",
+            r2.verdict
+        );
     }
 
     #[test]

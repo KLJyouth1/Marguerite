@@ -4,6 +4,7 @@ import { createApp } from 'vue'
 import { createI18n } from 'vue-i18n'
 
 import ChatComposerRunMode from './ChatComposerRunMode.vue'
+import type { SandboxSetupState } from '@/types/sandbox'
 
 let unmount: (() => void) | null = null
 
@@ -11,6 +12,7 @@ function mount(
   allowedRunModes: Array<'safe' | 'full'>,
   safeSetupAvailable = false,
   onSetRunMode?: (mode: 'safe' | 'full') => void,
+  options: { safeSetupState?: SandboxSetupState | null; runModeLocked?: boolean } = {},
 ) {
   const el = document.createElement('div')
   document.body.appendChild(el)
@@ -18,6 +20,9 @@ function mount(
     runMode: 'full',
     allowedRunModes,
     safeSetupAvailable,
+    safeSetupState: options.safeSetupState ?? null,
+    runModeLocked: options.runModeLocked ?? false,
+    runModeLockMessage: 'Run mode cannot be changed while this session has active work.',
     onSetRunMode,
   })
   app.use(createI18n({
@@ -33,6 +38,16 @@ function mount(
             runModeSafeDesc: 'Sandboxed',
             runModeFull: 'Full access',
             runModeFullDesc: 'Host access',
+            runModeLocked: 'Run mode cannot be changed while this session has active work.',
+            runModePolicyBlocked: 'The current gateway policy does not allow this run mode.',
+          },
+        },
+        settings: {
+          sandbox: {
+            safeMode: {
+              pendingLabel: 'Safe (setup pending)',
+              pendingComposerDesc: 'Your choice is kept; the isolation runtime is not installed.',
+            },
           },
         },
       },
@@ -60,16 +75,25 @@ describe('ChatComposerRunMode', () => {
     ])
   })
 
-  it('quietly disables Safe when the capability is unavailable', () => {
-    const el = mount(['full'])
+  it('keeps Safe clickable when setup is unavailable (no silent no-op)', () => {
+    const selected: Array<'safe' | 'full'> = []
+    const el = mount(['safe', 'full'], false, mode => selected.push(mode), {
+      safeSetupState: 'unavailable',
+    })
     const radios = [...el.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-    expect(radios[0].disabled).toBe(true)
-    expect(el.querySelector('.composer-run-mode__hint')).toBeNull()
+
+    expect(radios[0].disabled).toBe(false)
+    expect(radios[0].textContent).toContain('Safe (setup pending)')
+
+    radios[0].click()
+    expect(selected).toEqual(['safe'])
   })
 
   it('lets a repairable Safe choice request first-time setup', () => {
     const selected: Array<'safe' | 'full'> = []
-    const el = mount(['full'], true, mode => selected.push(mode))
+    const el = mount(['safe', 'full'], true, mode => selected.push(mode), {
+      safeSetupState: 'not_setup',
+    })
     const radios = [...el.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
 
     expect(radios[0].disabled).toBe(false)
@@ -77,5 +101,13 @@ describe('ChatComposerRunMode', () => {
 
     expect(selected).toEqual(['safe'])
     expect(radios[0].getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('disables both options with a visible reason only while the session is locked', () => {
+    const el = mount(['safe', 'full'], true, undefined, { runModeLocked: true })
+    const radios = [...el.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    expect(radios.map(radio => radio.disabled)).toEqual([true, true])
+    expect(el.querySelector('.composer-run-mode__hint')?.textContent)
+      .toContain('Run mode cannot be changed')
   })
 })

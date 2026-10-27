@@ -202,7 +202,9 @@ import { copyTextWithFallback } from '@/utils/browser'
 import {
   buildAgentDiagnosisHandoff,
   formatLatencyLine,
+  isTransportFailure,
   normalizeHomePaths,
+  normalizeDoctorReport,
   withoutLegacyMigrationFinding,
   providerBlocksAgent,
   settingsLinkForFinding,
@@ -607,13 +609,27 @@ async function loadHealth({ deep, silent = false }: HealthLoadOptions) {
   }
 
   try {
-    await rpc.waitForConnection()
-    const response = await rpc.call<HealthReport>('doctor.status', { agentId: 'main', deep })
-    const data = withoutLegacyMigrationFinding(response)
-    if (!data.gatewayUrl) data.gatewayUrl = gatewayContextUrl()
-    healthError.value = null
-    healthReport.value = data
-    healthCheckedAt.value = new Date().toISOString()
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await rpc.waitForConnection()
+        const response = await rpc.call<HealthReport>('doctor.status', { agentId: 'main', deep })
+        // 双引擎形状归一化：Rust 内核答 `items + summary`，pyengine 侧车答 `findings`。
+        // 总览页与医生页渲染同一份 findings 列表，只修医生页会漏掉这里。
+        const data = withoutLegacyMigrationFinding(normalizeDoctorReport(response))
+        if (!data.gatewayUrl) data.gatewayUrl = gatewayContextUrl()
+        healthError.value = null
+        healthReport.value = data
+        healthCheckedAt.value = new Date().toISOString()
+        return
+      } catch (err) {
+        // 只有传输波动重试一次；真实的体检失败（结构化错误）立刻如实上报。
+        if (attempt === 0 && isTransportFailure(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          continue
+        }
+        throw err
+      }
+    }
   } catch (err) {
     healthError.value = err instanceof Error ? err : new Error(String(err))
     healthReport.value = null

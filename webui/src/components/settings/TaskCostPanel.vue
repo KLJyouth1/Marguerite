@@ -5,7 +5,10 @@
  * 同时从 activity.recent（plan.confirmed / task.* 事件）抽取最近 run/task id 供快速查询。
  */
 import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
+
+const { t } = useI18n()
 
 interface TaskCost {
   ok: boolean
@@ -61,7 +64,7 @@ async function query(id?: string) {
     await rpc.waitForConnection()
     const data = await rpc.call<TaskCost>('usage.taskCost', { runId: target })
     if (data?.ok === false) {
-      error.value = data.error ?? '查询失败'
+      error.value = data.error ?? t('settings.taskCost.queryFailed')
     } else {
       result.value = data
     }
@@ -78,23 +81,23 @@ onMounted(loadRecent)
 <template>
   <section class="control-section">
     <div class="control-section__head">
-      <h3 class="control-section__title">任务成本卡片（FinOps）</h3>
+      <h3 class="control-section__title">{{ t('settings.taskCost.title') }}</h3>
       <p class="control-section__desc">
-        M3-D2 成本归因：按任务（run_id）归因该任务的 token 与成本，可结合下方最近运行的任务快速查询。
+        {{ t('settings.taskCost.description') }}
       </p>
     </div>
     <div class="costcard-query">
       <input
         v-model="runId"
         class="control-input"
-        placeholder="输入 run_id 查询任务成本"
-        aria-label="任务 run_id"
+        :placeholder="t('settings.taskCost.placeholder')"
+        :aria-label="t('settings.taskCost.runAria')"
         @keyup.enter="query()"
       />
-      <button type="button" class="btn" :disabled="loading || !runId.trim()" @click="query()">查询</button>
+      <button type="button" class="btn" :disabled="loading || !runId.trim()" @click="query()">{{ t('settings.taskCost.query') }}</button>
     </div>
     <div v-if="recentIds.length" class="costcard-recent">
-      <span class="costcard-recent__label">最近任务：</span>
+      <span class="costcard-recent__label">{{ t('settings.taskCost.recent') }}</span>
       <button
         v-for="entry in recentIds.slice(0, 5)"
         :key="entry.id"
@@ -107,33 +110,38 @@ onMounted(loadRecent)
       </button>
     </div>
     <div v-if="error" class="costcard-banner costcard-banner--err" role="alert">{{ error }}</div>
-    <div v-if="loading" class="costcard-empty">查询中…</div>
+    <div v-if="loading" class="costcard-empty">{{ t('settings.taskCost.querying') }}</div>
     <div v-else-if="result" class="costcard" data-testid="task-cost-card">
       <div class="costcard__head">
-        <span class="costcard__title">任务成本</span>
+        <span class="costcard__title">{{ t('settings.taskCost.cardTitle') }}</span>
         <code class="costcard__run">{{ result.run_id }}</code>
       </div>
       <div class="costcard__grid">
         <div class="costcard__item">
-          <span class="costcard__label">Token 总量</span>
+          <span class="costcard__label">{{ t('settings.taskCost.totalTokens') }}</span>
           <span class="costcard__value">{{ result.total_tokens.toLocaleString() }}</span>
         </div>
         <div class="costcard__item">
-          <span class="costcard__label">输入 / 输出</span>
+          <span class="costcard__label">{{ t('settings.taskCost.inputOutput') }}</span>
           <span class="costcard__value">{{ result.input_tokens.toLocaleString() }} / {{ result.output_tokens.toLocaleString() }}</span>
         </div>
         <div class="costcard__item">
-          <span class="costcard__label">LLM 调用</span>
+          <span class="costcard__label">{{ t('settings.taskCost.calls') }}</span>
           <span class="costcard__value">{{ result.calls }}</span>
         </div>
         <div class="costcard__item">
-          <span class="costcard__label">成本</span>
+          <span class="costcard__label">{{ t('settings.taskCost.cost') }}</span>
           <span class="costcard__value costcard__value--cost">${{ result.cost_usd.toFixed(4) }} {{ result.currency }}</span>
         </div>
       </div>
       <table v-if="result.models?.length" class="costcard-table">
         <thead>
-          <tr><th>模型</th><th>调用</th><th>Token</th><th>成本 $</th></tr>
+          <tr>
+            <th>{{ t('settings.taskCost.model') }}</th>
+            <th>{{ t('settings.taskCost.callCount') }}</th>
+            <th>{{ t('settings.taskCost.tokenCount') }}</th>
+            <th>{{ t('settings.taskCost.costUsd') }}</th>
+          </tr>
         </thead>
         <tbody>
           <tr v-for="model in result.models" :key="model.model">

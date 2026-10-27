@@ -160,6 +160,12 @@
         @reuse-last="$emit('planReuseLast', $event)"
       />
 
+      <!-- 电脑操控监管：一回合内聚合 computer_use 调用，展示动作/目标/成败/审批。 -->
+      <ComputerUseActivityCard
+        v-if="computerUseEvents.length"
+        :events="computerUseEvents"
+      />
+
       <div
         class="msg-ai-ending"
         :class="{ 'msg-ai-ending--done': showDoneBlock }"
@@ -177,6 +183,21 @@
         />
 
         <SourcesRow v-if="message.toolCalls?.length" ref="sourcesRowRef" :calls="message.toolCalls" :sources="message.sources ?? []" />
+
+        <!-- 会话里的「已编辑 / 已创建文件」行：点开后内联看 +N/-M 与行级 diff。 -->
+        <FileChangeDiffViewer
+          v-if="showFileChanges"
+          :session-key="sessionKey || ''"
+        />
+
+        <!-- 交付回执：一回合结束后把「改了什么 / 产出了什么 / 验证了什么 / 花了多少」
+             合成一条可核验的证据，并显式区分「已验证 / 未验证」。 -->
+        <DeliveryReceiptCard
+          v-if="showReceipt"
+          :session-key="sessionKey || ''"
+          :since="turnStartedAt ?? null"
+          :until="message.ts ?? null"
+        />
       </div>
 
       <div v-if="showFooter" class="msg-ai-footer">
@@ -277,6 +298,17 @@
             <Icon :name="copyIconName" :size="12" />
           </button>
           <span class="msg-copy-live" aria-live="polite">{{ copyLiveText }}</span>
+          <button
+            v-if="showFullMessageAction"
+            type="button"
+            class="msg-action"
+            data-testid="full-message-action"
+            :title="t('chat.fullMessage.open')"
+            :aria-label="t('chat.fullMessage.open')"
+            @click="$emit('showFullMessage', message)"
+          >
+            <Icon name="expand" :size="12" />
+          </button>
           <button type="button" class="msg-action" :title="t('chat.regenerate')" :aria-label="t('chat.regenerate')" @click="$emit('regenerate', message)">
             <Icon name="refresh" :size="12" />
           </button>
@@ -348,6 +380,9 @@ import Icon from '@/components/Icon.vue'
 import ActivityDisclosure from '@/components/chat/ActivityDisclosure.vue'
 import AssistantActivityTimeline from '@/components/chat/AssistantActivityTimeline.vue'
 import ChatArtifactList from '@/components/chat/ChatArtifactList.vue'
+import ComputerUseActivityCard from '@/components/chat/ComputerUseActivityCard.vue'
+import DeliveryReceiptCard from '@/components/chat/DeliveryReceiptCard.vue'
+import FileChangeDiffViewer from '@/components/chat/FileChangeDiffViewer.vue'
 import SourcesRow from '@/components/chat/SourcesRow.vue'
 import ToolCallTimeline from '@/components/chat/ToolCallTimeline.vue'
 import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
@@ -377,6 +412,7 @@ import {
   projectAssistantActivity,
   type AssistantActivityLifecycle,
 } from '@/utils/chat/assistantActivity'
+import { computerUseEventsFromToolCalls } from '@/utils/chat/toolPayload'
 import {
   readAssistantActivityDuration,
   writeAssistantActivityDuration,
@@ -412,6 +448,8 @@ const props = defineProps<{
   planActionPending?: PlanCardAction | null
   planActionsDisabled?: boolean
   showTurnOutcome?: boolean
+  /** 本回合起始时间（一般为配对的用户消息时间戳），交付回执据此裁剪证据窗口 */
+  turnStartedAt?: string | number | null
 }>()
 
 const emit = defineEmits<{
@@ -422,6 +460,7 @@ const emit = defineEmits<{
   toggleToolGroup: [groupId: string]
   toggleToolItem: [renderKey: string]
   showToolResult: [content: string, title: string, context?: ToolResultContext]
+  showFullMessage: [message: ChatRenderedMessage]
   fork: []
   resolveInterrupt: [id: string, decision: 'allow-once' | 'allow-always' | 'deny']
   extendInterrupt: [id: string]
@@ -537,6 +576,12 @@ const showFooter = computed(() =>
   && (!!props.message.meta || (!props.shareMode && !props.message.stopNotice)),
 )
 
+// 「完整消息」只在长回答上出现：短消息直接复制即可，弹窗反而多一步。
+const FULL_MESSAGE_MIN_CHARS = 600
+const showFullMessageAction = computed(() =>
+  (props.message.text || '').trim().length >= FULL_MESSAGE_MIN_CHARS,
+)
+
 // A citation pill in the body asks the paired SourcesRow to reveal + highlight
 // the source it points at. No-op when no SourcesRow is mounted (which only
 // happens when there are no sources, so the body has no pills either).
@@ -560,6 +605,68 @@ const metaDetailsOpen = computed(() => metaPinned.value || metaHovered.value)
 // metadata or inherits the artifact surface.
 const showDoneBlock = computed(() =>
   !!props.message.artifacts?.length && !props.message.isStreaming && !props.message.interrupted,
+)
+
+/** 回执只在「本回合已收尾 + 非分享/流式态」时出现，避免半途中给出结论。 */
+const showReceipt = computed(() =>
+  !!props.showTurnOutcome
+  && !!props.sessionKey
+  && !props.shareMode
+  && !props.message.isStreaming
+  && !props.message.interrupted,
+)
+
+/** 本回合所有工具调用（时间线里的调用 + 消息级 toolCalls，后者可能为空）。 */
+const turnToolCalls = computed(() => {
+  const timelineCalls = (props.message.timelineItems ?? []).flatMap(item =>
+    item.type === 'tool-group' ? item.group.calls : [],
+  )
+  return [...timelineCalls, ...(props.message.toolCalls ?? [])]
+})
+
+/** 一回合内聚合的 computer_use 监管事件；空数组时卡片不渲染。 */
+const computerUseEvents = computed(() =>
+  computerUseEventsFromToolCalls(turnToolCalls.value),
+)
+
+const FILE_CHANGE_TOOL_NAMES = new Set([
+  'write_file',
+  'write_scratch',
+  'create_file',
+  'create_source',
+  'edit_file',
+  'edit_source',
+  'apply_patch',
+  'delete_file',
+  'copy_file',
+  'move_file',
+  'append_file',
+])
+
+function toolBaseName(name: string): string {
+  const normalized = String(name || '')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/-/g, '_')
+  const parts = normalized.split(/__|[.:/]/).filter(Boolean)
+  return parts[parts.length - 1] || ''
+}
+
+/** 本回合是否真的产生过文件改动线索（写入类工具或已登记产物）。 */
+const hasFileChangeTools = computed(() =>
+  !!props.message.artifacts?.length
+  || turnToolCalls.value.some(call => FILE_CHANGE_TOOL_NAMES.has(toolBaseName(call.name))),
+)
+
+/** 文件改动只在回合收尾、非分享/流式态显示（与回执同一时机）。 */
+const showFileChanges = computed(() =>
+  !!props.showTurnOutcome
+  && !!props.sessionKey
+  && !props.shareMode
+  && !props.message.isStreaming
+  && !props.message.interrupted
+  && hasFileChangeTools.value,
 )
 
 const hasMetaDetails = computed(() => {
@@ -751,8 +858,21 @@ const activityStepCount = computed(() => Math.max(
 // Keep live work visible without making its expansion sticky. The disclosure
 // follows this lifecycle default in both directions, so terminal states fold
 // automatically while a later user click can still inspect the finished work.
+//
+// 思考可见性（真机反馈「模型的思考我总是看不见」）：这一轮**只有思考**时
+// （没有工具调用、没有状态步骤），settled 后折叠外层活动区只会剩下
+// 「思考了 7 秒 · 65 字」一行摘要，正文必须再点一次才出现。
+// 只有思考时默认展开；长文仍由 ReasoningPart 按 600 字阈值自行折叠，
+// 不会把整段思考一次铺满屏幕。
+const activityHasOnlyReasoning = computed(() =>
+  !!reasoningPart.value
+  && !hasVisibleActivityItem.value
+  && statusHistory.value.length === 0,
+)
 const activityDefaultOpen = computed(() =>
-  activityLifecycle.value === 'working' || activityLifecycle.value === 'answering',
+  activityLifecycle.value === 'working'
+  || activityLifecycle.value === 'answering'
+  || activityHasOnlyReasoning.value,
 )
 const activityCompletionConfirmed = computed(() =>
   activityLifecycle.value === 'settled'
@@ -937,11 +1057,14 @@ function ensembleRole(role: string, label: string): string {
   position: relative;
   display: flex;
   gap: 0.625rem;
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: 0 auto;
+  /* 会话阅读列只在 ChatMessageList 里定义一次（左对齐 + 左侧固定起排）。
+     这里不再用 `margin: 0 auto`：宽面板上 --chat-col 有上限，auto 外边距会把
+     整段历史缩到屏幕中间（任务结束后与实时气泡版式不一致的根因）。 */
+  width: 100%;
+  max-width: var(--chat-col, min(calc(100% - 48px), 980px));
+  margin-inline: 0;
   padding: 0.5rem 0;
   align-items: flex-start;
-  max-width: calc(100% - 48px);
 }
 
 .msg-ai--share-mode {

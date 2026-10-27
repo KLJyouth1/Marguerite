@@ -207,6 +207,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 copilot_model: None,
                 timeout_secs: 0,
+                    wire_api: crate::model::wire::WireApi::Chat,
             },
             ..Default::default()
         };

@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-gui"
-version = "0.2.13"
+version = "0.2.17"
 description = "Marguerite CLI Workbench - Tauri GUI Shell"
 edition = "2021"
 
@@ -19,6 +19,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

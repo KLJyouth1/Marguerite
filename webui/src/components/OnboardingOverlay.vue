@@ -22,6 +22,7 @@ import Icon from './Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 import { useRpcCall } from '@/composables/useRpc'
 import { useDialogA11y } from '@/composables/useDialogA11y'
+import { staticAssetUrl } from '@/utils/staticAsset'
 import {
   optionalSessionRpcCallOptions,
 } from '@/composables/chat/sessionBootstrapAdmission'
@@ -33,6 +34,8 @@ import {
 } from '@/composables/setup/useReadinessSummary'
 
 const { t } = useI18n()
+// 品牌图标走统一静态资产解析（DEV 直取根路径；PROD 走 <base>/static/）。
+const brandMarkUrl = staticAssetUrl('brand/logo-mark.png')
 const router = useRouter()
 const rpc = useRpcStore()
 
@@ -270,7 +273,7 @@ function goToProviderSettings() {
           <template v-if="step === 'welcome'">
             <div class="onboarding-welcome">
               <div class="onboarding-brand">
-                <img src="/marguerite-mark.svg" alt="" aria-hidden="true" class="onboarding-brand__mark" />
+                <img :src="brandMarkUrl" alt="" aria-hidden="true" class="onboarding-brand__mark" />
                 <h2 id="onboarding-title" class="onboarding-title">{{ t('onboarding.wizard.welcomeTitle') }}</h2>
               </div>
               <p class="onboarding-subtitle">{{ t('onboarding.wizard.welcomeSubtitle') }}</p>

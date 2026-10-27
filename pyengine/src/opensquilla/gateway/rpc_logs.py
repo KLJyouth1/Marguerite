@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,42 @@ from opensquilla.observability.turn_call_log import (
 from opensquilla.paths import default_opensquilla_home
 
 _d = get_dispatcher()
+
+# 级别只按「所处位置」识别，绝不做全文包含判断：
+# `skill_catalog.refreshed ... errors=0` 这类结构化字段里含 "error"，
+# 全文搜索会把整行误判成 ERROR（真机日志里 16 条 ERROR 绝大多数是误判，
+# 前端 LEVEL 统计与级别筛选同时被污染）。
+_LEVEL_TOKEN = r"(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)"
+_LEVEL_PATTERNS = (
+    # `[INFO]` 只允许出现在行首 80 字符内（时间戳 + logger 前缀区），
+    # 避免正文里出现的 "[ERROR]" 字样反过来改写整行级别。
+    re.compile(r"^.{0,80}?\[" + _LEVEL_TOKEN + r"\]", re.IGNORECASE),
+    # 行首级别：`INFO ...` / `INFO: ...`
+    re.compile(r"^\s*" + _LEVEL_TOKEN + r"\b", re.IGNORECASE),
+    # 时间戳后的裸级别：`2026-10-22 19:19:26,249 INFO ...`
+    re.compile(
+        r"^\s*\d{4}-\d{2}-\d{2}[T ][\d:.,]+\s+" + _LEVEL_TOKEN + r"\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _normalize_level(raw: str) -> str:
+    level = raw.upper()
+    if level == "WARNING":
+        return "WARN"
+    if level in ("FATAL", "CRITICAL"):
+        return "ERROR"
+    return level
+
+
+def _line_level(line: str) -> str:
+    """返回该行的级别（无法判定时按 INFO，与前端 `guessLevel` 同语义）。"""
+    for pattern in _LEVEL_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            return _normalize_level(match.group(1))
+    return "INFO"
 
 
 def _non_empty_env(name: str) -> str | None:
@@ -179,9 +216,24 @@ async def _handle_logs_trace(params: dict | None, ctx: RpcContext) -> dict[str, 
 async def _handle_logs_tail(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     """Tail log file with cursor-based pagination and level filter."""
     p = params or {}
-    limit = min(p.get("limit", 100), 1000)
-    level_filter = (p.get("level", "") or "").upper()
-    cursor = p.get("cursor", 0)
+    # limit 同样容错：`limit: null` 会让 min(None, 1000) 抛 TypeError，
+    # 整个 logs.tail 退化成 INTERNAL_ERROR（与 cursor 是同一类边界缺陷）。
+    raw_limit = p.get("limit")
+    try:
+        limit = min(max(1, int(raw_limit)), 1000) if raw_limit is not None else 100
+    except (TypeError, ValueError):
+        limit = 100
+    level_filter = str(p.get("level") or "").strip().upper()
+    # 游标容错：WebUI 首轮会显式传 `cursor: null`（尚无可续位置）。
+    # 原先 `p.get("cursor", 0)` 在键存在但值为 None 时返回 None，随后
+    # `cursor >= file_size` 抛 TypeError → 整个 logs.tail 返回 INTERNAL_ERROR，
+    # 日志页首屏因此永远空白（真机实测：
+    # "'>=' not supported between instances of 'NoneType' and 'int'"）。
+    raw_cursor = p.get("cursor")
+    try:
+        cursor = max(0, int(raw_cursor)) if raw_cursor is not None else 0
+    except (TypeError, ValueError):
+        cursor = 0
 
     log_file = _find_log_file()
     if log_file is None or not log_file.exists():
@@ -196,9 +248,10 @@ async def _handle_logs_tail(params: dict | None, ctx: RpcContext) -> dict[str, A
         raw_lines = f.readlines()
         new_cursor = f.tell()
 
-    # Apply level filter if specified
+    # Apply level filter if specified（按级别位置判定，不做全文包含匹配）
     if level_filter:
-        filtered = [ln for ln in raw_lines if level_filter in ln.upper()]
+        wanted = _normalize_level(level_filter) if level_filter else ""
+        filtered = [ln for ln in raw_lines if _line_level(ln) == wanted]
     else:
         filtered = raw_lines
 

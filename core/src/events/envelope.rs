@@ -449,12 +449,18 @@ impl Envelope {
 
     /// 用量实时事件（对齐 Web UI `session.event.usage`：每次 LLM 调用后即时推送，
     /// 替代前端 15s 轮询）。负载携带 model 与 token 用量。
+    ///
+    /// `cache_read_tokens` / `cache_creation_tokens` 只在服务商真的返回缓存字段时
+    /// 非零；前端 `useChatRpcEventHandlers` 按这两个字段累加命中率，缺了就是
+    /// 「有真实缓存却永远显示 0」的假仪表。
     pub fn usage(
         session: &str,
         model: &str,
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
     ) -> Self {
         Envelope::new(
             EventType::Usage,
@@ -463,6 +469,8 @@ impl Envelope {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
             }),
             session,
         )
@@ -717,6 +725,20 @@ mod tests {
         );
         let back = Envelope::from_sse(&env.to_sse()).unwrap();
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn test_usage_event_carries_cache_tokens() {
+        // 前端按这两个字段累加缓存命中率；缺字段时命中率永远是 0（假仪表）。
+        let env = Envelope::usage("ws.s1", "deepseek-chat", 1000, 200, 1200, 640, 128);
+        assert_eq!(env.r#type, EventType::Usage);
+        assert_eq!(env.route_key(), "ws.s1.usage");
+        assert_eq!(env.payload["model"], "deepseek-chat");
+        assert_eq!(env.payload["prompt_tokens"], 1000);
+        assert_eq!(env.payload["completion_tokens"], 200);
+        assert_eq!(env.payload["total_tokens"], 1200);
+        assert_eq!(env.payload["cache_read_tokens"], 640);
+        assert_eq!(env.payload["cache_creation_tokens"], 128);
     }
 
     #[test]

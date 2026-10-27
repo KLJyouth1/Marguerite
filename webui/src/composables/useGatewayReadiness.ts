@@ -79,9 +79,7 @@ import {
   useReadinessSummary,
   type ReadinessStatus,
 } from '@/composables/setup/useReadinessSummary'
-import {
-  optionalSessionRpcCallOptions,
-} from '@/composables/chat/sessionBootstrapAdmission'
+import { readinessRpcCallOptions } from '@/composables/chat/sessionBootstrapAdmission'
 
 export type GatewayReadiness = 'disconnected' | 'connecting' | 'not_ready' | 'ready'
 
@@ -112,7 +110,10 @@ function createGatewayReadiness(): GatewayReadinessState {
   const { data: status, loading, execute } = useRpcCall<ReadinessStatus>(
     'onboarding.status',
     undefined,
-    { callOptions: optionalSessionRpcCallOptions },
+    // 用 readiness 专用的 45s + reject，而不是 optionalSession 的 10s + reconnect。
+    // 原因见 readinessRpcCallOptions 的注释：10s 超时撞上最长 30s 的 canary 会导致
+    // 「超时→断连→重连→再超时」的自我维持循环，界面永久「连接中」。
+    { callOptions: readinessRpcCallOptions },
   )
   const { needsAction } = useReadinessSummary(status)
 
@@ -121,6 +122,18 @@ function createGatewayReadiness(): GatewayReadinessState {
     if (rpc.state === 'connecting') return 'connecting'
     // WS is connected — check business readiness.
     if (loading.value && !status.value) return 'connecting' // first fetch in flight
+    // 首次读取失败（status 仍为 null）**不得**声称 ready。
+    //
+    // 原实现直接落到 `return 'ready'`：一次失败的 onboarding.status 会让顶栏变绿、
+    // 让用户以为可以对话，直到第一轮真的失败。这与本文件开头的设计意图
+    // （"Users see green and think I can chat now — then the first turn fails"）
+    // 正好相反，属自相矛盾的漏判。
+    //
+    // 拿不到状态时返回 'connecting'（= UI 的「初始化中」）而不是 'not_ready'：
+    //   · 'not_ready' 会显示「需要配置」，那是**断言**用户没配置 —— 我们没有证据；
+    //   · 'connecting' 只表示「还没确认」，是诚实的说法。
+    // 重试由下面的 watch（loading 变化）驱动，成功后自然转绿。
+    if (!status.value) return 'connecting'
     if (needsAction.value) return 'not_ready'
     return 'ready'
   })

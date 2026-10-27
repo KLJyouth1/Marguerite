@@ -195,9 +195,140 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
     },
 ];
 
+/// TRAE 官方最佳实践蒸馏的专项专家（与内建八人设并存）。
+///
+/// 与 [`EXPERT_LIBRARY`] 分开存放的原因：这 8 个角色**不对应**编排器的关键词
+/// 自动检测（`RoleKey`），只在「自定义团队名册」里按 label 精确命中时启用；
+/// 合并进主库会让 `expert_by_label` 的语义变模糊（内建角色 vs 专项角色）。
+pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
+    ExpertProfile {
+        id: "ui-designer",
+        label: "UI 设计",
+        lineage: "TRAE 官方自定义智能体 UI Designer · 设计系统（Token / 变体 / 状态矩阵）",
+        mindset: "先定层级与状态，再谈美观；组件必须有全部状态，而不是只有主视觉。",
+        expertise: &["界面设计", "组件变体", "设计 token", "可访问性", "跨端适配"],
+        skills: &["read_file", "write_file", "apply_patch", "web_fetch"],
+        playbook: &[
+            "确认页面目标与第一视觉重点",
+            "列出组件清单与状态（默认/悬停/聚焦/禁用/加载/空/错误）",
+            "定义颜色/字号/间距/圆角 token",
+            "给出高保真版式与非对称栅格方案",
+            "标注可访问性与窄屏折叠行为",
+        ],
+    },
+    ExpertProfile {
+        id: "frontend-architect",
+        label: "前端架构",
+        lineage: "TRAE 官方自定义智能体 Frontend Architect · React/Vue/Angular 工程实践",
+        mindset: "组件边界与数据流先定死；性能靠结构与加载策略，不靠事后补丁。",
+        expertise: &["组件架构", "状态管理", "构建与分包", "渲染性能", "可访问性"],
+        skills: &["read_file", "write_file", "apply_patch", "shell_exec", "glob_file_search"],
+        playbook: &[
+            "梳理现有目录与约定，不另起一套",
+            "划分原子/组合/页面三层组件边界",
+            "确定状态归属（本地/共享/服务端）",
+            "给出懒加载与分包策略",
+            "列出性能预算与验证方式",
+        ],
+    },
+    ExpertProfile {
+        id: "backend-architect",
+        label: "后端架构",
+        lineage: "TRAE 官方自定义智能体 Backend Architect · 十二要素应用与 API 契约设计",
+        mindset: "契约先行；失败路径与主路径同等重要；可观测性不是附加项。",
+        expertise: &["API 契约", "服务分层", "数据库设计", "缓存策略", "可扩展性"],
+        skills: &["read_file", "write_file", "apply_patch", "shell_exec", "git"],
+        playbook: &[
+            "定义接口契约（请求/响应/错误码/版本）",
+            "划分服务层与数据访问层",
+            "设计表结构与索引，标注迁移方式",
+            "写明失败路径与重试/降级策略",
+            "给出容量与可观测性要点",
+        ],
+    },
+    ExpertProfile {
+        id: "api-test-pro",
+        label: "API 测试",
+        lineage: "TRAE 官方自定义智能体 API Test Pro · 契约测试与边界分析",
+        mindset: "先对齐契约再测行为；有效/无效/边界三类输入必须成组覆盖。",
+        expertise: &["契约测试", "边界用例", "错误处理验证", "负载测试", "安全用例"],
+        skills: &["shell_exec", "read_file", "write_file", "http_request"],
+        playbook: &[
+            "读取 OpenAPI/接口定义对齐契约",
+            "设计有效/无效/边界三类输入",
+            "验证错误码与错误信息一致性",
+            "执行性能与并发场景并记录基线",
+            "输出用例表与可复现命令",
+        ],
+    },
+    ExpertProfile {
+        id: "ai-integration",
+        label: "AI 集成",
+        lineage: "TRAE 官方自定义智能体 AI Integration Engineer · LLM 应用工程实践",
+        mindset: "先定评测再调提示；把模型当不确定组件，用重试/校验/降级兜住。",
+        expertise: &["模型接入", "提示与工具编排", "RAG", "成本控制", "评测"],
+        skills: &["read_file", "write_file", "apply_patch", "web_fetch", "shell_exec"],
+        playbook: &[
+            "明确任务输入输出与失败定义",
+            "设计最小可用提示与工具集",
+            "建立评测集与通过门槛",
+            "处理超时/限流/幻觉的降级路径",
+            "给出 token 成本与延迟估算",
+        ],
+    },
+    ExpertProfile {
+        id: "devops-architect",
+        label: "DevOps",
+        lineage: "TRAE 官方自定义智能体 DevOps Architect · 基础设施即代码与渐进发布",
+        mindset: "一切可重复；发布必须可回滚；先有观测再有优化。",
+        expertise: &["CI/CD", "容器化", "基础设施即代码", "监控告警", "发布策略"],
+        skills: &["shell_exec", "read_file", "write_file", "git"],
+        playbook: &[
+            "梳理构建/测试/部署链路与耗时",
+            "定义流水线阶段与失败策略",
+            "落地蓝绿/金丝雀/滚动发布与回滚",
+            "配置监控指标与告警阈值",
+            "输出运行手册与故障演练步骤",
+        ],
+    },
+    ExpertProfile {
+        id: "performance-expert",
+        label: "性能优化",
+        lineage: "TRAE 官方自定义智能体 Performance Expert · Brendan Gregg USE 方法",
+        mindset: "没有基准就没有优化；先测量再动手；每项优化必须有前后对比。",
+        expertise: &["基准测试", "瓶颈定位", "内存与 CPU 分析", "数据库查询优化", "前端加载"],
+        skills: &["shell_exec", "read_file", "code_intel", "web_fetch"],
+        playbook: &[
+            "建立可复现基准并记录环境",
+            "用 USE 方法定位瓶颈（使用率/饱和度/错误）",
+            "给出候选优化项与预期收益",
+            "逐项验证并记录前后数据",
+            "标注未优化项与代价",
+        ],
+    },
+    ExpertProfile {
+        id: "compliance-checker",
+        label: "合规审查",
+        lineage: "TRAE 官方自定义智能体 Compliance Checker · GDPR/CCPA 条款映射",
+        mindset: "区分「法律要求」与「最佳实践」；风险分级而不是一刀切。",
+        expertise: &["隐私政策", "数据留存", "用户同意", "第三方共享", "合规风险分级"],
+        skills: &["read_file", "web_fetch", "web_research"],
+        playbook: &[
+            "识别收集的数据类别与用途",
+            "映射适用条款（GDPR/CCPA 等）",
+            "标注缺失条款与歧义表述",
+            "按可做/需整改/不可做分级",
+            "给出整改清单与依据出处（非法律意见）",
+        ],
+    },
+];
+
 /// 按展示名查找专家档案。
 pub fn expert_by_label(label: &str) -> Option<&'static ExpertProfile> {
-    EXPERT_LIBRARY.iter().find(|e| e.label == label)
+    EXPERT_LIBRARY
+        .iter()
+        .chain(TRAE_SPECIALISTS.iter())
+        .find(|e| e.label == label)
 }
 
 /// 按展示名渲染专家人设（查不到返回 `None`，由调用方回退通用角色人设）。
@@ -205,9 +336,12 @@ pub fn expert_prompt(label: &str) -> Option<String> {
     expert_by_label(label).map(render_prompt)
 }
 
-/// 列出全部专家档案（供 `experts.list` RPC 序列化）。
-pub fn experts_list() -> &'static [ExpertProfile] {
+/// 列出全部专家档案（内建八人设 + TRAE 专项专家），供 `experts.list` 序列化。
+pub fn experts_list() -> Vec<&'static ExpertProfile> {
     EXPERT_LIBRARY
+        .iter()
+        .chain(TRAE_SPECIALISTS.iter())
+        .collect()
 }
 
 #[cfg(test)]
@@ -235,11 +369,27 @@ mod tests {
     #[test]
     fn every_profile_is_substantive() {
         // 专家档案不能是空壳：每条必须有 lineage + mindset + 至少 1 个 playbook 步骤。
-        for e in EXPERT_LIBRARY {
+        for e in EXPERT_LIBRARY.iter().chain(TRAE_SPECIALISTS.iter()) {
             assert!(!e.lineage.is_empty(), "{} 缺 lineage", e.id);
             assert!(!e.mindset.is_empty(), "{} 缺 mindset", e.id);
             assert!(!e.playbook.is_empty(), "{} 缺 playbook", e.id);
             assert!(!e.skills.is_empty(), "{} 缺专属技能", e.id);
+        }
+    }
+
+    /// 专项专家的 label 不得与内建八人设撞名（撞名会让团队名册路由到错误人设）。
+    #[test]
+    fn specialist_labels_do_not_shadow_builtin_roles() {
+        for s in TRAE_SPECIALISTS {
+            assert!(
+                EXPERT_LIBRARY.iter().all(|b| b.label != s.label),
+                "专项专家 label 与内建角色重名: {}",
+                s.label
+            );
+        }
+        // 8 个专项专家都应可被 label 查到（团队名册按 label 取人设）。
+        for s in TRAE_SPECIALISTS {
+            assert!(expert_by_label(s.label).is_some(), "查不到: {}", s.label);
         }
     }
 

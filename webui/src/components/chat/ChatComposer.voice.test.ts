@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
+import { createPinia } from 'pinia'
 import i18n from '@/i18n'
 import ChatComposer from './ChatComposer.vue'
 
@@ -31,6 +32,8 @@ async function mount(overrides: Record<string, unknown> = {}) {
   const el = document.createElement('div')
   document.body.appendChild(el)
   const app = createApp(ChatComposer, { ...BASE_PROPS, ...overrides })
+  // composer 现在内嵌 ChatModelPicker（依赖 rpc store），挂载必须带 Pinia。
+  app.use(createPinia())
   app.use(i18n)
   app.mount(el)
   await nextTick()

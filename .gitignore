@@ -180,3 +180,57 @@ vitest-report.json
 # 若决定不再随仓库发布，正确做法是 `git rm -r --cached website`，而不是加一条
 # ignore 规则——ignore 对已跟踪文件无效。
 # /website/
+
+# =============================================================================
+# 2026-10-27 发布前卫生补丁
+# 以下路径都是「本机生成 / 一次性诊断产物」，不含项目源码。全部是未跟踪文件，
+# 因此 ignore 规则可直接生效。
+# =============================================================================
+
+# 本机构建日志：`build*.log` 规则匹配不到 `.build_log*.txt` 这种形态
+/.build_log*.txt
+
+# 本机审计 / 临时工作区（智能体会话产生的 scratch 与导出的 HTML 包）
+/.audit-scratch/
+/.freebuff/
+/.trae-html-share-packages/
+/.patch_subagent.py
+
+# 本机 cargo 镜像配置（.cargo/config.toml 指向 rsproxy.cn，属个人网络环境，
+# 不应强加给所有贡献者与 CI）
+/.cargo/
+
+# 路由审计截图快照（webui/scripts/audit-routes.mjs 的整页截图，四份共约 47 MB）
+/webui/route-audit*/
+
+# WebUI 构建期临时目录
+/webui/.tmp/
+
+# 一次性 QA 探针与 i18n 应急脚本（不属于门禁脚本）
+/webui/scripts/__tmp_*
+/webui/scripts/_tmp_*
+/webui/scripts/.tmp*
+
+# QA 取证截图：docs/qa/full-ui-test-plan-* 的证据目录，含本机界面与绝对路径，
+# 不适合进入公开仓库（文档中的相对引用保留，截图按需本地复现）
+/docs/qa-shots/
+
+# 第三方技能库（arjun988/blender-skills，MIT，独立 git 仓库）。
+# `skills/blender3d.yaml` 明确写的是「本机 skills/blender-skills/...」，
+# 即它是本地挂载的参考资料而非主仓源码；直接 add 会变成没有 .gitmodules 的 gitlink。
+/skills/blender-skills/
+
+# 3D 演示交付物（智能体任务产物，不是应用源码）
+/island3d/
+
+# Blender 工具测试落盘物（core/src/tools/blender.rs 的测试在临时目录生成同名文件）
+/core/asset.blend
+/core/asset.blend1
+/core/asset.glb
+
+# 旧 GUI 的构建快照：docs/legacy 只保留源码，构建产物不入库
+/docs/legacy/*/dist-built-artifact/
+
+# verify-dist 只允许 boot/boot.mp3（CC0）随包分发；splash-cyber.mp4 是历史遗留，
+# 没有任何页面引用它（SplashView 已改用 /boot/boot.mp3 + public/splash/bg-v2.*）
+/webui/public/boot/splash-cyber.mp4

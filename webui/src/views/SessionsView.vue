@@ -1,6 +1,6 @@
 <template>
   <div class="hub control-stage sessions-stage">
-    <header class="control-stage__header">
+    <header class="control-stage__header sessions-topnav__head">
       <div class="control-stage__title-block">
         <h1 class="control-stage__title">{{ t('sessions.title') }}</h1>
         <p class="control-stage__subtitle">
@@ -8,6 +8,40 @@
         </p>
       </div>
       <div class="control-stage__actions">
+        <input
+          ref="importInput"
+          type="file"
+          accept=".json,application/json"
+          class="sessions-io__file"
+          @change="onImportFile"
+        />
+        <button
+          class="btn btn--sm btn--ghost"
+          :disabled="ioBusy"
+          :title="t('sessions.io.importHint')"
+          @click="pickImport"
+        >
+          <Icon name="download" :size="14" style="transform: rotate(180deg)" />
+          {{ t('sessions.io.import') }}
+        </button>
+        <button
+          class="btn btn--sm btn--ghost"
+          :disabled="ioBusy"
+          :title="t('sessions.io.exportAllHint')"
+          @click="exportAll"
+        >
+          <Icon name="download" :size="14" />
+          {{ t('sessions.io.exportAll') }}
+        </button>
+        <button
+          class="btn btn--sm btn--ghost"
+          :disabled="ioBusy"
+          :title="t('sessions.io.shareHint')"
+          @click="shareMarkdown"
+        >
+          <Icon name="share" :size="14" />
+          {{ t('sessions.io.share') }}
+        </button>
         <button
           class="btn btn--icon btn--ghost sessions-refresh"
           :title="refreshing ? t('sessions.refreshing') : t('sessions.refresh')"
@@ -19,6 +53,36 @@
         </button>
       </div>
     </header>
+
+    <nav class="sessions-topnav__bar" :aria-label="t('sessions.filter.ariaLabel')">
+      <div class="hub-filters control-segmented" role="group" :aria-label="t('sessions.filter.ariaLabel')">
+        <button
+          v-for="chip in FILTER_CHIPS"
+          :key="chip.id"
+          type="button"
+          class="hub-filter control-segmented__btn"
+          :class="{ 'is-active': filter === chip.id }"
+          :aria-pressed="filter === chip.id"
+          @click="filter = chip.id"
+        >
+          {{ t(chip.labelKey) }}
+          <span class="sessions-topnav__count" aria-hidden="true">{{ filterCounts[chip.id] }}</span>
+        </button>
+      </div>
+      <div class="hub-search">
+        <span class="hub-search__icon" aria-hidden="true">
+          <Icon name="search" :size="14" />
+        </span>
+        <input
+          v-model="search"
+          type="text"
+          class="hub-search__input"
+          :placeholder="t('sessions.search.placeholder')"
+          :aria-label="t('sessions.search.ariaLabel')"
+          autocomplete="off"
+        />
+      </div>
+    </nav>
 
     <SessionsTaskInput @submit="startTask" />
 
@@ -33,35 +97,6 @@
     />
 
     <section class="hub-list">
-      <div v-if="allSessions.length > 0" class="hub-list__head">
-        <div class="hub-filters control-segmented" role="group" :aria-label="t('sessions.filter.ariaLabel')">
-          <button
-            v-for="chip in FILTER_CHIPS"
-            :key="chip.id"
-            type="button"
-            class="hub-filter control-segmented__btn"
-            :class="{ 'is-active': filter === chip.id }"
-            :aria-pressed="filter === chip.id"
-            @click="filter = chip.id"
-          >
-            {{ t(chip.labelKey) }}
-          </button>
-        </div>
-        <div class="hub-search">
-          <span class="hub-search__icon" aria-hidden="true">
-            <Icon name="search" :size="14" />
-          </span>
-          <input
-            v-model="search"
-            type="text"
-            class="hub-search__input"
-            :placeholder="t('sessions.search.placeholder')"
-            :aria-label="t('sessions.search.ariaLabel')"
-            autocomplete="off"
-          />
-        </div>
-      </div>
-
       <ErrorState
         v-if="sessionListError"
         :message="t('sessions.error.load')"
@@ -96,6 +131,7 @@
         :needs-input-keys="needsInputKeys"
         @open="openSession"
         @remove="removeSession"
+        @export="exportSession"
       />
     </section>
 
@@ -117,10 +153,12 @@ import { computed, onActivated, onDeactivated, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useRpcStore } from '@/stores/rpc'
+import { readAuthToken } from '@/views/chat/read-auth-token'
 import Icon from '@/components/Icon.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import { useConfirm } from '@/composables/useConfirm'
+import { useToasts } from '@/composables/useToasts'
 import { requestUsageSnapshot } from '@/composables/usage/useUsageQuery'
 import type { UsageSnapshot } from '@/types/usage'
 import SessionsTaskInput from '@/components/sessions/SessionsTaskInput.vue'
@@ -178,6 +216,134 @@ const { sessionsList, allSessions, isLoading, sessionListError, loadSessions } =
 
 const filter = ref<FilterId>('all')
 const search = ref('')
+
+// ── 会话可移植性（导出 / 分享 / 导入）──────────────────────────────
+// 导出走 Rust `sessions.export`（行级无损）；分享生成 Markdown 并复制；
+// 导入先落盘再 `loadAll()` 回读，避免前端伪造"已导入"。
+const importInput = ref<HTMLInputElement | null>(null)
+const ioBusy = ref(false)
+const { pushToast } = useToasts()
+
+interface SessionExportResult {
+  ok: boolean
+  sessions?: unknown[]
+  markdown?: string
+  error?: string
+  code?: string
+}
+
+function fileStamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+function downloadText(filename: string, text: string, mime: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function ioError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+async function exportAll() {
+  ioBusy.value = true
+  try {
+    const r = await rpc.call<SessionExportResult>('sessions.export', {})
+    if (!r.ok) {
+      pushToast(t('sessions.io.exportFailed', { error: r.error || r.code || 'unknown' }), { tone: 'danger' })
+      return
+    }
+    downloadText(`marguerite-sessions-${fileStamp()}.json`, JSON.stringify(r, null, 2), 'application/json')
+    pushToast(t('sessions.io.exportDone', { n: r.sessions?.length ?? 0 }), { tone: 'ok' })
+  } catch (e) {
+    pushToast(t('sessions.io.exportFailed', { error: ioError(e) }), { tone: 'danger' })
+  } finally {
+    ioBusy.value = false
+  }
+}
+
+async function exportSession(item: { key: string }) {
+  ioBusy.value = true
+  try {
+    const r = await rpc.call<SessionExportResult>('sessions.export', { sessionId: item.key })
+    if (!r.ok) {
+      pushToast(t('sessions.io.exportFailed', { error: r.error || r.code || 'unknown' }), { tone: 'danger' })
+      return
+    }
+    const safe = item.key.replace(/[^\w.-]+/g, '_')
+    downloadText(`marguerite-session-${safe}.json`, JSON.stringify(r, null, 2), 'application/json')
+    pushToast(t('sessions.io.exportDone', { n: r.sessions?.length ?? 0 }), { tone: 'ok' })
+  } catch (e) {
+    pushToast(t('sessions.io.exportFailed', { error: ioError(e) }), { tone: 'danger' })
+  } finally {
+    ioBusy.value = false
+  }
+}
+
+/** 分享：生成 Markdown（含思考与工具调用）→ 复制 + 下载 .md。 */
+async function shareMarkdown() {
+  ioBusy.value = true
+  try {
+    const r = await rpc.call<SessionExportResult>('sessions.export', { format: 'markdown' })
+    if (!r.ok || !r.markdown) {
+      pushToast(t('sessions.io.shareFailed', { error: r.error || r.code || 'unknown' }), { tone: 'danger' })
+      return
+    }
+    downloadText(`marguerite-share-${fileStamp()}.md`, r.markdown, 'text/markdown')
+    try {
+      await navigator.clipboard.writeText(r.markdown)
+      pushToast(t('sessions.io.shareCopied'), { tone: 'ok' })
+    } catch {
+      // 剪贴板被拒（非安全上下文）时，下载已完成，如实提示。
+      pushToast(t('sessions.io.shareDownloaded'), { tone: 'info' })
+    }
+  } catch (e) {
+    pushToast(t('sessions.io.shareFailed', { error: ioError(e) }), { tone: 'danger' })
+  } finally {
+    ioBusy.value = false
+  }
+}
+
+function pickImport() {
+  importInput.value?.click()
+}
+
+async function onImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  ioBusy.value = true
+  try {
+    const payload = await file.text()
+    const r = await rpc.call<{
+      ok: boolean
+      total?: number
+      skipped?: unknown[]
+      error?: string
+      code?: string
+    }>('sessions.import', { payload })
+    if (!r.ok) {
+      pushToast(t('sessions.io.importFailed', { error: r.error || r.code || 'unknown' }), { tone: 'danger' })
+      return
+    }
+    pushToast(
+      t('sessions.io.importDone', { n: r.total ?? 0, skipped: r.skipped?.length ?? 0 }),
+      { tone: 'ok' },
+    )
+    await loadAll()
+  } catch (e) {
+    pushToast(t('sessions.io.importFailed', { error: ioError(e) }), { tone: 'danger' })
+  } finally {
+    ioBusy.value = false
+    input.value = ''
+  }
+}
 const agentNames = ref<Map<string, string>>(new Map())
 const agentsLoaded = ref(false)
 let agentsRequestGeneration = 0
@@ -198,9 +364,8 @@ const runningCount = computed(() => allSessions.value.filter(s => s.runStatus ==
 const queuedCount = computed(() => allSessions.value.filter(s => s.runStatus === 'queued').length)
 const needsInputKeys = computed(() => new Set(pendingApprovals.value))
 
-function matchesFilter(item: SessionItem, byKey: Map<string, SessionItem>): boolean {
-  if (filter.value === 'all') return true
-  const kind = FILTER_KINDS[filter.value]
+function matchesKind(item: SessionItem, kind: string | null, byKey: Map<string, SessionItem>): boolean {
+  if (!kind) return true
   // Subagent rows follow their parent through the filter.
   let current: SessionItem | undefined = item
   for (let hop = 0; current && hop < 4; hop++) {
@@ -210,6 +375,28 @@ function matchesFilter(item: SessionItem, byKey: Map<string, SessionItem>): bool
   }
   return false
 }
+
+function matchesFilter(item: SessionItem, byKey: Map<string, SessionItem>): boolean {
+  if (filter.value === 'all') return true
+  return matchesKind(item, FILTER_KINDS[filter.value], byKey)
+}
+
+/** Tab badges read the same kind matcher as the ledger so counts never drift. */
+const filterCounts = computed<Record<FilterId, number>>(() => {
+  const byKey = new Map(allSessions.value.map(item => [item.key, item]))
+  const counts: Record<FilterId, number> = {
+    all: allSessions.value.length,
+    chats: 0,
+    automations: 0,
+    channels: 0,
+  }
+  for (const item of allSessions.value) {
+    for (const id of ['chats', 'automations', 'channels'] as const) {
+      if (matchesKind(item, FILTER_KINDS[id], byKey)) counts[id] += 1
+    }
+  }
+  return counts
+})
 
 const ledgerEntries = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -272,10 +459,8 @@ async function loadAgents() {
 
 function approvalAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
-  try {
-    const token = sessionStorage.getItem('marguerite.wsToken') || ''
-    if (token) headers['Authorization'] = `Bearer ${token}`
-  } catch { /* ignore */ }
+  const token = readAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
   return headers
 }
 
@@ -492,6 +677,10 @@ onUnmounted(teardownLive)
   margin-top: 7px;
 }
 
+.sessions-io__file {
+  display: none;
+}
+
 .sessions-refresh {
   border-radius: var(--radius-control);
   color: var(--text-muted);
@@ -540,12 +729,25 @@ onUnmounted(teardownLive)
   max-width: 52ch;
 }
 
-.hub-list__head {
+.sessions-topnav__bar {
   align-items: center;
+  border-bottom: 1px solid var(--border);
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-3);
   justify-content: space-between;
+  padding-bottom: var(--sp-3);
+}
+
+.sessions-topnav__count {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+.hub-filter.is-active .sessions-topnav__count {
+  color: var(--text-muted);
 }
 
 .hub-filter:focus-visible {
@@ -590,7 +792,7 @@ onUnmounted(teardownLive)
     padding-bottom: var(--sp-6);
   }
 
-  .hub-list__head {
+  .sessions-topnav__bar {
     align-items: stretch;
     flex-direction: column;
   }

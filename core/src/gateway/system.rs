@@ -137,6 +137,26 @@ pub fn host_exit_evidence() -> Value {
     })
 }
 
+/// `host.metrics`：宿主（Python 侧车）最近一次资源采样（P1-6）。
+///
+/// 只做采集暴露：守护任务每 30s 读一次子进程 RSS（Windows
+/// `GetProcessMemoryInfo` / Linux `/proc/<pid>/status`），这里把最近一次
+/// 采样如实回给 UI。**不做预警重启**——告警与重启路径解耦，避免与
+/// P0-1 熔断互相干扰。
+///
+/// # 契约：从未采样过（侧车未跑过 / 刚启动）→ `available: false`，不是 RPC 错误。
+pub fn host_metrics() -> Value {
+    let m = crate::pyengine::sidecar::sidecar_metrics_snapshot();
+    json!({
+        "available": m.is_some(),
+        "pid": m.map(|x| x.pid),
+        "rss_bytes": m.map(|x| x.rss_bytes),
+        "rss_mb": m.map(|x| x.rss_bytes / 1_048_576),
+        "sampled_at_ms": m.map(|x| x.sampled_at_ms),
+        "uptime_ms": m.map(|x| x.uptime_ms),
+    })
+}
+
 #[cfg(test)]
 mod host_exit_tests {
     use super::*;

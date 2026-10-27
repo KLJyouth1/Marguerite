@@ -50,7 +50,11 @@ pub fn baota_credentials_set(params: &Value) -> Value {
         "linux_token": "",
         "linux_time": "",
     });
-    match std::fs::write(&path, serde_json::to_string(&data).unwrap_or_default()) {
+    // R13：原子写。凭据文件半截 = 解析失败 = 用户以为"保存成功"却要重填账号密码。
+    match crate::persistence::write_json_atomic(
+        &path,
+        &serde_json::to_string(&data).unwrap_or_default(),
+    ) {
         Ok(_) => json!({
             "ok": true,
             "msg": "凭据已保存，宝塔工具调用时将自动登录",

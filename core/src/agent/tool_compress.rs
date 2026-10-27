@@ -214,7 +214,10 @@ impl ToolCompressor {
     /// [`crate::cache::PrefixCacheTracker`]，返回 `true` 表示与历史一致（无漂移）、
     /// 前缀可持续命中 DeepSeek 服务端 KV 缓存；`false` 表示发生漂移，需排查压缩逻辑。
     pub fn observe_stable_prefix(&self, prefix: &str) -> bool {
-        prefix_cache_tracker().observe_stable_prefix(prefix)
+        // W5.3：按来源分域登记，让「漂移发生在压缩层还是 agent 稳定半区」可归因。
+        // scope 常量定义在 `cache` 里，避免字面量在多处漂移。
+        prefix_cache_tracker()
+            .observe_stable_prefix_scoped(crate::cache::COMPRESS_TOOL_RESULTS_SCOPE, prefix)
     }
 
     pub fn stats(&self) -> CompressStats {

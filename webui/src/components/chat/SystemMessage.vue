@@ -59,7 +59,7 @@
   <div v-else class="msg-system-wrap">
     <div class="msg-system" :class="message.displayRole">
       <template v-if="message.displayRole === 'subagent'">
-        <SubagentCard :message="message" />
+        <SubagentCard :message="message" @focus="emit('focus-subagent', $event)" />
       </template>
       <template v-else-if="message.text">
         <span class="msg-system-label">{{ message.roleLabel }}</span>
@@ -93,6 +93,7 @@ const emit = defineEmits<{
   retry: []
   replan: []
   'view-logs': []
+  'focus-subagent': [payload: { key: string }]
 }>()
 const resolving = ref(false)
 const showResume = computed(

@@ -36,6 +36,7 @@ pub fn mcp_servers_list() -> Value {
                 "args": s.args,
                 "env": s.env.keys().collect::<Vec<_>>(),
                 "url": s.url,
+                "enabled": s.enabled,
             })).collect::<Vec<_>>(),
         }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
@@ -68,35 +69,144 @@ pub fn mcp_list() -> Value {
     })
 }
 
-/// `mcp.servers.add`：新增/替换 MCP 服务器配置（name 唯一；url 或 command 至少一项）。
-pub fn mcp_servers_add(params: &Value) -> Value {
-    let name = param_str(params, "name", "name", "").trim();
+/// 读取可选字符串参数：键缺省时返回 `None`（用于区分「不修改」与「清空」）。
+fn optional_str<'a>(params: &'a Value, camel: &str, snake: &str) -> Option<&'a str> {
+    params
+        .get(camel)
+        .or_else(|| params.get(snake))
+        .and_then(Value::as_str)
+}
+
+/// 解析 `args`：必须是字符串数组；键缺省返回 `None`（表示不修改）。
+fn read_args(params: &Value) -> std::result::Result<Option<Vec<String>>, String> {
+    match params.get("args") {
+        None => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "args 必须是字符串数组".to_string())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err("args 必须是字符串数组".to_string()),
+    }
+}
+
+/// 解析 `env`：必须是「字符串 → 字符串」对象；键缺省返回 `None`（表示不修改）。
+fn read_env(
+    params: &Value,
+) -> std::result::Result<Option<std::collections::HashMap<String, String>>, String> {
+    match params.get("env") {
+        None => Ok(None),
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| {
+                v.as_str()
+                    .map(|s| (k.clone(), s.to_string()))
+                    .ok_or_else(|| format!("env.{k} 必须是字符串"))
+            })
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+            .map(Some),
+        Some(_) => Err("env 必须是键值对象".to_string()),
+    }
+}
+
+/// 写入服务器配置的共用实现（add / update 同一路径，避免两处逻辑漂移）。
+///
+/// - `must_exist = true`（update）：name 必须已存在，否则返回 `MCP_SERVER_NOT_FOUND`；
+/// - `args` / `env` 一旦提供就**全量替换**该服务器的配置（不是合并）；
+/// - `url` / `command` 缺省表示保留原值，提供则覆盖。
+fn save_server(params: &Value, must_exist: bool) -> Value {
+    let name = param_str(params, "name", "name", "").trim().to_string();
     if name.is_empty() {
         return json!({ "ok": false, "error": "缺少 name" });
     }
-    let url = param_str(params, "url", "url", "").trim().to_string();
-    let command = param_str(params, "command", "command", "")
-        .trim()
-        .to_string();
-    if url.is_empty() && command.is_empty() {
+    let args = match read_args(params) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let env = match read_env(params) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+    };
+    let idx = cfg.mcp.servers.iter().position(|s| s.name == name);
+    if must_exist && idx.is_none() {
+        return json!({
+            "ok": false,
+            "error": format!("MCP 服务器不存在: {name}"),
+            "code": "MCP_SERVER_NOT_FOUND",
+        });
+    }
+    let mut srv = match idx {
+        Some(i) => cfg.mcp.servers[i].clone(),
+        None => crate::persistence::config::McpServerConfig {
+            name: name.clone(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            url: None,
+            enabled: true,
+        },
+    };
+    srv.name = name;
+    if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+        srv.enabled = enabled;
+    }
+    if let Some(url) = optional_str(params, "url", "url") {
+        let url = url.trim();
+        srv.url = if url.is_empty() {
+            None
+        } else {
+            Some(url.to_string())
+        };
+    }
+    if let Some(command) = optional_str(params, "command", "command") {
+        srv.command = command.trim().to_string();
+    }
+    if let Some(args) = args {
+        srv.args = args;
+    }
+    if let Some(env) = env {
+        srv.env = env;
+    }
+    let has_url = srv
+        .url
+        .as_deref()
+        .map(str::trim)
+        .map(|u| !u.is_empty())
+        .unwrap_or(false);
+    if !has_url && srv.command.is_empty() {
         return json!({ "ok": false, "error": "url 与 command 至少提供一项" });
     }
-    match Config::load().and_then(|mut cfg| {
-        cfg.mcp.servers.retain(|s| s.name != name);
-        cfg.mcp
-            .servers
-            .push(crate::persistence::config::McpServerConfig {
-                name: name.to_string(),
-                command,
-                args: vec![],
-                env: std::collections::HashMap::new(),
-                url: if url.is_empty() { None } else { Some(url) },
-            });
-        cfg.save()
-    }) {
+    match idx {
+        Some(i) => cfg.mcp.servers[i] = srv,
+        None => cfg.mcp.servers.push(srv),
+    }
+    match cfg.save() {
         Ok(()) => mcp_servers_list(),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
     }
+}
+
+/// `mcp.servers.add`：新增/替换 MCP 服务器配置（name 唯一；url 或 command 至少一项）。
+///
+/// 同时支持 `args`（字符串数组）与 `env`（键值对象），与 `mcp.servers.update` 共用写入路径。
+pub fn mcp_servers_add(params: &Value) -> Value {
+    save_server(params, false)
+}
+
+/// `mcp.servers.update`：修改已存在的 MCP 服务器配置。
+///
+/// 入参 `{name, url?, command?, args?, env?}`；name 必须已存在。
+/// `args` / `env` 提供时全量替换；返回同 `mcp.servers.list`。
+pub fn mcp_servers_update(params: &Value) -> Value {
+    save_server(params, true)
 }
 
 /// `mcp.servers.remove`：删除 MCP 服务器配置。
@@ -142,6 +252,36 @@ async fn connect_and_list_tools(
             "探测超时（{}s 内未响应，疑似服务器无响应）",
             MCP_PROBE_TIMEOUT_SECS
         )),
+    }
+}
+
+/// `mcp.servers.setEnabled`：启用/停用一个已配置的 MCP 服务器。
+///
+/// 停用只把 `enabled` 写成 false 并保留配置：运行期加载（工具注册 / 对话注入 /
+/// 批量工具清单）会跳过它；探测与编辑仍可用，方便排查后再启用。
+pub fn mcp_servers_set_enabled(params: &Value) -> Value {
+    let name = param_str(params, "name", "name", "").trim();
+    if name.is_empty() {
+        return json!({ "ok": false, "error": "缺少 name" });
+    }
+    let Some(enabled) = params.get("enabled").and_then(Value::as_bool) else {
+        return json!({ "ok": false, "error": "enabled 必须是布尔值", "code": "INVALID_REQUEST" });
+    };
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+    };
+    let Some(srv) = cfg.mcp.servers.iter_mut().find(|s| s.name == name) else {
+        return json!({
+            "ok": false,
+            "error": format!("MCP 服务器不存在: {name}"),
+            "code": "MCP_SERVER_NOT_FOUND",
+        });
+    };
+    srv.enabled = enabled;
+    match cfg.save() {
+        Ok(()) => mcp_servers_list(),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
     }
 }
 
@@ -324,7 +464,14 @@ pub async fn mcp_tools_list(cached_only: bool) -> Result<Value, RpcError> {
 
     let cfg = Config::load().map_err(|e| RpcError::new("CONFIG_LOAD_FAILED", e.to_string()))?;
     let mut results: Vec<ServerToolProbe> = Vec::with_capacity(cfg.mcp.servers.len());
+    let mut disabled: Vec<String> = Vec::new();
     for srv in &cfg.mcp.servers {
+        // 停用的服务器不参与批量探测：它们不在运行期工具面里，
+        // 连接失败也不该把整体 `ok` 拉黑。
+        if !srv.enabled {
+            disabled.push(srv.name.clone());
+            continue;
+        }
         match connect_and_list_tools(srv).await {
             Ok(tools) => results.push(ServerToolProbe {
                 server: srv.name.clone(),
@@ -338,7 +485,10 @@ pub async fn mcp_tools_list(cached_only: bool) -> Result<Value, RpcError> {
             }),
         }
     }
-    let value = aggregate_tool_list(&results, 0, false);
+    let mut value = aggregate_tool_list(&results, 0, false);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("disabled".to_string(), json!(disabled));
+    }
     tools_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -350,6 +500,33 @@ pub async fn mcp_tools_list(cached_only: bool) -> Result<Value, RpcError> {
 #[cfg(test)]
 pub fn reset_tools_cache_for_test() {
     *tools_cache().lock().unwrap_or_else(|e| e.into_inner()) = ToolsCache::default();
+}
+
+#[cfg(test)]
+mod server_write_tests {
+    use super::*;
+
+    #[test]
+    fn read_args_rejects_non_string_entries() {
+        assert_eq!(read_args(&json!({})).unwrap(), None);
+        assert_eq!(
+            read_args(&json!({ "args": ["--port", "8080"] })).unwrap(),
+            Some(vec!["--port".to_string(), "8080".to_string()])
+        );
+        assert!(read_args(&json!({ "args": ["ok", 1] })).is_err());
+        assert!(read_args(&json!({ "args": "--port 8080" })).is_err());
+    }
+
+    #[test]
+    fn read_env_rejects_non_object_and_non_string_values() {
+        assert_eq!(read_env(&json!({})).unwrap(), None);
+        let env = read_env(&json!({ "env": { "API_KEY": "secret" } }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(env.get("API_KEY").map(String::as_str), Some("secret"));
+        assert!(read_env(&json!({ "env": ["API_KEY=secret"] })).is_err());
+        assert!(read_env(&json!({ "env": { "PORT": 8080 } })).is_err());
+    }
 }
 
 #[cfg(test)]

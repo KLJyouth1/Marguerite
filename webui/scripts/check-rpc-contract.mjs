@@ -34,9 +34,12 @@ function sourceFiles(dir, out = []) {
   return out
 }
 
-/** 去掉行注释与块注释，避免注释里的方法名被当成声明。 */
+/** 去掉行注释，避免注释里的方法名被当成声明。 */
 function stripComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  // 不要用整块注释正则剥离：protocol.rs 的行注释里存在 `skills/trae/**` 与
+  // `settings.*` / `auto_enabled.*` 这类文本，其中的星号加斜杠会被误判成块注释结尾，
+  // 把大半个 SUPPORTED_METHODS 数组吞掉（曾只解析出 120 条）。
+  return text.replace(/^\s*\/\/.*$/gm, '')
 }
 
 function supportedMethods() {
@@ -208,10 +211,14 @@ console.log(
 //   Python 侧车永不接管。故其「双实现」是**静态共存**而非运行时切换，本质与本守卫要防的
 //   「行为随侧车切换」不同，属误报。本守卫暂以基线（DUAL_IMPL_BASELINE）方式容忍这类方法，
 //   后续可加 `&& !rustFirst.has(m)` 过滤条件收敛，把纯 RUST_FIRST 方法移出双实现名单。
-//   （本次仅补注释说明，**不改判定逻辑**，避免影响现有 exit code。）
+//   （2026-10-24）已把该过滤**落到判定逻辑**：`dualImplementations()` 解析
+//   `RUST_FIRST_METHODS` 并 `!rustFirst.has(m)`，因此不再需要往基线里手工加豁免。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 既有 47 个双实现（2026-10-09 基线，待逐项语义审计）。**只许减少，不许新增。** */
+/**
+ * 既有双实现基线（2026-10-09 起，待逐项语义审计）。**只许减少，不许新增。**
+ * RUST_FIRST 方法由判定逻辑自动剔除，**不要**再为它们新增基线条目。
+ */
 const DUAL_IMPL_BASELINE = new Set([
   'artifacts.edit_inline', 'artifacts.get', 'artifacts.list',
   'artifacts.open_in_system', 'artifacts.register',
@@ -250,8 +257,18 @@ function dualImplementations() {
     [...(src.match(/RUST_OWNED_METHODS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)?.[1] ?? '')
       .matchAll(/"([^"]+)"/g)].map((m) => m[1]),
   )
+  // RUST_FIRST_METHODS：Rust 臂恒抢答（非 null 即 return），侧车永不接管。
+  // 这类方法的「双实现」只是静态共存，行为不随侧车在线与否变化 → 不属于本守卫
+  // 要防的「两套数据源 / 两套字段形状」，从判定中剔除（结构性修正，不靠基线豁免）。
+  const rustFirst = new Set(
+    [...(src.match(/RUST_FIRST_METHODS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)?.[1] ?? '')
+      .matchAll(/"([^"]+)"/g)].map((m) => m[1]),
+  )
   return [...arms]
-    .filter((m) => !owned.has(m) && prefixes.some((p) => m.startsWith(p)))
+    .filter(
+      (m) =>
+        !owned.has(m) && !rustFirst.has(m) && prefixes.some((p) => m.startsWith(p)),
+    )
     .sort()
 }
 

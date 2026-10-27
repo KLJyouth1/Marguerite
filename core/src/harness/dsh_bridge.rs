@@ -217,6 +217,18 @@ pub fn install_usage_hook_with_projection(
             let total = guard.total_tokens();
             drop(guard);
             publish_usage_accumulated(bus_for_hook.as_deref(), session_post.as_str(), &rec, total);
+            // 运行台账（best-effort）：每次工具调用落一条 append-only item。
+            // run_id 留空 —— 钩子拿不到 `run_isolated` 内部生成的 run_id，
+            // 但 session_id 是真实的，可按会话检索。
+            if let Some(ledger) = crate::harness::ledger::global() {
+                let item = crate::harness::ledger::ItemRecord::new(
+                    "tool_call",
+                    rec.tool_name.clone(),
+                )
+                .with_session(session_post.clone())
+                .with_metrics(rec.duration_ms, rec.tokens_in, rec.tokens_out, rec.ok);
+                let _ = ledger.record_item(item);
+            }
             // 凭证/投影缝：把样本折叠进会话 tokenUsage 投影（best-effort，失败不阻断记账）
             if let Some(proj) = proj_for_hook.as_ref() {
                 let event = json!({
@@ -266,6 +278,17 @@ pub fn install_usage_hook_with_projection(
             let total = guard.total_tokens();
             drop(guard);
             publish_usage_accumulated(bus_for_err.as_deref(), session_err.as_str(), &rec, total);
+            // 运行台账（best-effort）：错误型工具调用 ok=false，同样 append-only。
+            if let Some(ledger) = crate::harness::ledger::global() {
+                let item = crate::harness::ledger::ItemRecord::new(
+                    "tool_call",
+                    rec.tool_name.clone(),
+                )
+                .with_session(session_err.clone())
+                .with_metrics(0, 0, 0, false)
+                .with_error("TOOL_CALL_ERROR");
+                let _ = ledger.record_item(item);
+            }
             Ok(HookDecision::Continue)
         },
     );

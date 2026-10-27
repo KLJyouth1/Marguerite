@@ -154,6 +154,7 @@
   --dur-fast: 120ms;    /* hover, color, focus, press feedback */
   --dur-base: 200ms;    /* default UI transitions, reveals, small slides */
   --dur-enter: 280ms;   /* entrances, drawers, modals */
+  --dur-slow: 1200ms;   /* the one slow "breathing" ramp — frosted-glass/aurora cross-fades */
   --dur-pulse: 1800ms;  /* the single ambient "alive/working" loop period */
   --ease-standard: cubic-bezier(.2, 0, 0, 1);
   --ease-out: cubic-bezier(.2, .7, .2, 1);
@@ -275,4 +276,9 @@
   --sidebar-text: var(--text-muted);
   --sidebar-text-soft: var(--text-dim);
   --sidebar-border: var(--border);
+
+  /* Frosted panel wash for music mode (design §6): panels/cards may opt into
+     this instead of their solid surface. 74% opaque keeps body text contrast
+     ≥ 4.5:1 over the aurora scrim; colour-mix keeps every theme in one place. */
+  --glass-panel-bg: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 }

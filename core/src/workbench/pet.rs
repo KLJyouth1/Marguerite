@@ -117,8 +117,10 @@ fn load_store() -> PetStore {
 }
 
 fn save_store(p: &PetStore) {
+    // R13（2026-10-18）：改原子写。读取端 `load_store` 在解析失败时回落 default()，
+    // 半截文件 = 养成进度静默清零。
     if let Ok(json) = serde_json::to_string(p) {
-        let _ = std::fs::write(store_path(), json);
+        let _ = crate::persistence::write_json_atomic(&store_path(), &json);
     }
 }
 
@@ -141,18 +143,31 @@ fn mood_str(m: PetMood) -> &'static str {
 }
 
 /// 读取桌宠状态（按流逝时间 tick 衰减），供网关 RPC `pet.status`。
+///
+/// # 为什么只推进「整 10 秒」（真机缺陷，2026-10-23）
+///
+/// 旧实现每次调用都把 `last_ms` 改写成 `now`，而衰减量取 `elapsed/10` 的整数部分：
+/// 只要有任何消费者以 **短于 10 秒** 的间隔轮询 `pet.status`（桌宠页 15s 轮询 +
+/// 悬浮窗/托盘各自轮询），每次的小数部分都被抹掉 ⇒ 能量**永远不衰减**。
+/// 实测：投喂到 25 点后 29 秒仍是 25，与页面提示「每 10 秒衰减 1」不符。
+///
+/// 现在只消费整 10 秒并把余数留在 `last_ms` 里，衰减与轮询频率无关。
 pub fn status() -> PetView {
     let mut store = load_store();
-    let dt = now_ms().saturating_sub(store.last_ms) / 1000;
-    let cur = PetState {
-        mood: mood_from_str(&store.mood),
-        energy: store.energy,
-    };
-    let next = tick(&cur, dt);
-    store.energy = next.energy;
-    store.mood = mood_str(next.mood).to_string();
-    store.last_ms = now_ms();
-    save_store(&store);
+    let now = now_ms();
+    let elapsed_ms = now.saturating_sub(store.last_ms);
+    let decay_units = (elapsed_ms / 10_000) as i32;
+    if decay_units > 0 {
+        let cur = PetState {
+            mood: mood_from_str(&store.mood),
+            energy: store.energy,
+        };
+        let next = tick(&cur, (decay_units as u64) * 10);
+        store.energy = next.energy;
+        store.mood = mood_str(next.mood).to_string();
+        store.last_ms += (decay_units as u64) * 10_000;
+        save_store(&store);
+    }
     PetView {
         mood: store.mood.clone(),
         energy: store.energy,
@@ -209,6 +224,35 @@ mod tests {
         let after_low = tick(&low, 200); // 200s -> -20 -> 10
         assert_eq!(after_low.energy, 10);
         assert_eq!(after_low.mood, PetMood::Sleepy);
+    }
+
+    #[test]
+    fn status_accumulates_decay_across_frequent_polls() {
+        let dir = std::env::temp_dir().join(format!("pet_decay_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+        save_store(&PetStore {
+            mood: "idle".into(),
+            energy: 80,
+            affection: 0,
+            last_ms: now_ms() - 25_000,
+        });
+
+        let v1 = status();
+        assert_eq!(v1.energy, 78, "25 秒应衰减 2 点");
+
+        // 立刻再读（<10s）：不得再衰减，且 5 秒余数不能被抹掉。
+        let v2 = status();
+        assert_eq!(v2.energy, 78);
+
+        // 再补 5 秒（模拟短于 10 秒的高频轮询）→ 累计整 10 秒，必须再衰减 1。
+        let mut store = load_store();
+        store.last_ms -= 5_000;
+        save_store(&store);
+        let v3 = status();
+        assert_eq!(v3.energy, 77, "轮询间隔小于 10 秒也必须累计衰减");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

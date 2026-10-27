@@ -3,11 +3,12 @@
     ref="rootRef"
     tabindex="-1"
     class="composer-run-mode"
-    role="dialog"
+    :class="{ 'is-inline': inline }"
+    :role="inline ? undefined : 'dialog'"
     :aria-label="t('chat.composer.runMode')"
     @keydown.esc.stop="$emit('close')"
   >
-    <div class="composer-run-mode__head">
+    <div v-if="!inline" class="composer-run-mode__head">
       <span>{{ t('chat.composer.runMode') }}</span>
       <button type="button" class="composer-run-mode__close" :aria-label="t('chat.closeComposerSettings')" @click="$emit('close')">
         <Icon name="x" :size="14" />
@@ -22,6 +23,7 @@
         class="composer-run-mode__option"
         :class="{ 'is-active': selectedRunMode === option.value }"
         :disabled="isDisabled(option.value)"
+        :title="isDisabled(option.value) ? disabledReason : undefined"
         role="radio"
         :aria-checked="selectedRunMode === option.value ? 'true' : 'false'"
         @click="selectRunMode(option.value)"
@@ -34,6 +36,13 @@
       </button>
     </div>
 
+    <!-- 禁用必须给可见原因：原生 disabled 按钮不派发 click，没有这段文案就是
+         「点了没反应」。安全模式本身不再因「setup 未就绪」被禁用。 -->
+    <p
+      v-if="disabledReason"
+      class="composer-run-mode__hint"
+      role="note"
+    >{{ disabledReason }}</p>
   </section>
 </template>
 
@@ -41,30 +50,52 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
-import type { SandboxRunMode } from '@/types/sandbox'
+import type { SandboxRunMode, SandboxSetupState } from '@/types/sandbox'
 import { SANDBOX_RUN_MODES, normalizeSandboxRunMode } from '@/types/sandbox'
 
 const { t } = useI18n()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   runMode: SandboxRunMode
   allowedRunModes: SandboxRunMode[]
   safeSetupAvailable?: boolean
+  /**
+   * 沙箱 setup 的真实状态。未 ready 时 safe 仍可选（点击 → 安装/提示），
+   * 只把标签改成「安全（待安装）」，不再禁用。
+   */
+  safeSetupState?: SandboxSetupState | null
   /** 会话进行中锁定：所有沙箱选项禁用，仅展示锁定提示。 */
   runModeLocked?: boolean
   runModeLockMessage?: string
-}>()
+  /**
+   * 内联模式：被 `RunModePanel` 嵌进它自己的滚动面板时使用。
+   * 绝对定位的浮层会在锚点 chip 上再弹一层、逃出父面板的 max-height（实测「模型路由」
+   * 那一段内容被输入区吃掉），内联后它只是普通的一行排版。
+   */
+  inline?: boolean
+}>(), {
+  inline: false,
+})
 
 const emit = defineEmits<{
   close: []
   setRunMode: [mode: SandboxRunMode]
 }>()
 
+/** setup 未 ready（含未知）：safe 仍可选，但标签要老实标「待安装」。 */
+const safeSetupPending = computed(
+  () => props.safeSetupState != null && props.safeSetupState !== 'ready',
+)
+
 const runModeOptions = computed(() => [
   {
     value: 'safe',
-    label: t('chat.composer.runModeSafe'),
-    description: t('chat.composer.runModeSafeDesc'),
+    label: safeSetupPending.value
+      ? t('settings.sandbox.safeMode.pendingLabel')
+      : t('chat.composer.runModeSafe'),
+    description: safeSetupPending.value
+      ? t('settings.sandbox.safeMode.pendingComposerDesc')
+      : t('chat.composer.runModeSafeDesc'),
   },
   {
     value: 'full',
@@ -80,11 +111,20 @@ const allowedRunModes = computed(() => {
   return allowed.length > 0 ? allowed : [...SANDBOX_RUN_MODES]
 })
 
+/**
+ * 只允许两种禁用来源：会话运行锁（父级真实锁定）与网关策略不允许该模式。
+ * 「setup 未就绪」不再是禁用条件 —— 点击会落盘选择并给出安装/提示。
+ */
 function isDisabled(mode: SandboxRunMode): boolean {
   if (props.runModeLocked) return true
-  if (mode === 'safe' && props.safeSetupAvailable) return false
   return !allowedRunModes.value.includes(mode)
 }
+
+const disabledReason = computed(() => {
+  if (props.runModeLocked) return props.runModeLockMessage || t('chat.composer.runModeLocked')
+  const missing = SANDBOX_RUN_MODES.some(mode => !allowedRunModes.value.includes(mode))
+  return missing ? t('chat.composer.runModePolicyBlocked') : ''
+})
 
 function selectRunMode(mode: SandboxRunMode) {
   if (isDisabled(mode)) return
@@ -93,7 +133,11 @@ function selectRunMode(mode: SandboxRunMode) {
 }
 
 const rootRef = ref<HTMLElement | null>(null)
-onMounted(() => rootRef.value?.focus())
+onMounted(() => {
+  // 内联形态不要抢焦点：它嵌在父面板的滚动盒里，focus() 会把滚动位置拉到
+  // 这一段（「模型路由」在最后，等于一打开面板就被滚到底）。
+  if (!props.inline) rootRef.value?.focus()
+})
 </script>
 
 <style scoped>
@@ -108,6 +152,18 @@ onMounted(() => rootRef.value?.focus())
   background: var(--bg-surface);
   box-shadow: var(--shadow-xl);
   z-index: 30;
+}
+
+/* 内联：不再是一层浮窗，只是父面板里的一组选项 */
+.composer-run-mode.is-inline {
+  position: static;
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  z-index: auto;
 }
 
 .composer-run-mode__head {
@@ -194,12 +250,22 @@ onMounted(() => rootRef.value?.focus())
 }
 
 .composer-run-mode__option-desc {
-  overflow: hidden;
   color: var(--text-muted);
   font-size: 0.75rem;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 说明文字允许折行：原先 nowrap + 省略号会把「需要沙箱」之外的限制条件吃掉，
+     用户看到的是半句配置说明。 */
+  white-space: normal;
+}
+
+.composer-run-mode__hint {
+  margin: 0.5rem 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 @media (max-width: 520px) {

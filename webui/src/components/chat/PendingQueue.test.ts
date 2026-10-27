@@ -12,7 +12,7 @@ afterEach(() => {
 })
 
 async function mountQueue(
-  listeners: Record<string, () => void> = {},
+  listeners: Record<string, (...args: number[]) => void> = {},
   items: Array<{
     text: string
     deliveryState?: 'steering' | 'retryable'
@@ -80,7 +80,7 @@ describe('PendingQueue', () => {
 
     expect(el.querySelector('.chat-pending-card')?.getAttribute('aria-busy')).toBe('true')
     const actions = [...el.querySelectorAll<HTMLButtonElement>('.chat-pending-actions button')]
-    expect(actions).toHaveLength(3)
+    expect(actions).toHaveLength(6)
     expect(actions.every(button => button.disabled)).toBe(true)
 
     actions.forEach(button => button.click())
@@ -218,6 +218,36 @@ describe('PendingQueue', () => {
     expect(el.querySelector(`#${describedBy}`)?.textContent).toContain(blockedMessage)
     expect(el.querySelector('.chat-pending-attachment-status')?.textContent)
       .toContain(blockedMessage)
+    app.unmount()
+  })
+
+  it('offers send-now and reorder controls on each movable item', async () => {
+    let sentNow = 0
+    const moves: Array<[number, number]> = []
+    const { app, el } = await mountQueue({
+      onSendNow: () => { sentNow += 1 },
+      onMove: (index: number, delta: number) => { moves.push([index, delta]) },
+    }, [{ text: 'first' }, { text: 'second' }])
+
+    const sendNow = [...el.querySelectorAll<HTMLButtonElement>('.chat-pending-action--send-now')]
+    expect(sendNow).toHaveLength(2)
+    sendNow[1]?.click()
+    expect(sentNow).toBe(1)
+
+    const cards = [...el.querySelectorAll<HTMLElement>('.chat-pending-card')]
+    const upOf = (card: HTMLElement) =>
+      card.querySelector<HTMLButtonElement>('[aria-label="Move up"]')
+    const downOf = (card: HTMLElement) =>
+      card.querySelector<HTMLButtonElement>('[aria-label="Move down"]')
+    // 队首不能上移、队尾不能下移，中间两侧都可用
+    expect(upOf(cards[0])?.disabled).toBe(true)
+    expect(downOf(cards[0])?.disabled).toBe(false)
+    expect(upOf(cards[1])?.disabled).toBe(false)
+    expect(downOf(cards[1])?.disabled).toBe(true)
+
+    downOf(cards[0])?.click()
+    upOf(cards[1])?.click()
+    expect(moves).toEqual([[0, 1], [1, -1]])
     app.unmount()
   })
 

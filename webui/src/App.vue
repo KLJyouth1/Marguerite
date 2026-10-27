@@ -1,4 +1,10 @@
 <template>
+  <!-- 玛格丽特 · 星夜：3D 山脊（雪脊 + 补给站 + 结组登山队 + 云海 + 日出 / 左半星空）
+       WebGL 不可用时退回 Canvas 星空，两者都只在该主题激活时挂载 -->
+  <MargueriteRidge v-if="ridgeActive" />
+  <MargueriteSky v-else-if="skyActive" />
+  <!-- 液态玻璃 · 流光：仅在该主题激活时挂载背景质感层（云朵/海面/沙丘） -->
+  <GlassBackdrop v-if="glassActive" />
   <!-- Sidebar -->
   <nav
     ref="sidebarRef"
@@ -109,18 +115,26 @@
         >{{ section.items.length }}</span>
       </button>
       <div v-show="!collapsedGroups.has(section.id)" class="sidebar-group__items">
-        <router-link
-          v-for="item in section.items"
-          :key="item.path"
-          :to="item.path"
-          class="sidebar-fn-item sidebar-fn-item--nested"
-          :class="{ 'is-active': isPrimaryNavActive(item.path) }"
-          :aria-current="isPrimaryNavActive(item.path) ? 'page' : undefined"
-          @click="handleNavClick"
-        >
-          <Icon :name="item.icon" :size="16" />
-          <span class="sidebar-fn-label">{{ item.title }}</span>
-        </router-link>
+        <template v-for="item in section.items" :key="item.path">
+          <!-- 鲸鱼娘（/pet）保留原导航语义，只是把入口行换成紧凑桌宠卡片；
+               卡片本身不含 3D 舞台，全局 DesktopPet 仍是唯一的 WebGL 宿主。 -->
+          <SidebarPetModule
+            v-if="item.path === '/pet'"
+            :active="isPrimaryNavActive(item.path)"
+            @navigate="handleNavClick"
+          />
+          <router-link
+            v-else
+            :to="item.path"
+            class="sidebar-fn-item sidebar-fn-item--nested"
+            :class="{ 'is-active': isPrimaryNavActive(item.path) }"
+            :aria-current="isPrimaryNavActive(item.path) ? 'page' : undefined"
+            @click="handleNavClick"
+          >
+            <Icon :name="item.icon" :size="16" />
+            <span class="sidebar-fn-label">{{ item.title }}</span>
+          </router-link>
+        </template>
       </div>
     </div>
     <!-- Shell extension seam (append-only; renders nothing while empty). -->
@@ -206,6 +220,15 @@
     @open-settings="onPaletteOpenSettings"
     @toggle-theme="onPaletteToggleTheme"
     @select-session="onPaletteSelectSession"
+  />
+
+  <!-- Ctrl/⌘+P quick-open: modal file search over the project bound to the
+       current task. Opening a hit lands in the editor via ?path=. -->
+  <FileQuickOpen
+    :open="fileQuickOpenOpen"
+    :base-path="statusProject.path"
+    @close="fileQuickOpenOpen = false"
+    @open="openQuickOpenFile"
   />
 
   <!-- Main content -->
@@ -341,7 +364,10 @@
            route and at every viewport width. -->
       <TitleBarControls />
     </header>
-    <div class="app-workspace">
+    <div
+      class="app-workspace"
+      :style="{ '--workbench-inset-right': `${workbenchInsetRight}px` }"
+    >
       <main
         class="content"
         :class="{ 'content--chat': isChatRoute }"
@@ -359,9 +385,21 @@
       />
       <ArtifactImageLightbox />
       <PaperGrain v-if="appStore.theme === 'ink'" />
-      <!-- 鲸鱼娘桌面桌宠（可拖拽；设置 → 宠物 开关） -->
-      <DesktopPet />
+      <!-- 鲸鱼娘桌面桌宠（可拖拽；设置 → 宠物 开关）。
+           悬浮窗路由自身不挂页内桌宠：那里已有独立的 3D 舞台，
+           再挂一个（被 CSS 藏成 0×0）会白开第二个 WebGL 上下文与动画循环。 -->
+      <DesktopPet v-if="!isPetOverlayRoute" />
     </div>
+    <AppStatusBar
+      v-if="!isPetOverlayRoute"
+      :project="statusProject.label"
+      :project-path="statusProject.path"
+      :mode="t('appStatus.localMode')"
+      :branch="statusBranch || null"
+      :detached="statusDetached"
+      :connection-label="connectionStateLabel"
+      :connection-tone="gatewayReadiness"
+    />
   </div>
 
   <!-- Mobile bottom tab bar (<=768px only; hides while the keyboard is up):
@@ -407,24 +445,48 @@
 
   <OnboardingOverlay />
 
+  <!-- Music-driven full-interface ambience: frosts the whole workstation into
+       light frosted glass + aurora while background music plays. Pointer-
+       transparent; mounted once, app-wide. -->
+  <AmbienceLayer />
+
   <BootOrchestra />
 
   <!-- Single app-wide announcer for the pending-approval count. The nav badge
        and topbar pill stay silent (no double-announce); this region carries the
        only spoken update when the count changes. -->
   <p class="app-approval-live" aria-live="polite" role="status">{{ approvalAnnouncement }}</p>
+
+  <!-- 应用级右键菜单：桌面端不再弹 Chromium 默认菜单（重新加载/另存为/检查） -->
+  <AppContextMenu />
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { initActiveMode, disposeActiveMode } from '@/composables/useActiveMode'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { routeTitle } from './router'
+import { whenI18nReady } from '@/i18n'
 import { getPlatform } from '@/platform'
 import { useAppStore, type ThemeMode, type PendingApproval } from './stores/app'
 import { useRpcStore } from './stores/rpc'
+import { useWorkbenchStore } from '@/workbench/store'
+import { workbenchEffectiveWidth, workbenchLayoutMode } from '@/workbench/layout'
+import { readAuthToken } from '@/views/chat/read-auth-token'
+import { staticAssetUrl } from '@/utils/staticAsset'
+import { restoreStoredWallpaper } from '@/utils/wallpaper'
+import MargueriteSky from '@/components/MargueriteSky.vue'
+import AppStatusBar from '@/components/AppStatusBar.vue'
+// 3D 山脊是重资源（three.js）：整包懒加载，只有切到「玛格丽特 · 星夜」且 WebGL 可用时才拉
+const MargueriteRidge = defineAsyncComponent(() => import('@/components/marguerite/MargueriteRidge.vue'))
+import GlassBackdrop from '@/components/GlassBackdrop.vue'
+import { ambience } from '@/composables/useAmbience'
+import { initGlassScene } from '@/composables/useGlassScene'
+import { initGlassParams } from '@/composables/useGlassLab'
+import { restorePetOverlayPreference } from '@/composables/usePetOverlay'
 import { provideGatewayReadiness } from './composables/useGatewayReadiness'
+import { useWorkspaceStatus } from './composables/sessions/useWorkspaceStatus'
 import { provideHostExitEvidence } from './composables/useHostExitEvidence'
 import {
   arrangeSidebarSections,
@@ -439,6 +501,7 @@ import MobileTabBar from './components/MobileTabBar.vue'
 import ThemeMenu from './components/ThemeMenu.vue'
 import ProjectWorkspaceDialogs from './components/ProjectWorkspaceDialogs.vue'
 import ToastHost from './components/ToastHost.vue'
+import AppContextMenu from './components/AppContextMenu.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import ProjectWorkspaceEditDialog from './components/ProjectWorkspaceEditDialog.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
@@ -451,8 +514,10 @@ import HostExitCard from './components/HostExitCard.vue'
 import SlotHost from './shell/slots/SlotHost.vue'
 import SidebarResizer from './components/SidebarResizer.vue'
 import CommandPalette from './components/CommandPalette.vue'
+import FileQuickOpen from './components/FileQuickOpen.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import BgmControl from './components/BgmControl.vue'
+import AmbienceLayer from './components/AmbienceLayer.vue'
 import ArtifactImageLightbox from './components/chat/ArtifactImageLightbox.vue'
 import AppWorkbench from './components/workbench/AppWorkbench.vue'
 import TitleBarControls from './components/shell/TitleBarControls.vue'
@@ -464,12 +529,15 @@ import { useAgentOptions } from './composables/useAgentOptions'
 import { useSessionListSubscription } from './composables/useSessionListSubscription'
 import { useSessionTaskAttention } from './composables/useSessionTaskAttention'
 import { useToasts } from './composables/useToasts'
+import { readStoredSessionKeys } from './utils/sidebarStorage'
 import PaperGrain from '@/components/ink/PaperGrain.vue'
 import DesktopPet from '@/components/pet/DesktopPet.vue'
+import SidebarPetModule from '@/components/pet/SidebarPetModule.vue'
 import { useConfirm } from './composables/useConfirm'
 import { useProjectWorkspaces } from './composables/useProjectWorkspaces'
 import { useFreshTaskDraft } from './composables/useFreshTaskDraft'
 import { useNavigation } from './app/useNavigation'
+import { installInternalLinkGuard } from './app/useInternalLinkGuard'
 import ModeBadge from '@/components/ModeBadge.vue'
 import { useSurfaceSkin } from './themes/useSurfaceSkin'
 import { normalizeAgentId } from './utils/chat/sessionKeys'
@@ -493,10 +561,75 @@ import { markCronFinishNotified } from './utils/cron/notifications'
 
 const appStore = useAppStore()
 const rpcStore = useRpcStore()
+const workbenchStore = useWorkbenchStore()
+
+/**
+ * 工作台占用的右侧宽度。
+ *
+ * Chat 的右侧栏是 `position: fixed; right: 0`，而工作台是 `.app-workspace` 的
+ * flex 子项。两者同时打开时会**重叠**：实测右侧栏（z-index 95）盖住工作台标题栏，
+ * 连「关闭面板」的 X 都点不到。这里把工作台实际宽度作为 CSS 变量下发，
+ * 右侧栏与它的折叠按钮据此左移，二者各占其位。
+ */
+const layoutViewportWidth = ref(typeof window === 'undefined' ? 0 : window.innerWidth)
+const workbenchInsetRight = computed(() => {
+  if (!workbenchStore.expanded || !workbenchStore.activeItem) return 0
+  const mode = workbenchLayoutMode({ availableWidth: layoutViewportWidth.value })
+  if (mode !== 'split') return 0
+  return workbenchEffectiveWidth(
+    workbenchStore.widthPreference,
+    mode,
+    layoutViewportWidth.value,
+  )
+})
+function syncLayoutViewport() {
+  layoutViewportWidth.value = window.innerWidth
+}
+// 星夜天空画布只服务 `marguerite-night`；用 resolvedTheme 而不是 theme，
+// 这样 'system' 落到 light/dark 时不会误挂载。
+const skyActive = computed(() => appStore.resolvedTheme === 'marguerite-night')
+// 3D 山脊只在「玛格丽特 · 星夜」且 WebGL 可用时挂载；否则退回 Canvas 星空（诚实降级）。
+const webglOk = ref(false)
+const ridgeActive = computed(() => skyActive.value && webglOk.value)
+
+/** 一次性 WebGL 探测：拿不到上下文就退回 Canvas 星空，不抛错、不 import three。 */
+function detectWebGL(): boolean {
+  try {
+    const canvas = document.createElement('canvas')
+    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'))
+  } catch {
+    return false
+  }
+}
+// 液态玻璃背景层只服务 `liquid-glass`；同样用 resolvedTheme，避免 system 误挂载。
+const glassActive = computed(() => appStore.resolvedTheme === 'liquid-glass')
 const shortcutsStore = useShortcutsStore()
 const artifactImageLightbox = provideArtifactImageLightbox()
 const { t } = useI18n()
 const $route = useRoute()
+
+// 桌宠悬浮窗（Tauri 独立窗口，360×420 透明）：只渲染宠物本身，不带任何外壳。
+// 真机缺陷（2026-10-23）：该窗口宽度落入移动断点，顶栏与底部 tabbar 会盖在宠物上。
+// 用 `<html data-surface="pet-overlay">` 作为单一开关，样式集中在 base.css，
+// 避免在 App.vue 十几处外壳节点上逐个加 v-if（漏一个就是一块残影）。
+const isPetOverlayRoute = computed(() => $route.meta?.viewKey === 'pet-overlay')
+// P0-4：任务悬浮球是同一类无壳窗口，复用同一 data-surface 开关隐藏外壳。
+const overlaySurface = computed(() => {
+  const viewKey = $route.meta?.viewKey
+  return viewKey === 'pet-overlay' || viewKey === 'task-overlay' ? String(viewKey) : ''
+})
+watch(
+  overlaySurface,
+  (surface) => {
+    const html = document.documentElement
+    if (surface) html.dataset.surface = surface
+    else if (html.dataset.surface === 'pet-overlay' || html.dataset.surface === 'task-overlay') {
+      delete html.dataset.surface
+    }
+  },
+  { immediate: true },
+)
+
 const sidebarRef = ref<HTMLElement | null>(null)
 const sidebarDockToggleRef = ref<HTMLButtonElement | null>(null)
 const topbarSidebarToggleRef = ref<HTMLButtonElement | null>(null)
@@ -573,12 +706,16 @@ const { readiness: gatewayReadiness } = provideGatewayReadiness()
 provideHostExitEvidence()
 const connectionStateLabel = computed(() => t(`chrome.connectionState.${gatewayReadiness.value}`))
 const router = useRouter()
+// 内部裸锚点守卫：任何遗留的 `<a href="/control/...">` 都不该触发整页导航。
+// 安装点在 setup 期（早于视图挂载），注销在 root 卸载时。
+const removeInternalLinkGuard = installInternalLinkGuard(router)
 
-// afterEach only fires on navigation, so a same-route language switch needs an
-// explicit re-localize of the tab title.
-watch(() => appStore.locale, () => {
-  document.title = `${routeTitle($route)} — Marguerite`
-})
+// afterEach only fires on navigation, and it deliberately skips writing while the
+// first locale is still resolving (see applyRouteTitle) — so re-apply the tab title
+// on a same-route language switch, and once more when the first locale settles so
+// the cold-start title is not left at the index.html placeholder.
+watch(() => appStore.locale, () => applyRouteDocumentTitle())
+void whenI18nReady().then(() => { applyRouteDocumentTitle() })
 const { allSessions, sessionListError, isLoading, loadSessions, applySessionRunStatus } = useSessions(
   optionalSessionRpcCallOptions,
 )
@@ -653,15 +790,18 @@ installSessionNavigationDiagConsole()
 const { agents, loadAgents } = useAgentOptions(optionalSessionRpcCallOptions)
 const mobileKeyboardOpen = ref(false)
 const commandPaletteOpen = ref(false)
+// Ctrl/⌘+P quick-open overlay (see components/FileQuickOpen.vue).
+const fileQuickOpenOpen = ref(false)
 const localChatSessions = ref<Record<string, { effectiveAgentId: string; title: string; updatedAt: number }>>({})
 // Pending optimistic renames, keyed by session key; cleared after the next list
 // reload returns the backend's canonical title.
 const renameOverrides = ref<Record<string, string>>({})
 
 const brandMarkUrl = computed(() => {
-  if (import.meta.env.DEV) return '/marguerite-mark.svg'
-  const base = document.getElementById('Marguerite-data')?.dataset.basePath || '/control'
-  return `${base.replace(/\/$/, '')}/static/dist/marguerite-mark.svg`
+  // 2026-10-23：改用 Seedream 5.0 Pro 定制的专属 Logo（已裁掉生成水印、
+  // 缩到 256² 供 24px 侧栏使用）。路径解析走统一工具，避免 DEV/PROD 两套前缀
+  // 各写一遍（旧实现在 PROD 下拼错就会被 SPA 回退成 index.html → 图标空白）。
+  return staticAssetUrl('brand/logo-mark.png')
 })
 
 // Display chords track the configurable bindings so the rail hint, the New chat
@@ -741,6 +881,42 @@ const sidebarCurrentKey = computed(() =>
   currentSessionKey.value || activeProjectDraftKey.value,
 )
 
+// ── Bottom status bar: project / mode / branch / connection / version ──
+const currentSessionItem = computed(() => (
+  currentSessionKey.value
+    ? allSessions.value.find(item => item.key === currentSessionKey.value) || null
+    : null
+))
+
+function pathBaseName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const parts = trimmed.split(/[\\/]/)
+  return parts[parts.length - 1] || trimmed
+}
+
+const statusProject = computed(() => {
+  const session = currentSessionItem.value
+  if (session?.workspaceLabel) {
+    return { label: session.workspaceLabel, path: session.workspace || '' }
+  }
+  if (session?.workspace) {
+    return { label: pathBaseName(session.workspace), path: session.workspace }
+  }
+  const draftId = activeProjectDraftId.value
+  const draft = draftId ? projectWorkspaces.byId.value.get(draftId) : null
+  if (draft) return { label: draft.name, path: draft.path }
+  return { label: t('appStatus.noProject'), path: '' }
+})
+
+const statusWorkspace = useWorkspaceStatus()
+watch(
+  () => statusProject.value.path,
+  path => { void statusWorkspace.load(path) },
+  { immediate: true },
+)
+const statusBranch = computed(() => statusWorkspace.status.value?.git?.branch || '')
+const statusDetached = computed(() => statusWorkspace.status.value?.git?.detached === true)
+
 watch(
   [
     currentSessionKey,
@@ -763,6 +939,7 @@ const settingsOverlayOpen = computed(() =>
   webConfigEnabled && ($route.name === 'settings' || $route.name === 'settings-section'))
 const workbenchModalBlocked = computed(() =>
   commandPaletteOpen.value
+  || fileQuickOpenOpen.value
   || themeMenuOpen.value
   || settingsOverlayOpen.value
   || (appStore.sidebarOpen && isSidebarDrawer.value))
@@ -793,7 +970,9 @@ function isPrimaryNavActive(path: string): boolean {
 
 function agentDisplayName(agentId: string): string {
   const agent = agents.value.find(a => a.id === agentId)
-  return agent?.name || (agentId === 'main' ? 'Main Agent' : agentId)
+  // 兜底不能硬编码英文：agents.list 失败/未回来时，中文界面里会永久显示
+  // "Main Agent"。`chat.mainAgent` 是既有文案键（六语言齐备）。
+  return agent?.name || (agentId === 'main' ? t('chat.mainAgent') : agentId)
 }
 
 // Raw session keys (agent:…:…) and bare UUIDs must never render in the sidebar.
@@ -941,17 +1120,6 @@ watch(allSessions, sessions => {
 
 const SIDEBAR_SESSION_ORDER_KEY = 'Marguerite-sidebar-session-order-v1'
 const SIDEBAR_PINNED_SESSIONS_KEY = 'Marguerite-sidebar-pinned-sessions-v1'
-
-function readStoredSessionKeys(storageKey: string): string[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey) || '[]')
-    if (!Array.isArray(parsed)) return []
-    return [...new Set(parsed.filter((key): key is string => typeof key === 'string' && key.length > 0))]
-      .slice(0, 1000)
-  } catch {
-    return []
-  }
-}
 
 function writeStoredSessionKeys(storageKey: string, keys: readonly string[]) {
   try {
@@ -1295,6 +1463,16 @@ function openCommandPalette() {
   commandPaletteOpen.value = true
 }
 
+// Quick-open hit: dismiss the modal, then deep-link the editor at the picked
+// file. WorkspaceEditorView reads `?path=`, focuses the containing directory in
+// the tree and opens the file in a tab.
+function openQuickOpenFile(path: string) {
+  fileQuickOpenOpen.value = false
+  if (!path) return
+  const root = statusProject.value.path
+  void router.push({ path: '/editor', query: root ? { path, root } : { path } })
+}
+
 function onPaletteNewChat() {
   startNewChatInstant()
 }
@@ -1582,6 +1760,7 @@ function handleKeydown(e: KeyboardEvent) {
   // match a Shift+K press under a looser guard. preventDefault still runs before
   // the settingsOverlay guard so the browser never sees the chord.
   const paletteBinding = shortcutsStore.effectiveBinding('command-palette')
+  const quickOpenBinding = shortcutsStore.effectiveBinding('quick-open')
   const newChatBinding = shortcutsStore.effectiveBinding('new-chat')
   const toggleSidebarBinding = shortcutsStore.effectiveBinding('toggle-sidebar')
   if (bindingMatches(e, toggleSidebarBinding, isMac)) {
@@ -1594,6 +1773,14 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault()
     if (settingsOverlayOpen.value) return
     startNewChatInstant()
+    return
+  }
+  if (bindingMatches(e, quickOpenBinding, isMac)) {
+    e.preventDefault()
+    if (settingsOverlayOpen.value) return
+    // Toggle so a second press closes it; the modal owns Escape/focus while
+    // open, and its own binding never collides with the palette (Ctrl/⌘+P).
+    fileQuickOpenOpen.value = !fileQuickOpenOpen.value
     return
   }
   if (bindingMatches(e, paletteBinding, isMac)) {
@@ -1667,10 +1854,8 @@ const rpcApprovalUnsubs: Array<() => void> = []
 
 function approvalAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
-  try {
-    const token = sessionStorage.getItem('marguerite.wsToken') || ''
-    if (token) headers['Authorization'] = `Bearer ${token}`
-  } catch { /* ignore */ }
+  const token = readAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
   return headers
 }
 
@@ -1757,8 +1942,20 @@ const approvalAnnouncement = ref('')
 
 let titleDebounce: ReturnType<typeof setTimeout> | null = null
 
+// 未读数前缀必须套在「当前路由 + 当前语言」的标题上：语言切换与首屏语言就绪
+// 都会重排标题，拼接旧快照会把前缀挂到过期标题上。
+function routeDocumentTitle(): string {
+  return `${routeTitle($route)} — Marguerite`
+}
+
 function applyTitleBadge(count: number) {
-  document.title = count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE
+  const base = routeDocumentTitle()
+  document.title = count > 0 ? `(${count}) ${base}` : base
+}
+
+// 语言切换 / 首屏语言就绪时重设一次标题（沿用当前的未读数前缀）。
+function applyRouteDocumentTitle() {
+  applyTitleBadge(appStore.approvalCount)
 }
 
 // Debounce so a burst of count changes does not thrash the tab title.
@@ -1775,6 +1972,21 @@ useDocumentEvent('keydown', handleKeydown)
 
 onMounted(() => {
   appAutomaticRpcMounted = true
+  // 工作台与右侧栏的宽度联动依赖视口宽度：跟随窗口变化重新计算 inset。
+  window.addEventListener('resize', syncLayoutViewport)
+  // WebGL 探测放在挂载后：不 import three（那是几百 KB），只用一次性的原生上下文探测
+  webglOk.value = detectWebGL()
+  // 环境音：读取持久化偏好；开启过的话等第一次用户手势再启动（浏览器自动播放策略）
+  ambience.init()
+  // 液态玻璃：恢复背景质感场景与参数面板的调参（内联 --glass-* 覆盖主题默认值）
+  initGlassScene()
+  initGlassParams()
+  // 壁纸冷启动恢复：只在 `/wallpaper` 视图恢复会让「重启后落在 /chat」的会话
+  // 看不到已选壁纸（真机）。这里在应用挂载时统一还原一次。
+  restoreStoredWallpaper()
+  // 桌面桌宠悬浮窗：上次开过就在启动后恢复（幂等）。
+  // 必须排除 /pet-overlay 自身 —— 悬浮窗加载的也是本应用，否则会自我唤醒。
+  if (!isPetOverlayRoute.value) void restorePetOverlayPreference()
   window.visualViewport?.addEventListener('resize', syncMobileKeyboard)
   window.addEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
   window.addEventListener('focus', markCurrentSessionReadIfVisible)
@@ -1800,7 +2012,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  removeInternalLinkGuard()
   appAutomaticRpcMounted = false
+  window.removeEventListener('resize', syncLayoutViewport)
   sidebarRefreshPending = false
   window.removeEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
   window.removeEventListener('focus', markCurrentSessionReadIfVisible)
@@ -1969,5 +2183,64 @@ onUnmounted(() => {
 
 .app-host-exit > * {
   pointer-events: auto;
+}
+</style>
+
+<!-- Auto-triggered workstation effects while background music plays.
+     `body.ambience-on` is toggled by AmbienceLayer.vue; `--amb-amp` (0..1) is the
+     synth pad's live RMS, published on :root. Token-only colours (no literals) so
+     the component colour guard stays happy.
+     The breathing accent rim is stacking-independent (fixed, above content) and is
+     the signature "music is on" cue that animates with the track; the full-interface
+     frosted glass itself comes from AmbienceLayer's own scrim. -->
+<style>
+body.ambience-on::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
+  opacity: calc(0.35 + var(--amb-amp, 0) * 0.6);
+  transition: opacity var(--dur-fast) linear;
+}
+@media (prefers-reduced-transparency: reduce) {
+  body.ambience-on::after { box-shadow: none; }
+}
+
+/* Music-mode layout shift (design §6, restrained): the sidebar and the chat
+   topbar drop to light frosted glass so the aurora breathes through the edges.
+   No movement, no scale — readability first, the 1px rim signature stays.
+   The paired selector keeps the sidebar's existing drawer transform
+   transition (base.css) alive while adding the slow background/backdrop ramp.
+   All timing goes through --dur-slow; colours are token-only. */
+body.ambience-on .sidebar {
+  background: color-mix(in srgb, var(--sidebar-bg) 74%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+body.ambience-on .topbar--chat {
+  background: color-mix(in srgb, var(--bg-elevated) 68%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+body.ambience-on .sidebar,
+body:not(.ambience-on) .sidebar {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    background var(--dur-slow) var(--ease-standard),
+    backdrop-filter var(--dur-slow) var(--ease-standard),
+    -webkit-backdrop-filter var(--dur-slow) var(--ease-standard);
+}
+body.ambience-on .topbar--chat,
+body:not(.ambience-on) .topbar--chat {
+  transition: background var(--dur-slow) var(--ease-standard);
+}
+@media (prefers-reduced-transparency: reduce) {
+  body.ambience-on .sidebar,
+  body.ambience-on .topbar--chat {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
 </style>

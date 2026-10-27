@@ -56,6 +56,16 @@ const SECRET_KEYS: &[&str] = &[
 const MAX_ITEMS: usize = 12;
 /// 摘要级 excerpt 截断字符数
 const SNIPPET_CHARS: usize = 60;
+/// 召回注入片段长度：比搜索摘要更长 —— 60 字只够“知道有这件事”，
+/// 不足以让主模型据此推理，等于召回了但用不上。
+const RECALL_SNIPPET_CHARS: usize = 160;
+/// 仅靠向量分的准入门槛。
+///
+/// 0.12 时代几乎不设防：哈希向量对长句的区分度弱，低分行大多是噪声，
+/// 结果是“4 条命中”但没有一条真正相关。抬高门槛，并用关键词重叠兜底。
+const RECALL_LINE_SCORE_MIN: f64 = 0.22;
+/// 关键词重叠的最低 token 数（CJK 单字也计）。达到即视为字面强相关。
+const RECALL_KEYWORD_MIN: usize = 2;
 /// 渐进披露展开的上下文行数（前后各 N 行）
 const EXPAND_RADIUS: usize = 3;
 
@@ -108,6 +118,34 @@ fn expand_query(query: &str) -> String {
         return query.to_string();
     }
     format!("{} {}", query, extra.join(" "))
+}
+
+/// 行内是否含有可复用的事实内容：空行、代码围栏、纯标题/分隔线都不算。
+fn is_informative_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("```")
+        || trimmed.starts_with("|---")
+        || trimmed.starts_with("| ---")
+    {
+        return false;
+    }
+    trimmed.chars().filter(|c| c.is_alphanumeric()).count() >= 6
+}
+
+/// 查询与候选行的分词重叠数（零依赖粗分词；CJK 单字也计）。
+///
+/// 用于兜住「向量分偏低但字面强相关」的行，并给低分噪声再加一道闸。
+fn keyword_overlap(query: &str, line: &str) -> usize {
+    let q: HashSet<String> = crate::e::nlp::tokenize_zh(&expand_query(query))
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect();
+    if q.is_empty() {
+        return 0;
+    }
+    let l: HashSet<String> = crate::e::nlp::tokenize_zh(line).into_iter().collect();
+    q.intersection(&l).count()
 }
 
 /// 大小写不敏感地在**原始串**中定位 ASCII 模式，返回原始串的字节偏移。
@@ -424,12 +462,23 @@ fn gather_recall_scored(query: &str, limit: usize) -> Vec<RecallScored> {
             continue;
         }
         for (_line_no, line) in content_lines(&raw) {
-            let line_score = LocalEmbedding::cosine(&q_vec, &LocalEmbedding::embed(&line));
-            if line_score < 0.12 {
+            // 结构性噪声（空行、代码围栏、只有标题）没有可复用的事实内容。
+            if !is_informative_line(&line) {
                 continue;
             }
+            let line_score = LocalEmbedding::cosine(&q_vec, &LocalEmbedding::embed(&line));
+            let overlap = keyword_overlap(query, &line);
+            if line_score < RECALL_LINE_SCORE_MIN && overlap < RECALL_KEYWORD_MIN {
+                continue;
+            }
+            // 字面命中优先于哈希向量的偶然相似：把分数抬到门槛之上。
+            let line_score = if overlap >= RECALL_KEYWORD_MIN {
+                line_score.max(0.25)
+            } else {
+                line_score
+            };
             let combined = line_score * 0.7 + full_score * 0.3;
-            let snippet = redact(&truncate_chars(&line, SNIPPET_CHARS));
+            let snippet = redact(&truncate_chars(&line, RECALL_SNIPPET_CHARS));
             hits.push(RecallScored {
                 id: recall_id(&project, &snippet),
                 project: project.clone(),
@@ -571,6 +620,24 @@ mod tests {
         let c = LocalEmbedding::embed("completely different topic");
         assert!((LocalEmbedding::cosine(&a, &b) - 1.0).abs() < 1e-9);
         assert!(LocalEmbedding::cosine(&a, &c) < 0.9);
+    }
+
+    #[test]
+    fn recall_gate_rejects_noise_and_accepts_keyword_hits() {
+        // 字面强相关：即使哈希向量分一般，也应通过关键词兜底
+        assert!(keyword_overlap("修复编译错误", "修复编译错误：补上 use 语句") >= 2);
+        // 完全无关：重叠为 0，只能靠向量分过门槛
+        assert_eq!(keyword_overlap("部署发布", "今天天气不错，适合散步"), 0);
+    }
+
+    #[test]
+    fn informative_line_filter_skips_structural_noise() {
+        assert!(!is_informative_line(""));
+        assert!(!is_informative_line("## 进展"));
+        assert!(!is_informative_line("```rust"));
+        assert!(!is_informative_line("| --- | --- |"));
+        // 有事实内容的行必须保留
+        assert!(is_informative_line("- 修复了上下文压缩过早触发的问题"));
     }
 
     #[test]

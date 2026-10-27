@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { createPinia } from 'pinia'
 import { localizeImageActionableDetail, useSetupCatalog } from './useSetupCatalog'
 import { LEGACY_OPENROUTER_MODEL_OPTIONS } from './useSetupEnsembleForm'
 import { PROVIDER_CREDENTIAL_REVEAL_TIMEOUT_MS } from './useSetupProviderForm'
@@ -18,6 +19,7 @@ vi.mock('@/stores/rpc', () => ({
     waitForConnection,
     supportsMethod,
     call: rpcCall,
+    on: () => () => {},
   }),
 }))
 
@@ -39,6 +41,7 @@ async function mountCatalog() {
       return () => null
     },
   })
+  app.use(createPinia())
   app.mount(el)
   await nextTick()
   await Promise.resolve()

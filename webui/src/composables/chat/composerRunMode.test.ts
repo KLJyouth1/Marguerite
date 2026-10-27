@@ -4,58 +4,96 @@ import {
   completeComposerSafeSetup,
   composerRunModeSelectionAction,
   effectiveComposerRunMode,
+  resolveComposerRunMode,
 } from './composerRunMode'
 
-describe('effectiveComposerRunMode', () => {
+function status(state: 'not_setup' | 'setting_up' | 'failed' | 'unavailable' | 'ready') {
+  return {
+    state,
+    platform: 'win32',
+    message: '',
+    requiresAdmin: true,
+  } as const
+}
+
+describe('resolveComposerRunMode', () => {
   it.each(['not_setup', 'setting_up', 'failed', 'unavailable'] as const)(
-    'soft-lands a stale Safe preference in Full Access while setup is %s',
+    'keeps the Safe choice visible (with a degradation) while setup is %s',
     (state) => {
-      expect(effectiveComposerRunMode(
-        'safe',
-        { state, platform: 'win32', message: '', requiresAdmin: true },
-        null,
-      )).toBe('full')
+      const resolved = resolveComposerRunMode('safe', status(state), null)
+      expect(resolved.mode).toBe('safe')
+      expect(resolved.degraded).not.toBeNull()
     },
   )
 
+  it('maps each non-ready state to an explicit degradation reason', () => {
+    expect(resolveComposerRunMode('safe', status('not_setup'), null).degraded)
+      .toBe('setup_not_installed')
+    expect(resolveComposerRunMode('safe', status('setting_up'), null).degraded)
+      .toBe('setup_in_progress')
+    expect(resolveComposerRunMode('safe', status('failed'), null).degraded)
+      .toBe('setup_failed')
+    expect(resolveComposerRunMode('safe', status('unavailable'), null).degraded)
+      .toBe('setup_unavailable')
+  })
+
   it('keeps Safe when setup is ready', () => {
-    expect(effectiveComposerRunMode(
-      'safe',
-      { state: 'ready', platform: 'win32', message: '', requiresAdmin: false },
-      null,
-    )).toBe('safe')
+    expect(resolveComposerRunMode('safe', status('ready'), null)).toEqual({
+      mode: 'safe',
+      degraded: null,
+    })
   })
 
   it('does not invent failure while setup status is unknown', () => {
-    expect(effectiveComposerRunMode('safe', null, null)).toBe('safe')
+    expect(resolveComposerRunMode('safe', null, null)).toEqual({
+      mode: 'safe',
+      degraded: 'setup_unresolved',
+    })
   })
 
-  it('shows Full Access until the initial setup check resolves', () => {
-    expect(effectiveComposerRunMode('safe', null, null, false)).toBe('full')
+  it('keeps the preference (safe) until the initial setup check resolves', () => {
+    expect(effectiveComposerRunMode('safe', null, null, false)).toBe('safe')
   })
 
   it('preserves an active task lock even if setup status changes', () => {
-    expect(effectiveComposerRunMode(
-      'full',
-      { state: 'not_setup', platform: 'win32', message: '', requiresAdmin: true },
-      'safe',
-    )).toBe('safe')
+    expect(effectiveComposerRunMode('full', status('not_setup'), 'safe')).toBe('safe')
   })
 
-  it('routes a repairable Safe selection into setup instead of persistence', () => {
-    const status = { state: 'not_setup', platform: 'win32', message: '', requiresAdmin: true } as const
+  it('never degrades Full Access', () => {
+    expect(resolveComposerRunMode('full', status('unavailable'), null)).toEqual({
+      mode: 'full',
+      degraded: null,
+    })
+  })
+})
 
-    expect(composerRunModeSelectionAction('safe', status, true)).toBe('setup')
-    expect(composerRunModeSelectionAction('safe', status, false)).toBe('ignore')
-    expect(composerRunModeSelectionAction('full', status, true)).toBe('persist')
-    expect(composerRunModeSelectionAction('safe', { ...status, state: 'ready' }, false)).toBe('persist')
+describe('composerRunModeSelectionAction', () => {
+  it('routes a repairable Safe selection into setup', () => {
+    expect(composerRunModeSelectionAction('safe', status('not_setup'), true)).toBe('setup')
+    expect(composerRunModeSelectionAction('safe', status('failed'), true)).toBe('setup')
   })
 
-  it('ignores Safe selection until the initial setup check resolves', () => {
-    expect(composerRunModeSelectionAction('safe', null, false, false)).toBe('ignore')
+  it('persists Safe with an actionable notice when setup cannot run', () => {
+    expect(composerRunModeSelectionAction('safe', status('unavailable'), false)).toBe('notice')
+    expect(composerRunModeSelectionAction('safe', status('not_setup'), false)).toBe('notice')
+  })
+
+  it('persists instead of silently ignoring when the status is unknown', () => {
+    expect(composerRunModeSelectionAction('safe', null, false, false)).toBe('persist')
     expect(composerRunModeSelectionAction('full', null, false, false)).toBe('persist')
   })
 
+  it('persists while setup is already running without claiming it is unavailable', () => {
+    expect(composerRunModeSelectionAction('safe', status('setting_up'), false)).toBe('persist')
+  })
+
+  it('persists immediately once setup is ready', () => {
+    expect(composerRunModeSelectionAction('full', status('not_setup'), true)).toBe('persist')
+    expect(composerRunModeSelectionAction('safe', status('ready'), false)).toBe('persist')
+  })
+})
+
+describe('completeComposerSafeSetup', () => {
   it('persists Safe only after setup succeeds', async () => {
     const persist = vi.fn().mockResolvedValue(undefined)
 

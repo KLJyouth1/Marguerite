@@ -93,9 +93,15 @@ export function useChatElevatedMode(options: UseChatElevatedModeOptions) {
   async function syncElevatedMode(mode: string) {
     if (!options.sessionKey.value || elevatedUnavailable.value) return
     try {
+      // REST 与 WS 共用本地网关 token；不带 token 会被网关 401（Phase 0 收口）。
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      try {
+        const token = sessionStorage.getItem('marguerite.wsToken') || ''
+        if (token) headers.Authorization = `Bearer ${token}`
+      } catch { /* sessionStorage 不可用时按未授权处理，由后端 401 兜底 */ }
       const resp = await fetch('/api/elevated-mode', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ sessionKey: options.sessionKey.value, mode: mode || 'off' }),
       })
       if (ELEVATED_UNSUPPORTED_STATUSES.has(resp.status)) {

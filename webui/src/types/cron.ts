@@ -4,6 +4,9 @@ export interface CronJob {
   enabled?: boolean
   status?: string
   next_run?: string
+  /** Rust 离线兜底的原始毫秒时间戳；`next_run` 优先，缺失时才换算。 */
+  next_fire_ms?: number
+  nextFireMs?: number
   last_run?: string
   lastStatus?: string | null
   last_status?: string

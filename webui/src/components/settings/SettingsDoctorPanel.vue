@@ -79,7 +79,12 @@ import { useRouter } from 'vue-router'
 import { useRpcStore } from '@/stores/rpc'
 import { usePlatform } from '@/platform'
 import { isOwnedGatewayConnection } from '@/composables/useCliInvocation'
-import { withoutLegacyMigrationFinding, settingsLinkForFinding } from '@/utils/overviewDiagnostics'
+import {
+  withoutLegacyMigrationFinding,
+  settingsLinkForFinding,
+  normalizeDoctorReport,
+  isTransportFailure,
+} from '@/utils/overviewDiagnostics'
 import Icon from '@/components/Icon.vue'
 import AdvancedCliSteps from '@/components/overview/AdvancedCliSteps.vue'
 
@@ -115,9 +120,25 @@ async function load(deep: boolean) {
   busy.value = true
   error.value = null
   try {
-    await rpc.waitForConnection()
-    const data = withoutLegacyMigrationFinding(await rpc.call<HealthReport>('doctor.status', { agentId: 'main', deep }))
-    report.value = data
+    // 传输波动（连接换代 / 断线窗口）不是体检失败：有界重试一次，
+    // 其余错误立刻如实上报（见 `isTransportFailure` 的说明）。
+    let reportRaw: HealthReport | null = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await rpc.waitForConnection()
+        // 双引擎形状归一化：Rust 内核答 `items + summary`，pyengine 侧车答 `findings`。
+        // 不归一化则 Rust 托管下 `findings` 为 undefined，详情列表恒空（实测现象）。
+        reportRaw = await rpc.call<HealthReport>('doctor.status', { agentId: 'main', deep })
+        break
+      } catch (err) {
+        if (attempt === 0 && isTransportFailure(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          continue
+        }
+        throw err
+      }
+    }
+    report.value = withoutLegacyMigrationFinding(normalizeDoctorReport(reportRaw))
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
     report.value = null

@@ -14,6 +14,14 @@ import type {
 
 interface SkillsListData {
   skills?: Skill[]
+  disabledSkills?: DisabledSkill[]
+}
+
+/** 被停用的技能（真实改名后不在扫描结果里，由 skills.list 单独回传）。 */
+export interface DisabledSkill {
+  name: string
+  file_path?: string
+  enabled: false
 }
 
 export interface SkillsCatalogOptions {
@@ -25,6 +33,7 @@ export interface SkillsCatalogOptions {
 
 export interface SkillsCatalog {
   allSkills: Ref<Skill[]>
+  disabledSkills: Ref<DisabledSkill[]>
   filterText: Ref<string>
   statusFilter: Ref<string>
   filteredSkills: ComputedRef<Skill[]>
@@ -350,6 +359,7 @@ export function useSkillsCatalog(
 ): SkillsCatalog {
   const t = i18n.global.t
   const allSkills = ref<Skill[]>([])
+  const disabledSkills = ref<DisabledSkill[]>([])
   const filterText = ref('')
   const statusFilter = ref('all')
 
@@ -435,6 +445,7 @@ export function useSkillsCatalog(
     try {
       const data = await rpc.call<SkillsListData>('skills.list')
       allSkills.value = (data.skills || []).map(normalizeSkill)
+      disabledSkills.value = data.disabledSkills || []
       await options.loadProposals()
       return true
     } catch (err) {
@@ -445,6 +456,7 @@ export function useSkillsCatalog(
 
   return {
     allSkills,
+    disabledSkills,
     filterText,
     statusFilter,
     filteredSkills,

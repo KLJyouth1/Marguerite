@@ -30,6 +30,14 @@ export function normalizeBrowserUrl(value: string): string {
   }
 }
 
+/**
+ * 侧边浏览器工作台项。
+ *
+ * 2026-10-24 起 `hostKind` 从 `native-webcontents` 改为 `dom`：面板由 CDP 镜像
+ * （`browser.*` RPC + 截图 + 点击转发）在 DOM 里渲染。原因写在
+ * `browserWorkbenchProvider.ts` 顶部 —— 当前桌面壳未实现原生表面命令，
+ * 走 native 的结果是「面板打不开」。
+ */
 export function createBrowserWorkbenchItem(options: {
   scopeId: string
   url: string
@@ -44,7 +52,7 @@ export function createBrowserWorkbenchItem(options: {
     kind: 'browser',
     title: parsed.hostname,
     scope: { type: 'session', id: scopeId },
-    hostKind: 'native-webcontents',
+    hostKind: 'dom',
     retention: 'keep-alive',
     payload: {
       initialUrl: url,

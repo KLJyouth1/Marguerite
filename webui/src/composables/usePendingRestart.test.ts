@@ -1,8 +1,12 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { _resetPendingRestartForTests, usePendingRestart } from './usePendingRestart'
 
+const notifyReadFailure = vi.hoisted(() => vi.fn())
+vi.mock('@/utils/readFailureNotice', () => ({ notifyReadFailure }))
+
 beforeEach(() => {
+  notifyReadFailure.mockClear()
   _resetPendingRestartForTests()
 })
 
@@ -82,5 +86,19 @@ describe('usePendingRestart', () => {
     expect(store.isPending('wake')).toBe(true)
     store.reconcile([loadedRow('wake')])
     expect(store.isPending('wake')).toBe(false)
+  })
+
+  it('损坏的待重启清单读取失败时提示用户，而不是假装没有待重启项', async () => {
+    localStorage.setItem('marguerite.channels.pendingRestart.v1', '{broken json')
+    // loadStored() 在模块初始化时执行：重载模块才能复现「带着坏快照启动」。
+    vi.resetModules()
+    const fresh = await import('./usePendingRestart')
+
+    expect(fresh.usePendingRestart().pending.value).toEqual([])
+    expect(notifyReadFailure).toHaveBeenCalledWith(
+      'pending-restart',
+      'shared.storage.pendingRestartReadFailed',
+    )
+    localStorage.removeItem('marguerite.channels.pendingRestart.v1')
   })
 })

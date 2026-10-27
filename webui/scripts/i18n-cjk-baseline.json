@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-10-26T12:25:24.161Z",
+  "generatedBy": "node scripts/check-i18n.mjs --update-baseline",
+  "note": "Ratchet: hardcoded CJK lines per root <template> (lines that never call t()/$t()/i18n.). check-i18n.mjs FAILs when a file grows; lower counts are reported but never required. Regenerate with --update-baseline, which only lowers/creates and refuses to raise.",
+  "totalLines": 408,
+  "files": {
+    "src/components/chat/ArtifactInlineEditor.vue": 14,
+    "src/components/chat/ComposerMentionPopover.vue": 3,
+    "src/components/chat/MemoryFloorsPopover.vue": 12,
+    "src/components/pet/DesktopPet.vue": 9,
+    "src/components/settings/MultimodalCapabilitiesPanel.vue": 14,
+    "src/components/skills/BaotaCredentialsDialog.vue": 1,
+    "src/views/AppControlView.vue": 48,
+    "src/views/BrainView.vue": 14,
+    "src/views/BrowserCockpitView.vue": 28,
+    "src/views/ControlCenterView.vue": 52,
+    "src/views/ExpertCenterView.vue": 104,
+    "src/views/FleetView.vue": 10,
+    "src/views/PetView.vue": 26,
+    "src/views/PluginsView.vue": 5,
+    "src/views/PokerView.vue": 25,
+    "src/views/SplashView.vue": 4,
+    "src/views/SshCollabView.vue": 19,
+    "src/views/WallpaperView.vue": 20
+  }
+}

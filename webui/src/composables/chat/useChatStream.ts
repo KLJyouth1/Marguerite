@@ -728,6 +728,12 @@ export function useChatStream(options: UseChatStreamOptions) {
     return raw
   }
 
+  /** 后端 `approval` 字段归一：只接受三个真实取值，其余视为缺失（不编造）。 */
+  function normalizeApproval(value: unknown): ChatToolCall['approval'] | undefined {
+    const raw = String(value || '').trim().toLowerCase()
+    return raw === 'approved' || raw === 'pending' || raw === 'denied' ? raw : undefined
+  }
+
   function ensureStreamToolCall(payload: ToolUsePayload | ToolResultPayload, optionsArg: { running: boolean }): ChatToolCall | null {
     if (!payload) return null
     const name = normalizeToolName(payload)
@@ -751,6 +757,9 @@ export function useChatStream(options: UseChatStreamOptions) {
         existing.inputPreview = truncateToolPreview(input, 200)
         existing.displayName = toolDisplayName(existing.name, input)
       }
+      // 审批裁决只能来自后端事件；缺失时保持原值，绝不补默认值。
+      const approval = normalizeApproval(payload.approval)
+      if (approval) existing.approval = approval
       // A running ensure on an existing call mirrors to the fold so an input
       // refinement (re-narration) stays in sync; result-only ensures emit no
       // tool-start (the tool-result frame finalizes the call there).
@@ -794,6 +803,7 @@ export function useChatStream(options: UseChatStreamOptions) {
       result: '',
       resultPreview: '',
       isOpen: false,
+      ...(normalizeApproval(payload.approval) ? { approval: normalizeApproval(payload.approval) } : {}),
     }
     streamToolCalls.value.push(call)
     // Running creates emit a tool-start (fold stamps the clock here, matching the
@@ -873,6 +883,9 @@ export function useChatStream(options: UseChatStreamOptions) {
       tc.isRunning = false
       tc.status = toolResultIsError(payload) ? 'error' : 'success'
       tc.isError = toolResultIsError(payload)
+      // 结果帧同样携带引擎裁决；缺失时保留 ToolCall 帧上的值。
+      const resultApproval = normalizeApproval(payload.approval)
+      if (resultApproval) tc.approval = resultApproval
       tc.result = content
       tc.resultPreview = truncateToolPreview(content, 200)
 
@@ -1064,6 +1077,8 @@ export function useChatStream(options: UseChatStreamOptions) {
     streamIdleTimeoutMs,
     thinkingVisible,
     thinkingText,
+    /** 累积的真实思考正文（右侧「运行」面板据此展示"思考及内容"） */
+    thinkingContent,
     startStreaming,
     endStreaming,
     checkpointForUserMessage,

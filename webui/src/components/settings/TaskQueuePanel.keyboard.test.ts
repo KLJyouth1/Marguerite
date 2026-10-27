@@ -53,11 +53,14 @@ async function mountPanel() {
 
   const { createApp } = await import('vue')
   const { createPinia } = await import('pinia')
+  const { createI18n } = await import('vue-i18n')
+  const en = (await import('@/locales/en.json')).default
   const Component = (await import('./TaskQueuePanel.vue')).default
   const el = document.createElement('div')
   document.body.appendChild(el)
   const app = createApp(Component)
   app.use(createPinia())
+  app.use(createI18n({ legacy: false, locale: 'en', messages: { en } }))
   app.mount(el)
   mounted.push(app)
   await settle()
@@ -94,7 +97,7 @@ describe('M3-E3 键盘可操作性（TaskQueuePanel）', () => {
 
   it('标题输入框按 Enter 触发入队（queue.enqueue）', async () => {
     const { el, call } = await mountPanel()
-    const title = el.querySelector<HTMLInputElement>('input[aria-label="任务标题"]')
+    const title = el.querySelector<HTMLInputElement>('input[aria-label="Task title"]')
     expect(title).toBeTruthy()
     title!.focus()
     title!.value = '键盘入队测试'
@@ -112,7 +115,7 @@ describe('M3-E3 键盘可操作性（TaskQueuePanel）', () => {
   it('↑ 调序按钮键盘可达并触发 queue.move', async () => {
     const { el, call } = await mountPanel()
     // queued 行有「上移」按钮
-    const up = el.querySelector<HTMLButtonElement>('button[aria-label="上移"]')
+    const up = el.querySelector<HTMLButtonElement>('button[aria-label="Move up"]')
     expect(up).toBeTruthy()
     up!.focus()
     expect(document.activeElement).toBe(up)

@@ -5,6 +5,11 @@
 
 pub mod benchmarks;
 pub mod bloom_cache;
+pub mod budget_policy;
+pub mod capability;
+pub mod capability_bench;
+pub mod capability_cards;
+pub mod capability_guard;
 pub mod expertise;
 pub mod multi_strategy;
 pub mod prefix_scope;
@@ -15,10 +20,13 @@ pub mod stream_loop;
 pub mod subagent;
 pub mod team;
 pub mod tool_cache;
+pub mod tool_catalog;
+pub mod task_checkpoint;
 pub mod tool_compress;
 pub mod tool_cycle;
 pub mod tool_schema;
 pub mod trellis;
+pub mod turn_budget;
 pub mod worktree;
 
 pub use bloom_cache::{

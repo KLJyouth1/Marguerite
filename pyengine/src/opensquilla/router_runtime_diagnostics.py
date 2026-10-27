@@ -12,6 +12,25 @@ ROUTER_PYTHON_DEPENDENCY_MISSING = "router_python_dependency_missing"
 ROUTER_NATIVE_DEPENDENCY_MISSING = "router_native_dependency_missing"
 ROUTER_RUNTIME_UNAVAILABLE = "router_runtime_unavailable"
 
+#: 降级种类中**「一条命令就能修好」**的那几种。
+#:
+#: 判据不是"严重程度"，而是**「安装是否完整」**：
+#:   · ``router_weights_not_fetched`` —— bundle 布局完好，只是权重没拉（``git lfs pull``）；
+#:   · ``router_python_dependency_missing`` —— 源码完好，只是可选增强的依赖没装
+#:     （``pip install opensquilla[recommended]``）。
+#: 两种情况都**不该**在启动日志里记 ERROR：``RouterBundleDegraded`` 的 docstring
+#: 已写明 ML 路由是可选增强、规则路由仍能服务每一轮；把它们记成 ERROR 会让
+#: 「可选增强没装」看起来像「安装损坏」，用户看到一串 ERROR 却找不到坏在哪。
+#:
+#: 反过来，``router_assets_missing``（bundle 布局缺失）等**不在此列** ——
+#: 那是真损坏，必须保留 ERROR。
+REPAIRABLE_ROUTER_DEGRADATIONS = frozenset(
+    {
+        ROUTER_WEIGHTS_NOT_FETCHED,
+        ROUTER_PYTHON_DEPENDENCY_MISSING,
+    }
+)
+
 #: Marker inside a bundle error message that proves the file on disk is a
 #: Git LFS pointer rather than the artifact the manifest describes.
 LFS_POINTER_MARKER = "git lfs pointer"

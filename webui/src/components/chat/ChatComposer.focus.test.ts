@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { createPinia } from 'pinia'
 import i18n from '@/i18n'
 import ChatComposer from './ChatComposer.vue'
 
@@ -30,6 +31,8 @@ async function mountComposer() {
   const el = document.createElement('div')
   document.body.appendChild(el)
   const app = createApp(ChatComposer, BASE_PROPS)
+  // composer 现在内嵌 ChatModelPicker（依赖 rpc store），挂载必须带 Pinia。
+  app.use(createPinia())
   app.use(i18n)
   const vm = app.mount(el) as unknown as { focusTextarea: () => void }
   await nextTick()

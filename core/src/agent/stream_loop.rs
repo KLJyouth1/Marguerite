@@ -77,6 +77,10 @@ pub enum AgentEvent {
         id: Option<String>,
         name: String,
         arguments: String,
+        /// 引擎真实审批裁决（`approved` / `pending` / `denied`）。
+        /// 仅对「直接驱动本机」的高自主工具（computer_use …）有值，其余为 `None`
+        /// （不伪造字段）。
+        approval: Option<String>,
     },
     /// 工具执行结果（对应 `tool-result` / `tool-error`）；`ok=false` 表示错误或超时。
     /// `id` 与对应 [`AgentEvent::ToolCall`] 的 id 一致 —— 供前端**精确配对**，
@@ -86,6 +90,8 @@ pub enum AgentEvent {
         name: String,
         output: String,
         ok: bool,
+        /// 与 `ToolCall` 同源的审批裁决（approved / pending / denied）。
+        approval: Option<String>,
     },
     /// 检测到 doom-loop：同一工具 + 同一入参连续重复（对应 processor.ts:306-330）
     DoomLoop { tool: String, repeats: usize },
@@ -101,6 +107,15 @@ pub enum AgentEvent {
     Error {
         message: String,
         code: Option<String>,
+    },
+    /// P2-9：单 turn 预算（步数/时长/token）耗尽，硬熔断。携带结构化
+    /// `budget:{kind,limit,used,remaining}`，供前端显式提示而非静默截断。
+    BudgetExhausted {
+        kind: String,
+        limit: u64,
+        used: u64,
+        remaining: u64,
+        partial_text: String,
     },
 }
 
@@ -258,6 +273,7 @@ where
 {
     run_tool_loop_streaming_inner(
         history,
+        None,
         registry,
         None,
         events,
@@ -280,8 +296,39 @@ where
     F: FnMut(Vec<Message>, Vec<ToolDef>) -> Fut,
     Fut: Future<Output = Result<StreamReceiver>>,
 {
+    run_tool_loop_streaming_with_disclosure_and_session(
+        history,
+        registry,
+        disclosure,
+        events,
+        max_rounds,
+        None,
+        round_stream,
+    )
+    .await
+}
+
+/// 带按需 schema 发现 + 会话标识的流式工具回路（E12）。
+///
+/// `session` 用于在工具输出**真正写进 `Message::Tool` 时**计入上下文令牌台账。
+/// 事件桥（`gateway::chat`）随后收到同一条 `ToolResult` 时会按同一 `call_id`
+/// 认领失败并跳过，故两条路径不会重复计数。
+pub async fn run_tool_loop_streaming_with_disclosure_and_session<F, Fut>(
+    history: &mut Vec<Message>,
+    registry: Arc<ToolRegistry>,
+    disclosure: ToolDisclosure,
+    events: mpsc::Sender<AgentEvent>,
+    max_rounds: u32,
+    session: Option<String>,
+    round_stream: F,
+) -> Result<String>
+where
+    F: FnMut(Vec<Message>, Vec<ToolDef>) -> Fut,
+    Fut: Future<Output = Result<StreamReceiver>>,
+{
     run_tool_loop_streaming_inner(
         history,
+        session,
         registry,
         Some(disclosure),
         events,
@@ -293,6 +340,7 @@ where
 
 async fn run_tool_loop_streaming_inner<F, Fut>(
     history: &mut Vec<Message>,
+    session: Option<String>,
     registry: Arc<ToolRegistry>,
     mut disclosure: Option<ToolDisclosure>,
     events: mpsc::Sender<AgentEvent>,
@@ -306,8 +354,35 @@ where
     let cycle = ToolCycle::new(registry);
     // 按时序累积的 `(工具名, 入参)`，仅用于 doom-loop 判定
     let mut call_log: Vec<(String, String)> = Vec::new();
+    // P2-9：单 turn 预算硬熔断。
+    let budget_limits = crate::agent::turn_budget::limits_from_env();
+    let turn_started = std::time::Instant::now();
+    let mut tokens_used: u64 = 0;
+    // W4.4：反脚本守卫的「本 turn 已纠偏能力」必须跨轮保留（第二次放行），
+    // 不能每轮清空——否则模型每次重试都会再被拒一次，直到预算耗尽。
+    let mut corrected_capabilities = std::collections::HashSet::new();
 
     for round in 1..=max_rounds {
+        // 每轮开头先做预算硬熔断（round 自 1 计，已完成步数 = round-1）。
+        let steps_done = round - 1;
+        if let Some(breach) = crate::agent::turn_budget::check_turn_budget(
+            &budget_limits,
+            steps_done,
+            &turn_started,
+            tokens_used,
+        ) {
+            let partial_text = crate::agent::runtime::last_assistant_text(history);
+            let _ = events
+                .send(AgentEvent::BudgetExhausted {
+                    kind: breach.kind_str().to_string(),
+                    limit: breach.limit,
+                    used: breach.used,
+                    remaining: breach.remaining,
+                    partial_text: partial_text.clone(),
+                })
+                .await;
+            return Err(anyhow!("budget_exhausted: {}", breach.to_json(&partial_text, None)));
+        }
         let _ = events.send(AgentEvent::StepStart { round }).await;
 
         let active_tools = disclosure
@@ -341,6 +416,10 @@ where
                 }
             };
 
+            // P2-9：累计本 turn token（流末给出的 usage）。
+            if let Some(u) = &chunk.usage {
+                tokens_used = tokens_used.saturating_add(u.total_tokens as u64);
+            }
             if let Some(t) = &chunk.thinking {
                 if !t.is_empty() {
                     let _ = events.send(AgentEvent::Thinking { text: t.clone() }).await;
@@ -438,12 +517,24 @@ where
                 .await;
         }
 
-        for tc in &tool_calls {
+        // 真实审批裁决（与 `runtime::run_tool_loop` 同一判据）：只对「直接驱动本机」
+        // 的高自主工具产出 approval，其余工具为 None。
+        let approval_session = session.as_deref().unwrap_or("");
+        let approvals: Vec<Option<crate::guard::permission_matrix::ToolApproval>> = tool_calls
+            .iter()
+            .map(|tc| crate::guard::permission_matrix::decide_tool(&tc.name, approval_session))
+            .collect();
+        for (i, tc) in tool_calls.iter().enumerate() {
+            let approval = approvals
+                .get(i)
+                .and_then(|a| a.as_ref())
+                .map(|a| a.status.to_string());
             let _ = events
                 .send(AgentEvent::ToolCall {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     arguments: tc.arguments.clone(),
+                    approval,
                 })
                 .await;
         }
@@ -452,7 +543,31 @@ where
         // 按模型返回顺序串行收集结果，保证每个 ToolCall 都有同序 ToolResult。
         let tool_batch_started = std::time::Instant::now();
         let mut results = Vec::with_capacity(tool_calls.len());
-        for tc in &tool_calls {
+        for (i, tc) in tool_calls.iter().enumerate() {
+            // 矩阵拒绝 / 需确认但无宿主 → 不执行（fail-closed），结果里写明真实原因。
+            if let Some(a) = approvals.get(i).and_then(|a| a.as_ref()) {
+                if a.status == "denied" {
+                    results.push(ToolResult::Error {
+                        message: format!(
+                            "审批拒绝（denied）：{}",
+                            a.reason.as_deref().unwrap_or("权限矩阵拒绝")
+                        ),
+                        code: "APPROVAL_DENIED".to_string(),
+                    });
+                    continue;
+                }
+                if a.status == "pending" && !crate::guard::gateway::agent_approval_host_present() {
+                    results.push(ToolResult::Error {
+                        message: format!(
+                            "审批待定（pending）：{}；当前没有可用的宿主审批通道，\
+                             已按 fail-closed 拒绝执行。",
+                            a.reason.as_deref().unwrap_or("需要人工确认")
+                        ),
+                        code: "APPROVAL_PENDING".to_string(),
+                    });
+                    continue;
+                }
+            }
             let result = if disclosure
                 .as_ref()
                 .is_some_and(|d| d.is_discovery_tool(&tc.name))
@@ -483,6 +598,21 @@ where
                     ),
                     code: "TOOL_SCHEMA_NOT_LOADED".to_string(),
                 }])
+            } else if let Some(blocked) = crate::agent::capability_guard::check(
+                &tc.name,
+                &parse_tool_args(&tc.arguments),
+                &disclosure
+                    .as_ref()
+                    .map(|d| {
+                        d.active_tools()
+                            .into_iter()
+                            .map(|tool| tool.name)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                &mut corrected_capabilities,
+            ) {
+                Ok(vec![blocked])
             } else {
                 cycle
                     .execute_sequential(vec![CycleToolCall::new(
@@ -518,7 +648,7 @@ where
             });
         }
 
-        for (tc, res) in tool_calls.iter().zip(results) {
+        for (idx, (tc, res)) in tool_calls.iter().zip(results).enumerate() {
             let (mut output, ok) = match &res {
                 ToolResult::Success { data, .. } => (data.clone(), true),
                 ToolResult::Error { message, code } => {
@@ -537,12 +667,40 @@ where
                     );
                 }
             }
+            // E12：工具输出**真正进入模型上下文**的点，就是下面这条 `Message::Tool`
+            // 入历史处（`output` 即模型下一轮读到的完整文本，含重复调用提醒）。
+            // 在此按完整文本记一次账：`call_id` 与事件桥 payload 的 `id` 同源，
+            // 网关桥随后收到同一条 `ToolResult` 时会按该键认领失败并跳过 —— 只记一次。
+            // 注意必须在 `events.send` **之前**记账：桥上后到的那条一定能看到已登记的键。
+            if let Some(sess) = session.as_deref() {
+                crate::context::session::record_tool_output_at_context(
+                    sess,
+                    tc.id.as_deref(),
+                    &tc.name,
+                    &output,
+                );
+                // 复盘证据：与网关桥/计划 tap 共用同一幂等键（call_id），
+                // 谁先看到谁落盘，不会重复写行。
+                crate::persistence::session::append_tool_activity(
+                    sess,
+                    tc.id.as_deref(),
+                    &tc.name,
+                    &tc.arguments,
+                    &output,
+                    (tool_calls.len() == 1).then_some(tool_batch_elapsed_ms),
+                    Some(ok),
+                );
+            }
             let _ = events
                 .send(AgentEvent::ToolResult {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     output: output.clone(),
                     ok,
+                    approval: approvals
+                        .get(idx)
+                        .and_then(|a| a.as_ref())
+                        .map(|a| a.status.to_string()),
                 })
                 .await;
             // 工具结果回灌历史，供下一轮模型观测（observe）
@@ -575,6 +733,7 @@ mod tests {
             thinking: None,
             finish_reason: None,
             tool_calls: None,
+            usage: None,
         }
     }
 
@@ -584,6 +743,7 @@ mod tests {
             thinking: Some(s.to_string()),
             finish_reason: None,
             tool_calls: None,
+            usage: None,
         }
     }
 
@@ -593,6 +753,7 @@ mod tests {
             thinking: None,
             finish_reason: Some(reason.to_string()),
             tool_calls: None,
+            usage: None,
         }
     }
 
@@ -606,6 +767,7 @@ mod tests {
                 name: name.to_string(),
                 arguments: arguments.to_string(),
             }]),
+            usage: None,
         }
     }
 
@@ -845,13 +1007,16 @@ mod tests {
         assert!(events.contains(&AgentEvent::ToolCall {
             id: None,
             name: "echo".to_string(),
-            arguments: "{\"m\":\"x\"}".to_string()
+            arguments: "{\"m\":\"x\"}".to_string(),
+            // echo 不在审批面内 → 不伪造 approval 字段。
+            approval: None,
         }));
         assert!(events.contains(&AgentEvent::ToolResult {
             id: None,
             name: "echo".to_string(),
             output: "echo:x".to_string(),
-            ok: true
+            ok: true,
+            approval: None,
         }));
         // 工具结果回灌历史
         assert!(history
@@ -876,7 +1041,7 @@ mod tests {
                 parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string"}}}),
             },
         ];
-        tools.extend((0..12).map(|i| ToolDef {
+        tools.extend((0..20).map(|i| ToolDef {
             name: format!("special_{i}"),
             description: "专用能力".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -1103,6 +1268,102 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("3"),
             "错误须点明轮数上限"
+        );
+    }
+
+    // ---------- E12：工具输出 → 上下文令牌台账 ----------
+
+    /// 40k 字符工具输出的「生产方」（完整文本进入 `Message::Tool.output`）。
+    struct BigOutputTool;
+
+    #[async_trait]
+    impl ToolExecutor for BigOutputTool {
+        fn name(&self) -> &str {
+            "big_out"
+        }
+        fn description(&self) -> &str {
+            "E12 回归：返回 4 万字符输出"
+        }
+        async fn execute(&self, _args: &HashMap<String, String>) -> Result<ToolResult> {
+            Ok(ToolResult::Success {
+                data: "x".repeat(40_000),
+                metadata: HashMap::new(),
+            })
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+    }
+
+    /// E12 回归：流式回路把工具输出写进模型上下文的同时，按**完整文本**记入台账。
+    ///
+    /// 修复前：本回路自身不记账，只靠网关事件桥（异步、且部分事件只有摘要）→
+    /// 此处 `overhead_tokens` 恒为 0，压缩阈值因此永远晚到。
+    #[tokio::test]
+    async fn stream_loop_records_full_tool_output_to_context_ledger() {
+        let mut reg = ToolRegistry::new();
+        reg.register_local(Box::new(BigOutputTool));
+        let registry = Arc::new(reg);
+        let session = format!("mgt-e12-stream-{}", uuid::Uuid::new_v4());
+        let mut history = vec![user("读大输出")];
+        let (tx, rx) = mpsc::channel(64);
+        let mut round = 0u32;
+        let result = run_tool_loop_streaming_inner(
+            &mut history,
+            Some(session.clone()),
+            registry,
+            None,
+            tx,
+            4,
+            move |_m, _tools| {
+                round += 1;
+                async move {
+                    if round == 1 {
+                        Ok(synthetic_stream(vec![tool_chunk("big_out", "{}")]))
+                    } else {
+                        Ok(synthetic_stream(vec![
+                            text_chunk("完成"),
+                            finish_chunk("stop"),
+                        ]))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "回路应正常收敛：{result:?}");
+        // 历史里确实保存了完整输出
+        let tool_out = history
+            .iter()
+            .find_map(|m| match m {
+                Message::Tool { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .expect("回路应追加 Message::Tool");
+        assert_eq!(tool_out.len(), 40_000);
+
+        let expected = crate::context::session::estimate_tokens(&tool_out);
+        assert!(expected > 5_000, "40k 字符应估算出上万 token：{expected}");
+        let status = crate::context::session::context_status(&session);
+        assert_eq!(
+            status["overhead_tokens"].as_u64(),
+            Some(expected),
+            "完整工具输出必须计入台账（而不是摘要那点）：{status}"
+        );
+
+        // 事件里同样是完整输出（前端与台账同源，未截断）
+        let events = drain(rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { output, .. } if output.len() == 40_000
+            )),
+            "ToolResult 事件应携带完整输出"
+        );
+
+        let _ = std::fs::remove_file(
+            crate::persistence::config::Config::data_dir()
+                .join("context")
+                .join(format!("{session}.json")),
         );
     }
 }

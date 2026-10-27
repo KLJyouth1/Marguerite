@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { bootOrchestraSeenStorage } from './bootSeen'
 
 const CONTROL_URL = '/control/'
 const RAW_KEY_PATTERN = /agent:[a-z0-9_-]+:[a-z0-9_-]+:/i
@@ -139,6 +140,9 @@ test.describe('Sidebar', () => {
   test('touch phone landscape uses a fixed drawer with no resize handle', async ({ browser }) => {
     const context = await browser.newContext({
       baseURL: process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791',
+      storageState: bootOrchestraSeenStorage(
+        new URL(process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791').origin,
+      ),
       viewport: { width: 844, height: 390 },
       hasTouch: true,
       isMobile: true,
@@ -192,6 +196,9 @@ test.describe('Sidebar', () => {
     ]) {
       const context = await browser.newContext({
         baseURL: process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791',
+        storageState: bootOrchestraSeenStorage(
+          new URL(process.env.OPENSQUILLA_WEBUI_BASE_URL || 'http://127.0.0.1:18791').origin,
+        ),
         viewport,
         hasTouch: true,
         isMobile: true,

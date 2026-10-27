@@ -99,14 +99,28 @@ pub fn cache_status() -> Value {
         // invariant 8：携带工具定义的路径永远走 ExactOnly（语义近似命中会静默丢弃工具调用）
         "exact_only_tools": true,
         // ── useChatSidebarPanels.CacheStrip 契约（服务端前缀缓存，独立量纲）──
-        "server_cache_hit_rate": tracker.hit_rate() * 100.0,
+        // 主指标（W5.1）：coverage = 命中 token / 归一后的总输入 token。
+        // `server_cache_hit_rate` 保留为 **coverage 的别名**（前端旧字段）——
+        // 它不再是 read/(read+creation)：那个口径在 DeepSeek 上恒等于 100%，会骗人。
+        "server_cache_hit_rate": server.cache_coverage_pct(),
+        "server_cache_coverage_pct": server.cache_coverage_pct(),
+        "server_total_input_tokens": server.total_input_tokens,
+        // 合格请求命中率：达到 provider 最小可缓存长度的请求中至少命中一次的比例。
+        "server_cache_request_hit_rate_pct": server.request_hit_rate_pct(),
+        "server_cache_eligible_requests": server.eligible_requests,
+        "server_cache_hit_requests": server.hit_requests,
         "prefix_hits": prefix.prefix_hits,
         // ── 诚实附加诊断（不参与 UI 主指标，供排障与「缓存为何没命中」定位）──
         "prefix_saved_tokens": prefix.prefix_saved_tokens,
         "server_cache_read_tokens": server.cache_read_total,
         "server_cache_creation_tokens": server.cache_creation_total,
+        // 旧诊断口径（read/(read+creation)）：保留但**不**当主指标。
+        "server_cache_write_adjusted_hit_rate_pct": server.write_adjusted_hit_rate_pct(),
         "server_calls": server.calls,
         "stable_prefix_drift": server.stable_prefix_drift,
+        // W5.3：按来源归因（agent.stable_half / compress.tool_results …）。
+        // 稳态下每个 scope 都在、值为 0 —— 0 本身是可核对的证据，不隐藏。
+        "stable_prefix_drift_by_scope": server.stable_prefix_drift_by_scope,
         // ── 预填充去重真实计数（W-9）：实际发出的预热次数与去重跳过次数 ──
         "prefetch": {
             "warmups": pf_warmups,
@@ -272,6 +286,18 @@ mod tests {
 
         // 诚实性：无任何流量时命中率必须是 0，而不是臆造的非零值
         assert!(v["ok"].as_bool().unwrap(), "ok 应为 true");
+
+        // W5.3：漂移必须可按来源归因，且「总量 == 各 scope 之和」
+        // （两个字段来自同一次 `stats()` 快照，因此这条断言不受并行用例影响）。
+        let drift_by_scope = v["stable_prefix_drift_by_scope"]
+            .as_object()
+            .expect("stable_prefix_drift_by_scope 必须是 scope → 计数 的对象");
+        let summed: u64 = drift_by_scope.values().map(|n| n.as_u64().unwrap_or(0)).sum();
+        assert_eq!(
+            v["stable_prefix_drift"].as_u64().unwrap(),
+            summed,
+            "stable_prefix_drift 必须等于各 scope 之和"
+        );
     }
 
     /// 计数一致性：hits + misses 必须等于 lookups（否则 UI 的命中率与明细自相矛盾）。
@@ -354,21 +380,54 @@ mod tests {
         );
     }
 
-    /// 服务端前缀缓存命中率独立上报（与客户端命中率量纲不同，不可混算）。
+    /// 服务端前缀缓存指标独立上报（与客户端命中率量纲不同，不可混算）。
+    ///
+    /// 全局 tracker 是进程级累计，故断言按**前后差值**计算期望，避免并行/多次运行时
+    /// 依赖「此前没人上报过」的隐含假设。
     #[test]
     fn cache_status_reports_server_side_hit_rate_separately() {
-        use crate::cache::prefix_cache_tracker;
+        use crate::cache::{min_cache_tokens, prefix_cache_tracker, total_input_tokens};
 
-        prefix_cache_tracker().report(1000, 750, 250);
-        let v = cache_status();
-        let server_rate = v["server_cache_hit_rate"].as_f64().unwrap();
-        // 750 / (750 + 250) = 75%
-        assert!(
-            (server_rate - 75.0).abs() < 1e-6,
-            "服务端命中率应为 75%，实际 {server_rate}"
+        let before = prefix_cache_tracker().stats();
+        // Anthropic 口径：input=1100，read=750，creation=250 → 总输入 2100。
+        prefix_cache_tracker().report(
+            total_input_tokens(1100, 750, 250, true),
+            750,
+            250,
+            min_cache_tokens(true),
         );
-        assert_eq!(v["server_cache_read_tokens"].as_u64().unwrap(), 750);
-        assert_eq!(v["server_cache_creation_tokens"].as_u64().unwrap(), 250);
+        let after = prefix_cache_tracker().stats();
+        let v = cache_status();
+
+        let coverage = after.cache_coverage_pct();
+        let write_adjusted = after.write_adjusted_hit_rate_pct();
+        assert!(
+            (v["server_cache_hit_rate"].as_f64().unwrap() - coverage).abs() < 1e-6,
+            "server_cache_hit_rate 必须是 coverage 的别名"
+        );
+        assert!(
+            (v["server_cache_coverage_pct"].as_f64().unwrap() - coverage).abs() < 1e-6
+        );
+        assert!(
+            (v["server_cache_write_adjusted_hit_rate_pct"].as_f64().unwrap() - write_adjusted)
+                .abs() < 1e-6
+        );
+        assert_eq!(
+            v["server_total_input_tokens"].as_u64().unwrap(),
+            after.total_input_tokens
+        );
+        assert_eq!(
+            v["server_cache_read_tokens"].as_u64().unwrap(),
+            before.cache_read_total + 750
+        );
+        assert_eq!(
+            v["server_cache_creation_tokens"].as_u64().unwrap(),
+            before.cache_creation_total + 250
+        );
+        assert_eq!(
+            v["server_cache_eligible_requests"].as_u64().unwrap(),
+            after.eligible_requests
+        );
     }
 
     /// 契约守卫：`router.selflearning.status` 必须给出前端 `SelfLearningStatus`

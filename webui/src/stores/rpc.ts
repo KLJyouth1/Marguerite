@@ -93,6 +93,29 @@ function saveConnectionSettings(url: string, token: string): void {
   } catch {}
 }
 
+/**
+ * 本次页面加载中「已经用哪个 token 建立过连接」。
+ *
+ * 为什么必须有它（2026-10-21 实测根因）：`main.ts` 的顺序是
+ * `app.use(router)`（第 27 行）→ `rpcStore.init()`（第 34 行）。vue-router 在
+ * `createWebHistory()` 时就捕获了**当前 location**——此时 URL 里还带着 `?token=`。
+ * `init()` 消费 token 并 `replaceState` 把它从地址栏抹掉，但紧接着 router 的首次
+ * 导航 finalize 又把**它自己捕获的旧 URL（含 token）** 写回地址栏。
+ * 于是 `router.afterEach → applyLinkTokenFromUrl()` 再次读到同一个 token，
+ * 无条件执行 `disconnect()` + `connect()`：
+ *
+ *   · 每次带 token 进入页面 = **多一次完整 WS 握手**（实测 2 次 open / 1 次 close）；
+ *   · `disconnect()` 会把所有 in-flight 请求 reject 成 `Disconnected`
+ *     —— `/channels` 首载 `sessions.list` 偶发失败即此因（4 次复现命中 1~2 次，
+ *     命中与否取决于该请求是否正好落在 24ms 的重连窗口内）；
+ *   · token 被重新写回 URL，等于把已清理的凭据又暴露在地址栏与历史记录里。
+ *
+ * 判据是**语义等价**而非"只要 URL 有 token 就重连"：同一个 token 已经不重连，
+ * 只有 token 真的变了（换了访问链接）才切连接。这样既修掉双重连接，也保留
+ * "不同 share link 切换身份"的能力。
+ */
+let connectedToken: string | null = null
+
 export const useRpcStore = defineStore('rpc', () => {
   const client = ref<RpcClient | null>(null)
   const state = ref<'disconnected' | 'connecting' | 'connected'>('disconnected')
@@ -154,7 +177,26 @@ export const useRpcStore = defineStore('rpc', () => {
     // Auto-connect on init. Desktop shells use the local gateway serving this UI.
     consumeLinkTokenFromUrl()
     const { url, token } = loadConnectionSettings()
+    // 注入 token 落盘到 sessionStorage。
+    //
+    // 为什么必须做：`loadConnectionSettings` 在桌面壳冷启动时只从
+    // `#Marguerite-data[data-ws-token]` 读到 token，**不会**写回 sessionStorage；
+    // 而一大堆 REST 辅助函数（`/api/approvals`、`/api/system/update`、
+    // `/api/elevated-mode`、附件上传…）只认 `sessionStorage['marguerite.wsToken']`。
+    // 真机实证：带 token 的 WS 握手成功，但同一页面的 REST 全军覆没在 401，
+    // 控制台刷出「Approvals snapshot failed: HTTP 401」这类死路告警。
+    // 写回后，REST 与 WS 共用同一份凭据，401 的根因被消掉。
+    if (token) {
+      try {
+        if (sessionStorage.getItem(WS_TOKEN_KEY) !== token) {
+          sessionStorage.setItem(WS_TOKEN_KEY, token)
+        }
+      } catch {
+        // sessionStorage 不可用（隐私模式）：各 REST 调用自带注入 token 兜底。
+      }
+    }
     if (rpc.state === 'disconnected') {
+      connectedToken = token || null
       rpc.connect(url, token || undefined)
     }
   }
@@ -163,12 +205,17 @@ export const useRpcStore = defineStore('rpc', () => {
     if (!client.value) throw new Error('RPC client not initialized')
     error.value = null
     saveConnectionSettings(url, token || '')
+    connectedToken = token || null
     client.value.connect(url, token)
   }
 
   function applyLinkTokenFromUrl(): boolean {
     const settings = consumeLinkTokenFromUrl()
     if (!settings) return false
+    // 同一个 token 已连过：`consumeLinkTokenFromUrl` 已顺手清理地址栏，
+    // 这里**不再** disconnect + connect。否则每次带 token 进入都会二次握手，
+    // 把 in-flight 请求打成 `Disconnected`（见 `connectedToken` 的注释）。
+    if (settings.token === connectedToken) return false
     if (client.value) {
       client.value.disconnect()
       error.value = null
@@ -176,6 +223,7 @@ export const useRpcStore = defineStore('rpc', () => {
       auth.value = null
       methods.value = []
       unavailableMethods.value = new Set()
+      connectedToken = settings.token
       client.value.connect(settings.url, settings.token)
     }
     return true
@@ -183,6 +231,7 @@ export const useRpcStore = defineStore('rpc', () => {
 
   function disconnect() {
     client.value?.disconnect()
+    connectedToken = null
     state.value = 'disconnected'
     policy.value = null
     auth.value = null
@@ -199,6 +248,21 @@ export const useRpcStore = defineStore('rpc', () => {
     unavailableMethods.value = new Set([...unavailableMethods.value, method])
   }
 
+  /**
+   * 冷启动/重连窗口的统一等待上限。
+   *
+   * 为什么在这里（而不是每个页面各写一遍）：`state !== 'connected'` 时直接抛
+   * `Cannot call X: not connected (state: connecting)` 会把「还在连」当成「失败了」，
+   * 于是插件、编辑器、驾驶舱、终端、专家中心、本地模型中心等页面在**第一次打开**
+   * 就渲染红色错误条 + 重试按钮 —— 用户看到的是"每次点开都让我重试"。
+   * 同源缺陷此前在 8 个视图里用各自的 `waitForConnection` 打了补丁（见各文件
+   * "not connected (state: connecting)" 注释），但新页面仍会重犯。
+   *
+   * 现在把它收敛到唯一入口：未连接时先等（最多 8s，足够一次完整 WS 握手与
+   * 网关冷启动），等到就正常调用；等不到才如实失败。
+   */
+  const CONNECT_WAIT_MS = 8_000
+
   async function call<T = unknown>(
     method: string,
     params?: Record<string, unknown>,
@@ -206,7 +270,15 @@ export const useRpcStore = defineStore('rpc', () => {
   ): Promise<T> {
     if (!client.value) throw new Error('RPC client not initialized')
     if (state.value !== 'connected') {
-      throw new Error(`Cannot call ${method}: not connected (state: ${state.value})`)
+      // 写型/显式"排队关闭"的调用保持立即失败语义，绝不替调用方等：
+      // 一个已经失效的连接上重放写操作可能造成重复副作用。
+      if (options?.queue === false) {
+        throw new Error(`Cannot call ${method}: not connected (state: ${state.value})`)
+      }
+      await client.value.waitForConnection(CONNECT_WAIT_MS, options?.signal, {
+        abortAction: 'reject',
+        timeoutAction: 'reject',
+      })
     }
     return (
       options

@@ -1,12 +1,12 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
     "productName":  "Marguerite",
-    "version":  "0.2.13",
+    "version":  "0.2.17",
     "identifier":  "com.marguerite.workbench",
     "build":  {
-                  "beforeDevCommand":  "npm run dev",
-                  "devUrl":  "http://localhost:1420",
-                  "beforeBuildCommand":  "echo front-end is built externally by scripts/package_app.cmd",
+                  "beforeDevCommand":  "",
+                  "devUrl":  "http://localhost:18790/control/",
+                  "beforeBuildCommand":  "echo front-end is prebuilt into webui/dist by scripts/package_app.cmd",
                   "frontendDist":  "webui/dist"
               },
     "app":  {
@@ -21,11 +21,11 @@
                                     "minHeight":  640,
                                     "center":  true,
                                     "decorations":  false,
-                                    "url":  "http://localhost:18790/control/"
+                                    "url":  "splash.html"
                                 }
                             ],
                 "security":  {
-                                 "csp":  null
+                                 "csp":  "default-src \u0027self\u0027; script-src \u0027self\u0027 \u0027unsafe-inline\u0027; style-src \u0027self\u0027 \u0027unsafe-inline\u0027; img-src \u0027self\u0027 data: blob:; font-src \u0027self\u0027 data:; media-src \u0027self\u0027 data: blob:; connect-src \u0027self\u0027 ipc: http://ipc.localhost ws: wss:; object-src \u0027none\u0027; base-uri \u0027self\u0027; frame-ancestors \u0027none\u0027; worker-src \u0027self\u0027 blob:"
                              }
             },
     "bundle":  {
@@ -40,7 +40,6 @@
                                      "resources",
                                      "resources/modes",
                                      "resources/pyengine",
-                                     "resources/plugins",
                                      "resources/btpanel-mcp",
                                      "resources/docs",
                                      "resources/scripts"
@@ -57,16 +56,16 @@
                                                               "type":  "offlineInstaller",
                                                               "silent":  true
                                                           },
-                                    "wix":  {
-                                                "language":  {
-                                                                 "en-US":  {
-                                                                               "localePath":  "wix/locale/en-US.wxl"
-                                                                           }
-                                                             },
-                                                "fragmentPaths": [
-                                                    "wix/fragments/shortcuts.wxs"
-                                                ]
-                                            }
+                                   "wix":  {
+                                               "language":  {
+                                                                "en-US":  {
+                                                                              "localePath":  "wix/locale/en-US.wxl"
+                                                                          }
+                                                            },
+                                               "fragmentPaths":  [
+                                                                     "wix/fragments/shortcuts.wxs"
+                                                                 ]
+                                           }
                                }
                }
 }

@@ -152,9 +152,10 @@ pub(crate) fn patch_target_path(patch: &str) -> Option<String> {
 }
 
 pub(crate) fn apply_patch_tool(
-    workspace: PathBuf,
+    workspace: impl Into<RootSet>,
     versions: Arc<Option<VersionManager>>,
 ) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "apply_patch",
         "应用 unified diff 补丁到工作区文件（对齐上游 apply_patch）。patch 为包含 @@ hunk 头的补丁文本，可含 +++ b/path 头；若省略头则需显式 path。参数: patch(必填), path(可选，补丁含 +++ 头时可省略)",
@@ -173,7 +174,7 @@ pub(crate) fn apply_patch_tool(
                     .map(|s| s.as_str())
                     .or(header.as_deref())
                     .ok_or_else(|| anyhow!("missing 'path'（且补丁无 +++ 头）"))?;
-                let abs = safe_resolve(&ws, p)?;
+                let abs = ws.resolve(p)?;
                 let existed = abs.is_file();
                 let old_content = if existed {
                     std::fs::read_to_string(&abs)?
@@ -182,7 +183,7 @@ pub(crate) fn apply_patch_tool(
                 };
                 let (new_content, applied) = apply_hunks(&old_content, patch)?;
                 // L3 路径边界 + L2 内容扫描：补丁引入的新内容必须过护栏。
-                if let Some(denied) = gate(&PREFLIGHT.check_write(&abs, &normalize_workspace(&ws), &new_content)) {
+                if let Some(denied) = gate(&PREFLIGHT.check_write_multi(&abs, &guard_roots(&ws), &new_content)) {
                     return denied;
                 }
                 if let Some(parent) = abs.parent() {
@@ -272,10 +273,11 @@ pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
     glob_segments_match(&pat, &segs)
 }
 
-pub(crate) fn glob_file_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn glob_file_search_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "glob_file_search",
-        "按 glob 模式检索工作区文件（支持 *、**、? 通配，如 '**/*.rs'、'src/*.ts'）。参数: pattern(必填), max(可选，默认200)",
+        "按 glob 模式检索工作区文件（多根会话会跨全部登记根检索）。参数: pattern(必填), max(可选，默认200)",
         json!({"type":"object","properties":{"pattern":{"type":"string"},"max":{"type":"number"}},"required":["pattern"]}),
         Arc::new(move |args| {
             let ws = workspace.clone();
@@ -283,12 +285,18 @@ pub(crate) fn glob_file_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor>
                 let pattern = args.get("pattern").ok_or_else(|| anyhow!("missing 'pattern'"))?;
                 let max: usize = args.get("max").and_then(|m| m.parse().ok()).unwrap_or(200);
                 let mut all = Vec::new();
-                walk_files(&ws, &mut all);
+                for root in ws.all() {
+                    walk_files(root, &mut all);
+                }
+                all.sort();
+                all.dedup();
                 let mut hits: Vec<String> = all
                     .iter()
                     .filter_map(|p| {
-                        let rel = p
-                            .strip_prefix(&ws)
+                        let rel = ws
+                            .all()
+                            .iter()
+                            .find_map(|root| p.strip_prefix(root).ok())
                             .unwrap_or(p)
                             .to_string_lossy()
                             .replace('\\', "/");
@@ -303,7 +311,8 @@ pub(crate) fn glob_file_search_tool(workspace: PathBuf) -> Box<dyn ToolExecutor>
     )
 }
 
-pub(crate) fn todo_write_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
+pub(crate) fn todo_write_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
+    let workspace: RootSet = workspace.into();
     boxed(
         "todo_write",
         "写入/读取结构化任务清单（对齐 todo_write 机制）。action=set(替换清单)|get(读取)。set 时 items 为 JSON 数组 [{step,status}]，status=completed|in_progress|pending。持久化到 .marguerite/todos.json。参数: action(必填), items(set 时必填，JSON 数组字符串)",
@@ -314,7 +323,7 @@ pub(crate) fn todo_write_tool(workspace: PathBuf) -> Box<dyn ToolExecutor> {
         Arc::new(move |args| {
             let ws = workspace.clone();
             Box::pin(async move {
-                let store = ws.join(".marguerite").join("todos.json");
+                let store = ws.primary().join(".marguerite").join("todos.json");
                 let action = args.get("action").map(|s| s.as_str()).unwrap_or("get");
                 match action {
                     "set" => {

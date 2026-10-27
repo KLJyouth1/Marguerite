@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="control-stage fleet-stage">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
@@ -47,7 +47,7 @@
         :key="r.role_id"
         :title="r.label || r.role_id"
         kind="fleet"
-        :status="recommendation?.role_id === r.role_id ? 'running' : 'ok'"
+        status="idle"
         :subtitle="r.model"
         :detail="r.system_prompt"
         :meta="`${r.provider} · 推理 ${r.reasoning} · 并发 ${r.max_concurrency}`"
@@ -91,7 +91,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import RunNodeCard from '@/components/fleet/RunNodeCard.vue'
 import type { RunNodeKind, RunNodeStatus } from '@/components/fleet/runNodeTypes'
@@ -112,8 +112,7 @@ const error = ref('')
 const loading = ref(false)
 let loadedOnce = false
 
-/** Hardcoded capability constellation — visual shell of the memory/tool stack. */
-const capabilityNodes: Array<{
+interface CapabilityNode {
   id: string
   title: string
   kind: RunNodeKind
@@ -121,44 +120,125 @@ const capabilityNodes: Array<{
   subtitle: string
   detail: string
   meta: string
-}> = [
+}
+
+/**
+ * 能力星座：状态**一律来自实测 RPC**，探测不到就如实说「未探测 / 探测失败」。
+ *
+ * 此前这里是 4 条硬编码常量，状态写着 `running`/`ok`，meta 写着
+ * `memory.graph · warm`、`tools.runtime · 12 adapters` —— 这些运行时状态从未被测量过，
+ * 界面上却呈现成「活的」。改为实测后，每一格的 subtitle 都是可核对的事实。
+ */
+const capabilityNodes = ref<CapabilityNode[]>([
   {
     id: 'mem',
     title: '长期记忆',
     kind: 'memory',
-    status: 'running',
-    subtitle: 'Episodic + Semantic',
-    detail: '跨会话记忆与偏好沉淀，比竞品更稳的召回边界。',
-    meta: 'memory.graph · warm',
+    status: 'idle',
+    subtitle: '探测中…',
+    detail: '跨会话记忆与偏好沉淀，召回边界可控。',
+    meta: 'memory.layers.status',
   },
   {
     id: 'retr',
     title: '混合检索',
     kind: 'retrieval',
-    status: 'ok',
-    subtitle: 'Hybrid search',
-    detail: '向量 + 关键词 + 图谱路径，少 token、高命中。',
-    meta: 'retrieval.hybrid · ready',
+    status: 'idle',
+    subtitle: '向量 + 关键词 + 图谱路径',
+    detail: '少 token、高命中；由 kb.search / memory.*.search 承载。',
+    meta: '无独立运行时探测端点',
   },
   {
     id: 'kb',
     title: '知识库',
     kind: 'knowledge',
-    status: 'ok',
-    subtitle: 'Knowledge graph',
+    status: 'idle',
+    subtitle: '探测中…',
     detail: '结构化知识页与关系边，办公与编码共用一盘棋。',
-    meta: 'kb.graph · online',
+    meta: 'kb.status',
   },
   {
     id: 'tools',
     title: '工具运行时',
     kind: 'tool',
-    status: 'running',
-    subtitle: 'Adapters',
+    status: 'idle',
+    subtitle: '探测中…',
     detail: '办公、终端、浏览器、沙箱 — 按需扇出，不烧上下文。',
-    meta: 'tools.runtime · 12 adapters',
+    meta: 'tools.catalog',
   },
-]
+])
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+function patchCapability(id: string, patch: Partial<CapabilityNode>) {
+  const node = capabilityNodes.value.find((n) => n.id === id)
+  if (node) Object.assign(node, patch)
+}
+
+/**
+ * 逐格实测能力状态。三个探测互相独立：任一失败只影响它自己那一格，
+ * 绝不因此把别的格子也标成健康（「探测不到」≈ 未知，不是「正常」）。
+ */
+async function probeCapabilities() {
+  try {
+    const res = await rpc.call<{ layers?: Array<{ reachable?: boolean }> }>(
+      'memory.layers.status',
+      {},
+    )
+    const layers = res.layers || []
+    const reachable = layers.filter((l) => l.reachable === true).length
+    patchCapability('mem', {
+      status: layers.length > 0 && reachable === layers.length ? 'ok' : 'warn',
+      subtitle: `${layers.length} 层 · 可达 ${reachable}`,
+      meta: 'memory.layers.status · 实测',
+    })
+  } catch (e) {
+    patchCapability('mem', {
+      status: 'warn',
+      subtitle: `探测失败：${errText(e)}`,
+      meta: 'memory.layers.status · 未探测',
+    })
+  }
+
+  try {
+    const res = await rpc.call<{ documents?: number; chunks?: number; engine?: string }>(
+      'kb.status',
+      {},
+    )
+    const docs = Number(res.documents || 0)
+    patchCapability('kb', {
+      status: docs > 0 ? 'ok' : 'idle',
+      subtitle: `${docs} 篇 · ${Number(res.chunks || 0)} 分块${res.engine ? ` · ${res.engine}` : ''}`,
+      meta: 'kb.status · 实测',
+    })
+  } catch (e) {
+    patchCapability('kb', {
+      status: 'warn',
+      subtitle: `探测失败：${errText(e)}`,
+      meta: 'kb.status · 未探测',
+    })
+  }
+
+  try {
+    const res = await rpc.call<{ items?: Array<{ enabled?: boolean }> }>('tools.catalog', {})
+    const items = res.items || []
+    const enabled = items.filter((t) => t.enabled !== false).length
+    const disabled = items.length - enabled
+    patchCapability('tools', {
+      status: enabled > 0 ? 'ok' : 'warn',
+      subtitle: `${enabled} 个可用${disabled > 0 ? ` · ${disabled} 个已停用` : ''}`,
+      meta: 'tools.catalog · 实测',
+    })
+  } catch (e) {
+    patchCapability('tools', {
+      status: 'warn',
+      subtitle: `探测失败：${errText(e)}`,
+      meta: 'tools.catalog · 未探测',
+    })
+  }
+}
 
 async function loadFleet() {
   error.value = ''
@@ -169,10 +249,12 @@ async function loadFleet() {
     roles.value = res.roles || []
     loadedOnce = true
   } catch (e) {
-    error.value = `加载失败: ${e instanceof Error ? e.message : String(e)}`
+    error.value = `加载失败: ${errText(e)}`
   } finally {
     loading.value = false
   }
+  // 能力格子的实测与角色列表无关，各自独立刷新（角色列表失败也照样探测）。
+  await probeCapabilities()
 }
 
 watch(
@@ -195,7 +277,20 @@ async function route() {
   }
 }
 
+// P3 打通：模型/路由变更与编排 agent 事件 → 舰队角色清单被动刷新，
+// 与对话编排 / 专家中心共享同一运行态（任一界面启动编排，舰队页即时可见）。
+const rpcUnsubs: Array<() => void> = []
+rpcUnsubs.push(
+  rpc.on('models.changed', () => void loadFleet()),
+  rpc.on('agent.started', () => void loadFleet()),
+  rpc.on('agent.stopped', () => void loadFleet()),
+)
+
 onMounted(loadFleet)
+onUnmounted(() => {
+  for (const unsub of rpcUnsubs) unsub()
+  rpcUnsubs.length = 0
+})
 </script>
 
 <style scoped>

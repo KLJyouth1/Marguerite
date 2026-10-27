@@ -4,7 +4,7 @@
      顶层只呈现「极简 / 标准 / 极致 × 咨询 / 方案 / 执行」9 档；旧 bloom / 全谱 / 单模型
      路由能力已由网关 `from_user_mode` 收编进「执行」列。 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import ModeMatrix from '@/components/chat/ModeMatrix.vue'
@@ -45,6 +45,24 @@ const currentLabel = computed(() =>
 const showCurrentInHead = computed(() => currentLabel.value !== t('chat.presets.label'))
 const autoModelOn = computed(() => props.modelRoutingMode !== 'off')
 
+/**
+ * 上次生效的「非 off」破甲档位 —— 关闭再打开时**恢复它**，而不是硬写 `omni_agent`。
+ *
+ * 缺陷背景：旧实现 `autoModelOn ? 'off' : 'omni_agent'` 把 5 档路由（direct / router /
+ * ensemble / bloom / omni）压成了二值。用户选了轻量的 `squilla_router` 后关一次破甲
+ * 再打开，会被静默升级成最重的 `omni_agent` —— 成本与延迟都变了，界面却只显示「开」。
+ * 这是「状态被开关吞掉」，属于静默失效，必须记住用户真实选择。
+ */
+const lastActiveRoutingMode = ref<ModelRoutingMode>(
+  props.modelRoutingMode === 'off' ? 'omni_agent' : props.modelRoutingMode,
+)
+watch(
+  () => props.modelRoutingMode,
+  (mode) => {
+    if (mode !== 'off') lastActiveRoutingMode.value = mode
+  },
+)
+
 function toggle() {
   open.value = !open.value
 }
@@ -57,7 +75,7 @@ function openAdvanced() {
 }
 function toggleAutoModel() {
   if (props.modelRoutingBusy) return
-  emit('setModelRoutingMode', autoModelOn.value ? 'off' : 'omni_agent')
+  emit('setModelRoutingMode', autoModelOn.value ? 'off' : lastActiveRoutingMode.value)
 }
 
 function onDocPointerDown(event: PointerEvent) {

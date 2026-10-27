@@ -35,7 +35,10 @@ pub fn load_or_create_token(data_dir: &std::path::Path) -> Result<String> {
         }
     }
     let token = generate_token();
-    fs::write(&path, &token)?;
+    // R13：原子写。此处虽是短文本，但 `fs::write` 先截断——若在截断与写入之间
+    // 崩溃，下次启动读到空 token 会**重新生成**，所有已连接的客户端 token 集体失效
+    // （用户看到的是「刚打开就要求重新配对」）。
+    crate::persistence::write_json_atomic(&path, &token)?;
     Ok(token)
 }
 
@@ -49,6 +52,59 @@ pub fn verify(token: &str, expected: &str) -> bool {
         diff |= a ^ b;
     }
     diff == 0
+}
+
+/// REST 面的本地 token 请求头（与 WS 的 `connect.params.token` 同源）。
+pub const TOKEN_HEADER: &str = "x-marguerite-token";
+
+/// 从 REST 请求中提取 token：优先 `x-marguerite-token`，其次 `Authorization: Bearer`，
+/// 最后允许 `?token=`（仅用于无法自定义请求头的同源下载/iframe 场景）。
+///
+/// 为什么不接受 Cookie：前端已统一用 Authorization 头；引入 Cookie 会扩大 CSRF 面，
+/// 且 WebView 与浏览器对 SameSite 的行为不一致，难以保证「四端一致」。
+pub fn token_from_request(
+    headers: &axum::http::HeaderMap,
+    uri: Option<&axum::http::Uri>,
+) -> Option<String> {
+    if let Some(raw) = headers.get(TOKEN_HEADER).and_then(|v| v.to_str().ok()) {
+        let t = raw.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    if let Some(raw) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        let raw = raw.trim();
+        if let Some(t) = raw.strip_prefix("Bearer ").or_else(|| raw.strip_prefix("bearer ")) {
+            let t = t.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    if let Some(query) = uri.and_then(|u| u.query()) {
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("token=") {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// REST 是否已授权（token 缺失/错误一律拒绝，fail-closed）。
+pub fn rest_authorized(
+    headers: &axum::http::HeaderMap,
+    uri: Option<&axum::http::Uri>,
+    expected: &str,
+) -> bool {
+    token_from_request(headers, uri)
+        .map(|t| verify(&t, expected))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -80,5 +136,35 @@ mod tests {
         assert_eq!(t1, t2, "二次加载应复用已落盘 token");
         assert!(verify(&t1, &t2));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rest_token_sources_and_fail_closed() {
+        use axum::http::{HeaderMap, HeaderValue, Uri};
+
+        let mut h = HeaderMap::new();
+        h.insert(TOKEN_HEADER, HeaderValue::from_static("abc"));
+        assert_eq!(token_from_request(&h, None).as_deref(), Some("abc"));
+        assert!(rest_authorized(&h, None, "abc"));
+        assert!(!rest_authorized(&h, None, "xyz"));
+
+        let mut h2 = HeaderMap::new();
+        h2.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer e2e-test-token"),
+        );
+        assert!(rest_authorized(&h2, None, "e2e-test-token"));
+
+        let uri: Uri = "/api/approvals?x=1&token=e2e-test-token".parse().unwrap();
+        let empty = HeaderMap::new();
+        assert!(rest_authorized(&empty, Some(&uri), "e2e-test-token"));
+
+        // 缺失/错误一律拒绝（fail-closed）
+        assert!(!rest_authorized(&HeaderMap::new(), None, "e2e-test-token"));
+        assert!(!rest_authorized(
+            &HeaderMap::new(),
+            Some(&"/api/approvals?token=wrong".parse::<Uri>().unwrap()),
+            "e2e-test-token"
+        ));
     }
 }

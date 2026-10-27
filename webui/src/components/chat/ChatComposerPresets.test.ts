@@ -69,7 +69,8 @@ async function mount(opts: MountOpts = {}) {
     setup() {
       return {
         locked: opts.locked ?? false,
-        routing: opts.routing ?? 'omni_agent',
+        // ref 才能被 onRoute 回写后驱动 props 变化（setup 返回的裸字符串不会）。
+        routing: ref(opts.routing ?? 'omni_agent'),
         busy: opts.busy ?? false,
       }
     },
@@ -88,7 +89,11 @@ async function mount(opts: MountOpts = {}) {
         ;(this as unknown as { events: unknown[] }).events.push(['adv'])
       },
       onRoute(mode: string) {
-        ;(this as unknown as { events: unknown[] }).events.push(['route', mode])
+        const self = this as unknown as { events: unknown[]; routing: string }
+        self.events.push(['route', mode])
+        // 回写 props：真实 ChatView 收到 RPC 回执后会更新 modelRoutingMode，
+        // 破甲开关「关→开」的档位记忆必须在这种真实回写下才可验证。
+        self.routing = mode
       },
     },
   }
@@ -209,8 +214,26 @@ describe('ChatComposerPresets (auto model unleash)', () => {
     expect(vm.events).toContainEqual(['route', 'omni_agent'])
   })
 
-  it('ignores clicks while the routing settings are being written', async () => {
-    const { el, vm } = await mount({ routing: 'omni_agent', busy: true })
+  it('re-enables the routing mode the user actually had, not omni_agent', async () => {
+    // 回归：关一次破甲再打开，不得把轻量档静默升级成最重的 omni_agent。
+    const { el, vm } = await mount({ routing: 'squilla_router' })
+    await openPanel(el)
+    const btn = el.querySelector('.composer-mode-pop__auto') as HTMLButtonElement
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+
+    btn.click()
+    await nextTick()
+    expect(btn.getAttribute('aria-pressed')).toBe('false')
+
+    btn.click()
+    await nextTick()
+    expect(vm.events).toEqual([
+      ['route', 'off'],
+      ['route', 'squilla_router'],
+    ])
+  })
+
+  it('ignores clicks while the routing settings are being written', async () => {    const { el, vm } = await mount({ routing: 'omni_agent', busy: true })
     await openPanel(el)
     const btn = el.querySelector('.composer-mode-pop__auto') as HTMLButtonElement
     expect(btn.disabled).toBe(true)

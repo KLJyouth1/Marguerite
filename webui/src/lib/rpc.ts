@@ -32,6 +32,11 @@ export interface RpcCallOptions {
    * 立即 reject 语义（由上层 durable outbox 自行重放，避免重复副作用）。
    */
   queue?: boolean;
+  /**
+   * 内部字段：本请求因连接回收被重放过的次数（由客户端自增，调用方不要传）。
+   * 用于给「回收→重放」设上界，避免病态循环。
+   */
+  replayCount?: number;
 }
 
 export interface RpcConnectionWaitOptions {
@@ -93,6 +98,10 @@ interface PendingRequest {
   timeoutTimer: ReturnType<typeof setTimeout> | null;
   signal: AbortSignal | null;
   abortHandler: (() => void) | null;
+  /** 回收重放需要原始参数（此前只在 call() 局部可见）。 */
+  params: Record<string, unknown>;
+  options: RpcCallOptions;
+  replayCount: number;
 }
 
 /**
@@ -173,6 +182,21 @@ export class RpcClient {
   private _tickTimeoutMs = 60000;
   private _outbox: OutboxEntry[] = [];
   private static readonly _MAX_OUTBOX = 200;
+  /**
+   * 同一请求因「连接回收」被重放的最大次数。
+   *
+   * 背景（真机缺陷）：`sessions.messages.subscribe` 的超时/中止被显式配置为
+   * `abortAction: 'reconnect'`（见 `sessionBootstrapContract.phaseCallOptions`），
+   * 目的是让被放弃的会话订阅不再占住网关的串行调度队列。但回收是**整条 socket**
+   * 级别的，于是同连接上恰好正在飞的其他请求（典型：概览页的 `doctor.status`）
+   * 会被一起 reject，用户看到
+   * `无法从 ws://… 加载 doctor.status。Connection recycled after
+   *  sessions.messages.subscribe terminated` —— 一个与 doctor 毫无关系的失败。
+   *
+   * 这些被牵连的请求**从未被服务端确认失败**，只是 socket 换代了；对只读调用
+   * 重放是安全且必须的。上限 2 次防止病态循环（真断网时仍会走正常失败路径）。
+   */
+  private static readonly _MAX_REPLAYS = 2;
 
   connect(url: string, token?: string): void {
     this._url = url;
@@ -195,7 +219,46 @@ export class RpcClient {
     this._setState('disconnected');
   }
 
+  /**
+   * 对外调用入口：在 `_callOnce` 之上加一层**侧车启动期退避重试**。
+   *
+   * # 为什么需要（2026-10-22 实测的「一启动先报错、点重试才连上」）
+   *
+   * 启动顺序：Tauri 拉起 Rust 网关（**立刻**监听 18790）→ 网关**异步**启动 Python
+   * 侧车（冷启动约 6 秒）→ 侧车就绪。WebView 在网关一监听上就加载并连 WS，
+   * 于是这 6 秒内每个 Python 方法都返回 `SIDECAR_STARTING`。
+   *
+   * 旧行为：直接把它当错误弹出来，用户看到"报错"，点重试时侧车已就绪 → "重试就好了"。
+   * 新行为：把它当**加载中**，退避重试（0.8s→1.6→3.2→6→6→6，总计约 24s 上限），
+   * 期间不打扰用户。超过上限仍失败才如实抛错。
+   */
   call(
+    method: string,
+    params: Record<string, unknown> = {},
+    options: RpcCallOptions = {},
+  ): Promise<unknown> {
+    return this._callWithSidecarRetry(method, params, options, 0)
+  }
+
+  private _callWithSidecarRetry(
+    method: string,
+    params: Record<string, unknown>,
+    options: RpcCallOptions,
+    attempt: number,
+  ): Promise<unknown> {
+    return this._callOnce(method, params, options).catch((err: unknown) => {
+      const code = (err as RpcClientError | undefined)?.code
+      if (code === 'SIDECAR_STARTING' && attempt < 6) {
+        const delay = Math.min(800 * 2 ** attempt, 6_000)
+        return new Promise<void>((resolve) => setTimeout(resolve, delay)).then(() =>
+          this._callWithSidecarRetry(method, params, options, attempt + 1),
+        )
+      }
+      throw err
+    })
+  }
+
+  private _callOnce(
     method: string,
     params: Record<string, unknown> = {},
     options: RpcCallOptions = {}
@@ -251,6 +314,9 @@ export class RpcClient {
       timeoutTimer: null,
       signal: options.signal || null,
       abortHandler: null,
+      params,
+      options,
+      replayCount: options.replayCount ?? 0,
     };
     this._pending.set(id, pending);
 
@@ -518,6 +584,9 @@ export class RpcClient {
           timeoutTimer: null,
           signal: null,
           abortHandler: null,
+          params: {},
+          options: {},
+          replayCount: 0,
         });
         try {
           socket.send(
@@ -558,8 +627,7 @@ export class RpcClient {
           handshakeRequestId = null;
         }
         this._setState('connected');
-        const helloHandlers = this._listeners.get('_hello');
-        if (helloHandlers) helloHandlers.forEach((h) => h(data));
+        this._emit('_hello', [data]);
         this._startPing();
         this._startTickWatch();
         // 连接恢复：重放断线期间排队的幂等请求。
@@ -589,10 +657,8 @@ export class RpcClient {
         }
       } else if (data.type === 'event') {
         const meta = data.meta || {};
-        const handlers = this._listeners.get(data.event ?? '');
-        if (handlers) handlers.forEach((h) => h(data.payload, meta));
-        const wild = this._listeners.get('*');
-        if (wild) wild.forEach((h) => h(data.event, data.payload, meta));
+        this._emit(data.event ?? '', [data.payload, meta]);
+        this._emit('*', [data.event, data.payload, meta]);
       }
     };
 
@@ -682,6 +748,60 @@ export class RpcClient {
     }
   }
 
+  /**
+   * 连接即将换代时，把**被牵连的只读请求**转进 outbox 等新连接重放，
+   * 避免它们以 `Connection recycled after <别人的方法> terminated` 失败。
+   *
+   * 只赎救同时满足以下条件的请求（保守，宁可失败也不重复副作用）：
+   *   · 未主动中止（`signal` 未 abort）—— 主动中止是调用方自己的意愿；
+   *   · 未显式声明 `queue: false` —— 写型调用必须保持"立即失败"语义；
+   *   · 方法名属于只读集合（后缀白名单）—— 不靠猜测，避免 `.send/.patch/.delete`
+   *     这类有副作用的调用被重放；
+   *   · 重放次数未达上限。
+   */
+  private _salvagePendingForGeneration(generation: number): void {
+    const survivors: OutboxEntry[] = [];
+    for (const [id, pending] of [...this._pending]) {
+      if (pending.generation !== generation) continue;
+      if (pending.signal?.aborted) continue;
+      if (pending.options.queue === false) continue;
+      if (!RpcClient._isReplaySafeMethod(pending.method)) continue;
+      if (pending.replayCount >= RpcClient._MAX_REPLAYS) continue;
+
+      if (pending.timeoutTimer !== null) {
+        clearTimeout(pending.timeoutTimer);
+        pending.timeoutTimer = null;
+      }
+      if (pending.signal && pending.abortHandler) {
+        pending.signal.removeEventListener('abort', pending.abortHandler);
+        pending.abortHandler = null;
+      }
+      this._pending.delete(id);
+      survivors.push({
+        method: pending.method,
+        params: pending.params,
+        options: { ...pending.options, replayCount: pending.replayCount + 1 },
+        resolve: pending.resolve,
+        reject: pending.reject,
+        queueTimer: null,
+      });
+    }
+    for (const entry of survivors) this._enqueueOutbox(entry);
+  }
+
+  /** 只读方法白名单：只有这些后缀允许在连接回收后被透明重放。 */
+  private static _isReplaySafeMethod(method: string): boolean {
+    return (
+      method.endsWith('.status') ||
+      method.endsWith('.list') ||
+      method.endsWith('.snapshot') ||
+      method.endsWith('.history') ||
+      method.endsWith('.get') ||
+      method.endsWith('.effective') ||
+      method.endsWith('.preview')
+    );
+  }
+
   private _retireCurrentSocket(error: Error, reconnect: boolean): void {
     const socket = this._ws;
     const generation = this._socketGeneration;
@@ -697,6 +817,8 @@ export class RpcClient {
     ++this._socketGeneration;
     this._stopPing();
     this._stopTickWatch();
+    // 先赎救被牵连的只读请求（仅重连场景；主动断开时一并失败）。
+    if (reconnect) this._salvagePendingForGeneration(generation);
     this._rejectPendingForGeneration(generation, error);
     this._setState('disconnected');
     try {
@@ -749,10 +871,7 @@ export class RpcClient {
       if (this._lastPingAt <= this._lastPongAt) return;
       const unansweredMs = Date.now() - this._lastPingAt;
       if (unansweredMs <= this._pongTimeoutMs) return;
-      const handlers = this._listeners.get('_gap');
-      if (handlers) {
-        handlers.forEach((h) => h({ reason: 'pong_timeout', idleMs: unansweredMs }));
-      }
+      this._emit('_gap', [{ reason: 'pong_timeout', idleMs: unansweredMs }]);
       try {
         this._ws.close();
       } catch {}
@@ -777,8 +896,14 @@ export class RpcClient {
     const seq = data.seq;
     if (this._lastSeq > 0 && seq !== this._lastSeq + 1) {
       const detail = { expected: this._lastSeq + 1, actual: seq, event: data.event };
-      const handlers = this._listeners.get('_gap');
-      if (handlers) handlers.forEach((h) => h(detail));
+      // 先推进水位、再通知、再关连接。
+      //
+      // 原实现只在「正常帧」分支推进 `_lastSeq`，断档分支只 close()：
+      // 一旦 close 没能走到 onclose（被监听器异常打断、或 readyState 已是 CLOSING），
+      // 之后每一帧都会被判成新的断档而永久丢弃 —— 连接却仍是 OPEN、状态仍是 connected，
+      // 页面表现为「事件全部停摆但没有任何报错」。推进水位后最坏也只是丢掉断档那一帧。
+      this._lastSeq = Math.max(this._lastSeq, seq);
+      this._emit('_gap', [detail]);
       try {
         this._ws?.close();
       } catch {}
@@ -797,8 +922,7 @@ export class RpcClient {
       if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
       const idleMs = Date.now() - this._lastFrameAt;
       if (idleMs <= this._tickTimeoutMs) return;
-      const handlers = this._listeners.get('_gap');
-      if (handlers) handlers.forEach((h) => h({ reason: 'tick_timeout', idleMs }));
+      this._emit('_gap', [{ reason: 'tick_timeout', idleMs }]);
       try {
         this._ws.close();
       } catch {}
@@ -835,7 +959,26 @@ export class RpcClient {
   private _setState(s: ConnectionState): void {
     if (this._state === s) return;
     this._state = s;
-    const handlers = this._listeners.get('_state');
-    if (handlers) handlers.forEach((h) => h(s));
+    this._emit('_state', [s]);
+  }
+
+  /**
+   * 安全分发：单个监听器抛异常不得影响同帧其它监听器，也不得打断连接状态机。
+   *
+   * 真机事故（2026-10-24）：编排卡片与聊天等待指示同时停在 31s，页面却没有任何报错。
+   * 当时所有分发点都是裸 `forEach` —— 任一监听器抛异常都会让**同一帧**剩余的监听器
+   * （包括 `*` 上的看门狗、`_gap` 断档回调）静默失联，而且异常发生在 onmessage 内。
+   * 现在逐监听器 try/catch：异常只上报，不影响本帧其余订阅者与后续帧。
+   */
+  private _emit(event: string, args: unknown[]): void {
+    const handlers = this._listeners.get(event);
+    if (!handlers || handlers.size === 0) return;
+    for (const handler of [...handlers]) {
+      try {
+        (handler as (...params: unknown[]) => void)(...args);
+      } catch (error) {
+        console.error(`[RPC] listener for "${event}" threw; dispatch continues`, error);
+      }
+    }
   }
 }

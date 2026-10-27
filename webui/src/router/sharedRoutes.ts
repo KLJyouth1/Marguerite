@@ -3,6 +3,7 @@ import { detectPlatformId } from '@/platform/capabilities'
 import { readLastRoute } from './lastRoute'
 
 const ChatView = () => import('@/views/ChatView.vue')
+const SplashView = () => import('@/views/SplashView.vue')
 const TaskWorkspaceView = () => import('@/views/TaskWorkspaceView.vue')
 const CronView = () => import('@/views/CronView.vue')
 const AgentsView = () => import('@/views/AgentsView.vue')
@@ -15,6 +16,7 @@ const ComputerUseView = () => import('@/views/ComputerUseView.vue')
 const FleetView = () => import('@/views/FleetView.vue')
 const EvolveView = () => import('@/views/EvolveView.vue')
 const PluginsView = () => import('@/views/PluginsView.vue')
+const ToolsView = () => import('@/views/ToolsView.vue')
 const GraphView = () => import('@/views/GraphView.vue')
 const PetView = () => import('@/views/PetView.vue')
 const IslandView = () => import('@/views/IslandView.vue')
@@ -22,9 +24,11 @@ const IslandGameView = () => import('@/views/IslandGameView.vue')
 const PokerView = () => import('@/views/PokerView.vue')
 const GamesView = () => import('@/views/GamesView.vue')
 const EngineHealthView = () => import('@/views/EngineHealthView.vue')
+const McpView = () => import('@/views/McpView.vue')
 const BrainView = () => import('@/views/BrainView.vue')
 const WorkspaceEditorView = () => import('@/views/WorkspaceEditorView.vue')
 const BrowserCockpitView = () => import('@/views/BrowserCockpitView.vue')
+const AppControlView = () => import('@/views/AppControlView.vue')
 const SshCollabView = () => import('@/views/SshCollabView.vue')
 const CapabilitiesHubView = () => import('@/views/CapabilitiesHubView.vue')
 const ControlCenterView = () => import('@/views/ControlCenterView.vue')
@@ -34,6 +38,11 @@ const WallpaperView = () => import('@/views/WallpaperView.vue')
 const ExpertCenterView = () => import('@/views/ExpertCenterView.vue')
 const LocalModelsView = () => import('@/views/LocalModelsView.vue')
 const OpsView = () => import('@/views/OpsView.vue')
+const HarnessView = () => import('@/views/HarnessView.vue')
+const RulesView = () => import('@/views/RulesView.vue')
+const MemoryView = () => import('@/views/MemoryView.vue')
+const ArtifactsView = () => import('@/views/ArtifactsView.vue')
+const TeamBoardView = () => import('@/views/TeamBoardView.vue')
 const DeviceTwinStage = () => import('@/components/device-twin/DeviceTwinStage.vue')
 
 export function defaultRootRedirect(): string {
@@ -47,11 +56,27 @@ export function defaultRootRedirect(): string {
 
 export const sharedRoutes: RouteRecordRaw[] = [
   {
+    path: '/splash',
+    name: 'splash',
+    component: SplashView,
+    meta: { title: 'Splash', platforms: ['web', 'desktop'] },
+  },
+  {
     path: '/',
     redirect: () => {
-      // Desktop app cold starts should feel like opening an assistant: land on
-      // Chat, not the session ledger. Browser builds still restore the last
-      // stable view when available, with the existing responsive fallback.
+      // 桌面端：**每次冷启动都播启动动画**（2026-10-22）。
+      //
+      // 理由是"启动动画"与"首访引导"是两种东西：前者每次启动都该出现，
+      // 后者只该出现一次。桌面壳每次启动都会重新加载 `/control/`（即本路由），
+      // 而 WebView 持久化 profile 下 sessionStorage 会跨启动保留 ——
+      // 沿用"只播一次"会让启动动画从第二次启动起就永远消失。
+      // 不阻塞的保证：跳过按钮 + Esc + 6 秒自动进入。
+      if (detectPlatformId() === 'desktop') return '/splash'
+      // Web 端保持"每会话一次"，避免刷新页面就重播。
+      if (!sessionStorage.getItem('marguerite_splash_seen')) {
+        sessionStorage.setItem('marguerite_splash_seen', '1')
+        return '/splash'
+      }
       return defaultRootRedirect()
     },
   },
@@ -81,7 +106,8 @@ export const sharedRoutes: RouteRecordRaw[] = [
   { path: '/approvals', redirect: '/sessions' },
   // Agent administration remains available as an advanced deep link, but is
   // intentionally absent from primary navigation and cold-start restoration.
-  { path: '/agents',    name: 'agents',    component: AgentsView,    meta: { title: 'Agents', group: 'Settings', icon: 'agents', platforms: ['web', 'desktop'], keepAlive: true } },
+  // 设置 → 扩展 → Agent 预设 提供 CTA 直达本页，侧栏不再重复列出。
+  { path: '/agents',    name: 'agents',    component: AgentsView,    meta: { title: 'Agents', icon: 'agents', platforms: ['web', 'desktop'], keepAlive: true } },
   // Skills and Channels form one primary destination. /skills remains the
   // rail target while both canonical routes share the same kept-alive hub.
   { path: '/skills',    name: 'skills',    component: SkillsChannelsHubView, meta: { title: 'Skills', group: 'Work', icon: 'skills', nav: 'primary', navOrder: 40, navLabelKey: 'nav.skillsChannels', platforms: ['web', 'desktop'], keepAlive: true, viewKey: 'skills-channels-hub' } },
@@ -103,9 +129,12 @@ export const sharedRoutes: RouteRecordRaw[] = [
   // 归入 Observe 观测诊断分组（与引擎健康/共享大脑同组：都在回答「这套系统现在怎么样」）。
   { path: '/evolve', name: 'evolve', component: EvolveView, meta: { title: 'Evolve', group: 'Observe', icon: 'sparkles', nav: 'primary', navOrder: 82, platforms: ['web', 'desktop'], keepAlive: true } },
   // ── 插件市场 ──
-  { path: '/plugins', name: 'plugins', component: PluginsView, meta: { title: 'Plugins', group: 'Work', icon: 'plugin', platforms: ['web', 'desktop'] } },
-  // ── 关系图谱（KB 2.0 知识图谱可视化）── 归入 Settings 系统/能力分组。
-  { path: '/graph', name: 'graph', component: GraphView, meta: { title: 'Graph', group: 'Settings', icon: 'gitBranch', platforms: ['web', 'desktop'] } },
+  // 插件现在是独立的管理页（列表/详情/新增/编辑/删除/启停/适配），
+  // 因此进入 Settings 折叠组，作为与 MCP / 工具 / 技能并列的一站式扩展入口。
+  { path: '/plugins', name: 'plugins', component: PluginsView, meta: { title: 'Plugins', titleKey: 'plugins.page.title', group: 'Settings', icon: 'plugin', nav: 'primary', navOrder: 80, navLabelKey: 'nav.plugins', platforms: ['web', 'desktop'], keepAlive: true } },
+  // ── 关系图谱（KB 2.0 知识图谱可视化）──
+  // 同样收进 设置 → 扩展 → Graph（CTA 直达本页），侧栏不再重复。
+  { path: '/graph', name: 'graph', component: GraphView, meta: { title: 'Graph', icon: 'gitBranch', platforms: ['web', 'desktop'] } },
   // ── 德州扑克（游戏大厅 · 赌 Token）── 娱乐功能，归 Extras 扩展组。
   { path: '/poker', name: 'poker', component: PokerView, meta: { title: 'Poker', group: 'Extras', icon: 'coins', platforms: ['web', 'desktop'] } },
   // ── 内置小游戏（games.list / games.play RPC；能力健康度横幅同源）── 归 Extras。
@@ -115,14 +144,45 @@ export const sharedRoutes: RouteRecordRaw[] = [
   { path: '/brain', name: 'brain', component: BrainView, meta: { title: 'Brain', group: 'Observe', icon: 'sparkles', nav: 'primary', navOrder: 83, platforms: ['web', 'desktop'] } },
   // ── 引擎健康 / 模型档案 / 运行时模式（runtime.status + models.profiles.* + mode.get/switch）── 归入 Observe 观测诊断分组。
   { path: '/engine', name: 'engine', component: EngineHealthView, meta: { title: 'Engine Health', group: 'Observe', icon: 'gauge', nav: 'primary', navOrder: 84, platforms: ['web', 'desktop'] } },
+  // ── MCP 服务器 / 工具 / 插件进程独立管理页（mcp.servers.* + mcp.tools.list + plugins.mcp.*）──
+  // 与 /engine 同组，navOrder 紧随其后（84.5），避免重排既有条目。
+  { path: '/mcp', name: 'mcp', component: McpView, meta: { title: 'MCP', titleKey: 'mcp.page.title', group: 'Observe', icon: 'plugin', nav: 'primary', navOrder: 84.5, navLabelKey: 'nav.mcp', platforms: ['web', 'desktop'] } },
+  // ── 工具管理（tools.catalog + tools.patch.get/set）──
+  // 内置工具与 MCP 工具的统一清单：搜索、来源筛选、逐项启停（下一轮生效）。
+  { path: '/tools', name: 'tools', component: ToolsView, meta: { title: 'Tools', titleKey: 'tools.page.title', group: 'Operate', icon: 'boxes', nav: 'primary', navOrder: 86.5, navLabelKey: 'nav.tools', platforms: ['web', 'desktop'], keepAlive: true } },
   // ── Ops 运维面板（ops.* 只读 RPC：主机/状态/文件/日志/进程）── 归入 Observe 观测诊断分组。
   { path: '/ops', name: 'ops', component: OpsView, meta: { title: 'Ops', group: 'Observe', icon: 'terminal', nav: 'primary', navOrder: 87, platforms: ['web', 'desktop'] } },
+  // ── Harness 运行台账（harness.ledger.status/query/replay + skills.coverage）──
+  // 只读呈现真实运行证据：KPI / 条目时间线 / replay 摘要 / 技能覆盖。
+  // 归入 Observe 观测诊断分组（回答「这些运行为什么这么慢、成功率如何」）。
+  { path: '/harness', name: 'harness', component: HarnessView, meta: { title: 'Harness', titleKey: 'harness.title', group: 'Observe', icon: 'logs', nav: 'primary', navOrder: 95, navLabelKey: 'harness.title', platforms: ['web', 'desktop'], keepAlive: true } },
+  // ── 团队看板（team.members：成员状态 / 当前步骤 / 工具调用 / token 消耗）──
+  // 只读呈现当前会话里每个团队成员的动向（回答「谁在做什么」），
+  // 归入 Observe 观测诊断分组，与 /harness（运行台账）同组互补。
+  // 不设 keepAlive：轮询只在视图挂载期间运行，离开路由即卸载并清理定时器。
+  { path: '/team-board', name: 'team-board', component: TeamBoardView, meta: { title: 'Team board', titleKey: 'team.board.title', group: 'Observe', icon: 'agents', nav: 'primary', navOrder: 97, navLabelKey: 'team.board.title', platforms: ['web', 'desktop'] } },
+  // ── 我的文件（产物中心）── 跨会话聚合 artifacts.list { allSessions: true }。
+  // 归入 Work 分组：与任务工作区同为「交付物在哪」的视图。
+  { path: '/artifacts', name: 'artifacts', component: ArtifactsView, meta: { title: 'My files', titleKey: 'artifacts.title', group: 'Work', icon: 'folder', nav: 'primary', navOrder: 38, navLabelKey: 'artifacts.navLabel', platforms: ['web', 'desktop'], keepAlive: true } },
+  // ── 用户规则编辑器（rules.list/get/save/delete，Rust-first）──
+  // 规则是「每轮都注入的硬约束」，与技能（按需加载的流程）不同。
+  // 归入 Settings 系统/能力分组。
+  { path: '/rules', name: 'rules', component: RulesView, meta: { title: 'Rules', titleKey: 'rules.title', group: 'Settings', icon: 'listChecks', nav: 'primary', navOrder: 96, navLabelKey: 'rules.navLabel', platforms: ['web', 'desktop'] } },
+  // ── 记忆一等页（设置 → 记忆 的六块面板提升为独立目的地，与 /rules 并列）──
+  // 与规则的分工：规则是「每轮注入的硬约束」，记忆是跨项目知识 / 分层记忆 /
+  // 画像 / 专家 / 导入流水线。navOrder 95 在 Settings 组内唯一（harness 的 95
+  // 属于 Observe 组，组内排序互不影响），排在 control-center(93) 与 rules(96) 之间。
+  { path: '/memory', name: 'memory', component: MemoryView, meta: { title: 'Memory', titleKey: 'memoryPage.title', group: 'Settings', icon: 'user', nav: 'primary', navOrder: 95, navLabelKey: 'memoryPage.navLabel', platforms: ['web', 'desktop'], keepAlive: true } },
   // ── 智能体与专家中心（预设智能体/专家库/蜂群规格）── 归入 Settings 系统/能力分组。
   { path: '/expert-center', name: 'expert-center', component: ExpertCenterView, meta: { title: 'Expert Center', group: 'Settings', icon: 'listChecks', nav: 'primary', navOrder: 85, platforms: ['web', 'desktop'] } },
   // ── 内置工作区编辑器（文件树 + 多标签文本编辑）── 归入 Operate 执行工具分组。
   { path: '/editor', name: 'editor', component: WorkspaceEditorView, meta: { title: 'Editor', group: 'Operate', icon: 'fileCode', nav: 'primary', navOrder: 86, platforms: ['web', 'desktop'] } },
   // ── 浏览器驾驶舱（CDP 操控 / JS 控制台 / 截图点击 / 无障碍树）── 归入 Operate 执行工具分组。
   { path: '/browser-cockpit', name: 'browser-cockpit', component: BrowserCockpitView, meta: { title: 'Browser Cockpit', group: 'Operate', icon: 'appWindow', nav: 'primary', navOrder: 88, platforms: ['web', 'desktop'] } },
+  // ── 应用自控（本应用 DOM 的语义化操控 + 全路由巡检）── 归入 Operate 执行工具分组。
+  // 与 /computer-use（像素级键鼠）、/browser-cockpit（外部 CDP）互补：
+  // 这一层直接寻址 data-testid / 无障碍名，稳定、可断言、可批量巡检。
+  { path: '/app-control', name: 'app-control', component: AppControlView, meta: { title: 'App Control', group: 'Operate', icon: 'cursor', nav: 'primary', navOrder: 91, platforms: ['web', 'desktop'] } },
   // ── 企业协同 / SSH + 能力中心 / 设置总览 ──
   { path: '/terminal', name: 'terminal', component: TerminalView, meta: { title: 'Terminal', group: 'Operate', icon: 'command', nav: 'primary', navOrder: 89, platforms: ['web', 'desktop'] } },
   { path: '/ssh-collab', name: 'ssh-collab', component: SshCollabView, meta: { title: 'SSH Collab', group: 'Operate', icon: 'collab', nav: 'primary', navOrder: 90, platforms: ['web', 'desktop'] } },

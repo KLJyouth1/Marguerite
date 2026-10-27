@@ -61,6 +61,9 @@ export class IslandGameScene {
   private elves: THREE.Group[] = []
   private water!: THREE.Mesh
   private rain?: THREE.Points
+  private fireflies?: THREE.Points
+  private fireflyBase?: Float32Array
+  private fireflyCount = -1
   private landmark?: LandmarkHandle
   private treeMats: THREE.MeshToonMaterial[] = []
 
@@ -286,6 +289,52 @@ export class IslandGameScene {
     })
   }
 
+  /**
+   * 缓存命中率 → 萤火虫密度（蓝图 §2.1/§6.1：命中率 >80% 时萤火虫增多）。
+   *
+   * 只接受 0..100 的**真实**命中率；null（未连接/方法不存在）= 不生成，
+   * 绝不用随机数假装「缓存很好」。低画质档封顶 90 只，守住桌面常驻预算。
+   */
+  setCacheHitRate(rate: number | null): void {
+    const raw = rate == null || !Number.isFinite(rate) ? 0 : rate
+    const bucket = raw >= 80 ? 300 : raw >= 50 ? 150 : raw >= 20 ? 60 : 0
+    const count = this.tier === 'low' ? Math.min(bucket, 90) : bucket
+    if (count === this.fireflyCount) return
+    this.fireflyCount = count
+
+    if (this.fireflies) {
+      this.scene.remove(this.fireflies)
+      this.fireflies.geometry.dispose()
+      ;(this.fireflies.material as THREE.Material).dispose()
+      this.fireflies = undefined
+      this.fireflyBase = undefined
+    }
+    if (count <= 0) return
+
+    const pos = new Float32Array(count * 3)
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2
+      const r = 4 + Math.random() * 30
+      pos[i * 3] = Math.cos(a) * r
+      pos[i * 3 + 1] = 1 + Math.random() * 6
+      pos[i * 3 + 2] = Math.sin(a) * r
+    }
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(pos.slice(), 3))
+    this.fireflies = new THREE.Points(
+      g,
+      new THREE.PointsMaterial({
+        color: 0xffe9a0,
+        size: 0.22,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+      }),
+    )
+    this.fireflyBase = pos
+    this.scene.add(this.fireflies)
+  }
+
   /** 模式符文点灯：bloom/omni 时圣殿花瓣发光增强。 */
   setModeKind(kind: string | null): void {
     const lit = kind === 'bloom' || kind === 'omni-transcend'
@@ -365,6 +414,16 @@ export class IslandGameScene {
         let y = p.getY(i) - dt * 18
         if (y < 0) y = 28
         p.setY(i, y)
+      }
+      p.needsUpdate = true
+    }
+
+    // 萤火虫漂浮（缓存命中率越高，粒子越多；reduced-motion 时保持静止）
+    if (this.fireflies && this.fireflyBase && !this.reduceMotion) {
+      const p = this.fireflies.geometry.getAttribute('position') as THREE.BufferAttribute
+      const t = this.clock.elapsedTime
+      for (let i = 0; i < p.count; i++) {
+        p.setY(i, this.fireflyBase[i * 3 + 1] + Math.sin(t * 0.8 + i * 0.7) * 0.35)
       }
       p.needsUpdate = true
     }

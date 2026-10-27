@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { createPinia } from 'pinia'
 import i18n from '@/i18n'
 import ChatComposer from './ChatComposer.vue'
 
@@ -44,6 +45,7 @@ describe('ChatComposer image-send guard', () => {
       sendBlockedMessage: message,
       onSend,
     })
+    app.use(createPinia())
     app.use(i18n)
     app.mount(el)
     await nextTick()
@@ -71,6 +73,7 @@ describe('ChatComposer image-send guard', () => {
     const el = document.createElement('div')
     document.body.appendChild(el)
     const app = createApp(ChatComposer, { ...BASE_PROPS, onSend })
+    app.use(createPinia())
     app.use(i18n)
     app.mount(el)
     await nextTick()

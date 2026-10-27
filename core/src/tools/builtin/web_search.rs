@@ -4,6 +4,33 @@
 
 use super::*;
 
+/// 按查询语言选择搜索引擎市场参数 `(mkt, setlang)`。
+///
+/// **为什么必须跟着查询语言走**：此前这里把 `mkt` 写死成 `zh-CN`。于是纯英文技术查询
+/// （例如 `Three.js floating island 3D scene tutorial low poly`）会被 cn.bing 强行按
+/// 中文市场重排：返回一堆中文站点，甚至插入「词典/翻译」类模块，把真正要的英文文档挤掉。
+/// 实测症状就是子智能体回报「搜索受到中文词典结果干扰」，随后只能改用 web_fetch 直抓
+/// GitHub raw —— 白烧十几秒和若干次工具调用。
+///
+/// 判据取「是否含 CJK 字符」：含中文就按中文市场检索，纯拉丁/数字/符号就按英文市场。
+/// 这比按比例阈值判语言更可预测（混排查询 `Three.js 中文文档` 仍会走中文市场）。
+pub(crate) fn search_market(query: &str) -> (&'static str, &'static str) {
+    let has_cjk = query.chars().any(|c| {
+        matches!(c as u32,
+            0x3400..=0x4DBF     // CJK 扩展 A
+            | 0x4E00..=0x9FFF   // CJK 基本区
+            | 0xF900..=0xFAFF   // 兼容表意文字
+            | 0x3040..=0x30FF   // 日文假名
+            | 0xAC00..=0xD7AF   // 韩文音节
+        )
+    });
+    if has_cjk {
+        ("zh-CN", "zh-hans")
+    } else {
+        ("en-US", "en")
+    }
+}
+
 /// 既有零 API key 直接抓取引擎（cn.bing 主 + DuckDuckGo 回退）。
 ///
 /// 作为 [`run_web_search`] 在无 Chromium / 浏览器通道异常时的回退实现，保证纯粹离线 /
@@ -22,11 +49,14 @@ pub(crate) async fn run_web_search_direct(q: &str, max: usize) -> Result<Vec<Sea
     // 记录被质量门禁剔除的条数：全部结果都是引擎首页/空壳时，给出「请调整检索词」提示，
     // 而不是把整句原样回显给用户（P0-3 / P1-1 的收口）。
     let mut filtered_out = 0usize;
+    // 市场/语言跟随查询语言，别让英文技术查询被中文市场重排（见 search_market 注释）
+    let (mkt, setlang) = search_market(q);
     match client
         .get("https://cn.bing.com/search")
         .query(&[
             ("q", q.to_string()),
-            ("mkt", "zh-CN".to_string()),
+            ("mkt", mkt.to_string()),
+            ("setlang", setlang.to_string()),
             ("count", max.to_string()),
         ])
         .header("User-Agent", ua)
@@ -40,6 +70,13 @@ pub(crate) async fn run_web_search_direct(q: &str, max: usize) -> Result<Vec<Sea
                     warn!(dropped = removed.len(), "cn.bing 结果命中低质门禁（引擎首页/空壳），已剔除");
                 }
                 filtered_out += removed.len();
+                // 词典/翻译噪音（P0-4）：引擎对英文品牌词长尾查询会返回「xxx 是什么意思」
+                // 这类词条，占满结果位。查询本身在查词义时整批放行（见 search_quality）。
+                let (kept, dict_removed) = filter_dictionary_noise(kept, q);
+                if !dict_removed.is_empty() {
+                    warn!(dropped = dict_removed.len(), "cn.bing 结果命中词典/翻译噪音门禁，已剔除");
+                }
+                filtered_out += dict_removed.len();
                 results = kept;
             }
         }
@@ -65,6 +102,11 @@ pub(crate) async fn run_web_search_direct(q: &str, max: usize) -> Result<Vec<Sea
                     warn!(dropped = removed.len(), "DuckDuckGo 结果命中低质门禁（引擎首页/空壳），已剔除");
                 }
                 filtered_out += removed.len();
+                let (kept, dict_removed) = filter_dictionary_noise(kept, q);
+                if !dict_removed.is_empty() {
+                    warn!(dropped = dict_removed.len(), "DuckDuckGo 结果命中词典/翻译噪音门禁，已剔除");
+                }
+                filtered_out += dict_removed.len();
                 ddg_results = kept;
             }
         }

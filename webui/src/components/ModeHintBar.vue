@@ -16,6 +16,7 @@ import Icon from '@/components/Icon.vue'
 import { useActiveMode } from '@/composables/useActiveMode'
 import { useGatewayReadiness } from '@/composables/useGatewayReadiness'
 import { normalizeModeKind } from '@/stores/activeMode'
+import { stripDuplicateLabel } from '@/components/modeHintText'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -42,7 +43,12 @@ const currentHint = computed(() => {
     return t('modeHintBar.gatewayLoading')
   }
   if (currentKind.value && (MODE_KINDS as readonly string[]).includes(currentKind.value)) {
-    return t(`mode.hint.${currentKind.value}`)
+    // 防御重复别名：左侧已渲染 alias，hint 里若又写了别名就剥掉（历史事故见
+    // `modeHintText.ts` 顶部说明）。
+    return stripDuplicateLabel(
+      t(`mode.hint.${currentKind.value}`),
+      t(`mode.alias.${currentKind.value}`),
+    )
   }
   return t('modeHintBar.gatewayLoading')
 })

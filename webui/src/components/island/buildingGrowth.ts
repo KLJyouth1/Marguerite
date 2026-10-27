@@ -84,6 +84,9 @@ export type DeviceLifecycle = 'unconnected' | 'connected' | 'running' | 'complet
 export interface ConstructionPlotConfig {
   /** 地块唯一 id（事件路由用） */
   id: string
+  /** 展示名（可选；缺省由 id 的 slug 推导）。放数据里而不是代码里：
+   *  不同配置源可以给自己的地块起本地化名字，渲染层不写死任何建筑名。 */
+  name?: string
   /** 岛平面落点 */
   x: number
   z: number

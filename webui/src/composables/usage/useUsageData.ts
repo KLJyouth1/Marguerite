@@ -16,6 +16,7 @@ import {
 } from '@/composables/usage/taskDisplayName'
 import { formatUsageCost, effectiveCnyPerUsd } from '@/composables/usage/nativeBilling'
 import { buildUsageCsv } from '@/composables/usage/usageCsv'
+import { normalizeUsageDaily } from '@/utils/usage/heatGrid'
 import {
   SESSION_LIST_VIEW,
   itemKey,
@@ -30,6 +31,8 @@ import type {
   ModelCard,
   SessionRow,
   TableColumn,
+  UsageDailyPoint,
+  UsageDailyResponse,
   UsageRangeSelection,
   UsageSnapshot,
   UsageStatusData,
@@ -59,6 +62,7 @@ const TABLE_COLUMN_KEYS: Array<{ key: string; labelKey: string }> = [
   { key: 'input_tokens', labelKey: 'usageLogs.columns.input' },
   { key: 'output_tokens', labelKey: 'usageLogs.columns.output' },
   { key: 'cache_read_tokens', labelKey: 'usageLogs.columns.cacheRead' },
+  { key: 'cache_hit_rate', labelKey: 'usageLogs.columns.cacheHitRate' },
   { key: 'cache_write_tokens', labelKey: 'usageLogs.columns.cacheWrite' },
   { key: 'cost_usd', labelKey: 'usageLogs.columns.cost' },
   { key: 'cost_source', labelKey: 'usageLogs.columns.source' },
@@ -94,6 +98,8 @@ const usageSnapshot = ref<UsageSnapshot | null>(null)
 const taskTitles = ref<Map<string, string>>(new Map())
 const usageLoading = ref(false)
 const usageError = ref<string | null>(null)
+const heatmapPoints = ref<UsageDailyPoint[]>([])
+const heatmapState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const sessions = computed<SessionRow[]>(() => usageSnapshot.value?.sessions || [])
 const lastStatus = computed<UsageStatusData | null>(() => {
   const snapshot = usageSnapshot.value
@@ -110,6 +116,9 @@ let autoRefreshId: ReturnType<typeof setInterval> | null = null
 let usageEventUnsub: (() => void) | null = null
 let usageEventTimer: ReturnType<typeof setTimeout> | null = null
 let loadGeneration = 0
+let heatmapFetchedAt = 0
+let heatmapGeneration = 0
+let heatmapInFlight = false
 
 // The rate the ledger normalized CNY receipts with, so every derived CNY
 // figure (totals hint, CSV export, per-row conversions) agrees with
@@ -187,6 +196,8 @@ const {
   usageTotals,
   totalTokensDisplay,
   tokensBreakdownParts,
+  cacheHitRateDisplay,
+  cacheHitRateHint,
   totalCostDisplay,
   costHintText,
   costHintTitle,
@@ -347,6 +358,8 @@ async function requestLoad(): Promise<LoadOutcome> {
     if (generation !== loadGeneration) return 'superseded'
     usageSnapshot.value = snapshot
     taskTitles.value = nextTaskTitles
+    // 热力图按 84 天窗口独立取数：它不随范围筛选变化，也不该拖慢主快照。
+    void loadHeatmap()
     return 'loaded'
   } catch (error) {
     if (generation !== loadGeneration) return 'superseded'
@@ -357,6 +370,9 @@ async function requestLoad(): Promise<LoadOutcome> {
     if (!usageSnapshot.value) {
       usageError.value = error instanceof Error ? error.message : String(error)
     }
+    // 主快照失败时仍尝试热力图：它的数据源与范围筛选独立，
+    // 不能因为表格加载失败就让网格永远停在骨架态。
+    void loadHeatmap()
     return 'failed'
   } finally {
     if (generation === loadGeneration) usageLoading.value = false
@@ -365,6 +381,35 @@ async function requestLoad(): Promise<LoadOutcome> {
 
 async function loadData(): Promise<boolean> {
   return (await requestLoad()) === 'loaded'
+}
+
+/**
+ * 热力图数据源是既有 `usage.daily`（最多 90 天，UTC 日边界）。
+ * 失败时保留上一次成功数据；没有历史数据才显示「不可用」，不拿 0 冒充。
+ */
+async function loadHeatmap(force = false): Promise<void> {
+  if (!force && heatmapState.value === 'ready' && Date.now() - heatmapFetchedAt < 60_000) return
+  if (heatmapInFlight) return
+  if (typeof rpc.supportsMethod === 'function' && !rpc.supportsMethod('usage.daily')) {
+    heatmapState.value = heatmapPoints.value.length > 0 ? 'ready' : 'error'
+    return
+  }
+  heatmapInFlight = true
+  const generation = ++heatmapGeneration
+  if (heatmapPoints.value.length === 0) heatmapState.value = 'loading'
+  try {
+    await rpc.waitForConnection()
+    const response = await rpc.call<UsageDailyResponse>('usage.daily', { days: 84 })
+    if (generation !== heatmapGeneration) return
+    heatmapPoints.value = normalizeUsageDaily(response)
+    heatmapFetchedAt = Date.now()
+    heatmapState.value = 'ready'
+  } catch {
+    if (generation !== heatmapGeneration) return
+    heatmapState.value = heatmapPoints.value.length > 0 ? 'ready' : 'error'
+  } finally {
+    heatmapInFlight = false
+  }
 }
 
 function setRange(nextRange: string) {
@@ -676,6 +721,8 @@ function download(filename: string, mime: string, content: string) {
     usageTotals,
     totalTokensDisplay,
     tokensBreakdownParts,
+    cacheHitRateDisplay,
+    cacheHitRateHint,
     totalCostDisplay,
     costHintText,
     costHintTitle,
@@ -683,6 +730,9 @@ function download(filename: string, mime: string, content: string) {
     avgCostDisplay,
     chartCaption,
     chartRows,
+    heatmapPoints,
+    heatmapState,
+    loadHeatmap,
     modelCards,
     modelsMeta,
     sortedRows,

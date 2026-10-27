@@ -145,6 +145,26 @@ pub(crate) fn onboarding_catalog() -> Value {
             "whatYouNeed": ["OpenAI-compatible API endpoint", "API Key (if required)"],
             "fields": &openai_compatible_fields,
         },
+        {
+            "providerId": "ollama",
+            "label": "Ollama (local)",
+            "runtimeSupported": true,
+            "routerSupported": false,
+            "acceptsApiKey": false,
+            "requiresApiKey": false,
+            "envKey": "",
+            "defaultBaseUrl": "http://localhost:11434",
+            "defaultDirectModel": "",
+            "deployment": "local",
+            "blocking": true,
+            "canProbe": true,
+            "whatYouNeed": ["Ollama 已在本机运行", "一个已 ollama pull 的模型 id"],
+            "fields": [
+                { "name": "model", "label": "Model id", "type": "text", "required": true, "placeholder": "qwen3.8:27b", "description": "本地已拉取的模型标签，例如 qwen3.8:27b" },
+                { "name": "base_url", "label": "Base URL", "type": "text", "required": false, "default": "http://localhost:11434", "description": "Ollama 服务地址，默认本机 11434" },
+                { "name": "proxy", "label": "HTTP proxy", "type": "text", "required": false, "default": "", "description": "可选 HTTP 代理" },
+            ],
+        },
     ]);
 
     let search_providers = json!([
@@ -330,9 +350,11 @@ pub(crate) fn onboarding_catalog() -> Value {
 /// `llmProfileStatus`：从 models.json 汇总各服务商档案的就绪行。
 ///
 /// 与 `config.get llm_profiles` 同一数据源与过滤规则（非内置模板 + 当前主
-/// provider）。凭据可用性以「主 provider 已配置（env/.env 注入）或档案自带
-/// key」近似——Rust 回退不维护逐档案密钥台账，诚实标注 credentialSource。
-fn llm_profile_status(live: &Config) -> Value {
+/// provider）。凭据可用性**按真实解析链**判定（档案声明 env → 分槽 → 受标记约束的
+/// 全局槽 → 密文/明文），而不是只看不落盘的 `p.api_key`——旧实现让非 active
+/// 档案永远显示未就绪，用户会以为密钥没保存。
+fn llm_profile_status() -> Value {
+    use crate::model::byok;
     use crate::model::selector::ModelSelector;
     let Ok(sel) = ModelSelector::load() else {
         return json!([]);
@@ -344,15 +366,40 @@ fn llm_profile_status(live: &Config) -> Value {
         .iter()
         .filter(|p| !(p.builtin && p.api_key.is_empty() && p.id != active_id))
         .map(|p| {
-            let is_active_provider = p.provider == live.model.provider;
-            let ready = (is_active_provider && !live.model.api_key.is_empty()) || !p.api_key.is_empty();
+            let (resolved, source) =
+                byok::resolve_api_key_with_source(&p.id, &p.provider, &p.api_key, &p.api_key_env, None);
+            // 【2026-10-23 修复：本地/回环端点免密钥 ⇒ 就绪】
+            //
+            // 原判据是「解析出非空密钥」，于是所有 Ollama / LM Studio 档案都回
+            // `ready:false`（实测 11 条本地档案全红），设置页「模型服务」被标
+            // 「需要处理」，而本地模型其实完全可用 —— 与 `llm_readiness` /
+            // `chat::api_key_gate` 的判据自相矛盾。
+            // 这里统一走同一个纯函数 `byok::is_keyless_endpoint`，并用前端已认识的
+            // `keyless` 口径（`profileCredentialUiSource` 把它映射成「无需密钥」）。
+            let keyless = byok::is_keyless_endpoint(&p.provider, &p.base_url);
+            let ready = keyless || !resolved.is_empty();
+            // 来源由解析链本身给出：环境变量名 = env；显式/落盘 = explicit。
+            // 不再按「api_key 字符串非空」猜，否则 .env 与残留字段的优先级会被说谎。
+            let (credential_source, credential_env) = if keyless && resolved.is_empty() {
+                ("keyless", String::new())
+            } else if !ready {
+                ("none", String::new())
+            } else if source == "explicit" || source == "stored" {
+                ("explicit", String::new())
+            } else {
+                ("env", source)
+            };
             json!({
                 "provider": p.provider,
                 "ready": ready,
-                "credentialSource": if !p.api_key.is_empty() { "explicit" } else if ready { "env" } else { "none" },
-                "credentialEnv": "",
+                "credentialSource": credential_source,
+                "credentialEnv": credential_env,
                 "endpointSource": "",
-                "reason": "",
+                "reason": if keyless && resolved.is_empty() {
+                    "本地/回环端点，无需 API Key"
+                } else {
+                    ""
+                },
                 "primaryEligible": true,
                 "primaryBlockReason": "",
             })
@@ -361,14 +408,89 @@ fn llm_profile_status(live: &Config) -> Value {
     json!(rows)
 }
 
+/// 模型服务就绪判定（纯函数）：**有密钥，或本地/回环端点（免密钥）**。
+///
+/// 缺陷背景（2026-10-21 实测）：此前只看 `model.api_key` 是否为空，于是 Ollama
+/// 本地模型永远 `llmConfigured=false` → `needsOnboarding=true` → 设置页横幅
+/// 「需要配置 / 请设置模型提供商以开始对话」，而用户其实已经能离线跑。
+/// 判据统一走 `byok::is_keyless_endpoint`，与 `chat::api_key_gate` / `doctor` 同源。
+///
+/// 返回值第二项是**来源口径**：`config`（有密钥）/ `local`（本地免密钥）/ `none`。
+fn llm_readiness(provider: &str, base_url: &str, api_key: &str) -> (bool, &'static str) {
+    if !api_key.trim().is_empty() {
+        return (true, "config");
+    }
+    if crate::model::byok::is_keyless_endpoint(provider, base_url) {
+        return (true, "local");
+    }
+    (false, "none")
+}
+
 /// `onboarding.status`（Rust 离线回退）：返回最小引导状态。
 pub(crate) fn onboarding_status(ctx: &GatewayContext) -> Value {
-    let live = Config::load().unwrap_or_else(|_| ctx.config.clone());
+    // 【2026-10-23 修复：就绪度必须问「执行侧真正在用的模型」】
+    //
+    // 真机取证（安装包 0.2.16，模型选择器显示 ollama/omnipilot17:latest）：
+    // 本函数回 `hasConfig:false` / `llmConfigured:false` / `llmSource:none`，
+    // 侧栏因此常驻「需要设置 · 网关尚未就绪」，模型服务页也标「需要处理」。
+    //
+    // 根因：这里只读 `config.yaml` 的 `model` 段（该段仍是厂商默认 deepseek、
+    // 无密钥），而用户实际选中的档案存在 `models.json.active` —— 会话入口
+    // （`model::selector::apply_effective_model`）正是以它覆盖 model 段后才发给模型。
+    // 于是「判就绪的配置」与「真正发请求的配置」是两份东西。
+    //
+    // 修复：与 `chat.send` 走**同一条**解析链（`apply_effective_model`），
+    // 就绪判据与执行侧单源。models.json 不存在时该函数原样返回 config.yaml，
+    // 行为与旧版一致（不会把"从没选过档案"的机器静默切到种子默认模型）。
+    let live = crate::model::selector::apply_effective_model(
+        &Config::load().unwrap_or_else(|_| ctx.config.clone()),
+    );
     // v3 修复：Config::load() 已叠加 env/.env 覆盖，api_key 非空即视为已配置。
     // 此前这里只看 YAML 的 api_key 字段（现已 skip_serializing 恒为空），
     // 导致 .env 有密钥也误报「网关尚未就绪」。
-    let llm_configured = !live.model.api_key.is_empty();
-    let llm_source = if llm_configured { "config" } else { "none" };
+    // 就绪判据见 `llm_readiness`（纯函数，可单测；本地端点免密钥）。
+    let (llm_configured, llm_source) = llm_readiness(
+        &live.model.provider,
+        &live.model.base_url,
+        &live.model.api_key,
+    );
+    // 主凭据的来源与变量名必须由**同一条解析链**产出（见 byok::resolve_api_key_with_source）：
+    // 旧实现恒报 `MARGUERITE_API_KEY`，档案分槽/声明变量用户会看到错误的变量名，
+    // 照它去设置环境变量永远不生效。
+    let (credential_source, credential_env) = if llm_source == "local" {
+        // 本地端点不需要凭据：如实说「本地」，不要谎称读到了某个环境变量。
+        ("local", String::new())
+    } else if llm_configured {
+        use crate::model::byok;
+        let (_, source) = match Config::active_profile_identity() {
+            Some((id, provider, declared)) => byok::resolve_api_key_with_source(
+                &id,
+                &provider,
+                "",
+                &declared,
+                None,
+            ),
+            // 无档案：只有全局槽可能提供密钥，归属标记按配置 provider 校验。
+            None => byok::resolve_api_key_with_source(
+                "",
+                &live.model.provider,
+                "",
+                "",
+                None,
+            ),
+        };
+        if source == "explicit" || source == "stored" {
+            ("explicit", String::new())
+        } else if source.is_empty() {
+            // 内存里已有密钥但解析链读不到环境变量（例如启动期注入），
+            // 不谎称它来自某个变量。
+            ("config", String::new())
+        } else {
+            ("env", source)
+        }
+    } else {
+        ("none", String::new())
+    };
     // configPath 的语义是**配置文件路径**（客户端据此展示/复制「更多选项在此文件」并拼
     // `--config <path>`）。此前误传 `Config::data_dir()`（数据目录），导致前端页脚把目录
     // 当成配置文件、`--config <目录>` 亦是坏命令；pyengine 侧契约测试明确要求
@@ -410,15 +532,15 @@ pub(crate) fn onboarding_status(ctx: &GatewayContext) -> Value {
         "llmCredentialStatus": {
             "provider": live.model.provider,
             "available": llm_configured,
-            "source": if llm_configured { "env" } else { "none" },
-            "envKey": if llm_configured { "MARGUERITE_API_KEY" } else { "" },
+            "source": credential_source,
+            "envKey": credential_env,
             "masked": "",
             "revealAllowed": false,
         },
         // v3.1：已存档案的就绪状态行（与 config.get llm_profiles 对齐）。
         // 数据源 = models.json 非内置模板 + 当前主 provider；webui 档案卡的
         // ready/primaryEligible 判定依赖此列表。
-        "llmProfileStatus": llm_profile_status(&live),
+        "llmProfileStatus": llm_profile_status(),
         "warnings": if llm_configured { Value::Array(vec![]) } else { json!(["LLM API Key 未配置（离线降级可用）"]) },
     })
 }
@@ -448,8 +570,19 @@ pub(crate) fn onboarding_router_configure(ctx: &GatewayContext, params: &Value) 
     if let Some(v) = params.get("crossProviderTiers").and_then(Value::as_bool) {
         cfg.model_routing.cross_provider_tiers = v;
     }
-    match cfg.save() {
-        Ok(()) => json!({ "ok": true, "saved": true, "restartRequired": true }),
+match cfg.save() {
+        Ok(()) => {
+            // R72+：保存即生效 —— 更新进程级生效配置快照，ModelRouter / chat.send
+            // 下一轮即用新路由模式，无需重启（与 onboarding_provider_configure 一致）。
+            crate::gateway::chat::publish_effective_config(cfg.clone());
+            // P3 打通：路由配置保存广播 models.changed，路由面板 / 聊天指示被动刷新。
+            crate::events::product::emit(
+                "models.changed",
+                "",
+                json!({ "reason": "router_configure" }),
+            );
+            json!({ "ok": true, "saved": true, "restart_required": false })
+        }
         Err(e) => json!({ "ok": false, "error": format!("保存路由配置失败: {e}") }),
     }
 }
@@ -470,7 +603,11 @@ pub(crate) fn onboarding_ensemble_configure(ctx: &GatewayContext, params: &Value
         cfg.bloom.candidates = candidates.clone();
     }
     match cfg.save() {
-        Ok(()) => json!({ "ok": true, "saved": true }),
+        Ok(()) => {
+            // R72+：保存即生效 —— 同步进程级生效配置快照（Bloom 并行编排开关即时可用）。
+            crate::gateway::chat::publish_effective_config(cfg.clone());
+            json!({ "ok": true, "saved": true, "restart_required": false })
+        }
         Err(e) => json!({ "ok": false, "error": format!("保存集成配置失败: {e}") }),
     }
 }
@@ -479,61 +616,23 @@ pub(crate) fn onboarding_ensemble_configure(ctx: &GatewayContext, params: &Value
 ///
 /// v3.1 修复「保存了但没生效」：同时接受 webui 发送的 camelCase `model`
 /// 字段（此前只认 modelName/model_name，模型名永远存不上 → 页面仍显示空状态）；
-/// 收到 apiKey 时经 [`Config::write_env_key`] 转写 `.env`（凭证护栏，YAML 不落钥）。
+/// 收到 apiKey 时经 [`Config::write_env_key_for`] 转写 `.env`（凭证护栏，YAML 不落钥）。
 pub(crate) fn onboarding_provider_configure(ctx: &GatewayContext, params: &Value) -> Value {
-    let mut cfg = ctx.config.clone();
-    let mut changed = false;
-    if let Some(v) = params
-        .get("provider")
-        .or_else(|| params.get("providerId"))
-        .and_then(Value::as_str)
-    {
-        if !v.trim().is_empty() {
-            cfg.model.provider = v.to_string();
-            changed = true;
-        }
-    }
-    // model 字段三形态兼容（webui 发 camelCase 单数形式）
-    let model_value = params
-        .get("model")
-        .or_else(|| params.get("modelName"))
-        .or_else(|| params.get("model_name"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if let Some(v) = model_value {
-        cfg.model.model_name = v.to_string();
-        changed = true;
-    }
-    let explicit_key = params
-        .get("apiKey")
-        .or_else(|| params.get("api_key"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
-    if !explicit_key.is_empty() {
-        // 凭证护栏：YAML 永不落钥，转写 .env；内存保留供本次会话立即可用
-        Config::write_env_key(&explicit_key);
-        cfg.model.api_key = explicit_key;
-        changed = true;
-    }
-    if let Some(v) = params
-        .get("baseUrl")
-        .or_else(|| params.get("base_url"))
-        .and_then(Value::as_str)
-    {
-        if !v.trim().is_empty() {
-            cfg.model.base_url = v.to_string();
-            changed = true;
-        }
-    }
-    if !changed {
+    // 空负载保持原语义（响亮拒绝，不做无意义的「重存一遍」）。
+    let touches_model = ["provider", "providerId", "model", "modelName", "model_name",
+        "baseUrl", "base_url", "apiKey", "api_key", "apiKeyEnv", "api_key_env"]
+        .iter()
+        .any(|k| params.get(*k).is_some());
+    if !touches_model {
         return json!({ "ok": false, "error": "没有需要保存的字段" });
     }
-    match cfg.save() {
-        Ok(()) => json!({ "ok": true, "saved": true, "restart_required": false }),
-        Err(e) => json!({ "ok": false, "error": format!("保存服务商配置失败: {e}") }),
+    // 委托给「档案优先」实现：本函数此前只写 config.yaml + .env 全局槽 + 内存快照，
+    // 从不碰 models.json，而请求侧 `apply_effective_model` 会用 models.json.active
+    // 覆盖 config.yaml —— 于是「保存成功」等于什么都没发生（详见
+    // `llm_profile::configure_primary_provider` 的文档注释与实测证据）。
+    match crate::gateway::llm_profile::configure_primary_provider(ctx, params) {
+        Ok(v) => v,
+        Err(e) => json!({ "ok": false, "error": e.message, "code": e.code }),
     }
 }
 
@@ -563,7 +662,17 @@ pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
         .unwrap_or("deepseek")
         .to_string();
 
-    if api_key.is_empty() {
+    // R72：**本地/回环端点豁免密钥**。Ollama / LM Studio 等本地推理服务不需要
+    // API Key，原先一刀切「密钥不能为空」让用户永远无法添加本地模型
+    // （用户口径「本地模型和 Ollama 都就绪了但手动添加无法连接」）。
+    let is_local = provider.eq_ignore_ascii_case("ollama")
+        || {
+            let lower = base_url.to_lowercase();
+            ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]
+                .iter()
+                .any(|h| lower.contains(h))
+        };
+    if api_key.is_empty() && !is_local {
         return json!({ "ok": false, "error": "API 密钥不能为空" });
     }
 
@@ -585,7 +694,14 @@ pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
 
     match client
         .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
+        .header(
+            "Authorization",
+            if api_key.is_empty() {
+                "Bearer local".to_string()
+            } else {
+                format!("Bearer {api_key}")
+            },
+        )
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -677,4 +793,25 @@ mod tests {
             .join("\n");
         assert!(pwindow.contains("Config::data_dir()"), "扫描窗口必须能覆盖到赋值处");
     }
+    /// 就绪判定：本地/回环端点**不需要密钥**也必须算「已配置」。
+    ///
+    /// 回归背景（2026-10-21 实测）：此前只看 `api_key.is_empty()`，Ollama 用户
+    /// 永远看到「需要配置 / 请设置模型提供商」，而模型其实能跑。
+    #[test]
+    fn llm_readiness_exempts_local_endpoints_and_still_gates_cloud() {
+        use super::llm_readiness;
+        // 本地：免密钥即就绪，来源如实标 local
+        assert_eq!(llm_readiness("ollama", "http://127.0.0.1:11434", ""), (true, "local"));
+        assert_eq!(llm_readiness("custom", "http://localhost:1234/v1", ""), (true, "local"));
+        // 云端：无密钥即未就绪
+        assert_eq!(llm_readiness("deepseek", "https://api.deepseek.com", ""), (false, "none"));
+        // 有密钥：不论端点一律就绪，来源 config
+        assert_eq!(
+            llm_readiness("deepseek", "https://api.deepseek.com", "sk-x"),
+            (true, "config")
+        );
+        // 本地即使配了密钥，也按 config 口径（用户显式给了凭据，不要覆盖他的认知）
+        assert_eq!(llm_readiness("ollama", "http://127.0.0.1:11434", "sk-x"), (true, "config"));
+    }
+
 }

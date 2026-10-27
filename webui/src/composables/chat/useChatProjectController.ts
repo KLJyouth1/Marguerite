@@ -26,6 +26,63 @@ import { useChatSessionRuntime } from '@/composables/chat/useChatSessionRuntime'
 import { activeSnapshot } from '../../views/chat/active-snapshot'
 import { agentIdFromSessionKey } from '@/utils/chat/sessionKeys'
 
+/* ── 项目信任记忆 ─────────────────────────────────────────────────────
+ *
+ * 缺陷（真机反馈「每次打开都让我重新选择/确认」）：`chooseProjectPath` 每次都会
+ * 弹 `workspaces.trustTitle` 确认框，但确认结果**从不落盘**，同一个项目下次仍要
+ * 再确认一遍。信任是稳定的用户决策，应该记住。
+ *
+ * 纪律：
+ *  · 只在**打开成功之后**记录（打开失败绝不写入）；
+ *  · 上限 50 条，最近使用优先，避免 localStorage 无界增长；
+ *  · Windows 路径大小写不敏感，键做小写归一（其它平台保持原样，避免误合并）。
+ */
+const TRUSTED_PROJECTS_KEY = 'marguerite.chat.trustedProjectPaths'
+const MAX_TRUSTED_PROJECTS = 50
+const IS_WINDOWS = typeof navigator !== 'undefined' && /^win/i.test(navigator.platform)
+
+function projectTrustKey(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, '')
+  return IS_WINDOWS ? trimmed.toLowerCase() : trimmed
+}
+
+/** 该路径是否已被用户信任过（纯读，坏数据按「未信任」处理）。 */
+export function isProjectPathTrusted(path: string): boolean {
+  const key = projectTrustKey(path)
+  if (!key) return false
+  try {
+    const raw = JSON.parse(globalThis.localStorage?.getItem(TRUSTED_PROJECTS_KEY) || '[]')
+    return Array.isArray(raw) && raw.includes(key)
+  } catch {
+    return false
+  }
+}
+
+/** 记住一个成功打开的项目路径（LRU，最多 50 条）。 */
+export function rememberTrustedProjectPath(path: string): void {
+  const key = projectTrustKey(path)
+  if (!key) return
+  // 读旧值单独兜底：存储里是坏 JSON 时不能因此**丢掉这次**信任写入
+  // （否则坏数据一旦写入，就永久退化成"每次都问"）。
+  let rest: string[] = []
+  try {
+    const raw = JSON.parse(globalThis.localStorage?.getItem(TRUSTED_PROJECTS_KEY) || '[]')
+    if (Array.isArray(raw)) {
+      rest = raw.filter((item): item is string => typeof item === 'string' && item !== key)
+    }
+  } catch {
+    rest = []
+  }
+  try {
+    globalThis.localStorage?.setItem(
+      TRUSTED_PROJECTS_KEY,
+      JSON.stringify([key, ...rest].slice(0, MAX_TRUSTED_PROJECTS)),
+    )
+  } catch {
+    // 写不进去就退化成「每次都确认」，绝不阻断打开。
+  }
+}
+
 export interface ChatProjectControllerDeps {
   rpc: ReturnType<typeof useRpcStore>
   confirm: ReturnType<typeof useConfirm>['confirm']
@@ -103,16 +160,22 @@ export function useChatProjectController(
   async function chooseProjectPath(path: string) {
     projectPickerOpen.value = false
     if (!rpc.canChooseProject) return
-    const trusted = await confirm({
-      title: t('workspaces.trustTitle'),
-      body: t('workspaces.trustBody', { path }),
-      primaryLabel: t('workspaces.trustConfirm'),
-      primaryClass: 'btn--primary',
-    })
-    if (!trusted) return
+    // 已信任的路径不再重复询问（首次仍会弹，见模块顶部的信任记忆说明）。
+    const alreadyTrusted = isProjectPathTrusted(path)
+    if (!alreadyTrusted) {
+      const trusted = await confirm({
+        title: t('workspaces.trustTitle'),
+        body: t('workspaces.trustBody', { path }),
+        primaryLabel: t('workspaces.trustConfirm'),
+        primaryClass: 'btn--primary',
+      })
+      if (!trusted) return
+    }
     try {
       const workspace = await projectWorkspaces.openWorkspace(path)
       if (!workspace) return
+      // 打开成功才记住：失败/取消不写入任何信任记录。
+      rememberTrustedProjectPath(path)
       freshTaskDraft.requestFreshTask(draftAgentId(), workspace.id)
       goToDraft({
         agentId: draftAgentId(),

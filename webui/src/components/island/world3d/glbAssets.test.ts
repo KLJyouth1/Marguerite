@@ -5,6 +5,8 @@
  * 成功加载后 getAsset/revision、reset 归零。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as THREE from 'three'
 import type { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import {
@@ -49,6 +51,69 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/**
+ * manifest 与磁盘的一致性。
+ *
+ * 为什么需要这组断言（2026-10-21 逐页巡检发现）：`/island-game` 每次加载都打
+ * 4 个 `.glb` 的 404，而当时所有门禁全绿——因为原测试只验证
+ * `resolveGlbUrl()` 的**字符串拼接**，从不检查文件是否存在。于是
+ * "manifest 登记 5 件、磁盘上只有 1 件"这件事没有任何地方能发现。
+ *
+ * 判定分三层，各拦一类错误：
+ *   1. 非 optional 资产 → 文件**必须**存在（缺了就是 404，必须门禁红）；
+ *   2. optional 资产若存在 → 必须非空（0 字节是"假装导出成功"）；
+ *   3. optional 且缺失 → 属"资产尚未产出"，不判红，但必须打印清单：
+ *      这条信息是"未产出"的可见痕迹，避免它悄悄变成用户眼里的 404。
+ */
+describe('manifest ↔ 磁盘一致性', () => {
+  const island3dDir = fileURLToPath(new URL('../../../../public/island3d/', import.meta.url))
+
+  function fileNameOf(relOrName: string): string {
+    return relOrName.replace(/^\.\//, '').split('/').pop() || relOrName
+  }
+
+  it('非 optional 资产必须真实存在于 public/island3d', () => {
+    const required = ISLAND_GLB_MANIFEST.assets.filter((a) => a.optional !== true)
+    const missing = required
+      .map((a) => fileNameOf(a.url))
+      .filter((file) => !existsSync(`${island3dDir}${file}`))
+    expect(
+      missing,
+      `manifest 把以下资产声明为必需，但 public/island3d 下没有对应文件（会 404）：${missing.join(', ')}`,
+    ).toEqual([])
+  })
+
+  it('已存在的资产文件必须非空（0 字节 = 伪装成功）', () => {
+    const empties: string[] = []
+    for (const asset of ISLAND_GLB_MANIFEST.assets) {
+      const path = `${island3dDir}${fileNameOf(asset.url)}`
+      if (!existsSync(path)) continue
+      if (statSync(path).size === 0) empties.push(path)
+    }
+    expect(empties).toEqual([])
+  })
+
+  it('把「尚未导出」的资产显式列出来（诚实痕迹，不静默）', () => {
+    const pending = ISLAND_GLB_MANIFEST.assets
+      .filter((a) => a.optional === true)
+      .map((a) => fileNameOf(a.url))
+      .filter((file) => !existsSync(`${island3dDir}${file}`))
+    // 不把"未导出"判成失败：本机确实没装 Blender（见 glbAssets.ts 文件头），
+    // 这是被 manifest 显式声明的预期状态。但如果清单**为空**却仍有 optional
+    // 标记，说明 optional 已经名不副实，应清理标记而不是继续挂着。
+    if (pending.length === 0) {
+      const stillOptional = ISLAND_GLB_MANIFEST.assets.filter((a) => a.optional === true)
+      expect(
+        stillOptional,
+        '所有资产都已落地，仍标 optional 的条目应移除标记（否则 future 缺失会被静默放过）',
+      ).toEqual([])
+    }
+    // 可见性：让"待导出 N 件"出现在测试输出里，而不是只在浏览器控制台。
+    console.log(`[glbAssets] 待导出资产 ${pending.length} 件：${pending.join(', ') || '（无）'}`)
+    expect(Array.isArray(pending)).toBe(true)
+  })
+})
+
 describe('resolveGlbUrl', () => {
   it('DEV：解析为站点根下的 /island3d/<file>', () => {
     vi.stubEnv('DEV', true)
@@ -58,10 +123,11 @@ describe('resolveGlbUrl', () => {
     expect(resolveGlbUrl('./nested/quest_beacon.glb')).toBe('/island3d/quest_beacon.glb')
   })
 
-  it('PROD：解析为 <basePath>/static/dist/island3d/<file>（node 无 document → 回退 /control）', () => {
+  it('PROD：解析为 <basePath>/static/island3d/<file>（node 无 document → 回退 /control）', () => {
     vi.stubEnv('DEV', false)
+    // 回归：网关 /static/ 已映射 dist 根；多拼一层 dist 会命中 SPA 回落（text/html）。
     expect(resolveGlbUrl('./code_crystal.glb')).toBe(
-      '/control/static/dist/island3d/code_crystal.glb',
+      '/control/static/island3d/code_crystal.glb',
     )
   })
 
@@ -72,7 +138,7 @@ describe('resolveGlbUrl', () => {
       getElementById: () => ({ dataset: {} }),
     } as unknown as Document)
     expect(resolveGlbUrl('./doc_scroll.glb')).toBe(
-      '/control/static/dist/island3d/doc_scroll.glb',
+      '/control/static/island3d/doc_scroll.glb',
     )
 
     vi.stubGlobal('document', {
@@ -81,7 +147,7 @@ describe('resolveGlbUrl', () => {
     } as unknown as Document)
     // 末尾斜杠被归一化，不产生双斜杠
     expect(resolveGlbUrl('./doc_scroll.glb')).toBe(
-      '/custom/static/dist/island3d/doc_scroll.glb',
+      '/custom/static/island3d/doc_scroll.glb',
     )
   })
 })

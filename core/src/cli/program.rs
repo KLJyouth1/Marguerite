@@ -41,6 +41,7 @@ use crate::skills::loader::SkillLoader;
 use crate::tools::builtin::register_builtin_tools;
 use crate::types::Message;
 use chrono::Utc;
+use serde_json::Value;
 use std::sync::Arc;
 
 /// 主程序
@@ -144,7 +145,12 @@ impl Program {
         }
 
         // 2. 加载配置
-        let config = Config::load()?;
+        //
+        // 会话入口叠加「用户选择的模型」（`models.json` active 档案）——`model use` 只写
+        // `models.json`，而执行侧只认 `config.model.*`，不叠加则切换不生效。此处是 CLI
+        // 唯一的加载点，Direct / Subcommand / 交互 TUI 三条下游分支一并继承，避免逐处散落。
+        let config =
+            crate::model::selector::apply_effective_model(&Config::load()?);
 
         // 2.1 按配置初始化嵌入后端（默认 local；backend=model 加载真实模型，失败回退）
         crate::memory::EmbeddingProvider::configure(&config);
@@ -276,7 +282,10 @@ impl Program {
         // 3) 配置了密钥 → 真实模型执行
         let result = rt.block_on(async {
             // 克隆：`config` 之后仍需在鉴权失败降级路径（print_offline_echo_with_hint）复用。
-            let mut runtime = AgentRuntime::new(config.clone());
+            // 生效模型以 `models.json` 的 active 档案为准（`model use` 写的就是它）：
+            // 否则命令行里 `model use X` 之后跑任务仍走 config.yaml 里的旧模型。
+            let effective = crate::model::selector::apply_effective_model(&config);
+            let mut runtime = AgentRuntime::new(effective);
             runtime.init()?;
             let resp = runtime.process_input(&prompt).await?;
             Ok::<String, anyhow::Error>(resp.to_string())
@@ -338,6 +347,30 @@ impl Program {
 /// 与真实执行路径一致：空白密钥进真实调用必然失败，只应降级而非报错退出。
 fn needs_offline_echo(config: &Config) -> bool {
     config.model.api_key.trim().is_empty()
+}
+
+/// 会话预算的**实测**视图：用户配过预算（`usage.budget.set`）时以台账为准。
+///
+/// 为什么必须有：`SessionState.budget.tokens_used/usd_used` 全仓无人写入（恒 0），
+/// 直接打印会给出「剩余 100%」的假读数，与控制台、TUI 各说一套。
+/// 未配置预算时回退会话态（等价于「不按预算约束」），行为与旧版一致。
+fn measured_budget(
+    state: &crate::model::tier::SessionState,
+) -> crate::model::tier::SessionBudget {
+    match crate::usage::tightest_budget_snapshot() {
+        Some(b) => state.budget.clone().with_measured_snapshot(
+            b.tokens_cap,
+            b.usd_cap,
+            b.tokens_used,
+            b.usd_used,
+        ),
+        None => state.budget.clone(),
+    }
+}
+
+/// 台账实测的剩余比例（未配置预算 → `None`，退回会话态口径）。
+fn measured_ratio() -> Option<f64> {
+    crate::usage::tightest_budget_snapshot().map(|b| b.remaining_ratio)
 }
 
 /// P0-1d 分支判定（纯函数）：该稳定错误码是否应触发「鉴权失败 → 离线降级」。
@@ -542,7 +575,7 @@ fn render_top_help() -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "资源（子命令）:");
     let _ = writeln!(out, "  doctor    系统诊断与环境自检");
-    let _ = writeln!(out, "  model     模型档案管理（list/current/use/copilot/add/remove/path）");
+    let _ = writeln!(out, "  model     模型档案管理（list/current/use/copilot/add/remove/path/tier/budget/ledger）");
     let _ = writeln!(out, "  mcp       MCP 服务器管理（list）");
     let _ = writeln!(out, "  skills    技能管理（list/install）");
     let _ = writeln!(out, "  session   会话管理（list/delete）");
@@ -551,7 +584,7 @@ fn render_top_help() -> String {
     let _ = writeln!(out, "  serve     ACP 回环服务（serve --health | serve [--port N]）");
     let _ = writeln!(
         out,
-        "  sandbox   沙箱执行与状态（sandbox exec -- <命令> / sandbox workspace）"
+        "  sandbox   沙箱执行与终端诊断（sandbox exec -- <命令> / workspace / shells / terminal）"
     );
     let _ = writeln!(
         out,
@@ -665,12 +698,30 @@ Marguerite model — 模型档案管理（Phase H2）
   marguerite model add --id <id> --base-url <url> \\
       --model <name> [--provider <p>] [--label <l>] \\
       [--api-key <k>] [--kind cloud|local|custom]         新增自定义接入点
-  marguerite model remove <id>                            删除档案（至少保留一个）
+  marguerite model remove <id>                            删除档案（至少保留一条）
   marguerite model path                                   显示 models.json 路径
+  marguerite model tier [flagship|balanced|turbo|auto] \\
+      [--effort off|normal|deep|max]                      查看/锁定三档模型分层
+  marguerite model budget [--tokens <n>] [--usd <d>]      设置会话预算（熔断阈值）
+  marguerite model ledger [--limit <n>]                   查看调用流水与当前账本状态
+  marguerite model deploy <id> [--activate]               部署本地模型目录项为路由档案
+  marguerite model ollama deploy <tag> [--activate]       把真实存在的 Ollama tag 接入路由
+  marguerite model activate <profile_id>                  按档案 id 激活（镜像 config + 发布）
+  marguerite model routing [get|set <mode>]               查看 / 设置路由模式
+  marguerite model system                                 查看宿主真实系统规格（RAM/核心/GPU）
 
 示例:
   marguerite model list
   marguerite model use deepseek-v4-pro
+  marguerite model deploy qwen3.8-27b --activate   # 部署并立即激活本地模型
+  marguerite model ollama deploy qwen3:8b           # 先 ollama pull，再接入路由
+  marguerite model activate local-qwen3.8-27b       # 仅激活既有档案
+  marguerite model routing set omni                 # direct/router/ensemble/bloom/omni
+  marguerite model system                           # 主机规格，驱动本地模型智能推荐
+  marguerite model tier                # 查看生效档位、预算台账与各档候选链
+  marguerite model tier flagship       # 锁定旗舰档
+  marguerite model tier auto           # 解除锁定，回到自动选档
+  marguerite model ledger --limit 20   # 最近 20 次调用的时间/模型/任务归因/用量
 "
         }
         "mcp" => {
@@ -859,6 +910,22 @@ Marguerite exec — 终端沙箱命令执行
 示例:
   marguerite exec -- ls -la
   marguerite exec -- git status
+"
+        }
+        "sandbox" => {
+            "\
+Marguerite sandbox — 沙箱执行与终端诊断
+
+用法:
+  marguerite sandbox exec -- <命令...>   在真实沙箱中执行（白名单 + 路径守卫 + 模式门控 + JSONL 审计）
+  marguerite sandbox workspace           显示沙箱工作区与资源限制
+  marguerite sandbox shells              列出本机可用的 shell（pwsh / powershell / cmd / git-bash / wsl…）
+  marguerite sandbox terminal            真实探测本机 PTY 是否可用（会起一个会话再终止）
+
+示例:
+  marguerite sandbox exec -- ls -la
+  marguerite sandbox shells
+  marguerite sandbox terminal
 "
         }
         "deploy" => {
@@ -1575,7 +1642,7 @@ fn build_acp_tool_registry() -> ToolRegistry {
 /// - `remove <id>`             删除档案（至少保留一个）
 /// - `reload-seeds`            热更新内置种子（读 models.json 同目录的 models.seed.json 覆盖层，不覆盖自定义档案）
 /// - `path`                    显示 models.json 路径
-fn model_handler(args: &Args, _config: &Config) -> Result<()> {
+fn model_handler(args: &Args, config: &Config) -> Result<()> {
     let sub = args.sub_args.first().map(String::as_str).unwrap_or("");
     let mut sel = ModelSelector::load()?;
     match sub {
@@ -1603,6 +1670,17 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
                 );
                 println!("      base_url: {}", p.base_url);
             }
+            // P2·A：路由候选与生效模式（与桌面 `config.get` 的 candidateModels/modelRouting 同源）
+            let cfg = Config::load()?;
+            println!(
+                "\n路由候选（{} 个，config.yaml model_routing.candidate_models 同源）:",
+                cfg.model_routing.candidate_models.len()
+            );
+            for id in &cfg.model_routing.candidate_models {
+                let star = if *id == sel.registry().active { "*" } else { " " };
+                println!("  {} {}", star, id);
+            }
+            println!("路由模式: {}", cfg.model_routing.mode);
         }
         "current" => {
             match sel.registry().active_profile() {
@@ -1646,6 +1724,26 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
             sel.remove(id)?;
             println!("已删除模型档案: {}", id);
         }
+        // 恢复被删掉的内置档案：marguerite model restore <id> | --all
+        "restore" => {
+            let arg = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            if arg.is_empty() {
+                return Err(anyhow!(
+                    "用法: marguerite model restore <id> | --all（恢复被删掉的内置种子档案）"
+                ));
+            }
+            if arg == "--all" {
+                let restored = sel.restore_all_builtin()?;
+                if restored.is_empty() {
+                    println!("没有缺失的内置档案（全部在位）");
+                } else {
+                    println!("已恢复 {} 个内置档案: {}", restored.len(), restored.join(", "));
+                }
+            } else {
+                let p = sel.restore_builtin(arg)?;
+                println!("已恢复内置档案: {} ({})", p.label, p.id);
+            }
+        }
         "path" => {
             println!("{}", models_path().display());
         }
@@ -1660,7 +1758,7 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
         // 三档模型分层（5c）：marguerite model tier [flagship|balanced|turbo|auto] [--effort off|normal|deep|max]
         "tier" => {
             use crate::model::thinking::ThinkingEffort;
-            use crate::model::tier::{ModelTier, SessionState};
+            use crate::model::tier::{ModelTier, SessionState, TierRequest, TierRules};
             let mut state = SessionState::load();
             // --effort <x>
             if let Some(pos) = args.sub_args.iter().position(|a| a == "--effort") {
@@ -1675,14 +1773,42 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
                 };
             }
             let _ = state.save();
+            crate::usage::init();
+            let budget = measured_budget(&state);
             println!(
                 "档位: locked={:?}  effort={:?}  effective={}  预算状态={} (剩余 {:.0}%)",
                 state.locked_tier.map(|t| t.as_str()),
                 state.thinking_effort.reasoning_effort(),
                 state.effective_tier().as_str(),
-                state.budget.state().as_str(),
-                state.budget.remaining_ratio() * 100.0
+                budget.state().as_str(),
+                budget.remaining_ratio() * 100.0
             );
+            // 台账四要素：时间之外的用量 / 余额 / 状态（与 WebUI/GUI/TUI 同源）
+            println!(
+                "台账: tokens={}/{}  usd=${:.2}/${:.2}  剩余={:.0}%",
+                budget.tokens_used,
+                budget.tokens_cap,
+                budget.usd_used,
+                budget.usd_cap,
+                budget.remaining_ratio() * 100.0
+            );
+            let rules = TierRules::from_embedded();
+            for tier in [ModelTier::Flagship, ModelTier::Balanced, ModelTier::Turbo] {
+                let chain = rules.chain_for(tier).join(" → ");
+                println!(
+                    "  {:<9} {}",
+                    tier.as_str(),
+                    if chain.is_empty() { "（未配置）" } else { chain.as_str() }
+                );
+            }
+            // 「为什么是这一档」——对标竞品 Auto 模式的黑箱：把选档理由逐条打印。
+            let decision = state.resolve_tier_with(TierRequest::default(), measured_ratio());
+            if !decision.why.is_empty() {
+                println!("选档原因:");
+                for reason in &decision.why {
+                    println!("  - {reason}");
+                }
+            }
         }
         // 会话预算：marguerite model budget [--tokens <n>] [--usd <d>]
         "budget" => {
@@ -1696,14 +1822,218 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
                 state.budget.usd_cap = u;
             }
             let _ = state.save();
+            crate::usage::init();
+            let budget = measured_budget(&state);
             println!(
                 "会话预算: tokens={}/{}  usd=${:.2}/${:.2}  剩余={:.0}%  状态={}",
-                state.budget.tokens_used,
-                state.budget.tokens_cap,
-                state.budget.usd_used,
-                state.budget.usd_cap,
-                state.budget.remaining_ratio() * 100.0,
-                state.budget.state().as_str()
+                budget.tokens_used,
+                budget.tokens_cap,
+                budget.usd_used,
+                budget.usd_cap,
+                budget.remaining_ratio() * 100.0,
+                budget.state().as_str()
+            );
+        }
+        // 调用流水（对标 WorkBuddy「积分流水对不上」：时间/任务归因/原因/当前状态四要素齐全）
+        "ledger" => {
+            use crate::model::tier::SessionState;
+            use chrono::{Local, TimeZone};
+
+            let flags = parse_flags(&args.sub_args[1.min(args.sub_args.len())..]);
+            let limit = flags
+                .get("limit")
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(20)
+                .clamp(1, 200);
+
+            crate::usage::init();
+            let q = crate::usage::query(&serde_json::json!({ "limit": limit }));
+            let state = SessionState::load();
+            // 已用/剩余取台账实测：会话态里的 used 字段无人写入，直接打印是"剩余 100%"假读数。
+            let budget = measured_budget(&state);
+            println!(
+                "当前账本: tokens={}/{}  usd=${:.2}/${:.2}  状态={}  剩余={:.0}%",
+                budget.tokens_used,
+                budget.tokens_cap,
+                budget.usd_used,
+                budget.usd_cap,
+                budget.state().as_str(),
+                budget.remaining_ratio() * 100.0
+            );
+            println!(
+                "{:<19}  {:<22}  {:<16}  {:>9}  {:>9}  {:>9}",
+                "时间", "模型", "任务归因(run_id)", "输入", "输出", "合计"
+            );
+            let items = q
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if items.is_empty() {
+                println!("  （暂无调用记录；发起一次对话后会在这里出现真实流水）");
+            }
+            for item in items {
+                let ts = item.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+                let when = Local
+                    .timestamp_millis_opt(ts)
+                    .single()
+                    .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                let model = item.get("model").and_then(|v| v.as_str()).unwrap_or("—");
+                let run = item
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("—");
+                let pin = item.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let pout = item.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let tot = item.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                println!(
+                    "{:<19}  {:<22}  {:<16}  {:>9}  {:>9}  {:>9}",
+                    when, model, run, pin, pout, tot
+                );
+            }
+            println!("说明：每行 = 一次真实 provider 调用（变化原因：模型调用）；任务归因取 run_id，缺失显示 —。");
+        }
+        // P2·A：本地模型部署 —— marguerite model deploy <id> [--activate]
+        // 复用 gateway::local_models::local_deploy（与桌面 models.local.deploy 同一引擎路径，
+        // 默认激活 + 并入路由候选 + 广播 models.changed 事件）。
+        "deploy" => {
+            let id = args
+                .sub_args
+                .get(1)
+                .ok_or_else(|| anyhow!("用法: marguerite model deploy <id> [--activate]"))?;
+            let activate = args.sub_args.iter().any(|a| a == "--activate");
+            let ctx = cli_gateway_context(config);
+            let out = crate::gateway::local_models::local_deploy(
+                &ctx,
+                &serde_json::json!({ "id": id, "activate": activate }),
+            );
+            if out.get("ok").and_then(Value::as_bool) != Some(true) {
+                let err = out
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("部署失败");
+                bail!("{err}");
+            }
+            println!(
+                "已部署本地模型 {} → profile_id={} (activated={})",
+                id,
+                out.get("profile_id").and_then(Value::as_str).unwrap_or(""),
+                out.get("activated").and_then(Value::as_bool).unwrap_or(false)
+            );
+            if let Some(count) = out.get("candidate_count").and_then(Value::as_u64) {
+                println!("路由候选数: {count}");
+            }
+            if let Some(mode) = out.get("routing_mode").and_then(Value::as_str) {
+                println!("路由模式: {mode}");
+            }
+        }
+        // P2·A：Ollama 直连部署 —— marguerite model ollama deploy <tag> [--activate]
+        // 复用 gateway::local_models::local_ollama_deploy（在线校验 tag 真实存在，
+        // 离线/缺 tag 均明确报错）。async 函数，需 block_on。
+        "ollama" => {
+            let op = args.sub_args.get(1).map(String::as_str).unwrap_or("");
+            match op {
+                "deploy" => {
+                    let tag = args.sub_args.get(2).ok_or_else(|| {
+                        anyhow!("用法: marguerite model ollama deploy <tag> [--activate]")
+                    })?;
+                    let activate = args.sub_args.iter().any(|a| a == "--activate");
+                    let ctx = cli_gateway_context(config);
+                    let out = tokio::runtime::Runtime::new()?.block_on(
+                        crate::gateway::local_models::local_ollama_deploy(
+                            &ctx,
+                            &serde_json::json!({ "model": tag, "activate": activate }),
+                        ),
+                    );
+                    if out.get("ok").and_then(Value::as_bool) != Some(true) {
+                        let err = out
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Ollama 部署失败");
+                        bail!("{err}");
+                    }
+                    println!(
+                        "已部署 Ollama 模型 {tag} → profile_id={} (activated={})",
+                        out.get("profile_id").and_then(Value::as_str).unwrap_or(""),
+                        out.get("activated").and_then(Value::as_bool).unwrap_or(false)
+                    );
+                }
+                _ => {
+                    print_subcommand_help("model");
+                }
+            }
+        }
+        // P2·A：按档案 id 激活 —— marguerite model activate <profile_id>
+        // 复用 activate_profile_by_id（use_active + 镜像 config + 发布生效快照）
+        // + reconcile_routing_candidates（候选并入路由并发布）。
+        "activate" => {
+            let profile_id = args
+                .sub_args
+                .get(1)
+                .ok_or_else(|| anyhow!("用法: marguerite model activate <profile_id>"))?;
+            let ctx = cli_gateway_context(config);
+            crate::gateway::llm_profile::activate_profile_by_id(&ctx, profile_id)
+                .map_err(|e| anyhow!("激活失败: {e}"))?;
+            crate::gateway::llm_profile::reconcile_routing_candidates(&ctx)
+                .map_err(|e| anyhow!("候选刷新失败: {e}"))?;
+            println!("已激活模型档案: {profile_id}");
+            let cfg = Config::load()?;
+            if !cfg.model.base_url.is_empty() {
+                println!("config.model.base_url → {}", cfg.model.base_url);
+            }
+        }
+        // P2·A：路由模式查看/设置 —— marguerite model routing [get|set <mode>]
+        // 复用 models_routing_get/set（direct/router/ensemble/bloom/omni）。
+        "routing" => {
+            let action = args.sub_args.get(1).map(String::as_str).unwrap_or("get");
+            let ctx = cli_gateway_context(config);
+            match action {
+                "get" => {
+                    let out = crate::gateway::mode::models_routing_get(&ctx);
+                    println!(
+                        "路由模式: {}",
+                        out.get("mode").and_then(Value::as_str).unwrap_or("direct")
+                    );
+                }
+                "set" => {
+                    let mode = args
+                        .sub_args
+                        .get(2)
+                        .ok_or_else(|| anyhow!("用法: marguerite model routing set <mode>"))?;
+                    let out = tokio::runtime::Runtime::new()?
+                        .block_on(crate::gateway::mode::models_routing_set(
+                            &ctx,
+                            &serde_json::json!({ "mode": mode }),
+                        ))
+                        .map_err(|e| anyhow!("设置路由模式失败: {}", e.message))?;
+                    println!(
+                        "已设置路由模式: {}",
+                        out.get("mode").and_then(Value::as_str).unwrap_or("")
+                    );
+                }
+                other => bail!("未知 routing 动作: {other}（应为 get 或 set <mode>）"),
+            }
+        }
+        // P2·A：主机真实系统规格 —— marguerite model system
+        // 复用 gateway::local_models::local_system（RAM/核心/GPU，驱动智能推荐）。
+        "system" => {
+            let out = crate::gateway::local_models::local_system(&serde_json::Value::Null);
+            println!("主机规格:");
+            println!(
+                "  来源: {}",
+                out.get("source").and_then(Value::as_str).unwrap_or("—")
+            );
+            println!(
+                "  OS: {}",
+                out.get("os").and_then(Value::as_str).unwrap_or("—")
+            );
+            println!(
+                "  RAM: {} GB   核心: {}   GPU: {}",
+                out.get("ram_gb").and_then(Value::as_u64).unwrap_or(0),
+                out.get("cores").and_then(Value::as_u64).unwrap_or(0),
+                out.get("gpu_name").and_then(Value::as_str).unwrap_or("—")
             );
         }
         _ => {
@@ -1711,6 +2041,18 @@ fn model_handler(args: &Args, _config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 构造 CLI 侧 GatewayContext（token 固定 "cli"；bus 独立于网关进程，仅用于
+/// deploy/activate 内部 reconcile 的事务性发布，事件消费者为各自订阅方）。
+fn cli_gateway_context(config: &Config) -> crate::gateway::methods::GatewayContext {
+    use std::time::Instant;
+    crate::gateway::methods::GatewayContext {
+        config: config.clone(),
+        token: "cli".into(),
+        started_at: Instant::now(),
+        bus: std::sync::Arc::new(crate::events::EventBus::default()),
+    }
 }
 
 /// 解析 `--key value` 形式的 flag 列表（忽略位置参数）
@@ -2564,12 +2906,62 @@ fn sandbox_handler(args: &Args, _config: &Config) -> Result<()> {
             println!("沙箱工作区: {}", std::env::current_dir()?.display());
             println!("资源限制: 超时 60s · 输出上限 1MB · 最大子进程 8");
             println!("门控: Plan 禁写 · Agent 非交互写 fail-closed · Bloom 沙箱白名单");
+            let list = crate::terminal::shells::discover();
+            if let Some(p) = crate::terminal::shells::default_profile(&list) {
+                println!("交互式终端: 真实 PTY · 默认 shell = {} ({})", p.id(), p.program);
+            } else {
+                println!("交互式终端: 真实 PTY · 但本机未发现可用 shell");
+            }
+            Ok(())
+        }
+        // 终端可发现性：用户不该为了确认「装了 PowerShell 7 为什么终端还是 cmd」去翻源码。
+        "shells" => {
+            let list = crate::terminal::shells::discover();
+            let default_id = crate::terminal::shells::default_profile(&list).map(|p| p.id());
+            println!(
+                "本机 shell（默认：{}）",
+                default_id.unwrap_or("无可用")
+            );
+            for p in &list {
+                let status = if p.available { "可用" } else { "未安装" };
+                println!("  {:<12} {:<28} {}  [{}]", p.id(), p.label(), p.program, status);
+                if p.available {
+                    println!("      启动参数 {:?} · 来源 {}", p.args, p.source);
+                }
+            }
+            println!("\n提示：设置 MARGUERITE_TERMINAL_SHELL=<id> 可改默认；WebUI 终端面板内也可切换。");
+            Ok(())
+        }
+        // 真实探测：不只读静态清单，真的起一个 PTY 会话再终止（证明 ConPTY/openpty 可用）。
+        "terminal" => {
+            let cwd = std::env::current_dir()?;
+            let list = crate::terminal::shells::discover();
+            match crate::terminal::shells::default_profile(&list) {
+                Some(profile) => {
+                    println!("默认 shell: {} ({})", profile.id(), profile.program);
+                    match crate::terminal::pty::PtyTerminal::spawn(profile, &cwd, 100, 30, &[]) {
+                        Ok(term) => {
+                            println!(
+                                "PTY: 可用 · pid={:?} · 尺寸={}x{}",
+                                term.pid(),
+                                term.size().0,
+                                term.size().1
+                            );
+                            term.kill();
+                        }
+                        Err(e) => println!("PTY: 不可用 · {e}"),
+                    }
+                }
+                None => println!("PTY: 无可用 shell（请先安装 PowerShell / bash 或 cmd）"),
+            }
             Ok(())
         }
         _ => {
             println!("用法:");
             println!("  marguerite sandbox exec -- <命令...>  在真实沙箱中执行");
             println!("  marguerite sandbox workspace          显示沙箱状态");
+            println!("  marguerite sandbox shells             列出本机可用 shell");
+            println!("  marguerite sandbox terminal           探测 PTY 可用性");
             Ok(())
         }
     }
@@ -3180,7 +3572,9 @@ fn auto_detect_bin() -> Option<std::path::PathBuf> {
 /// If `--json`，单发**必须**输出 `{ok, data:{response}, meta}`（静默收齐再包，不混流）。
 fn chat_handler(args: &Args, _config: &Config) -> Result<()> {
     let config = Config::load()?;
-    let mut runtime = AgentRuntime::new(config.clone());
+    // 生效模型取自 models.json 的 active 档案（`model use` 的落点），与 `--json` 输出、
+    // 网关 chat、TUI 同源；`models.json` 不存在时原样返回（行为不变）。
+    let mut runtime = AgentRuntime::new(crate::model::selector::apply_effective_model(&config));
     runtime.init()?;
 
     let prompt = args.sub_args.join(" ").trim().to_string();
@@ -4297,6 +4691,7 @@ mod tests {
                 args: vec!["-y".to_string(), "mcp-server-fs".to_string()],
                 env: Default::default(),
                 url: None,
+                enabled: true,
             });
         let args = Args {
             mode: CliMode::Subcommand("mcp".to_string()),

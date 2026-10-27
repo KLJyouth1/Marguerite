@@ -18,9 +18,9 @@
     <section v-if="note" class="wall-note">{{ note }}</section>
 
     <section class="wall-card">
-      <div class="wall-card__title">预设壁纸库（内置 5 款，主题令牌渐变，零外部资源）</div>
+      <div class="wall-card__title">预设壁纸库（内置 6 款：1 款专属影像 + 5 款主题令牌渐变）</div>
       <div class="wall-grid">
-        <button v-for="p in presets" :key="p.id" class="wall-tile" :style="{ background: p.css }" @click="applyPreset(p)">
+        <button v-for="p in presets" :key="p.id" class="wall-tile" :style="{ background: styleOf(p.css) }" @click="applyPreset(p)">
           <span class="wall-tile__label">{{ p.label }}</span>
           <span v-if="activeId === p.id" class="wall-tile__badge">使用中</span>
         </button>
@@ -53,6 +53,28 @@
       </div>
     </section>
 
+    <section class="wall-card">
+      <div class="wall-card__title">面板遮罩（主题 × 壁纸可读性）</div>
+      <p class="wall-card__hint">
+        数值越大，内容面板越不透明、正文越稳；越小壁纸越明显。图片壁纸会按采样亮度自动抬升下限，
+        保证正文对比度不低于 4.5:1（WCAG AA）。
+      </p>
+      <div class="wall-row wall-veil">
+        <input
+          v-model.number="veil"
+          class="wall-veil__range"
+          type="range"
+          :min="VEIL_MIN"
+          :max="VEIL_MAX"
+          step="1"
+          aria-label="面板遮罩强度"
+          @input="onVeilInput"
+        />
+        <span class="wall-veil__value">{{ veil }}%</span>
+        <span v-if="guardApplied" class="wall-veil__guard">已按对比度守卫抬到 {{ appliedAlpha }}%</span>
+      </div>
+    </section>
+
     <div v-if="immersive" class="wall-immersive" @click="immersive = false">
       <video v-if="videoUrl" :src="videoUrl" class="wall-immersive__media" autoplay muted loop playsinline></video>
       <img v-else-if="currentBg" :src="currentBg" class="wall-immersive__media" alt="壁纸预览" />
@@ -64,18 +86,34 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import Icon from '@/components/Icon.vue'
+import {
+  WALLPAPER_PANEL_ALPHA_MAX,
+  WALLPAPER_PANEL_ALPHA_MIN,
+  WALLPAPER_PRESETS,
+  applyWallpaperGuarded,
+  applyWallpaperVeil,
+  clearStoredWallpaper,
+  clearWallpaperFromBody,
+  clampPanelAlpha,
+  isGradient,
+  persistImage,
+  persistPreset,
+  persistWallpaperVeil,
+  readStoredWallpaper,
+  readWallpaperVeil,
+  resolveStoredCss,
+  type WallpaperPreset,
+} from '@/utils/wallpaper'
 
-interface Preset { id: string; label: string; css: string }
-const presets: Preset[] = [
-  { id: 'aurora', label: '极光 · 蓝橙', css: 'linear-gradient(135deg, color-mix(in srgb, var(--accent) 85%, var(--bg)) 0%, color-mix(in srgb, var(--accent) 25%, var(--bg)) 45%, var(--bg) 100%)' },
-  { id: 'dusk', label: '黄昏 · 墨彩', css: 'linear-gradient(160deg, var(--bg) 0%, color-mix(in srgb, var(--warn) 22%, var(--bg)) 55%, color-mix(in srgb, var(--accent) 12%, var(--bg)) 100%)' },
-  { id: 'ink', label: '水墨 · 青灰', css: 'linear-gradient(120deg, var(--bg) 20%, color-mix(in srgb, var(--info) 16%, var(--bg)) 60%, var(--card) 100%)' },
-  { id: 'ember', label: '余烬 · 暖橙', css: 'linear-gradient(145deg, color-mix(in srgb, var(--warn) 30%, var(--bg)) 0%, var(--bg) 70%)' },
-  { id: 'night', label: '夜航 · 深蓝', css: 'radial-gradient(120% 90% at 20% 10%, color-mix(in srgb, var(--info) 30%, var(--bg)) 0%, var(--bg) 60%)' },
-]
+type Preset = WallpaperPreset
+// 预设库 / 持久化 / 冷启动恢复统一在 `utils/wallpaper.ts`（App.vue 也用它），
+// 避免「壁纸页能恢复、其它入口不能」的两套逻辑。
+const presets = WALLPAPER_PRESETS
 
-const STORAGE_KEY = 'marguerite.wallpaper'
-const MAX_PERSIST_BYTES = 2 * 1024 * 1024
+/** 遮罩滑块量程（与 store 的守卫量程同源） */
+const VEIL_MIN = WALLPAPER_PANEL_ALPHA_MIN
+const VEIL_MAX = WALLPAPER_PANEL_ALPHA_MAX
+
 const activeId = ref('')
 const note = ref('')
 const localInfo = ref('')
@@ -83,20 +121,46 @@ const localWallpaper = ref('')
 const videoUrl = ref('')
 const currentBg = ref('')
 const immersive = ref(false)
+const veil = ref(readWallpaperVeil())
+const appliedAlpha = ref(veil.value)
+const guardApplied = ref(false)
 
-function applyToBody(bg: string): void {
+/**
+ * 应用壁纸 = 背景 + 对比度守卫后的面板遮罩。
+ * 守卫只对图片壁纸生效（渐变壁纸的色值来自主题令牌，对比度天然成立）。
+ */
+async function applyToBody(bg: string): Promise<void> {
   currentBg.value = bg
-  document.body.style.backgroundImage = (bg.startsWith('linear') || bg.startsWith('radial')) ? bg : 'url("' + bg + '")'
-  document.body.style.backgroundSize = 'cover'
-  document.body.style.backgroundAttachment = 'fixed'
+  const result = await applyWallpaperGuarded(bg, veil.value)
+  appliedAlpha.value = result.applied
+  guardApplied.value = result.guard > 0 && result.applied > clampPanelAlpha(veil.value)
 }
 
-function applyPreset(p: Preset): void {
+/** 拖动滑块：即时生效并持久化（不重算壁纸选择，避免重复写 localStorage） */
+function onVeilInput(): void {
+  veil.value = clampPanelAlpha(veil.value)
+  persistWallpaperVeil(veil.value)
+  if (currentBg.value) {
+    void applyToBody(currentBg.value)
+  } else {
+    // 没有壁纸时也要记住强度：CSS 变量先写好，等用户选壁纸即按该强度呈现。
+    applyWallpaperVeil(veil.value)
+  }
+}
+
+/// 缩略图用的 `background` 简写。
+/// 预设里既有渐变（直接可用）也有图片路径（必须包 `url()`，否则整条声明非法、格子空白）。
+function styleOf(css: string): string {
+  return isGradient(css) ? css : `url("${css}") center / cover no-repeat`
+}
+
+function applyPreset(p: Preset, opts: { silent?: boolean } = {}): void {
   activeId.value = p.id
   localWallpaper.value = p.css
   videoUrl.value = ''
   applyToBody(p.css)
-  note.value = '已应用预设壁纸：' + p.label
+  persistPreset(p.id)
+  if (!opts.silent) note.value = '已应用预设壁纸：' + p.label
 }
 
 function clearWallpaper(): void {
@@ -104,17 +168,9 @@ function clearWallpaper(): void {
   localWallpaper.value = ''
   videoUrl.value = ''
   currentBg.value = ''
-  document.body.style.backgroundImage = ''
-  document.body.style.backgroundSize = ''
-  document.body.style.backgroundAttachment = ''
-  try { localStorage.removeItem(STORAGE_KEY) } catch { /* 忽略 */ }
+  clearWallpaperFromBody()
+  clearStoredWallpaper()
   note.value = '壁纸已清除'
-}
-
-function persistImage(dataUrl: string): boolean {
-  const bytes = Math.ceil((dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4)
-  if (bytes > MAX_PERSIST_BYTES) return false
-  try { localStorage.setItem(STORAGE_KEY, dataUrl); return true } catch { return false }
 }
 
 function onImagePick(e: Event): void {
@@ -150,14 +206,28 @@ function onVideoPick(e: Event): void {
 }
 
 onMounted(() => {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      localWallpaper.value = saved
-      localInfo.value = '已恢复上次会话的本地图片壁纸'
-      applyToBody(saved)
+  // 先把遮罩强度写到 CSS 变量：即使没有壁纸，面板默认值也与用户选择一致。
+  applyWallpaperVeil(veil.value)
+  const stored = readStoredWallpaper()
+  if (!stored) return
+  const css = resolveStoredCss(stored)
+  if (!css) {
+    // 预设已下线（改版）：清掉脏数据，避免每次进来都空转。
+    clearStoredWallpaper()
+    return
+  }
+  if (stored.type === 'preset') {
+    const preset = presets.find(p => p.id === stored.id)
+    if (preset) {
+      // 静默恢复：只还原背景与「使用中」徽标，不弹「已应用」提示。
+      applyPreset(preset, { silent: true })
+      localInfo.value = '已恢复上次选择的预设壁纸：' + preset.label
+      return
     }
-  } catch { /* 忽略 */ }
+  }
+  localWallpaper.value = css
+  localInfo.value = '已恢复上次会话的本地图片壁纸'
+  applyToBody(css)
 })
 </script>
 
@@ -173,6 +243,9 @@ onMounted(() => {
 .wall-tile__label { position: absolute; left: 8px; bottom: 8px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--bg) 60%, transparent); padding: 2px 8px; border-radius: 999px; }
 .wall-tile__badge { position: absolute; top: 6px; right: 6px; font-size: 10px; padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 20%, var(--bg)); color: var(--accent); }
 .wall-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.wall-veil__range { flex: 1 1 220px; min-width: 160px; accent-color: var(--accent); }
+.wall-veil__value { font-family: var(--font-mono); font-size: 12px; color: var(--text); min-width: 40px; }
+.wall-veil__guard { font-size: 11px; color: var(--warn); }
 .wall-file { position: relative; cursor: pointer; }
 .wall-file__input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .wall-immersive { position: fixed; inset: 0; z-index: 10000; background: var(--bg); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }

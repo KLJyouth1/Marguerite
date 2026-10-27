@@ -105,6 +105,17 @@ impl SessionManager {
         if !has_project_col {
             db.execute_batch("ALTER TABLE sessions ADD COLUMN project_path TEXT;")?;
         }
+        // 迁移（P2-9 多根）：会话可绑定多个项目目录。`project_paths` 存 JSON
+        // 数组字符串，`project_path` 仍是**主根**（= 数组首项），旧读取方无需改动。
+        // 幂等：只增列；旧库该列为 NULL → 回退 `project_path` 单值（诚实降级）。
+        let has_paths_col: bool = db
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "project_paths");
+        if !has_paths_col {
+            db.execute_batch("ALTER TABLE sessions ADD COLUMN project_paths TEXT;")?;
+        }
         // 迁移（P2-10/T14）：为旧库补充工具耗时列。**只增列**，旧快照该列为 NULL
         // → 历史工具卡不显示耗时（诚实降级）。
         let has_elapsed_col: bool = db
@@ -134,6 +145,16 @@ impl SessionManager {
             .any(|name| name == "context_window");
         if !has_ctx_col {
             db.execute_batch("ALTER TABLE sessions ADD COLUMN context_window INTEGER;")?;
+        }
+        // 迁移（任务复盘）：工具行的成功/失败标记。只增列；旧行的工具结果没有
+        // 这个信号 → NULL（复盘时按「未知」统计，不臆测成功）。
+        let has_tool_ok_col: bool = db
+            .prepare("PRAGMA table_info(session_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "tool_ok");
+        if !has_tool_ok_col {
+            db.execute_batch("ALTER TABLE session_messages ADD COLUMN tool_ok INTEGER;")?;
         }
         self.db = Some(db);
         Ok(())
@@ -254,6 +275,9 @@ impl SessionManager {
     }
 
     /// 按项目路径列出会话（任务列表按项目归类）。
+    ///
+    /// P2-9：这里按**主根索引** `project_path` 精确匹配（主根 = `project_paths`
+    /// 首项）。多根场景下「命中任一子根」的统计等后续再扩，避免本轮改变既有语义。
     pub fn list_sessions_by_project(
         &self,
         project_path: &str,
@@ -283,6 +307,61 @@ impl SessionManager {
             .filter_map(|r| r.ok())
             .collect();
 
+        Ok(results)
+    }
+
+    /// 按「多根归属」列出会话：`project_path` 精确命中 **或** `project_paths`
+    /// 数组包含该路径（P2-9 多项目工作区统计 / 历史删除共用）。
+    ///
+    /// SQL 先按 `project_path = ?` 或 `project_paths LIKE %"path"%` 粗筛，
+    /// 再在 Rust 侧解析 JSON 做精确二次过滤——避免路径里的 `%`/`_` 被 LIKE
+    /// 当通配符造成误命中。
+    pub fn list_sessions_by_any_project(
+        &self,
+        project_path: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionInfo>> {
+        let db = self.db()?;
+        // JSON 序列化得到 `"D:\\proj"`（含引号与转义），正好用作 LIKE 锚点。
+        let needle = serde_json::to_string(project_path)?;
+        let pattern = format!("%{needle}%");
+        let mut stmt = db.prepare(
+            "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path, reasoning_effort, context_window, project_paths
+             FROM sessions WHERE project_path = ?1 OR project_paths LIKE ?2
+             ORDER BY updated_at DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![project_path, pattern, limit as i64],
+            |row| {
+                let info = SessionInfo {
+                    session_id: row.get(0)?,
+                    summary: row.get(1)?,
+                    message_count: row.get::<_, i32>(2)? as usize,
+                    state: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    tokens_used: row.get::<_, i32>(6)? as u32,
+                    project_path: row.get(7)?,
+                    reasoning_effort: row.get(8)?,
+                    context_window: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+                };
+                let raw: Option<String> = row.get(10)?;
+                Ok((info, raw))
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows.filter_map(Result::ok) {
+            let (info, raw) = row;
+            let matched = info.project_path.as_deref() == Some(project_path)
+                || raw
+                    .as_deref()
+                    .and_then(|r| serde_json::from_str::<Vec<String>>(r).ok())
+                    .map(|paths| paths.iter().any(|p| p == project_path))
+                    .unwrap_or(false);
+            if matched {
+                results.push(info);
+            }
+        }
         Ok(results)
     }
 
@@ -460,9 +539,102 @@ impl SessionManager {
         Ok(())
     }
 
-    /// 清除会话所有消息（保留会话记录本身，sessions.reset RPC 后端实现）
-    pub fn clear_messages(&self, session_id: &str) -> Result<()> {
+    /// 绑定会话到项目根目录（R70：从 `save_snapshot_for_project` 拆出）。
+    ///
+    /// 消息已改为逐条追加（[`Self::append_message`]），项目归属不再需要随整段
+    /// 快照重写——本方法只更新归属列，行不存在时先创建（与 `touch_session` 同口径）。
+    ///
+    /// P2-9：本方法只写**主根索引**（`project_path`，供精确匹配用）；一个会话的
+    /// 完整多根集合由 [`Self::bind_projects`] 写入 `project_paths`。
+    pub fn bind_project(&self, session_id: &str, project_path: &str) -> Result<()> {
         let db = self.db()?;
+        let now = Utc::now().to_rfc3339();
+        db.execute(
+            "INSERT OR IGNORE INTO sessions
+                (session_id, summary, state, message_count, tokens_used, created_at, updated_at, project_path)
+             VALUES (?1, 'Empty session', 'idle', 0, 0, ?2, ?2, ?3)",
+            rusqlite::params![session_id, now, project_path],
+        )?;
+        db.execute(
+            "UPDATE sessions SET
+                project_path = ?2,
+                message_count = (SELECT COUNT(*) FROM session_messages WHERE session_id = ?1),
+                updated_at = ?3
+             WHERE session_id = ?1",
+            rusqlite::params![session_id, project_path, now],
+        )?;
+        Ok(())
+    }
+
+    /// 绑定会话到多个项目目录（P2-9）。
+    ///
+    /// 双写：`project_path` = 第一个（主根索引，旧读取方不变），
+    /// `project_paths` = 去重保序后的 JSON 数组字符串。
+    /// 空列表为无操作（不得把已有归属清空）。
+    pub fn bind_projects(&mut self, session_id: &str, projects: &[String]) -> Result<()> {
+        let normalized = normalize_projects(projects);
+        let Some(primary) = normalized.first() else {
+            return Ok(());
+        };
+        let raw = serde_json::to_string(&normalized)?;
+        let db = self.db()?;
+        let now = Utc::now().to_rfc3339();
+        db.execute(
+            "INSERT OR IGNORE INTO sessions
+                (session_id, summary, state, message_count, tokens_used, created_at, updated_at, project_path, project_paths)
+             VALUES (?1, 'Empty session', 'idle', 0, 0, ?2, ?2, ?3, ?4)",
+            rusqlite::params![session_id, now, primary, raw],
+        )?;
+        db.execute(
+            "UPDATE sessions SET
+                project_path = ?2,
+                project_paths = ?3,
+                message_count = (SELECT COUNT(*) FROM session_messages WHERE session_id = ?1),
+                updated_at = ?4
+             WHERE session_id = ?1",
+            rusqlite::params![session_id, primary, raw, now],
+        )?;
+        Ok(())
+    }
+
+    /// 读取会话绑定的全部项目目录（P2-9）。
+    ///
+    /// `project_paths` JSON 有效且非空 → 原样返回（去重保序）；空/损坏 → 回退
+    /// `project_path` 单值；都空 → 空 Vec。
+    pub fn project_paths_of(&self, session_id: &str) -> Result<Vec<String>> {
+        let db = self.db()?;
+        let row = db.query_row(
+            "SELECT project_paths, project_path FROM sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        );
+        let (raw_paths, legacy) = match row {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(raw) = raw_paths {
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&raw) {
+                let parsed = normalize_projects(&parsed);
+                if !parsed.is_empty() {
+                    return Ok(parsed);
+                }
+            }
+        }
+        Ok(legacy
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .map(|p| vec![p])
+            .unwrap_or_default())
+    }
+
+    /// 清除会话所有消息（保留会话记录本身，sessions.reset RPC 后端实现）
+    pub fn clear_messages(&self, session_id: &str) -> Result<()> {        let db = self.db()?;
         db.execute(
             "DELETE FROM session_messages WHERE session_id = ?1",
             rusqlite::params![session_id],
@@ -470,6 +642,171 @@ impl SessionManager {
         db.execute(
             "UPDATE sessions SET message_count = 0, updated_at = ?1 WHERE session_id = ?2",
             rusqlite::params![Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
+    }
+
+    /// **只追加**一条会话消息（R70：`sessions.db` 为只追加的会话记录）。
+    ///
+    /// # 与 [`Self::save_snapshot`] 的区别是本方法的全部意义
+    ///
+    /// `save_snapshot` 是「整段重写」（先 DELETE 该会话全部消息再重插）。它的输入
+    /// 是 context 台账的当前内容，而台账会因**上下文压缩**折叠成「摘要 + 最近几条」
+    /// —— 压缩本是**模型侧**的优化，一旦用它重写 DB，用户翻回去的历史就没了。
+    ///
+    /// 本方法供逐条落盘使用：每条对话消息到达时追加一行，**绝不删除已有行**。
+    /// 上下文压缩从此只影响台账（模型上下文），不再影响展示历史。
+    ///
+    /// `summary` 只在**首次创建**会话行时使用（取首条用户消息前缀，与
+    /// `generate_summary` 口径一致）；已存在的行保持用户/系统设置过的标题不被覆盖。
+    pub fn append_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        timestamp_rfc3339: &str,
+        summary_seed: Option<&str>,
+    ) -> Result<()> {
+        self.append_message_with(
+            session_id,
+            role,
+            content,
+            timestamp_rfc3339,
+            summary_seed,
+            None,
+        )
+    }
+
+    /// 追加一条消息，并可带上**思考正文**（`thinking`）。
+    ///
+    /// 网关 `chat.send` 此前只落 `content`，于是 `session_messages.thinking`
+    /// 在会话页历史里永远为空，复盘也拿不到「智能体思路」。本方法供网关路径使用。
+    pub fn append_message_with(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        timestamp_rfc3339: &str,
+        summary_seed: Option<&str>,
+        thinking: Option<&str>,
+    ) -> Result<()> {
+        let db = self.db()?;
+        let now = Utc::now().to_rfc3339();
+        let tx = db.unchecked_transaction()?;
+        // 先确保会话行存在：session_messages 有指向 sessions 的外键，
+        // 消息行必须后插（否则 FOREIGN KEY constraint failed）。
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO sessions
+                (session_id, summary, state, message_count, tokens_used, created_at, updated_at)
+             VALUES (?1, ?2, 'idle', 0, 0, ?3, ?3)",
+            rusqlite::params![
+                session_id,
+                summary_seed.unwrap_or("Empty session"),
+                now
+            ],
+        )?;
+        // 行已存在时 INSERT OR IGNORE 不生效（inserted==0）→ 既有 summary 保持不变
+        // （尊重用户重命名）；两分支的计数/时间刷新相同，合并为一条 UPDATE。
+        let _ = inserted;
+        tx.execute(
+            "INSERT INTO session_messages (session_id, role, content, thinking, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                session_id,
+                role,
+                content,
+                thinking
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| truncate_chars(s, MAX_STORED_THINKING_CHARS)),
+                timestamp_rfc3339
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET
+                message_count = (SELECT COUNT(*) FROM session_messages WHERE session_id = ?1),
+                updated_at = ?2
+             WHERE session_id = ?1",
+            rusqlite::params![session_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 追加一条**工具调用**记录（`role='tool'`）。
+    ///
+    /// 网关路径此前只在内存里累计工具的 token 开销，`session_messages` 里没有任何
+    /// 工具行 —— 会话历史看不到「调了什么、多久、结果如何」，任务复盘也无从统计。
+    /// 这里按行落盘；`input` / `output` 会按上限截断（见
+    /// [`MAX_STORED_TOOL_FIELD_CHARS`]），完整输出仍以工具自身产物为准。
+    // 7 个业务字段 + &self 超出门槛：参数都是独立的列值，再包一层结构体
+    // 只会把同一组必填信息藏到别处，不提升可读性。
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_tool_message(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: &str,
+        elapsed_ms: Option<u64>,
+        ok: Option<bool>,
+        timestamp_rfc3339: &str,
+    ) -> Result<()> {
+        let db = self.db()?;
+        let now = Utc::now().to_rfc3339();
+        let input = truncate_chars(tool_input.trim(), MAX_STORED_TOOL_FIELD_CHARS);
+        let output = truncate_chars(tool_output.trim(), MAX_STORED_TOOL_FIELD_CHARS);
+        let tx = db.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO sessions
+                (session_id, summary, state, message_count, tokens_used, created_at, updated_at)
+             VALUES (?1, 'Empty session', 'idle', 0, 0, ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO session_messages
+                (session_id, role, content, tool_name, tool_input, tool_output, elapsed_ms, tool_ok, timestamp)
+             VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                session_id,
+                format!("[{tool_name}]"),
+                tool_name,
+                input,
+                output,
+                elapsed_ms.map(|ms| ms as i64),
+                ok.map(|v| if v { 1i64 } else { 0i64 }),
+                timestamp_rfc3339
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET
+                message_count = (SELECT COUNT(*) FROM session_messages WHERE session_id = ?1),
+                updated_at = ?2
+             WHERE session_id = ?1",
+            rusqlite::params![session_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 刷新会话元数据（message_count / updated_at），**不触碰消息行**。
+    ///
+    /// 供 `persist_session` 在不再整段重写消息后维持 `sessions.list` 的计数与排序。
+    pub fn touch_session(&self, session_id: &str) -> Result<()> {
+        let db = self.db()?;
+        let now = Utc::now().to_rfc3339();
+        db.execute(
+            "INSERT OR IGNORE INTO sessions
+                (session_id, summary, state, message_count, tokens_used, created_at, updated_at)
+             VALUES (?1, 'Empty session', 'idle', 0, 0, ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )?;
+        db.execute(
+            "UPDATE sessions SET
+                message_count = (SELECT COUNT(*) FROM session_messages WHERE session_id = ?1),
+                updated_at = ?2
+             WHERE session_id = ?1",
+            rusqlite::params![session_id, now],
         )?;
         Ok(())
     }
@@ -553,6 +890,180 @@ impl SessionManager {
             truncated
         }
     }
+}
+
+/// 落盘思考正文的字符上限：复盘要能读，但不能让一条思考把 DB 撑爆。
+const MAX_STORED_THINKING_CHARS: usize = 8_000;
+
+/// 工具入参/输出单字段落盘上限。完整输出以工具自身产物为准，这里只留可读证据。
+const MAX_STORED_TOOL_FIELD_CHARS: usize = 4_000;
+
+/// 单轮思考缓冲上限（字符）：超出即截断，只保留可复盘的主体。
+const MAX_PENDING_THINKING_CHARS: usize = 16_000;
+
+/// 进程级工具活动去重表上限（超出即整体清空；去重只防同一次调用被多条路径重复落盘）。
+const MAX_TOOL_ACTIVITY_KEYS: usize = 4_096;
+
+/// 单轮思考缓冲：思考增量/整段先攒着，assistant 行落盘时一起写 `thinking` 列。
+///
+/// 放在 persistence 层而不是网关层：桌面主路径（`agent::runtime` 非流式回路）
+/// 不发 `Thinking` 事件，只有网关的流式桥能攒到；两条路径必须共用同一个缓冲，
+/// 否则「智能体思路」在主流路径上永远是空的。
+fn pending_thinking_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>>
+{
+    static BUF: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    BUF.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 记一段思考（增量或整段；按字符上限截断）。
+pub fn note_pending_thinking(session: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut guard = pending_thinking_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let buf = guard.entry(session.to_string()).or_default();
+    if buf.chars().count() >= MAX_PENDING_THINKING_CHARS {
+        return;
+    }
+    let room = MAX_PENDING_THINKING_CHARS.saturating_sub(buf.chars().count());
+    buf.extend(text.chars().take(room));
+}
+
+/// 取走本轮的思考缓冲（assistant 落盘时调用）。
+pub fn take_pending_thinking(session: &str) -> Option<String> {
+    pending_thinking_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 读取本轮思考缓冲但**不消费**（回合收尾发事件时用；落盘仍需 `take_` 取走）。
+pub fn peek_pending_thinking(session: &str) -> Option<String> {
+    pending_thinking_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 丢弃残留思考（新一轮用户输入到达时调用，避免跨轮串味）。
+pub fn clear_pending_thinking(session: &str) {
+    pending_thinking_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session);
+}
+
+/// 进程级 `sessions.db` 句柄（工具活动落盘共用一条连接，避免每条工具行都重新打开库）。
+fn tool_activity_db() -> &'static std::sync::Mutex<SessionManager> {
+    static MGR: std::sync::OnceLock<std::sync::Mutex<SessionManager>> =
+        std::sync::OnceLock::new();
+    MGR.get_or_init(|| {
+        let path = crate::persistence::config::Config::config_dir().join("sessions.db");
+        let mut manager = SessionManager::new(&path);
+        if let Err(e) = manager.init() {
+            tracing::warn!(err = %e, "工具活动落盘：sessions.db 初始化失败");
+        }
+        std::sync::Mutex::new(manager)
+    })
+}
+
+fn tool_activity_seen() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 记一次工具活动（`role='tool'` 行），供**网关桥**与**计划路径**共用。
+///
+/// 幂等：`call_id` 存在时按 `(session, call_id)` 去重 —— 同一次调用可能被
+/// 引擎侧与网关事件桥各看到一次，不能因此写两行。缺 `call_id` 时退化为
+/// `(session, tool, 输出哈希)`，仍能拦住完全相同的重复事件。
+///
+/// 失败只记日志、绝不影响回合（复盘证据不该拖垮主链路）。
+pub fn append_tool_activity(
+    session: &str,
+    call_id: Option<&str>,
+    tool: &str,
+    input: &str,
+    output: &str,
+    elapsed_ms: Option<u64>,
+    ok: Option<bool>,
+) {
+    let tool = tool.trim();
+    if session.trim().is_empty() || tool.is_empty() {
+        return;
+    }
+    // 单测禁止写真实用户库：事件 tap 跑在独立线程，线程局部的 config_dir 覆盖
+    // 传不过去，一旦落盘就会把测试会话混进用户的 `~/.marguerite/sessions.db`。
+    // 集成测试（tests/ 目录）编译时不带 cfg(test)，仍按真实路径验证。
+    if cfg!(test) {
+        let _ = (call_id, input, output, elapsed_ms, ok);
+        return;
+    }
+    use std::hash::{Hash, Hasher};
+    let key = match call_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("{session}|id:{id}"),
+        None => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            session.hash(&mut hasher);
+            tool.hash(&mut hasher);
+            output.hash(&mut hasher);
+            format!("{session}|h:{:016x}", hasher.finish())
+        }
+    };
+    {
+        let mut seen = tool_activity_seen()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !seen.insert(key) {
+            return;
+        }
+        if seen.len() > MAX_TOOL_ACTIVITY_KEYS {
+            seen.clear();
+        }
+    }
+    let manager = tool_activity_db().lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = manager.append_tool_message(
+        session,
+        tool,
+        input,
+        output,
+        elapsed_ms,
+        ok,
+        &Utc::now().to_rfc3339(),
+    ) {
+        tracing::warn!(err = %e, session = %session, tool = %tool, "工具活动落盘失败（忽略）");
+    }
+}
+
+/// 项目路径归一化：去空白、丢空串、去重（保持首次出现顺序）。
+fn normalize_projects(projects: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(projects.len());
+    for p in projects {
+        let p = p.trim();
+        if !p.is_empty() && !out.iter().any(|x| x == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// 按字符（不是字节）截断，避免切断多字节字符导致乱码。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push('…');
+    out
 }
 
 /// 从消息中提取数据库字段（P2-10/T14：末位为工具耗时 `elapsed_ms`，非工具消息为 None）
@@ -915,5 +1426,212 @@ mod tests {
         let info = manager.get_session("none").unwrap();
         assert!(info.is_none(), "旧库迁移后查询应正常");
         std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+
+    /// P2-9：迁移后多根双写/回读；只写旧列时回退单值。
+    #[test]
+    fn test_project_paths_multivalue_roundtrip_and_legacy_fallback() {
+        let (mut manager, tmp_dir) = setup_manager("ss_multi_paths");
+
+        // init 的幂等迁移补齐 `project_paths` 列后，写入 2 个路径 → 回读顺序一致
+        manager
+            .bind_projects(
+                "multi-1",
+                &["D:/proj/a".to_string(), "D:/proj/b".to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            manager.project_paths_of("multi-1").unwrap(),
+            vec!["D:/proj/a".to_string(), "D:/proj/b".to_string()],
+            "多根必须原序回读"
+        );
+        assert_eq!(
+            manager
+                .get_session("multi-1")
+                .unwrap()
+                .unwrap()
+                .project_path
+                .as_deref(),
+            Some("D:/proj/a"),
+            "主根（project_path）必须是第一个"
+        );
+
+        // 只写旧列（bind_project）→ 回退为 1 个
+        manager.bind_project("legacy-1", "D:/proj/only").unwrap();
+        assert_eq!(
+            manager.project_paths_of("legacy-1").unwrap(),
+            vec!["D:/proj/only".to_string()],
+            "旧列必须回退为单值"
+        );
+
+        // 空列表为无操作：不得清空已有归属
+        manager.bind_projects("legacy-1", &[]).unwrap();
+        assert_eq!(
+            manager.project_paths_of("legacy-1").unwrap(),
+            vec!["D:/proj/only".to_string()]
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+}
+
+#[cfg(test)]
+mod append_only_tests {
+    use super::*;
+
+    fn temp_db() -> (SessionManager, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("marg_append_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (SessionManager::new(&dir.join("sessions.db")), dir)
+    }
+
+    /// R70 核心契约：**追加永不删除**。
+    ///
+    /// 历史缺陷：`save_snapshot` 是「DELETE 全部 + 重插」，台账压缩折叠后用它落盘，
+    /// 用户翻回去的历史就少一截。`append_message` 必须逐条累加、顺序稳定。
+    #[test]
+    fn append_never_deletes_and_preserves_order() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        mgr.append_message("s1", "user", "第一条用户消息", "2026-10-19T10:00:00Z", Some("第一条用户消息"))
+            .unwrap();
+        mgr.append_message("s1", "assistant", "第一条回复", "2026-10-19T10:00:05Z", None)
+            .unwrap();
+        mgr.append_message("s1", "user", "第二条用户消息", "2026-10-19T10:01:00Z", Some("第二条用户消息"))
+            .unwrap();
+
+        let snap = mgr.load_snapshot("s1").unwrap();
+        assert_eq!(snap.messages.len(), 3, "三次追加必须都在，一条不能少");
+        match &snap.messages[0] {
+            Message::User { content, timestamp } => {
+                assert_eq!(content, "第一条用户消息");
+                assert_eq!(
+                    timestamp.timestamp_millis(),
+                    1_792_404_000_000,
+                    "必须保留传入的真实时间戳（不得偷换成 now）"
+                );
+            }
+            other => panic!("首条应为 user：{other:?}"),
+        }
+        match &snap.messages[1] {
+            Message::Assistant { content, .. } => assert_eq!(content, "第一条回复"),
+            other => panic!("第二条应为 assistant：{other:?}"),
+        }
+        // message_count 与实际行数一致（sessions.list 展示用）
+        let info = mgr.get_session("s1").unwrap().expect("会话行应存在");
+        assert_eq!(info.message_count, 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 标题只认**首条**种子，且后续追加/重命名不被覆盖。
+    #[test]
+    fn summary_seed_applies_only_on_first_creation() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        mgr.append_message("s2", "user", "开场的用户消息", "2026-10-19T10:00:00Z", Some("开场的用户消息"))
+            .unwrap();
+        let t1 = mgr.get_session("s2").unwrap().unwrap().summary;
+        assert_eq!(t1, "开场的用户消息");
+        // 后续追加即使带不同的种子，也不得改标题（用户可能已重命名）
+        mgr.append_message("s2", "assistant", "回复内容", "2026-10-19T10:00:05Z", Some("回复内容"))
+            .unwrap();
+        let t2 = mgr.get_session("s2").unwrap().unwrap().summary;
+        assert_eq!(t2, "开场的用户消息", "追加不得覆盖既有标题");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 项目归属绑定不得动消息行（拆自 save_snapshot_for_project）。
+    #[test]
+    fn bind_project_keeps_messages_and_count() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        mgr.append_message("s3", "user", "msg-a", "2026-10-19T10:00:00Z", None)
+            .unwrap();
+        mgr.append_message("s3", "assistant", "msg-b", "2026-10-19T10:00:05Z", None)
+            .unwrap();
+        mgr.bind_project("s3", "D:/proj/demo").unwrap();
+        let info = mgr.get_session("s3").unwrap().unwrap();
+        assert_eq!(info.project_path.as_deref(), Some("D:/proj/demo"));
+        assert_eq!(info.message_count, 2, "绑项目不得影响消息行");
+        let snap = mgr.load_snapshot("s3").unwrap();
+        assert_eq!(snap.messages.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 复盘数据面：思考正文与工具行都必须真正落盘（此前网关路径两者全丢）。
+    #[test]
+    fn thinking_and_tool_rows_are_persisted() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        mgr.append_message("s4", "user", "排查一下项目", "2026-10-24T10:00:00Z", Some("排查一下项目"))
+            .unwrap();
+        mgr.append_tool_message(
+            "s4",
+            "read_file",
+            "{\"path\":\"Cargo.toml\"}",
+            "package name = marguerite",
+            Some(37),
+            Some(true),
+            "2026-10-24T10:00:01Z",
+        )
+        .unwrap();
+        mgr.append_message_with(
+            "s4",
+            "assistant",
+            "已定位问题",
+            "2026-10-24T10:00:02Z",
+            None,
+            Some("先读清单，再看依赖"),
+        )
+        .unwrap();
+
+        let snap = mgr.load_snapshot("s4").unwrap();
+        assert_eq!(snap.messages.len(), 3, "user / tool / assistant 三行都在");
+        match &snap.messages[1] {
+            Message::Tool {
+                name,
+                input,
+                output,
+                elapsed_ms,
+                ..
+            } => {
+                assert_eq!(name, "read_file");
+                assert!(input.contains("Cargo.toml"), "{input}");
+                assert!(output.contains("marguerite"), "{output}");
+                assert_eq!(*elapsed_ms, Some(37));
+            }
+            other => panic!("第二行应为 tool：{other:?}"),
+        }
+        match &snap.messages[2] {
+            Message::Assistant { thinking, .. } => {
+                assert_eq!(thinking.as_deref(), Some("先读清单，再看依赖"))
+            }
+            other => panic!("第三行应为 assistant：{other:?}"),
+        }
+        let info = mgr.get_session("s4").unwrap().unwrap();
+        assert_eq!(info.message_count, 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 超长工具输出/思考按字符截断，不得把 DB 撑爆，也不得切碎多字节字符。
+    #[test]
+    fn oversized_tool_fields_are_truncated_by_chars() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        let huge = "玛".repeat(MAX_STORED_TOOL_FIELD_CHARS + 500);
+        mgr.append_tool_message("s5", "shell_exec", &huge, &huge, None, None, "2026-10-24T10:00:01Z")
+            .unwrap();
+        let snap = mgr.load_snapshot("s5").unwrap();
+        match &snap.messages[0] {
+            Message::Tool {
+                input, output, ..
+            } => {
+                assert_eq!(input.chars().count(), MAX_STORED_TOOL_FIELD_CHARS + 1);
+                assert!(input.ends_with('…'));
+                assert_eq!(output.chars().count(), MAX_STORED_TOOL_FIELD_CHARS + 1);
+            }
+            other => panic!("应为 tool：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -61,8 +61,36 @@ impl ThinkingEffort {
         matches!(self, ThinkingEffort::Deep | ThinkingEffort::Max)
     }
 
-    /// 从模式规格字符串解析档位（`mode/spec.rs` 的 `BloomSpec::reasoning_effort`）。
+    /// 档位的**规范键**（`off` / `normal` / `deep` / `max`）——UI 与 RPC 的对外口径。
     ///
+    /// 与 [`Self::reasoning_effort`] 的区别：那个是**请求体 wire 值**（`low/medium/high`，
+    /// Off 为 None），这个是**档位标识**（恒有值）。两者不可互相替代：
+    /// 前端滑块按 `as_key` 定位档位，请求体只认 `reasoning_effort`。
+    pub fn as_key(self) -> &'static str {
+        match self {
+            ThinkingEffort::Off => "off",
+            ThinkingEffort::Normal => "normal",
+            ThinkingEffort::Deep => "deep",
+            ThinkingEffort::Max => "max",
+        }
+    }
+
+    /// 严格解析档位键（`off|normal|deep|max`，别名 `none|low|medium|high`）。
+    ///
+    /// 与 [`Self::from_spec_str`] 的差别是**对未知值返回 `None`**：
+    /// 这是 RPC/请求参数入口，成本治理不允许把 typo（如 `"higg"`）静默升级成 Deep。
+    /// 调用方必须响亮拒绝（见 `gateway::chat` 与 `session.thinking.set`）。
+    pub fn from_key(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(ThinkingEffort::Off),
+            "low" | "normal" => Some(ThinkingEffort::Normal),
+            "medium" | "deep" => Some(ThinkingEffort::Deep),
+            "high" | "max" => Some(ThinkingEffort::Max),
+            _ => None,
+        }
+    }
+
+    /// 从模式规格字符串解析档位（`mode/spec.rs` 的 `BloomSpec::reasoning_effort`）。
     /// 历史缺陷：`BloomSpec.reasoning_effort`（bloom.yaml = `max`，omni_transcend.yaml = `max`）
     /// 是纯展示字段，从无解析入口，导致模式声明的思考强度到不了请求体。此处补上解析，
     /// 让 `mode/spec.rs` 的字符串与 `ThinkingEffort` 枚举真正贯通。
@@ -224,11 +252,47 @@ pub fn profile_for(kind: TaskKind) -> ThinkingProfile {
     }
 }
 
-/// 极限思考系统提示：在 `effort.wants_reasoning_prompt()` 时注入，引导模型先深思再作答。
+/// 按档位给出**差异化**的思考指令；`Off` 返回 None（完全不注入）。
+///
+/// 缺陷背景：此前只有一个通用常量 [`reasoning_system_prompt`]，而且**全仓没有任何
+/// 调用点**——档位只改了请求体里的 `reasoning_effort` 字段，模型侧完全不知道
+/// 「这一轮该想多深」。用户实测感受就是「档位是玩具」。
+///
+/// 四档语义（对应 UI 的 不思考 / 思考 / 深度思考 / 极限推理）：
+/// - Off：不注入（省 token、低延迟）；
+/// - Normal：单句要求“心里过一遍约束”，不要求输出推理；
+/// - Deep：完整推理（拆解约束 + 验证依据 + 找反例）；
+/// - Max：穷尽推理（列全路径 + 自我反驳 + 显式写出排除理由 + 边界检查）。
+pub fn reasoning_system_prompt_for(effort: ThinkingEffort) -> Option<&'static str> {
+    match effort {
+        ThinkingEffort::Off => None,
+        ThinkingEffort::Normal => Some(
+            "回答前先在心里过一遍关键约束与已知事实；不要输出冗长的推理过程，直接给结论。",
+        ),
+        ThinkingEffort::Deep => Some(
+            "你是深度推理模型。面对困难问题，请先完整推理（reasoning）：\
+             拆解约束、验证每步依据、主动寻找反例与边界情况，再给出最终答案；\
+             必要时给出多个候选方案并说明为何选择其一。不要过早收敛。",
+        ),
+        ThinkingEffort::Max => Some(
+            "你是极限推理模型。必须穷尽推理：把所有可能路径列全并逐一评估，\
+             主动构造反例自我攻击，明确写出被排除的方案与排除理由，\
+             检查边界条件与单位/量纲一致性，最后再给结论。\
+             宁可多花推理预算，也不要漏掉一个约束。",
+        ),
+    }
+}
+
+/// 本轮档位对应的思考指令（无显式档位 = 不注入，交给自适应策略）。
+pub fn reasoning_system_prompt_for_turn() -> Option<&'static str> {
+    reasoning_system_prompt_for(current_turn_effort()?)
+}
+
+/// 兼容旧入口（等价 Deep 档文本；新代码请用 [`reasoning_system_prompt_for`]）。
+///
+/// 保留它只为不破坏既有调用/文档；实现直接委托，避免"两处文案各自漂移"。
 pub fn reasoning_system_prompt() -> &'static str {
-    "你是深度推理模型。面对困难问题，请先完整推理（reasoning），\
-     拆解约束、验证每步依据、主动寻找反例与边界情况，再给出最终答案。\
-     必要时给出多个候选方案并说明为何选择其一。不要过早收敛。"
+    reasoning_system_prompt_for(ThinkingEffort::Deep).unwrap_or("")
 }
 
 /// 依据模型名是否为 DeepSeek 推理系，决定是否注入 `reasoning_effort` 字段。
@@ -238,9 +302,60 @@ pub fn supports_reasoning_effort(model: &str) -> bool {
     m.contains("deepseek") || m.starts_with("reasoner") || m.contains("v4-pro")
 }
 
+tokio::task_local! {
+    /// 本轮用户显式选择的思考档位（`chat.send` 的 `effort` 参数）。
+    ///
+    /// 为什么需要它：模型请求的构造点在 `ModelRouter::chat_with_tools` /
+    /// `chat_stream_with_tools`（工具回路），那里**只有** `default_client` 与任务分类，
+    /// 拿不到 `RouteDecision`。于是 UI 选 `deep` 会被 `with_adaptive_profile(chat)`
+    /// 覆盖成 `Off` —— 用户拖动档位、请求体里却从来没有这个参数（真机实测确认）。
+    /// 用 task-local 把「本轮显式档位」传到请求构造点，且不跨会话串扰。
+    pub static TURN_EFFORT: Option<ThinkingEffort>;
+}
+
+/// 读取本轮显式档位（无 scope / 未选择时返回 `None`，调用方回落到自适应）。
+pub fn current_turn_effort() -> Option<ThinkingEffort> {
+    TURN_EFFORT.try_with(|e| *e).ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 四档必须给出**不同**的思考指令，而不是一个通用常量。
+    ///
+    /// 缺陷背景：修复前 `reasoning_system_prompt()` 是死代码，四档在提示层完全没区别，
+    /// 用户拖滑块感受不到任何变化。这个测试锁住"分档"这件事本身。
+    #[test]
+    fn four_tiers_produce_distinct_reasoning_prompts() {
+        assert!(
+            reasoning_system_prompt_for(ThinkingEffort::Off).is_none(),
+            "不思考档不得注入任何思考指令"
+        );
+        let normal = reasoning_system_prompt_for(ThinkingEffort::Normal).unwrap();
+        let deep = reasoning_system_prompt_for(ThinkingEffort::Deep).unwrap();
+        let max = reasoning_system_prompt_for(ThinkingEffort::Max).unwrap();
+        assert_ne!(normal, deep, "思考 / 深度思考必须不同");
+        assert_ne!(deep, max, "深度思考 / 极限推理必须不同");
+        assert_ne!(normal, max);
+        // 语义要点：Normal 不要长篇推理；Max 要穷尽 + 自我反驳 + 排除理由。
+        assert!(normal.contains("不要输出冗长"));
+        assert!(deep.contains("完整推理"));
+        assert!(max.contains("穷尽"));
+        assert!(max.contains("反例"));
+        assert!(max.contains("排除理由"));
+        // 层级强度：Max 的指令应当比 Normal 更长更严（不是同义改写）
+        assert!(max.chars().count() > normal.chars().count());
+    }
+
+    #[test]
+    fn legacy_prompt_entry_still_returns_deep_text() {
+        // 旧入口保留兼容，但新代码必须走 reasoning_system_prompt_for
+        assert_eq!(
+            reasoning_system_prompt(),
+            reasoning_system_prompt_for(ThinkingEffort::Deep).unwrap()
+        );
+    }
 
     #[test]
     fn classify_routes_code() {
@@ -323,6 +438,42 @@ mod tests {
         assert!(supports_reasoning_effort("deepseek-v4-pro-0813"));
         assert!(supports_reasoning_effort("deepseek-reasoner"));
         assert!(!supports_reasoning_effort("gpt-4o"));
+    }
+
+    #[test]
+    fn as_key_roundtrips_with_from_key() {
+        // UI 档位键必须能「写出去再读回来」，否则滑块切一次就漂移。
+        for e in [
+            ThinkingEffort::Off,
+            ThinkingEffort::Normal,
+            ThinkingEffort::Deep,
+            ThinkingEffort::Max,
+        ] {
+            assert_eq!(ThinkingEffort::from_key(e.as_key()), Some(e), "{}", e.as_key());
+        }
+    }
+
+    #[test]
+    fn from_key_accepts_aliases_and_rejects_typos() {
+        // 别名表与 chat.send 的 wire 值同源（low/medium/high）
+        assert_eq!(ThinkingEffort::from_key("low"), Some(ThinkingEffort::Normal));
+        assert_eq!(ThinkingEffort::from_key("medium"), Some(ThinkingEffort::Deep));
+        assert_eq!(ThinkingEffort::from_key("high"), Some(ThinkingEffort::Max));
+        assert_eq!(ThinkingEffort::from_key("none"), Some(ThinkingEffort::Off));
+        // 大小写/空白宽容
+        assert_eq!(ThinkingEffort::from_key("  MAX "), Some(ThinkingEffort::Max));
+        // typo 必须 None（调用方响亮拒绝），绝不静默降级成 Deep
+        assert_eq!(ThinkingEffort::from_key("higg"), None);
+        assert_eq!(ThinkingEffort::from_key(""), None);
+    }
+
+    #[test]
+    fn as_key_is_distinct_from_wire_value() {
+        // 两个口径不可混用：档位标识恒有值，wire 值 off 为 None。
+        assert_eq!(ThinkingEffort::Off.as_key(), "off");
+        assert_eq!(ThinkingEffort::Off.reasoning_effort(), None);
+        assert_eq!(ThinkingEffort::Deep.as_key(), "deep");
+        assert_eq!(ThinkingEffort::Deep.reasoning_effort(), Some("medium"));
     }
 
     #[test]

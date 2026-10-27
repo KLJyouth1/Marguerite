@@ -1,17 +1,35 @@
 {
   "identifier": "com.marguerite.workbench",
   "description": "Marguerite CLI Workbench GUI 壳默认能力",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "opener:default",
+    "dialog:default",
     "global-shortcut:default",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "notification:default",
+    "allow-sidecar-status",
+    "allow-sidecar-log-dir",
+    "allow-sidecar-start",
+    "allow-sidecar-stop",
+    "allow-notify-turn-ended",
+    "allow-pet-overlay-move",
+    "allow-pet-overlay-hide",
+    "allow-pet-overlay-show",
+    "allow-pet-overlay-toggle",
+    "allow-autostart-status",
+    "allow-autostart-set"
   ],
   "remote": {
-    "urls": ["http://localhost:18790/*", "http://127.0.0.1:18790/*"]
+    "urls": [
+      "http://localhost:18790/*",
+      "http://127.0.0.1:18790/*"
+    ]
   }
 }

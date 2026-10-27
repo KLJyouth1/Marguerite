@@ -15,13 +15,37 @@
         :inert="saveAllPending ? true : undefined"
         :aria-busy="saveAllPending ? 'true' : undefined"
       >
+        <div class="settings-rail-column">
+        <div class="settings-rail__search" role="search">
+          <Icon name="search" :size="14" aria-hidden="true" />
+          <input
+            ref="railSearchRef"
+            v-model="railQuery"
+            type="search"
+            class="settings-rail__search-input"
+            :placeholder="t('settings.dialog.searchPlaceholder')"
+            :aria-label="t('settings.dialog.searchPlaceholder')"
+            @keydown.enter.prevent="selectFirstRailMatch"
+            @keydown.esc.stop.prevent="clearRailSearch"
+          />
+          <button
+            v-if="railQuery"
+            type="button"
+            class="settings-rail__search-clear"
+            :aria-label="t('settings.dialog.searchClear')"
+            :title="t('settings.dialog.searchClear')"
+            @click="clearRailSearch"
+          >
+            <Icon name="x" :size="12" />
+          </button>
+        </div>
         <nav ref="railRef" class="settings-rail" role="tablist" :aria-label="t('settings.dialog.sections')" :aria-orientation="railOrientation">
-          <template v-for="(s, i) in visibleSections" :key="s.id">
+          <template v-for="(s, i) in filteredSections" :key="s.id">
             <!-- Presentational group eyebrow: labels the rail without adding a
                  tab stop. Rendered when the group changes so each bin is headed
                  once. Hidden on the mobile horizontal strip. -->
             <span
-              v-if="i === 0 || s.group !== visibleSections[i - 1].group"
+              v-if="i === 0 || s.group !== filteredSections[i - 1].group"
               class="settings-rail__group"
               role="presentation"
               aria-hidden="true"
@@ -45,6 +69,10 @@
             </button>
           </template>
         </nav>
+        <p v-if="railQuery && filteredSections.length === 0" class="settings-rail__empty">
+          {{ t('settings.dialog.searchEmpty') }}
+        </p>
+        </div>
 
         <div class="settings-main">
           <header class="settings-modal__head">
@@ -171,15 +199,19 @@
               @update-ensemble-all-failed-policy="setEnsembleAllFailedPolicy"
               @go-to-section="selectSection"
             />
-            <SetupCapabilitiesPanel
-              v-else-if="section === 'capabilities'"
-              :panel="capabilitiesPanel"
-              @update-field="updateCapabilityField"
-              @search-provider-change="onSearchProviderChange"
-              @image-provider-change="onImageProviderChange"
-              @use-image-recommendation="useImageRecommendation"
-              @reset-capability="resetCapability"
-            />
+            <template v-else-if="section === 'capabilities'">
+              <SetupCapabilitiesPanel
+                :panel="capabilitiesPanel"
+                @update-field="updateCapabilityField"
+                @search-provider-change="onSearchProviderChange"
+                @image-provider-change="onImageProviderChange"
+                @use-image-recommendation="useImageRecommendation"
+                @reset-capability="resetCapability"
+              />
+              <!-- 模型档案级的多模态能力（图像输出 / 音频输入输出 / 生视频识别）：
+                   生图、转写、朗读三个工具按这里的声明决定往哪个端点发请求。 -->
+              <MultimodalCapabilitiesPanel />
+            </template>
             <SettingsAppearancePanel v-else-if="section === 'appearance'" />
             <SettingsKeyboardPanel v-else-if="section === 'keyboard'" />
             <template v-else-if="section === 'advanced'">
@@ -187,6 +219,9 @@
                 @open-agent-configuration="openAgentConfiguration"
                 @open-data-maintenance="openDataMaintenance"
               />
+              <!-- 计划执行配置（含审批闸门）：走 Rust-first 的 config.plan.* ，
+                   只碰引擎真正读取的 config.yaml，避免与 Python 侧车配置分叉。 -->
+              <SettingsPlanPanel />
               <!-- M2-C5 信任校准 / M2-C6 持久任务队列：动作型面板（非 config 表单），
                    在 Advanced 节直接渲染，操作走 RPC 立即生效。 -->
               <TrustCalibrationPanel />
@@ -195,6 +230,8 @@
               <RecentActivityPanel />
               <BudgetPanel />
               <TaskCostPanel />
+              <!-- 内容更新源（Rust 原生 update.*）：切换技能/插件来源仓库 + Release 检查 + 内容同步 -->
+              <UpdateSourcePanel />
             </template>
             <SettingsExtensionsPanel
               v-else-if="isExtensionSection(section)"
@@ -260,10 +297,12 @@ import SetupConnectionPanel from '@/components/settings/SetupConnectionPanel.vue
 import SetupProviderPanel from '@/components/setup/SetupProviderPanel.vue'
 import SetupModelStrategyPanel from '@/components/setup/SetupModelStrategyPanel.vue'
 import SetupCapabilitiesPanel from '@/components/setup/SetupCapabilitiesPanel.vue'
+import MultimodalCapabilitiesPanel from '@/components/settings/MultimodalCapabilitiesPanel.vue'
 import SettingsPrivacyPanel from '@/components/settings/SettingsPrivacyPanel.vue'
 import SettingsAppearancePanel from '@/components/settings/SettingsAppearancePanel.vue'
 import SettingsKeyboardPanel from '@/components/settings/SettingsKeyboardPanel.vue'
 import SettingsAdvancedPanel from '@/components/settings/SettingsAdvancedPanel.vue'
+import SettingsPlanPanel from '@/components/settings/SettingsPlanPanel.vue'
 import SettingsMemoryPanel from '@/components/settings/SettingsMemoryPanel.vue'
 import CrossProjectMemoryPanel from '@/components/settings/CrossProjectMemoryPanel.vue'
 import KnowledgeBasePanel from '@/components/settings/KnowledgeBasePanel.vue'
@@ -277,8 +316,10 @@ import DataMigrationPanel from '@/components/settings/DataMigrationPanel.vue'
 import SettingsExtensionsPanel from '@/components/settings/SettingsExtensionsPanel.vue'
 import TrustCalibrationPanel from '@/components/settings/TrustCalibrationPanel.vue'
 import TaskQueuePanel from '@/components/settings/TaskQueuePanel.vue'
+import UpdateSourcePanel from '@/components/settings/UpdateSourcePanel.vue'
 import { useSetupCatalog, SETTINGS_SECTIONS } from '@/composables/setup/useSetupCatalog'
 import { parseProviderHash, sectionFromRouteParam } from '@/composables/setup/useSettingsSection'
+import { filterSettingsSections } from '@/utils/settings/search'
 import { useConfirm } from '@/composables/useConfirm'
 import { usePlatform } from '@/platform'
 import '@/styles/settings-forms.css'
@@ -376,6 +417,22 @@ const activeRailSection = computed(() => (
 
 const modalRef = ref<HTMLElement | null>(null)
 const railRef = ref<HTMLElement | null>(null)
+const railSearchRef = ref<HTMLInputElement | null>(null)
+const railQuery = ref('')
+const filteredSections = computed(() => filterSettingsSections(
+  visibleSections.value.map(s => ({ ...s, label: t('settings.rail.' + s.id) })),
+  railQuery.value,
+))
+
+function clearRailSearch() {
+  railQuery.value = ''
+  railSearchRef.value?.focus()
+}
+
+function selectFirstRailMatch() {
+  const first = filteredSections.value[0]
+  if (first) selectSection(first.id)
+}
 const panelRef = ref<HTMLElement | null>(null)
 const closeBtn = ref<HTMLButtonElement | null>(null)
 
@@ -694,6 +751,13 @@ function onDocumentKeydown(event: KeyboardEvent) {
   // The confirm modal owns the keyboard while it is open; let it handle Escape
   // so a single keypress cannot both dismiss the prompt and re-open it.
   if (confirmState.value) return
+  // Ctrl/⌘+F jumps into the rail filter — the escape hatch for a 22-item rail.
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+    event.preventDefault()
+    railSearchRef.value?.focus()
+    railSearchRef.value?.select()
+    return
+  }
   if (event.key === 'Escape') {
     event.preventDefault()
     void requestClose()
@@ -787,7 +851,11 @@ onUnmounted(() => {
   justify-content: center;
   padding: var(--sp-6);
   position: fixed;
-  z-index: 300;
+  /* Layer: modal-dialog. Must stay above the globally mounted desktop pet
+     (DesktopPet z-index 801): at the old 300 the pet danced over the modal and
+     swallowed clicks on Save/Discard (e2e settings-modal.spec.ts reproduced it
+     27 times). Guarded by settings-layering.contract.test.ts. */
+  z-index: 1100;
 }
 
 .settings-modal {
@@ -897,6 +965,83 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: var(--sp-3) var(--sp-2);
   width: 200px;
+}
+
+.settings-rail-column {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 0;
+}
+
+/* The search field now sits above the tab list, so the nav must own the
+   remaining height itself — otherwise 21+ items overflow without scrolling. */
+.settings-rail-column .settings-rail {
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-rail__search {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  margin: var(--sp-3) var(--sp-2) 0;
+  padding: 0 var(--sp-2);
+}
+
+.settings-rail__search:focus-within {
+  border-color: var(--border-strong);
+}
+
+.settings-rail__search-input {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  flex: 1;
+  font-size: var(--fs-sm);
+  height: 32px;
+  min-width: 0;
+  outline: none;
+}
+
+.settings-rail__search-input::placeholder {
+  color: var(--text-dim);
+}
+
+.settings-rail__search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.settings-rail__search-clear {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  width: 20px;
+}
+
+.settings-rail__search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.settings-rail__empty {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  margin: var(--sp-3);
+  text-align: center;
 }
 
 .settings-rail__item {
@@ -1137,6 +1282,24 @@ onUnmounted(() => {
 
   .settings-foot__sep {
     display: none;
+  }
+
+  .settings-rail-column {
+    border-bottom: 1px solid var(--border);
+    width: 100%;
+  }
+
+  .settings-rail-column .settings-rail {
+    border-bottom: none;
+    width: auto;
+  }
+
+  .settings-rail__search {
+    margin: var(--sp-2) var(--sp-2) 0;
+  }
+
+  .settings-rail__empty {
+    margin: var(--sp-2);
   }
 }
 </style>

@@ -241,21 +241,26 @@ jobs:
   # `scripts/verify.sh --gui` has always covered this stack locally, but CI did
   # not — and that omission is precisely how `gui/package-lock.json` drifted 85
   # entries away from `gui/package.json` without anyone noticing. On a developer
-  # machine the four gui checks reuse an already-populated `node_modules` and so
+  # machine the gui checks reuse an already-populated `node_modules` and so
   # never run `npm ci`; on a clean checkout they could not even start
-  # (`'tsc' is not recognized`). This job runs the same five checks
-  # `verify.sh --gui` does, from a genuinely fresh install, so that class of drift
-  # fails here instead of on a user's first clone.
+  # (`'tsc' is not recognized`).
+  #
+  # `gui/` is a pure Tauri shell since 2026-10-21: the React sources were
+  # archived and the window loads the gateway-served Vue console (AGENTS.md §1).
+  # So this job has no typecheck/lint/unit-test/bundle steps — those scripts do
+  # not exist in `gui/package.json` (calling them was a guaranteed red job).
+  # It now runs the same guard set as `verify.sh --gui`: no-frontend, shell
+  # architecture invariants, lockfile. The Rust shell compile/clippy is covered
+  # by the `rust` job's workspace build (it installs the WebKitGTK/GTK deps;
+  # this job deliberately does not).
   #
   # Deliberately NOT included: `npm run security:audit`. This package carries 4
-  # advisories whose fix needs a breaking major bump of vite (8.x), and this React
-  # app is not reachable from the product UI — the Tauri window loads the
-  # gateway-served Vue console (AGENTS.md §1) — so that upgrade waits on the
-  # wire-up-or-remove decision rather than being forced here. `webui/`, the console
-  # users actually see, *is* audited in the job above.
+  # advisories whose fix needs a breaking major bump of vite (8.x), and the
+  # residual React deps are not reachable from the product UI. `webui/`, the
+  # console users actually see, *is* audited in the job above.
   # ---------------------------------------------------------------------------
   gui:
-    name: gui / lockfile + typecheck + lint + tests + bundle
+    name: gui / lockfile + shell guards
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -279,18 +284,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: "Guard: no frontend source in gui"
+        run: npm run --silent verify:no-frontend
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Unit tests
-        run: npm run test:unit
-
-      # `npm run build` = typecheck + vite build.
-      - name: Production bundle
-        run: npm run build
+      - name: "Guard: shell architecture invariants"
+        run: python3 ../scripts/check_gui_shell_config.py
 
   # ---------------------------------------------------------------------------
   # 5. Python sidecar: the pytest suite that nothing else here ran.

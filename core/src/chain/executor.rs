@@ -1730,6 +1730,11 @@ mod tests {
             token: "approval-e2e-token".to_string(),
             started_at: std::time::Instant::now(),
             webui_dir: std::env::temp_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
         });
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1742,9 +1747,17 @@ mod tests {
 
         let base = format!("http://{addr}");
         let client = reqwest::Client::new();
+        // Phase 0 起审批 REST 面要求本地 token（本机任意进程不得零凭据裁决）：
+        // 真实控制台的 `fetchSnapshot` / `resolveApproval` 都带 `Authorization: Bearer`。
+        let auth = "Bearer approval-e2e-token";
         tokio::spawn(async move {
             for _ in 0..600 {
-                let Ok(resp) = client.get(format!("{base}/api/approvals")).send().await else {
+                let Ok(resp) = client
+                    .get(format!("{base}/api/approvals"))
+                    .header("Authorization", auth)
+                    .send()
+                    .await
+                else {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
@@ -1758,6 +1771,7 @@ mod tests {
                 {
                     let resolved = client
                         .post(format!("{base}/api/approvals/resolve"))
+                        .header("Authorization", auth)
                         .json(&serde_json::json!({ "id": id, "approved": true }))
                         .send()
                         .await;

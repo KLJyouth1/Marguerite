@@ -84,6 +84,20 @@ describe('useProjectWorkspaces', () => {
     expect(call).toHaveBeenNthCalledWith(2, 'workspaces.list', undefined)
   })
 
+  it('throws the gateway reason when workspaces.open fails inside an ok envelope', async () => {
+    const rpc = useRpcStore()
+    connectOwner(rpc)
+    const call = vi.fn().mockResolvedValueOnce({ error: '目录不存在：/repo/gone' })
+    rpc.client = { call } as never
+    const projects = useProjectWorkspaces()
+
+    await expect(projects.openWorkspace('/repo/gone')).rejects.toThrow(
+      '目录不存在：/repo/gone',
+    )
+    // 失败的打开不是一次成功的打开：不再刷新列表、也不返回 null 冒充成功。
+    expect(call).toHaveBeenCalledTimes(1)
+  })
+
   it('returns the exact task keys deleted with project history', async () => {
     const rpc = useRpcStore()
     connectOwner(rpc)

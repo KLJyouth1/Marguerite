@@ -59,6 +59,8 @@ pub enum MainTab {
 pub enum RailTab {
     /// 智能体状态
     Agent,
+    /// 模型档案面板（与 CLI / GUI 共用 models.json）
+    Models,
     /// 工具日志
     Tools,
     /// 上下文
@@ -108,6 +110,44 @@ pub struct TokenUsage {
     pub budget: u32,
 }
 
+/// 三档模型分层 + 会话预算的只读快照（供状态栏展示，来源 `SessionState`）。
+///
+/// 为什么单独抽出来：状态栏是纯渲染层，不应在 render 里读磁盘；
+/// Tick 里刷新一次快照，渲染只读字段，避免每帧 I/O 与不可重入锁。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TierLedger {
+    /// 生效档位（flagship / balanced / turbo）
+    pub effective: String,
+    /// 用户锁定档位（空 = 自动）
+    pub locked: String,
+    /// 预算状态机（healthy / degraded / emergency / depleted）
+    pub budget_state: String,
+    /// 剩余比例（0..1）
+    pub remaining_ratio: f32,
+    /// 已用 token
+    pub tokens_used: u64,
+    /// token 上限（0 = 不按 token 熔断）
+    pub tokens_cap: u64,
+}
+
+impl TierLedger {
+    /// 状态栏单行文案：`balanced(自) 预算78%`。
+    pub fn label(&self) -> String {
+        if self.effective.is_empty() {
+            return String::new();
+        }
+        let lock = if self.locked.is_empty() { "自" } else { "锁" };
+        if self.tokens_cap == 0 {
+            format!("{}({}) 预算{}%·仅记量", self.effective, lock,
+                    (self.remaining_ratio * 100.0).round() as i32)
+        } else {
+            format!("{}({}) {}/{} tok·剩{}%", self.effective, lock,
+                    self.tokens_used, self.tokens_cap,
+                    (self.remaining_ratio * 100.0).round() as i32)
+        }
+    }
+}
+
 // ---- 视图模型子结构 ----
 
 /// 聊天角色
@@ -135,8 +175,14 @@ pub struct ChatMessage {
 pub struct ChatModel {
     /// 消息流
     pub messages: Vec<ChatMessage>,
-    /// 流式输出缓冲（Thinking 累积，Done 落盘为 Assistant 消息）
+    /// 可见答复的流式缓冲（`TextDelta` 累积，`Done` 时落盘为 Assistant 消息）
     pub streaming: Option<String>,
+    /// 模型思考过程缓冲（`Thinking` 累积）。
+    ///
+    /// 与 [`ChatModel::streaming`] **刻意分开**：`Thinking` 是推理链、`TextDelta` 是答复，
+    /// 混进同一个缓冲就等于把思考过程当正文展示；而回合结束（`Done`）时它必须被丢弃，
+    /// 否则下一轮会拿着上一轮的思考续写。
+    pub thinking: Option<String>,
 }
 
 /// 文件引用（@file 解析结果）
@@ -292,6 +338,60 @@ pub struct CollabView {
     pub log: std::collections::VecDeque<String>,
 }
 
+/// 模型面板单行（渲染期只读投影，零磁盘 IO）
+#[derive(Debug, Clone)]
+pub struct ModelItem {
+    /// 档案 id（激活时按此定位，`label` 会重名）
+    pub id: String,
+    /// 展示名
+    pub label: String,
+    /// 提供商标识
+    pub provider: String,
+    /// 接入点（空 = 走 provider 默认）
+    pub base_url: String,
+    /// 是否内置种子档案
+    pub builtin: bool,
+    /// 是否已配置密钥（只看有没有，不接触明文）
+    pub key_ready: bool,
+}
+
+/// 模型档案面板视图（右栏 Models tab）
+///
+/// 为什么要有这一层：`models.json` 的读取 + JSON 解析不能放进渲染函数。
+/// 主循环每 200ms 重绘一帧，逐帧 `ModelSelector::load()` 等于把文件 IO 塞进
+/// 绘制路径（掉帧 + 与其它进程写档案互斥）。改为「事件驱动刷新 → 状态缓存 → 渲染只读」。
+#[derive(Debug, Clone, Default)]
+pub struct ModelPanelView {
+    /// 档案列表（按 id 排序，顺序稳定，光标才有意义）
+    pub items: Vec<ModelItem>,
+    /// 当前激活档案 id
+    pub active_id: String,
+    /// 光标位置
+    pub cursor: usize,
+    /// 读取错误（None = 正常；Some = 面板必须显示错误态而不是空态）
+    pub error: Option<String>,
+}
+
+impl ModelPanelView {
+    /// 当前光标所指档案
+    pub fn selected(&self) -> Option<&ModelItem> {
+        self.items.get(self.cursor)
+    }
+
+    /// 光标下移（越界钳制，不绕回：避免长按 ↓ 从末项跳回首项而误激活）
+    pub fn move_down(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        self.cursor = (self.cursor + 1).min(self.items.len() - 1);
+    }
+
+    /// 光标上移
+    pub fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+}
+
 /// 全局视图模型（不可变快照，渲染只读）
 #[derive(Debug, Clone)]
 pub struct WorkbenchState {
@@ -309,6 +409,8 @@ pub struct WorkbenchState {
     pub main_tab: MainTab,
     /// 右栏 Tab
     pub rail_tab: RailTab,
+    /// 模型面板视图（右栏 Models tab，事件驱动刷新）
+    pub model_panel: ModelPanelView,
     /// 模式（来自 ModeManager::current 的缓存）
     pub mode: ModeKind,
     /// 模型名（主模型展示标签）
@@ -317,6 +419,8 @@ pub struct WorkbenchState {
     pub copilot_model: String,
     /// Token 用量
     pub token_usage: TokenUsage,
+    /// 档位 + 会话预算快照（状态栏展示）
+    pub tier_ledger: TierLedger,
     /// 会话计时文本
     pub session_time: String,
     /// 连接状态
@@ -379,10 +483,12 @@ impl WorkbenchState {
             sidebar_open_path: None,
             main_tab: MainTab::Chat,
             rail_tab: RailTab::Agent,
+            model_panel: ModelPanelView::default(),
             mode: ModeKind::Agent,
             model,
             copilot_model: String::new(),
             token_usage: TokenUsage::default(),
+            tier_ledger: TierLedger::default(),
             session_time: "00:00".into(),
             connection: ConnectionStatus::Ready,
             interaction: InteractionState::Idle,
@@ -439,6 +545,7 @@ impl WorkbenchState {
             UiEvent::Mouse(_) => vec![UiEffect::Render],
             UiEvent::Tick => {
                 self.refresh_token_usage();
+                self.refresh_tier_ledger();
                 vec![]
             }
             UiEvent::Resize(w, _h) => {
@@ -469,6 +576,97 @@ impl WorkbenchState {
         // 预算分母：系统暂无配置，用占位默认；非零即视为已设置，保持稳定。
         if self.token_usage.budget == 0 {
             self.token_usage.budget = DEFAULT_TOKEN_BUDGET;
+        }
+    }
+
+    /// 刷新档位 + 会话预算快照（三档分层 / 台账在 TUI 的展示口径）。
+    ///
+    /// 与 CLI `marguerite model tier` / 网关 `model.tier.get` 同源：
+    /// 都读 `SessionState`，避免三端各算一套、数字对不上。
+    ///
+    /// 预算的**已用/剩余**额外经 `usage` 台账实测：`SessionState.budget` 的 used 字段
+    /// 全仓无人写入（恒 0），只读它会永远显示「剩余 100%」。
+    pub fn refresh_tier_ledger(&mut self) {
+        use crate::model::tier::SessionState;
+        let s = SessionState::load();
+        let budget = match crate::usage::tightest_budget_snapshot() {
+            Some(b) => s.budget.clone().with_measured_snapshot(
+                b.tokens_cap,
+                b.usd_cap,
+                b.tokens_used,
+                b.usd_used,
+            ),
+            None => s.budget.clone(),
+        };
+        self.tier_ledger = TierLedger {
+            effective: s.effective_tier().as_str().to_string(),
+            locked: s.locked_tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
+            budget_state: budget.state().as_str().to_string(),
+            remaining_ratio: budget.remaining_ratio() as f32,
+            tokens_used: budget.tokens_used,
+            tokens_cap: budget.tokens_cap,
+        };
+    }
+
+    /// 重新读取 `models.json` 并投影到模型面板视图。
+    ///
+    /// 调用时机只有三类：打开模型面板、一次模型操作结束后、启动首帧。
+    /// 渲染函数只读 `self.model_panel`，不做任何文件 IO。
+    pub fn refresh_model_panel(&mut self) {
+        match crate::model::selector::ModelSelector::load() {
+            Ok(sel) => {
+                let reg = sel.registry();
+                let mut items: Vec<ModelItem> = reg
+                    .list()
+                    .into_iter()
+                    .map(|p| ModelItem {
+                        id: p.id.clone(),
+                        label: p.label.clone(),
+                        provider: p.provider.clone(),
+                        base_url: p.base_url.clone(),
+                        builtin: p.builtin,
+                        // 本地/回环端点免密钥，与 `byok::is_keyless_endpoint` 同判据；
+                        // 这里只判断"能不能直接用"，绝不读取密钥明文。
+                        key_ready: !p.api_key.trim().is_empty()
+                            || !p.api_key_env.trim().is_empty()
+                            || crate::model::byok::is_keyless_endpoint(&p.provider, &p.base_url),
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.id.cmp(&b.id));
+                let active_id = reg.active.clone();
+                let cursor = items
+                    .iter()
+                    .position(|i| i.id == active_id)
+                    .unwrap_or_default();
+                // 顶栏主/副模型标签同步到 models.json 的**当前**激活项：
+                // 否则从面板激活后，顶栏还写着旧模型（"切了没反应"的典型观感）。
+                self.model = items
+                    .iter()
+                    .find(|i| i.id == active_id)
+                    .map(|i| i.label.clone())
+                    .unwrap_or_default();
+                self.copilot_model = reg
+                    .copilot
+                    .as_ref()
+                    .and_then(|cid| items.iter().find(|i| &i.id == cid))
+                    .map(|i| i.label.clone())
+                    .unwrap_or_default();
+                self.model_panel = ModelPanelView {
+                    items,
+                    active_id,
+                    cursor,
+                    error: None,
+                };
+            }
+            Err(e) => {
+                // 读取失败 = 错误态，**不是**空态：空态会让用户以为"档案被删光了"。
+                self.model_panel = ModelPanelView {
+                    items: Vec::new(),
+                    active_id: String::new(),
+                    cursor: 0,
+                    error: Some(e.to_string()),
+                };
+            }
         }
     }
 
@@ -526,6 +724,12 @@ impl WorkbenchState {
                 KeyCode::Char('u') => {
                     self.rail_tab = RailTab::Agent;
                     return vec![UiEffect::SwitchRailTab(RailTab::Agent)];
+                }
+                KeyCode::Char('m') => {
+                    // Ctrl+M：打开/重读模型面板（重读是错误态的显式重试出口）
+                    self.rail_tab = RailTab::Models;
+                    self.refresh_model_panel();
+                    return vec![UiEffect::SwitchRailTab(RailTab::Models)];
                 }
                 KeyCode::Char('5') => {
                     self.rail_tab = RailTab::Deploy;
@@ -590,6 +794,33 @@ impl WorkbenchState {
             return vec![UiEffect::Render];
         }
 
+        // 模型面板：↑↓ 移动光标，Enter 激活。只在面板可见时接管方向键，
+        // 否则会把聊天页的历史召回（↑/↓）抢走。
+        if self.rail_tab == RailTab::Models {
+            match k.code {
+                KeyCode::Up => {
+                    self.model_panel.move_up();
+                    return vec![UiEffect::Render];
+                }
+                KeyCode::Down => {
+                    self.model_panel.move_down();
+                    return vec![UiEffect::Render];
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    // 走 `ModelOp::Activate`（与 /model activate、桌面 models.activate 同一条
+                    // 持久化链）。绝不在前端另写一份 models.json。
+                    if let Some(item) = self.model_panel.selected() {
+                        let id = item.id.clone();
+                        if id != self.model_panel.active_id {
+                            return vec![UiEffect::ModelAction(ModelOp::Activate(id))];
+                        }
+                    }
+                    return vec![UiEffect::Render];
+                }
+                _ => {}
+            }
+        }
+
         // 上/下召回历史（非搜索态）
         match k.code {
             KeyCode::Up => {
@@ -633,6 +864,18 @@ impl WorkbenchState {
 
         match env.r#type {
             EventType::Thinking => {
+                // 思考过程单独累积（不是答复正文）：见 [`ChatModel::thinking`]。
+                let text = str_of(&env.payload, "text").to_string();
+                self.chat
+                    .thinking
+                    .get_or_insert_with(String::new)
+                    .push_str(&text);
+            }
+            EventType::TextDelta => {
+                // 可见答复的增量（编排器把 `AgentEvent::TextDelta` 映射为
+                // `{text, presentation}`）。此前 TUI 直接忽略它，于是**非流式兜底
+                // 之外一个字都看不到**：真实引擎只发 Thinking + Done，
+                // 而 Done 的 `summary` 又被丢弃 → 界面上永远没有 AI 答复。
                 let text = str_of(&env.payload, "text").to_string();
                 self.chat
                     .streaming
@@ -723,14 +966,23 @@ impl WorkbenchState {
                 self.interaction = InteractionState::Idle;
             }
             EventType::Done => {
-                if let Some(s) = self.chat.streaming.take() {
-                    if !s.is_empty() {
-                        self.chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: s,
-                        });
-                    }
+                // 收口本轮答复：优先用流式增量累积的正文；引擎不流式时回落
+                // `Done.summary`（`AgentRuntime` 与编排器的 `AgentEvent::Done { text }`
+                // 都是映射到 `summary`）。两条路都为空时**不编造**空消息。
+                let streamed = self.chat.streaming.take().unwrap_or_default();
+                let final_text = if streamed.trim().is_empty() {
+                    str_of(&env.payload, "summary").to_string()
+                } else {
+                    streamed
+                };
+                if !final_text.trim().is_empty() {
+                    self.chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: final_text,
+                    });
                 }
+                // 思考过程属过程态：回合结束即清，绝不带入下一轮当正文续写。
+                self.chat.thinking = None;
                 self.progress = None;
                 self.interaction = InteractionState::Idle;
             }
@@ -778,8 +1030,9 @@ impl WorkbenchState {
                     }
                 }
             }
-            EventType::TextDelta | EventType::StepStart | EventType::StepFinish => {
-                // TUI 侧暂不渲染流式增量/步骤边界（Web UI 卡片化展示）
+            EventType::StepStart | EventType::StepFinish => {
+                // 步骤边界的耗时/轮次在 Web UI 用于卡片分组；TUI 无对应视图状态。
+                // （此前这里连同 `TextDelta` 一起被丢弃，正文因此整轮不可见。）
             }
             // 网关专属事件：用量实时刷新（session.event.usage）与会话运行态变更
             // （sessions.changed）。TUI 不经网关总线，忽略即可，仅保证穷尽匹配可编译。
@@ -944,11 +1197,21 @@ pub enum ModelOp {
     /// 设置 / 关闭 Bloom 副模型（None = 关闭双模型）
     UseCopilot(Option<String>),
     /// 新增档案
-    Add(ModelProfile),
+    Add(Box<ModelProfile>),
     /// 删除档案
     Remove(String),
     /// 列出全部档案（回显到聊天系统消息）
     List,
+    /// 部署本地模型目录项为路由档案（P2·A：复用 gateway local_deploy，按需激活）
+    Deploy(String, bool),
+    /// 部署真实存在的 Ollama tag（P2·A：复用 gateway local_ollama_deploy，按需激活）
+    OllamaDeploy(String, bool),
+    /// 按档案 id 激活（P2·A：activate_profile_by_id + reconcile_routing_candidates）
+    Activate(String),
+    /// 查看 / 设置路由模式（P2·A：empty = get；否则为 set <mode>）
+    Routing(Option<String>),
+    /// 查看主机真实系统规格（P2·A：local_system）
+    System,
 }
 
 #[cfg(test)]
@@ -960,6 +1223,26 @@ mod tests {
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn tier_ledger_label_shows_lock_and_budget() {
+        let auto = TierLedger {
+            effective: "balanced".into(),
+            locked: String::new(),
+            budget_state: "healthy".into(),
+            remaining_ratio: 0.78,
+            tokens_used: 44_000,
+            tokens_cap: 200_000,
+        };
+        assert_eq!(auto.label(), "balanced(自) 44000/200000 tok·剩78%");
+
+        let locked = TierLedger { locked: "flagship".into(), ..auto };
+        assert_eq!(locked.label(), "balanced(锁) 44000/200000 tok·剩78%");
+
+        let meter_only = TierLedger { tokens_cap: 0, ..locked };
+        assert_eq!(meter_only.label(), "balanced(锁) 预算78%·仅记量");
+        assert_eq!(TierLedger::default().label(), "");
     }
 
     #[test]
@@ -1025,20 +1308,70 @@ mod tests {
         assert!(s.collapse.sidebar, "手动折叠应覆盖响应式展开");
     }
 
+    /// `TextDelta`（正文增量）在 `Done` 时落盘为 Assistant 消息。
     #[test]
-    fn test_ingest_thinking_then_done_flushes_message() {
+    fn test_ingest_text_delta_then_done_flushes_message() {
         let mut s = WorkbenchState::new("s1".into(), "m".into());
         s.ingest(Envelope::new(
-            EventType::Thinking,
-            json!({"text":"你好"}),
+            EventType::TextDelta,
+            json!({"text":"你好","presentation":"answer"}),
             "s1",
         ));
-        assert!(s.chat.streaming.is_some());
+        assert!(s.chat.streaming.is_some(), "正文增量应进入流式缓冲");
+        s.ingest(Envelope::new(
+            EventType::TextDelta,
+            json!({"text":"，Marguerite"}),
+            "s1",
+        ));
         s.ingest(Envelope::new(EventType::Done, json!({}), "s1"));
         assert!(s.chat.streaming.is_none());
         assert_eq!(s.chat.messages.len(), 1);
-        assert_eq!(s.chat.messages[0].content, "你好");
+        assert_eq!(s.chat.messages[0].content, "你好，Marguerite");
         assert_eq!(s.interaction, InteractionState::Idle);
+    }
+
+    /// 引擎不流式时，`Done.summary` 必须被展示（此前被整段丢弃 → 界面无答复）。
+    #[test]
+    fn test_done_summary_is_shown_when_no_stream() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        s.ingest(Envelope::new(
+            EventType::Done,
+            json!({"summary":"引擎未流式时的答复"}),
+            "s1",
+        ));
+        assert_eq!(s.chat.messages.len(), 1, "非流式答复必须落盘");
+        assert_eq!(s.chat.messages[0].content, "引擎未流式时的答复");
+    }
+
+    /// 思考过程与答复分开：思考不进正文，且回合结束即清空。
+    #[test]
+    fn test_thinking_is_separate_from_answer_and_cleared_on_done() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        s.ingest(Envelope::new(
+            EventType::Thinking,
+            json!({"text":"先看看用户想干什么…"}),
+            "s1",
+        ));
+        assert!(
+            s.chat.streaming.is_none(),
+            "思考不得混入正交流式缓冲（否则推理链会被当作答案展示）"
+        );
+        assert!(s.chat.thinking.is_some());
+
+        s.ingest(Envelope::new(EventType::TextDelta, json!({"text":"答复"}), "s1"));
+        s.ingest(Envelope::new(EventType::Done, json!({}), "s1"));
+        assert!(s.chat.thinking.is_none(), "回合结束必须丢弃思考过程");
+        assert_eq!(s.chat.messages.len(), 1);
+        assert_eq!(s.chat.messages[0].content, "答复", "落盘的只能是答复正文");
+    }
+
+    /// 空答复不得编造一条空 Assistant 消息。
+    #[test]
+    fn test_done_without_any_text_pushes_nothing() {
+        let mut s = WorkbenchState::new("s1".into(), "m".into());
+        s.ingest(Envelope::new(EventType::Done, json!({}), "s1"));
+        s.ingest(Envelope::new(EventType::Done, json!({"summary":"   "}), "s1"));
+        assert!(s.chat.messages.is_empty(), "无正文时不得塞空消息");
     }
 
     #[test]

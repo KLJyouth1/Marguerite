@@ -7,6 +7,10 @@
  * - 预览统一用 emoji + 主题色（不再依赖图片素材）。
  *
  * `kind: 'image'` 类型保留以兼容旧调用（当前列表无 image 皮肤）。
+ *
+ * 【2026-10-23 素材下线】原首位「Seedream 专属立绘」（`/pets/seedream-pet.png`）已移除：
+ * 该图带第三方生成水印、体积 3.7MB，且与「无敏感/无水印素材」的交付要求冲突。
+ * 现在桌宠一律由本地矢量/3D 模型渲染，不随包分发人物位图。
  */
 
 export interface PetSkin {
@@ -69,6 +73,17 @@ export const PET_SKINS: PetSkin[] = [
     model: 'green',
     accent: '#8ec9a0',
     emoji: '🍀',
+  },
+  {
+    // 与 `marguerite-night` 主题同源的看板形象：雏菊花冠 + 海蓝宝石 + 星夜冷色。
+    // 造型全部由 petSpec 数据驱动（2.5D / 3D 共用），不随包分发人物位图。
+    id: 'princess',
+    name: '玛格丽特公主',
+    description: '银紫长发 · 雏菊花冠 · 海蓝宝石 · 星夜微光',
+    kind: 'model',
+    model: 'princess',
+    accent: '#7fe3d4',
+    emoji: '👑',
   },
 ]
 

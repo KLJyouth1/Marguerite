@@ -29,6 +29,16 @@
       </span>
       <div class="chat-pending-actions">
         <button
+          type="button"
+          class="chat-pending-action chat-pending-action--icon chat-pending-action--send-now"
+          :aria-label="t('chat.pending.sendNow')"
+          :title="t('chat.pending.sendNowHint')"
+          :disabled="isActionDisabled(item)"
+          @click="emit('sendNow', index)"
+        >
+          <Icon name="send" :size="13" />
+        </button>
+        <button
           v-if="canShowSteer(item)"
           type="button"
           class="chat-pending-action chat-pending-action--steer"
@@ -85,6 +95,28 @@
             </button>
           </div>
         </div>
+        <div class="chat-pending-reorder">
+          <button
+            type="button"
+            class="chat-pending-action chat-pending-action--icon"
+            :aria-label="t('chat.pending.moveUp')"
+            :title="t('chat.pending.moveUp')"
+            :disabled="!canMove(index, -1)"
+            @click="emit('move', index, -1)"
+          >
+            <Icon name="arrowUp" :size="13" />
+          </button>
+          <button
+            type="button"
+            class="chat-pending-action chat-pending-action--icon"
+            :aria-label="t('chat.pending.moveDown')"
+            :title="t('chat.pending.moveDown')"
+            :disabled="!canMove(index, 1)"
+            @click="emit('move', index, 1)"
+          >
+            <Icon name="arrowDown" :size="13" />
+          </button>
+        </div>
       </div>
     </article>
   </section>
@@ -124,6 +156,8 @@ const emit = defineEmits<{
   edit: [index: number]
   remove: [index: number]
   steer: [index: number]
+  sendNow: [index: number]
+  move: [index: number, delta: -1 | 1]
 }>()
 
 const openMenuIndex = ref<number | null>(null)
@@ -134,6 +168,27 @@ function displayText(item: PendingQueueItem): string {
 
 function isSteering(item: PendingQueueItem): boolean {
   return item.deliveryState === 'steering'
+}
+
+/** 直接发送：机器控制项与正在投递的项不可绕过队列。 */
+function isActionDisabled(item: PendingQueueItem): boolean {
+  return Boolean(item.hiddenControl) || isSteering(item)
+}
+
+/**
+ * 能否向 `delta` 方向移动：目标位置必须是可移动的普通条目
+ * （跳过机器控制项与正在投递的项，保持它们的相对绑定关系）。
+ */
+function canMove(index: number, delta: -1 | 1): boolean {
+  const item = props.items[index]
+  if (!item || item.hiddenControl || item.deliveryState) return false
+  let target = index + delta
+  while (target >= 0 && target < props.items.length) {
+    const candidate = props.items[target]
+    if (!candidate.hiddenControl && !candidate.deliveryState) return true
+    target += delta
+  }
+  return false
 }
 
 function canShowSteer(item: PendingQueueItem): boolean {
@@ -274,6 +329,16 @@ useDocumentEvent('keydown', (event) => {
   align-items: center;
   flex: 0 0 auto;
   gap: 2px;
+}
+
+/* 调序按钮独立成组，放在最右侧，与执行类按钮用一条细线分开。 */
+.chat-pending-reorder {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  margin-left: 2px;
+  padding-left: 2px;
+  border-left: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .chat-pending-action {

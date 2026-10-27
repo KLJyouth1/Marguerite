@@ -59,6 +59,20 @@ describe('AgentPersonaBadge (P0-2)', () => {
     expect(el.querySelector('[data-testid="agent-persona-badge"]')).toBeNull()
   })
 
+  it('labels the default session as 主智能体, not 当前专家', async () => {
+    // 主智能体不是「专家」，是默认应答者（严工）。同一事实在两处用不同措辞
+    // 会让用户以为自己在跟两个不同的东西说话。
+    useChatRouteFeedback().setActivePersona({
+      agentId: 'main',
+      name: '严工 · 高级开发工程师',
+      description: '先诊断根因',
+      isBuiltin: true,
+    })
+    const el = await mountBadge()
+    expect(el.textContent).toContain('主智能体：严工 · 高级开发工程师')
+    expect(el.textContent).not.toContain('当前专家')
+  })
+
   it('navigates to /agents on click', async () => {
     useChatRouteFeedback().setActivePersona({
       agentId: 'researcher',

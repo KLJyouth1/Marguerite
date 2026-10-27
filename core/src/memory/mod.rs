@@ -12,6 +12,7 @@ pub mod embedding;
 pub mod embedding_real;
 pub mod experience;
 pub mod federated;
+pub mod flyhash;
 pub mod gateway;
 pub mod hooks;
 pub mod home_memory;
@@ -21,18 +22,24 @@ pub mod recall;
 pub mod sensory;
 pub mod short_term;
 pub mod synapse;
+pub mod tiered;
+pub mod inject;
+pub mod layers;
 
 pub use self::compact::{
     compact_messages, hybrid_retrieve, render_timeline, token_economics, MemoryHit, Observation,
     TokenEconomics,
 };
 pub use self::embedding::{Embedding, EmbeddingProvider, LocalEmbeddingBackend};
-pub use self::experience::{Experience, ExperienceKind, ExperienceLedger, SelfEvolution};
+pub use self::experience::{
+    Experience, ExperienceKind, ExperienceLedger, ExperienceMeta, SelfEvolution,
+};
 pub use self::federated::{
     ConsolidationReport, CrossProjectBackend, ExperienceBackend, FederatedHit, FederatedMemory,
     FederatedResult, FederatedStats, LayerBackend, MemoryTier, RecallMode, SensoryBackend,
     ShortTermBackend,
 };
+pub use self::flyhash::{FlyHashIndex, FlyHit, SparseVector, WtaFingerprint, FLY_DIM, WTA_ROUNDS};
 pub use self::hooks::{MemoryHookEvent, MemoryHooks};
 pub use self::long_term::{
     HierarchicalMemory, LocalEmbedding, LongTermMemory, MemoryItem, RetrievalResult,
@@ -41,3 +48,4 @@ pub use self::pages::{KnowledgePage, PageStore};
 pub use self::sensory::SensoryMemory;
 pub use self::short_term::{SessionSummary, ShortTermMemory};
 pub use self::synapse::{SynapseEdge, SynapseGraph, SynapseStats};
+pub use self::tiered::{MemoryTierVariant, TieredEntry, TieredHit, TieredMemory};

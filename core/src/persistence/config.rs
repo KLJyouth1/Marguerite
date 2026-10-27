@@ -57,6 +57,11 @@ pub struct ModelConfig {
     /// 请求超时时间（秒）。缺省 60。设置较短值可让「连接级卡死」快速失败并由重试恢复。
     #[serde(default)]
     pub timeout_secs: u64,
+    /// 请求协议：`chat`（默认）或 `responses`。与 Codex 的 `wire_api` 同义。
+    ///
+    /// `#[serde(default)]` → 缺字段即 `Chat`，存量 `config.yaml` 零迁移。
+    #[serde(default)]
+    pub wire_api: crate::model::wire::WireApi,
 }
 
 /// 副模型（Copilot）配置：Bloom 并行编排时作为审校模型，与主模型区分。
@@ -97,6 +102,7 @@ impl Default for ModelConfig {
             base_url: default_base_url(),
             copilot_model: None,
             timeout_secs: 0,
+            wire_api: crate::model::wire::WireApi::default(),
         }
     }
 }
@@ -119,6 +125,12 @@ pub struct McpServerConfig {
     /// 配置后引擎启动时会连接并拉取工具目录，注册进工具注册表。
     #[serde(default)]
     pub url: Option<String>,
+    /// 是否参与运行期加载（工具注册 / 对话注入 / 批量探测）。
+    ///
+    /// 缺省 `true`：旧配置文件无需迁移。停用只影响运行期消费，
+    /// 配置本身仍保留，探测 / 编辑 / 删除照常可用。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// MCP 配置
@@ -145,6 +157,21 @@ pub struct MemoryConfig {
     /// 关闭时召回行为与引入该功能前**完全一致**（无强化、无重排、不发事件）。
     #[serde(default = "default_true")]
     pub synapse_enabled: bool,
+    /// P2·B 分层稀疏记忆（flyhash 粗排 + 渐进检索）开关。
+    ///
+    /// **默认 false 是刻意的**：它会在既有五路召回之外**新增一路**上下文注入，
+    /// 默认开启等于静默改变所有历史会话的 prompt 前缀——那是最难排查的一类回归。
+    /// 打开后：每轮把用户消息写入进程级 tiered 库，召回时用 flyhash 近邻粗排再精排，
+    /// 只注入高信号条目（见 `memory::inject`）。
+    #[serde(default)]
+    pub tiered_enabled: bool,
+    /// 记忆楼层开关（7 层记忆；第 8 层「经验」也在这里）。
+    ///
+    /// 与 `tiered_enabled` 的关系：`tiered` 那一层**不重复存储**，仍由
+    /// `tiered_enabled` 控制（见 `memory::layers::ResolvedLayers`）。
+    /// 缺字段的旧配置走 `LayerSwitches::default()`（全开），零迁移。
+    #[serde(default)]
+    pub layers: crate::memory::layers::LayerSwitches,
 }
 
 fn default_sensory_path() -> String {
@@ -162,6 +189,8 @@ impl Default for MemoryConfig {
             short_term_path: default_short_term_path(),
             auto_capture_enabled: default_true(),
             synapse_enabled: default_true(),
+            tiered_enabled: false,
+            layers: crate::memory::layers::LayerSwitches::default(),
         }
     }
 }
@@ -192,6 +221,13 @@ pub struct PlanConfig {
     /// 聊天主路径是否自动拆解复杂任务（关掉则退回单轮执行，简单任务不受影响）
     #[serde(default = "default_auto_decompose")]
     pub auto_decompose: bool,
+    /// 计划执行前是否需要**人工批准**（默认 false）。
+    ///
+    /// 默认 false = 复杂任务自动拆解后直接执行（长续航是产品主张，保持既有行为不变）。
+    /// 置 true 时：拆解 → 抬升一次审批（与控制台审批卡片同一套注册表/裁决面）→
+    /// **未批准绝不启动运行实例**（fail-closed）。用于「长任务要先看清计划再花钱」的用户。
+    #[serde(default = "default_plan_require_approval")]
+    pub require_approval: bool,
     /// 单次自主执行的最大步骤数（防失控，超限自动停止）
     #[serde(default = "default_plan_max_steps")]
     pub max_steps: usize,
@@ -212,6 +248,11 @@ fn default_auto_decompose() -> bool {
     true
 }
 
+/// 计划审批闸门默认关闭：开启后每个复杂任务都会停在「等你批准」，与长续航主张冲突。
+fn default_plan_require_approval() -> bool {
+    false
+}
+
 fn default_plan_max_steps() -> usize {
     12
 }
@@ -228,6 +269,7 @@ impl Default for PlanConfig {
     fn default() -> Self {
         Self {
             auto_decompose: default_auto_decompose(),
+            require_approval: default_plan_require_approval(),
             max_steps: default_plan_max_steps(),
             checkpoint_interval_steps: default_checkpoint_interval_steps(),
             heartbeat_interval_s: default_heartbeat_interval_s(),
@@ -298,6 +340,42 @@ pub struct GatewayConfig {
     /// 条目形如 `scheme://host[:port]`；带端口须精确匹配，不带端口接受任意端口。
     #[serde(default)]
     pub origin_allowlist: Vec<String>,
+    /// 生产限流（W3.4）：默认开启，只作用于 `/api/*` REST（`/api/health` 与
+    /// WS/静态资源豁免）。`None` = 默认；显式 false 才关闭（并应写审计）。
+    #[serde(default)]
+    pub rate_limit_enabled: Option<bool>,
+    /// 令牌桶容量（突发上限）。默认 240。
+    #[serde(default)]
+    pub rate_limit_capacity: Option<u32>,
+    /// 令牌桶补充速率（token/秒）。默认 40。
+    #[serde(default)]
+    pub rate_limit_refill_per_second: Option<f64>,
+}
+
+impl GatewayConfig {
+    /// 限流是否启用。环境变量 `MARGUERITE_RATE_LIMIT=off` 是运维紧急开关
+    /// （优先级高于配置；只接受明确的 on/off 词，拼错时回落到配置）。
+    pub fn rate_limit_is_enabled(&self) -> bool {
+        if let Ok(raw) = std::env::var("MARGUERITE_RATE_LIMIT") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "off" | "0" | "false" | "no" => return false,
+                "on" | "1" | "true" | "yes" => return true,
+                _ => {}
+            }
+        }
+        self.rate_limit_enabled.unwrap_or(true)
+    }
+
+    pub fn rate_limit_capacity(&self) -> u32 {
+        self.rate_limit_capacity.unwrap_or(240).max(1)
+    }
+
+    pub fn rate_limit_refill(&self) -> f64 {
+        match self.rate_limit_refill_per_second {
+            Some(value) if value.is_finite() && value >= 0.0 => value,
+            _ => 40.0,
+        }
+    }
 }
 
 /// Bloom 并行编排配置（webui 模型策略/对话路由可见；默认关闭，零行为变化）
@@ -473,6 +551,20 @@ pub struct Config {
     /// 默认空表（零行为变化），配置后 `ops.*` 才拿到真实主机；见 `ops/executor.rs`。
     #[serde(default)]
     pub ops: OpsConfig,
+    /// 插件远程源（DSH 开源生态接入）：`market.remote.search` / `market.install_url`
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// 插件市场配置（远程索引）。
+///
+/// 默认**空 URL = 不启用**：不在用户不知情时对外发起请求；
+/// 一旦填写，`market.remote.search` 就按该索引拉取插件列表。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginsConfig {
+    /// 插件索引 JSON 的 https 地址（形状见 `gateway::market_remote` 模块文档）
+    #[serde(default)]
+    pub registry_url: String,
 }
 
 /// 解析配置目录（纯函数，便于单测；顺序：`MARGUERITE_CONFIG_DIR` > 用户主目录）。
@@ -622,10 +714,8 @@ impl Config {
             dotenv.get(key).filter(|v| !v.is_empty()).cloned()
         };
 
-        // 3) 叠加到模型配置（仅在非空时覆盖，保留 YAML 已有值）
-        if let Some(v) = resolve("MARGUERITE_API_KEY") {
-            self.model.api_key = v;
-        }
+        // 3) 先叠加 provider/model/base_url —— 密钥归属判定必须基于**最终的** provider，
+        //    否则「同一次 load 里先读密钥、后换 provider」会用旧 provider 的归属标记放行。
         if let Some(v) = resolve("MARGUERITE_MODEL") {
             self.model.model_name = v;
         }
@@ -634,6 +724,51 @@ impl Config {
         }
         if let Some(v) = resolve("MARGUERITE_PROVIDER") {
             self.model.provider = v;
+        }
+
+        // 4) 密钥：**分槽优先**（`MARGUERITE_API_KEY_<PROFILE_ID>`），其次受归属标记约束的
+        //    全局 `MARGUERITE_API_KEY`。
+        //
+        //    多 provider 并存的根因就在这一步：旧实现无条件把全局单槽注入 `model.api_key`，
+        //    配置第二家服务商时覆盖第一家的密钥，且「A 家密钥发给 B 家端点」形成跨域泄漏。
+        //    全局槽只允许在「归属标记为空（升级前的单家用户）或与当前 provider 相符」时生效。
+        let marker = resolve(Config::ENV_KEY_PROVIDER_MARKER);
+        let global_allowed = marker
+            .as_deref()
+            .map(|m| m.trim().is_empty() || m.eq_ignore_ascii_case(self.model.provider.trim()))
+            .unwrap_or(true);
+        let key = match Self::active_profile_identity() {
+            Some((id, active_provider, declared_env)) => {
+                // 0) 档案声明的环境变量名（设置页「使用环境变量」）优先于分槽：
+                //    用户显式切换来源后，残留分槽不得继续生效。
+                let declared = declared_env.trim();
+                let from_declared = if declared.is_empty() {
+                    None
+                } else {
+                    resolve(declared)
+                };
+                match from_declared {
+                    Some(v) => Some(v),
+                    None => match resolve(&Self::env_slot_name(&id)) {
+                        Some(v) => Some(v),
+                        // active 档案与配置 provider 不一致时，不拿全局密钥「凑数」：
+                        // 宁可留空让请求明确失败，也不能把别家的钥匙发出去。
+                        None
+                            if global_allowed
+                                && active_provider
+                                    .eq_ignore_ascii_case(self.model.provider.trim()) =>
+                        {
+                            resolve("MARGUERITE_API_KEY")
+                        }
+                        None => None,
+                    },
+                }
+            }
+            None if global_allowed => resolve("MARGUERITE_API_KEY"),
+            None => None,
+        };
+        if let Some(v) = key {
+            self.model.api_key = v;
         }
 
         if !self.model.api_key.is_empty() {
@@ -679,38 +814,12 @@ impl Config {
     }
 
     /// [`Self::write_env_key`] 的路径注入版本（单测用，避免触碰真实用户目录）。
-    fn write_env_key_to(env_path: &PathBuf, key: &str) -> Option<PathBuf> {
-        if key.is_empty() {
-            return None;
+    fn write_env_key_to(env_path: &std::path::Path, key: &str) -> Option<PathBuf> {
+        let written = Self::write_env_var_to(env_path, "MARGUERITE_API_KEY", key);
+        if let Some(p) = &written {
+            info!("API Key 已转写 {}（YAML 不落钥）", p.display());
         }
-        let res = (|| -> Result<(), anyhow::Error> {
-            let mut lines: Vec<String> = std::fs::read_to_string(env_path)
-                .map(|c| c.lines().map(str::to_string).collect())
-                .unwrap_or_default();
-            let new_line = format!("MARGUERITE_API_KEY={key}");
-            match lines
-                .iter_mut()
-                .find(|l| l.starts_with("MARGUERITE_API_KEY="))
-            {
-                Some(l) => *l = new_line,
-                None => lines.push(new_line),
-            }
-            if let Some(p) = env_path.parent() {
-                std::fs::create_dir_all(p)?;
-            }
-            std::fs::write(env_path, lines.join("\n") + "\n")?;
-            Ok(())
-        })();
-        match res {
-            Ok(()) => {
-                info!("API Key 已转写 {}（YAML 不落钥）", env_path.display());
-                Some(env_path.clone())
-            }
-            Err(e) => {
-                tracing::warn!("API Key 转写 .env 失败（仅驻内存生效）: {e}");
-                None
-            }
-        }
+        written
     }
 
     /// 获取日志目录路径
@@ -728,31 +837,187 @@ impl Config {
     ///
     /// 返回 `true` = 确实删掉了一行；`false` = 文件不存在或本就没有该键（如实报告，不谎称）。
     pub fn remove_env_key() -> bool {
-        Self::remove_env_key_from(&Self::config_dir().join(".env"))
+        let env_path = Self::config_dir().join(".env");
+        let key_removed = Self::remove_env_key_from(&env_path);
+        // 归属标记与全局密钥同生共死：残留标记会让后来手动写入的「无标记」全局密钥
+        // 被误判为属于别家 provider 而拒绝使用（一次移除变成永久静默失效）。
+        let _ = Self::remove_env_var_from(&env_path, Self::ENV_KEY_PROVIDER_MARKER);
+        key_removed
     }
 
     /// [`Self::remove_env_key`] 的路径注入版本（单测用，避免触碰真实用户目录）。
     fn remove_env_key_from(env_path: &Path) -> bool {
+        Self::remove_env_var_from(env_path, "MARGUERITE_API_KEY")
+    }
+
+    /// 全局密钥的归属标记键：记录 `MARGUERITE_API_KEY` 属于哪个 provider。
+    ///
+    /// 多 provider 并存时全局槽只能被「它所属的那一家」使用。没有这个标记，
+    /// 后配置的 B 家密钥会被无条件注入，并可能在切换到 A 家端点时被发出去（跨域泄漏）。
+    /// 标记缺省视为「升级前的单家用户」→ 放行（保持向后兼容）。
+    pub const ENV_KEY_PROVIDER_MARKER: &'static str = "MARGUERITE_API_KEY_PROVIDER";
+
+    /// 档案专属密钥的环境变量名：`MARGUERITE_API_KEY_<PROFILE_ID>`
+    /// （大写，`-` / `.` 归一为 `_`，与 byok 回退链的历史命名一致）。
+    pub fn env_slot_name(profile_id: &str) -> String {
+        format!(
+            "MARGUERITE_API_KEY_{}",
+            profile_id.to_uppercase().replace(['-', '.'], "_")
+        )
+    }
+
+    /// 读取 `.env` 键值对（先 cwd 的 `.env`，再配置目录的 `.env`，后者覆盖前者）。
+    ///
+    /// 与 [`Self::apply_env_overrides`] 的读取顺序严格一致 —— 两处若不一致，
+    /// 就会出现「load 时读到 A 值、resolve 时读到 B 值」的分裂真相。
+    pub fn read_env_vars() -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for candidate in [PathBuf::from(".env"), Self::config_dir().join(".env")] {
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    if !k.is_empty() {
+                        map.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// 写入单个键到 `.env`：替换同名行或追加；空值 no-op；保留其余行与注释。
+    ///
+    /// 路径注入版本（单测用，避免触碰真实用户目录）。
+    pub fn write_env_var_to(env_path: &Path, name: &str, value: &str) -> Option<PathBuf> {
+        if value.is_empty() || name.is_empty() {
+            return None;
+        }
+        let res = (|| -> Result<(), anyhow::Error> {
+            let mut lines: Vec<String> = std::fs::read_to_string(env_path)
+                .map(|c| c.lines().map(str::to_string).collect())
+                .unwrap_or_default();
+            let new_line = format!("{name}={value}");
+            let prefix = format!("{name}=");
+            match lines
+                .iter_mut()
+                .find(|l| l.trim_start().starts_with(&prefix))
+            {
+                Some(l) => *l = new_line,
+                None => lines.push(new_line),
+            }
+            if let Some(p) = env_path.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            std::fs::write(env_path, lines.join("\n") + "\n")?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => Some(env_path.to_path_buf()),
+            Err(e) => {
+                tracing::warn!("写入 .env 键 {name} 失败（仅驻内存生效）: {e}");
+                None
+            }
+        }
+    }
+
+    /// 删除 `.env` 中指定键（整行），返回是否确实删掉了一行（不谎称成功）。
+    pub fn remove_env_var_from(env_path: &Path, name: &str) -> bool {
         let Ok(content) = std::fs::read_to_string(env_path) else {
             return false;
         };
+        let prefix = format!("{name}=");
         let kept: Vec<&str> = content
             .lines()
-            .filter(|l| !l.trim_start().starts_with("MARGUERITE_API_KEY="))
+            .filter(|l| !l.trim_start().starts_with(&prefix))
             .collect();
         if kept.len() == content.lines().count() {
             return false; // 本来就没有该键
         }
         match std::fs::write(env_path, kept.join("\n") + "\n") {
             Ok(()) => {
-                info!("API Key 已从 {} 移除", env_path.display());
+                info!("键 {name} 已从 {} 移除", env_path.display());
                 true
             }
             Err(e) => {
-                tracing::warn!("从 .env 移除 API Key 失败: {e}");
+                tracing::warn!("从 .env 移除键 {name} 失败: {e}");
                 false
             }
         }
+    }
+
+    /// 把密钥写进**档案专属槽**（`MARGUERITE_API_KEY_<PROFILE_ID>`）。
+    pub fn write_env_key_slot(profile_id: &str, key: &str) -> Option<PathBuf> {
+        Self::write_env_var_to(
+            &Self::config_dir().join(".env"),
+            &Self::env_slot_name(profile_id),
+            key,
+        )
+    }
+
+    /// 删除档案专属槽；返回是否确实删掉。
+    pub fn remove_env_key_slot(profile_id: &str) -> bool {
+        Self::remove_env_var_from(
+            &Self::config_dir().join(".env"),
+            &Self::env_slot_name(profile_id),
+        )
+    }
+
+    /// 把密钥写进全局槽 `MARGUERITE_API_KEY`，并写入归属标记（provider 非空时）。
+    ///
+    /// 用于「没有可归属档案」的场景（如直接改 `config.yaml` 的 provider）。
+    /// 有档案时优先用 [`Self::write_env_key_slot`]：分槽才能真正做到多家并存。
+    pub fn write_env_key_for(provider: &str, key: &str) -> Option<PathBuf> {
+        if key.is_empty() {
+            return None;
+        }
+        let env_path = Self::config_dir().join(".env");
+        Self::write_env_var_to(&env_path, "MARGUERITE_API_KEY", key)?;
+        if !provider.trim().is_empty() {
+            Self::write_env_var_to(&env_path, Self::ENV_KEY_PROVIDER_MARKER, provider.trim());
+        }
+        Some(env_path)
+    }
+
+    /// 当前 active 档案的身份 `(id, provider, api_key_env)`。
+    ///
+    /// `api_key_env` 为档案声明的密钥环境变量名（设置页「使用环境变量」，可为空）。
+    /// 只做轻量 JSON 解析而不依赖 `ModelRegistry`：持久化层被模型层依赖，
+    /// 反向依赖会形成模块环。文件缺失 / 损坏 → `None`（调用方回退全局槽）。
+    pub fn active_profile_identity() -> Option<(String, String, String)> {
+        let content = std::fs::read_to_string(Self::config_dir().join("models.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let active = v.get("active")?.as_str()?.to_string();
+        let profile = v.get("profiles")?.get(&active)?;
+        let provider = profile.get("provider")?.as_str()?.to_string();
+        let api_key_env = profile
+            .get("api_key_env")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Some((active, provider, api_key_env))
+    }
+
+    /// 按「生效归属」写入密钥：
+    /// - active 档案的 provider 与传入 provider 相符 → 写该档案的分槽（多 provider 并存）；
+    /// - 否则 → 写全局槽 + 归属标记（受标记约束，不会跨 provider 泄漏）。
+    pub fn write_env_key_for_active(provider: &str, key: &str) -> Option<PathBuf> {
+        if key.is_empty() {
+            return None;
+        }
+        if let Some((id, active_provider, _)) = Self::active_profile_identity() {
+            if active_provider.eq_ignore_ascii_case(provider.trim()) {
+                return Self::write_env_key_slot(&id, key);
+            }
+        }
+        Self::write_env_key_for(provider, key)
     }
 }
 
@@ -926,6 +1191,7 @@ mod tests {
             args: vec!["-x".to_string()],
             env: std::collections::HashMap::new(),
             url: None,
+            enabled: true,
         };
         let yaml = serde_yaml::to_string(&server).unwrap();
         let back: McpServerConfig = serde_yaml::from_str(&yaml).unwrap();

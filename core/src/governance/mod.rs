@@ -5,12 +5,21 @@
 //!
 //! 设计原则：纯逻辑、零外部依赖、可离线裁决；宪法与决策台账均可独立单元测试。
 
+pub mod brief;
 pub mod completion_gate;
 pub mod constitution;
+pub mod decompose;
 pub mod decisions;
 pub mod review;
 pub mod verifier;
+pub mod wish;
 
+pub use brief::{
+    BriefGap, BriefReport, HardConstraint, HardConstraintChecker, HardConstraintKind,
+    HardConstraintViolation, RequirementBrief,
+};
+pub use decompose::{decompose, Difficulty, RiskLevel, TaskDag, TaskNode, MVP_SLICE_THRESHOLD};
+pub use wish::{TaskKind, WishDraft, WishParser};
 pub use completion_gate::{
     BlockReason, CompletionClaim, CompletionGate, CompletionVerdict, Criterion, ShellRunner,
     VerificationCtx, VerificationOutcome, VerificationStatus, VerificationSummary,

@@ -16,6 +16,7 @@ import type {
 import type { ProjectWorkspaceItem } from '@/types/rpc'
 import { normalizeTurnOutcome, turnOutcomePresentation } from '@/utils/chat/turnOutcome'
 import { normalizeRunStatus as normalizeRunStatusValue } from '@/utils/chat/runStatus'
+import { isSideChatSessionKey } from '@/utils/chat/sessionKeys'
 import type { SessionTaskAttention } from '@/composables/useSessionTaskAttention'
 
 export const SESSION_LIST_VIEW = 'session-list-v1'
@@ -53,6 +54,8 @@ export interface SessionItem {
   workspaceId?: string
   workspaceLabel?: string
   workspaceDisplayPath?: string
+  /** 会话绑定的全部项目目录（P2-9 多根；[0] 与 `workspace` 一致，空/缺省 = 未绑定） */
+  projectPaths?: string[]
   effectiveAgentId: string
   sessionKind: string
   surface: string
@@ -357,6 +360,13 @@ export function normalizeSessionItem(item: unknown): SessionItem | null {
   const reasoningEffortRaw = textValue(raw.reasoningEffort) || textValue(raw.reasoning_effort)
   const reasoningEffort = reasoningEffortRaw ? reasoningEffortRaw : null
   const contextWindow = numberValue(raw.contextWindow) ?? numberValue(raw.context_window)
+  // P2-9 多根：后端 projectPaths 优先（去重保序）；缺省回退单值 workspace
+  const projectPaths = Array.from(new Set(
+    (Array.isArray(raw.projectPaths) ? raw.projectPaths : [])
+      .map(v => textValue(v))
+      .filter(Boolean),
+  ))
+  if (projectPaths.length === 0 && workspace) projectPaths.push(workspace)
 
   return {
     key,
@@ -367,6 +377,7 @@ export function normalizeSessionItem(item: unknown): SessionItem | null {
     workspaceId: workspaceId || undefined,
     workspaceLabel: workspaceLabel || undefined,
     workspaceDisplayPath: workspaceDisplayPath || undefined,
+    projectPaths: projectPaths.length > 0 ? projectPaths : undefined,
     effectiveAgentId,
     sessionKind,
     surface,
@@ -806,7 +817,7 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
   const allSessions = computed((): SessionItem[] =>
     sessionsList.value
       .map(normalizeSessionItem)
-      .filter((item): item is SessionItem => !!item)
+      .filter((item): item is SessionItem => !!item && !isSideChatSessionKey(item.key))
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
   )
 

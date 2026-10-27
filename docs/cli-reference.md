@@ -281,9 +281,18 @@ marguerite chat --json "一句话解释 tokio runtime" | jq .data.response  # JS
 - 依赖本机 Chromium/Chrome 可执行文件；未检测到时提示 `browser_bridge 不可用` 并退出。
 - 接口：`core/src/browser/mod.rs`（`BrowserBridge`）。
 
-### 4.12 `sandbox` — 沙箱命令执行
+### 4.12 `sandbox` — 沙箱命令执行与终端诊断
 
-`marguerite sandbox -- <命令>`：在受限沙箱中执行命令（L1 命令护栏 + 执行超时保护），输出经治理门核验后返回。与 `exec` 的区别：`sandbox` 走更严格的隔离与权限边界（`sec.guardrail` 分层安全 L3），适合运行不可信或高权限操作。
+```
+marguerite sandbox exec -- <命令...>   在受限沙箱中执行（L1 命令护栏 + 分层安全 L3 + JSONL 审计）
+marguerite sandbox workspace           显示沙箱工作区、资源限制与默认 shell
+marguerite sandbox shells              列出本机可用 shell（pwsh / powershell / cmd / git-bash / wsl…）
+marguerite sandbox terminal            真实探测 PTY 是否可用（起一个会话再终止）
+```
+
+`exec` 与 `sandbox exec` 都经统一门控执行；后者走更严格的隔离与权限边界（`sec.guardrail` 分层安全 L3），适合运行不可信或高权限操作。
+
+`shells` / `terminal` 是交互式终端的可发现性入口：WebUI 沙箱终端与 `sandbox.terminal.*` RPC 共用同一套 shell 发现与 PTY 实现（`core/src/terminal/shells.rs` + `core/src/terminal/pty.rs`）。默认 shell 优先级为 pwsh → Windows PowerShell → cmd → Git Bash → WSL；可用 `MARGUERITE_TERMINAL_SHELL=<id>` 覆盖。
 
 ---
 

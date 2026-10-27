@@ -9,12 +9,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+pub mod adaptation;
 pub mod di;
 pub mod manifest;
+pub mod mcp_launch;
 pub mod patch;
 pub mod slot;
 
 pub use manifest::{Activation, ManifestDiagnostic, Permission};
+pub use mcp_launch::McpLaunchSpec;
 pub use patch::{PatchDiagnostic, PatchLayer, PatchOp, PatchReport, PatchSummary};
 pub use slot::{PluginSlot, SlotDescriptor, SlotExecutor, SlotKind, SlotResult};
 

@@ -1,5 +1,6 @@
 import { computed, type ComputedRef, type Ref } from 'vue'
 import i18n from '@/i18n'
+import { cacheHitRate } from '@/composables/usage/useUsageTotals'
 import type { SessionRow, SortedRow } from '@/types/usage'
 
 const t = i18n.global.t
@@ -34,6 +35,8 @@ export function useUsageSessionRows(options: {
       const modified = timestamp != null ? options.relTime(timestamp) : '-'
       const bd = row.modelBreakdown
       const hasModelBreakdown = !!(bd && bd.length > 1)
+      const inputTokens = options.numericRowVal(row, 'input_tokens', 'inputTokens')
+      const cacheReadTokens = options.numericRowVal(row, 'cache_read_tokens', 'cacheReadTokens')
 
       return {
         raw: row,
@@ -41,9 +44,11 @@ export function useUsageSessionRows(options: {
         sessionLabel,
         rowIdentity: sessionKey || sessionLabel,
         modified,
-        inputTokens: options.numericRowVal(row, 'input_tokens', 'inputTokens'),
+        inputTokens,
         outputTokens: options.numericRowVal(row, 'output_tokens', 'outputTokens'),
-        cacheReadTokens: options.numericRowVal(row, 'cache_read_tokens', 'cacheReadTokens'),
+        cacheReadTokens,
+        // 口径：cache_read / (prompt_tokens + cache_read)，与汇总区同源同公式。
+        cacheHitRate: cacheHitRate(inputTokens ?? 0, cacheReadTokens ?? 0),
         cacheWriteTokens: options.numericRowVal(row, 'cache_write_tokens', 'cacheWriteTokens'),
         cost: cost != null ? Number(cost) : null,
         hasModelBreakdown,

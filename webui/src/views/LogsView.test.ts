@@ -212,6 +212,30 @@ describe('LogsView states', () => {
     expect(el.textContent).toContain('No logs have been recorded yet.')
   })
 
+  it('classifies raw log lines by level position, not by substring noise', async () => {
+    rpcMocks.call.mockImplementation(async (method: string) => {
+      if (method === 'logs.status') return normalStatus()
+      if (method === 'logs.tail') {
+        return {
+          lines: [
+            '2026-10-22 19:19:26,249 [INFO] opensquilla.skills.loader: skill_catalog.refreshed errors=0',
+            '2026-10-22 19:19:33,945 [ERROR] opensquilla.gateway.websocket: handshake failed',
+          ],
+          cursor: 2,
+        }
+      }
+      throw new Error(`unexpected RPC method: ${method}`)
+    })
+    const { el } = await mountLogs()
+
+    // 真机缺陷回归：`errors=0` 这种结构化字段曾被全文搜索判成 ERROR。
+    expect(errorChipCount(el)).toBe('1')
+    const rows = lineRows(el)
+    expect(rows).toHaveLength(2)
+    expect(rows[0].querySelector('.lg-line__lvl')?.textContent).toBe('INFO')
+    expect(rows[1].querySelector('.lg-line__lvl')?.textContent).toBe('ERROR')
+  })
+
   it('distinguishes loading from a successful empty response', async () => {
     let resolveTail!: (value: { lines: []; cursor: number }) => void
     rpcMocks.call.mockImplementation((method: string) => {

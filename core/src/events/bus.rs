@@ -12,7 +12,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::events::envelope::Envelope;
-use tracing::debug;
+use tracing::warn;
 
 /// 回放缓冲默认上限
 pub const DEFAULT_HISTORY_CAPACITY: usize = 2000;
@@ -89,12 +89,33 @@ impl EventBus {
             }
         }
 
-        // 3) 分发（订阅者已断开或缓冲满则忽略发送失败；满时计入丢弃计数）
+        // 3) 分发（缓冲满则丢弃并计数；已断开的订阅者顺手摘除）
+        //
+        // 为什么区分 Full / Closed：原实现把两种失败都计入「丢弃」，而断连的僵尸 sender
+        // 又从不摘除 —— 重连次数越多，`subs` 越长、每次 publish 的扇出成本越高，
+        // 丢弃计数也被污染，真正的「慢消费者丢帧」反而查不出来（真机 2026-10-24 排查受此拖累）。
+        let mut closed = 0usize;
         for tx in targets {
-            if tx.try_send(env.clone()).is_err() {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                debug!(route = route, "事件订阅者缓冲已满，丢弃事件（慢消费者）");
+            match tx.try_send(env.clone()) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        route = route,
+                        "事件订阅者缓冲已满，丢弃事件（慢消费者）—— 客户端可能丢失终态帧"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    closed += 1;
+                }
             }
+        }
+        if closed > 0 {
+            let mut subs = self.subs.lock().unwrap_or_else(|e| e.into_inner());
+            subs.retain(|_, senders| {
+                senders.retain(|tx| !tx.is_closed());
+                !senders.is_empty()
+            });
         }
     }
 
@@ -112,6 +133,18 @@ impl EventBus {
             .filter(|(_, ti)| **ti >= since)
             .map(|(e, _)| e.clone())
             .collect()
+    }
+
+    /// 缓冲里保留的全部事件（最旧在前，最多 `capacity` 条）。
+    ///
+    /// 为什么需要它：`history(since)` 的时间基准是 `std::time::Instant`，在 Windows 上
+    /// 锚点取自开机计时 —— `Instant::now() - 24h` 在开机不足 24h 时直接**下溢**，
+    /// 调用方若把 `None` 回退成 `now`，过滤结果就是空集（真机 2026-10-24 实测：
+    /// 编排对账恒返回空 `runs`，卡片永远收敛不了）。需要「整个缓冲」时用这里，
+    /// 再按 `Envelope::ts`（墙钟）过滤，就不会被开机时长截断。
+    pub fn history_all(&self) -> Vec<Envelope> {
+        let h = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        h.iter().cloned().collect()
     }
 
     /// 主题通配匹配
@@ -219,6 +252,26 @@ mod tests {
         let got = rx.try_recv().expect("应收到事件");
         assert_eq!(got.session, "core");
         assert_eq!(got.r#type, EventType::Status);
+    }
+
+    /// 断连订阅者：不计入「慢消费者丢帧」，且会被从订阅表摘除（防僵尸 sender 累积）。
+    #[test]
+    fn test_closed_subscriber_pruned_without_counting_as_drop() {
+        let bus = EventBus::default();
+        let rx = bus.subscribe("**");
+        drop(rx);
+        bus.publish(env("s", EventType::Progress));
+        assert_eq!(bus.dropped_events(), 0, "断连订阅者不得计为慢消费者丢帧");
+        let sender_count: usize = bus
+            .subs
+            .lock()
+            .unwrap()
+            .values()
+            .map(|senders| senders.len())
+            .sum();
+        assert_eq!(sender_count, 0, "已断开的 sender 必须被摘除");
+        bus.publish(env("s", EventType::Progress));
+        assert_eq!(bus.dropped_events(), 0);
     }
 
     #[test]

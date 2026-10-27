@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::tui::workbench::slot::{Slot, SlotId};
 use crate::tui::workbench::state::{DeployKind, RailTab, WorkbenchState};
-use crate::tui::workbench::theme::{StatusDot, Theme};
+use crate::tui::workbench::theme::{truncate, StatusDot, Theme};
 
 /// 右栏渲染器
 pub struct RailPanel;
@@ -28,6 +28,7 @@ pub fn render_rail(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
     render_tabbar(frame, v[0], state);
     match state.rail_tab {
         RailTab::Agent => render_agent(frame, v[1], state),
+        RailTab::Models => render_models(frame, v[1], state),
         RailTab::Tools => render_tools(frame, v[1], state),
         RailTab::Context => render_context(frame, v[1], state),
         RailTab::Memory => render_memory(frame, v[1], state),
@@ -40,18 +41,18 @@ pub fn render_rail(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
 fn render_tabbar(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
     use ratatui::layout::Alignment;
     let t = Theme::effective();
-    // 右栏仅 34 宽：7 个 tab 用 2 字符缩写 + `│` 分隔（共 20 列），确保全部可见。
-    // 激活项以 brand 色加粗区分；完整面板名见各面板内容头。
-    // 缩写: Ag=Agent Tl=Tools Cx=Context Mm=Memory Tk=Tasks Dp=Deploy Co=Collab
-    let labels = ["Ag", "Tl", "Cx", "Mm", "Tk", "Dp", "Co"];
+    // 右栏保持紧凑：模型面板使用 Md，其余 tab 使用 2 字符缩写。
+    // 缩写: Ag=Agent Md=Models Tl=Tools Cx=Context Mm=Memory Tk=Tasks Dp=Deploy Co=Collab
+    let labels = ["Ag", "Md", "Tl", "Cx", "Mm", "Tk", "Dp", "Co"];
     let idx = match state.rail_tab {
         RailTab::Agent => 0,
-        RailTab::Tools => 1,
-        RailTab::Context => 2,
-        RailTab::Memory => 3,
-        RailTab::Tasks => 4,
-        RailTab::Deploy => 5,
-        RailTab::Collab => 6,
+        RailTab::Models => 1,
+        RailTab::Tools => 2,
+        RailTab::Context => 3,
+        RailTab::Memory => 4,
+        RailTab::Tasks => 5,
+        RailTab::Deploy => 6,
+        RailTab::Collab => 7,
     };
     let mut spans: Vec<Span> = Vec::with_capacity(labels.len() * 2);
     for (i, lab) in labels.iter().enumerate() {
@@ -112,6 +113,78 @@ fn render_agent(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
             Span::styled(format!("{p}%"), Style::default().fg(t.brand_light)),
         ]));
     }
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn render_models(frame: &mut Frame, area: Rect, state: &WorkbenchState) {
+    let t = Theme::effective();
+    let panel = &state.model_panel;
+    let mut lines = vec![Line::from(vec![
+        Span::styled("模型档案 ", Style::default().fg(t.brand).bold()),
+        Span::styled(
+            format!("{} 个", panel.items.len()),
+            Style::default().fg(t.text_secondary),
+        ),
+    ])];
+
+    if let Some(err) = &panel.error {
+        // 错误态与空态必须分开：读取失败时显示"暂无档案"会把用户引向错误操作。
+        lines.push(Line::from(Span::styled(
+            "读取失败",
+            Style::default().fg(t.danger).bold(),
+        )));
+        for ln in err.lines().take(3) {
+            lines.push(Line::from(Span::styled(
+                ln.to_string(),
+                Style::default().fg(t.danger),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "Ctrl+M 重试",
+            Style::default().fg(t.text_muted),
+        )));
+    } else if panel.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "暂无档案：/model add 新增，或到设置页配置服务商",
+            Style::default().fg(t.text_muted),
+        )));
+    } else {
+        for (index, item) in panel.items.iter().enumerate() {
+            let is_active = item.id == panel.active_id;
+            let is_cursor = index == panel.cursor;
+            // 标记语义：● 当前激活 + 光标，◆ 当前激活，▶ 光标，○ 普通
+            let marker = match (is_cursor, is_active) {
+                (true, true) => "●",
+                (true, false) => "▶",
+                (false, true) => "◆",
+                (false, false) => "○",
+            };
+            let base = if is_active {
+                Style::default().fg(t.brand).bold()
+            } else {
+                Style::default().fg(t.text_primary)
+            };
+            let style = if is_cursor { base.bg(t.panel) } else { base };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} "), style),
+                Span::styled(truncate(&item.label, 18), style),
+                Span::styled(
+                    format!(
+                        " {}{}",
+                        if is_active { "当前 " } else { "" },
+                        if item.key_ready { "" } else { "缺密钥" }
+                    ),
+                    Style::default().fg(if item.key_ready { t.success } else { t.warning }),
+                ),
+            ]));
+            // 第二行放 provider + 接入点：右栏窄，同一行必然被截断成噪声。
+            lines.push(Line::from(Span::styled(
+                format!("   {} · {}", item.provider, item.base_url),
+                Style::default().fg(t.text_muted),
+            )));
+        }
+    }
+
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 

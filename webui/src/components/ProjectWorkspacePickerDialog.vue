@@ -1,7 +1,7 @@
 <template>
   <Teleport to="body">
     <div
-      v-if="open && enabled && phase !== 'closed' && phase !== 'native-picking'"
+      v-if="open && enabled && (multi || (phase !== 'closed' && phase !== 'native-picking'))"
       class="modal-overlay"
       @click="closeDialog"
     >
@@ -10,11 +10,11 @@
         class="modal project-picker"
         role="dialog"
         aria-modal="true"
-        :aria-label="t('workspaces.chooseProject')"
+        :aria-label="dialogTitle"
         @click.stop
       >
         <header class="project-picker__header">
-          <h3>{{ t('workspaces.chooseProject') }}</h3>
+          <h3>{{ dialogTitle }}</h3>
           <button
             class="btn btn--icon btn--ghost"
             :aria-label="t('common.close')"
@@ -24,7 +24,65 @@
           </button>
         </header>
 
-        <template v-if="phase === 'desktop-error'">
+        <template v-if="multi">
+          <p class="project-picker__scope">{{ t('chat.composer.projectRoots.hint') }}</p>
+          <div
+            class="project-picker__entries project-picker__roots"
+            role="group"
+            :aria-label="dialogTitle"
+          >
+            <button
+              v-for="workspace in workspaces"
+              :key="workspace.id"
+              type="button"
+              class="project-picker__root"
+              :class="{
+                'is-selected': isRootSelected(workspace.id),
+                'is-primary': workspace.id === primaryId,
+              }"
+              :disabled="workspace.id === primaryId"
+              :aria-pressed="workspace.id === primaryId || isRootSelected(workspace.id) ? 'true' : 'false'"
+              :title="workspace.path"
+              @click="toggleRoot(workspace.id)"
+            >
+              <span class="project-picker__root-mark" aria-hidden="true">
+                <Icon
+                  :name="workspace.id === primaryId || isRootSelected(workspace.id) ? 'check' : 'plus'"
+                  :size="14"
+                />
+              </span>
+              <span class="project-picker__root-copy">
+                <span class="project-picker__root-name">{{ workspace.name }}</span>
+                <span class="project-picker__root-path">{{ workspace.path }}</span>
+              </span>
+              <span
+                v-if="workspace.id === primaryId"
+                class="project-picker__root-badge"
+              >{{ t('chat.composer.projectRoots.primary') }}</span>
+              <span
+                v-else-if="!workspace.available"
+                class="project-picker__root-badge project-picker__root-badge--warn"
+              >{{ t('workspaces.unavailable') }}</span>
+            </button>
+            <p v-if="workspaces.length === 0" class="project-picker__scope">
+              {{ t('chat.composer.projectRoots.empty') }}
+            </p>
+          </div>
+          <footer class="project-picker__footer">
+            <button class="btn btn--ghost" @click="closeDialog">
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              class="btn btn--primary project-picker__choose"
+              @click="applySelection"
+            >
+              <Icon name="check" :size="15" />
+              {{ t('chat.composer.projectRoots.apply') }}
+            </button>
+          </footer>
+        </template>
+
+        <template v-else-if="phase === 'desktop-error'">
           <p class="project-picker__error" role="alert">{{ error }}</p>
           <footer class="project-picker__footer">
             <button class="btn btn--ghost" @click="closeDialog">
@@ -32,6 +90,96 @@
             </button>
             <button class="btn btn--primary" @click="retryNativePicker">
               {{ t('workspaces.retryDirectoryPicker') }}
+            </button>
+          </footer>
+        </template>
+
+        <template v-else-if="phase === 'recent-loading'">
+          <p class="project-picker__scope" role="status">{{ t('workspaces.recentLoading') }}</p>
+          <footer class="project-picker__footer">
+            <button class="btn btn--ghost" @click="closeDialog">
+              {{ t('common.cancel') }}
+            </button>
+            <!-- 列表 RPC 挂起时仍要有出口：直接去选目录，而不是只能关窗。 -->
+            <button
+              class="btn btn--ghost project-picker__action"
+              :disabled="systemPickerBusy"
+              @click="browseFoldersWhileLoading"
+            >
+              <Icon name="folder" :size="14" />
+              {{ t('workspaces.browseFolders') }}
+            </button>
+          </footer>
+        </template>
+
+        <template v-else-if="phase === 'recent-ready'">
+          <p class="project-picker__scope">{{ t('workspaces.recentTitle') }}</p>
+          <div
+            ref="recentListRef"
+            class="project-picker__entries project-picker__roots"
+            role="listbox"
+            tabindex="0"
+            :aria-label="t('workspaces.recentTitle')"
+            @keydown.enter.prevent="chooseRecent()"
+          >
+            <button
+              v-for="workspace in recentWorkspaces"
+              :key="workspace.id"
+              type="button"
+              role="option"
+              class="project-picker__root"
+              :class="{ 'is-selected': workspace.path === recentSelectedPath }"
+              :aria-selected="workspace.path === recentSelectedPath"
+              :title="workspace.path"
+              @click="selectRecent(workspace.path)"
+              @dblclick="chooseRecent(workspace.path)"
+              @keydown.enter.prevent.stop="chooseRecent(workspace.path)"
+              @keydown.space.prevent.stop="selectRecent(workspace.path)"
+            >
+              <span class="project-picker__root-mark" aria-hidden="true">
+                <Icon
+                  :name="workspace.path === recentSelectedPath ? 'check' : 'folder'"
+                  :size="14"
+                />
+              </span>
+              <span class="project-picker__root-copy">
+                <span class="project-picker__root-name">{{ workspace.name }}</span>
+                <span class="project-picker__root-path">{{ workspace.path }}</span>
+              </span>
+              <span
+                v-if="workspace.pinned"
+                class="project-picker__root-badge"
+                :title="t('workspaces.pin')"
+                :aria-label="t('workspaces.pin')"
+              >
+                <Icon name="skills" :size="11" />
+              </span>
+              <span
+                v-else-if="!workspace.available"
+                class="project-picker__root-badge project-picker__root-badge--warn"
+              >{{ t('workspaces.unavailable') }}</span>
+            </button>
+          </div>
+          <p v-if="error" class="project-picker__error" role="alert">{{ error }}</p>
+          <footer class="project-picker__footer">
+            <button class="btn btn--ghost" @click="closeDialog">
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              class="btn btn--ghost project-picker__action"
+              :disabled="systemPickerBusy"
+              @click="browseFolders"
+            >
+              <Icon name="folder" :size="14" />
+              {{ t('workspaces.browseFolders') }}
+            </button>
+            <button
+              class="btn btn--primary project-picker__choose"
+              :disabled="!recentSelectedPath"
+              @click="chooseRecent()"
+            >
+              <Icon name="check" :size="15" />
+              {{ t('workspaces.chooseSelectedDirectory') }}
             </button>
           </footer>
         </template>
@@ -140,6 +288,15 @@
             <button class="btn btn--ghost" @click="closeDialog">
               {{ t('common.cancel') }}
             </button>
+            <!-- 最近列表读取失败后回落到浏览器：保留一条回到最近列表的重试入口。 -->
+            <button
+              v-if="recentFailed && !startInBrowser"
+              class="btn btn--ghost project-picker__action"
+              @click="retryRecentList"
+            >
+              <Icon name="refresh" :size="14" />
+              {{ t('workspaces.retryRecentList') }}
+            </button>
             <button
               class="btn btn--primary project-picker__choose"
               :disabled="!canChoose"
@@ -156,38 +313,69 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useDialogA11y } from '@/composables/useDialogA11y'
+import {
+  normalizeWorkspace,
+  sortWorkspacesByRecent,
+  type NormalizedProjectWorkspace,
+} from '@/composables/useProjectWorkspaces'
 import { getPlatform } from '@/platform'
 import { useRpcStore } from '@/stores/rpc'
-import type { SandboxPathEntry, SandboxPathListResponse } from '@/types/rpc'
+import type {
+  ProjectWorkspaceItem,
+  ProjectWorkspacesResponse,
+  SandboxPathEntry,
+  SandboxPathListResponse,
+} from '@/types/rpc'
 
 type PickerPhase =
   | 'closed'
   | 'native-picking'
   | 'desktop-error'
+  | 'recent-loading'
+  | 'recent-ready'
   | 'web-loading'
   | 'web-ready'
   | 'web-error'
 
 const props = withDefaults(defineProps<{
   open: boolean
-  sessionKey: string
+  sessionKey?: string
   initialPath?: string
   enabled?: boolean
+  /** 多选模式：列出已注册项目供勾选（不浏览文件系统）。 */
+  multi?: boolean
+  /** 多选模式下的已选附加项目 id（主根由 `primaryId` 单独给出）。 */
+  selectedIds?: string[]
+  /** 多选模式下的主项目 id：置灰且不可取消。 */
+  primaryId?: string
+  /** 多选模式的项目清单（来自 `workspaces.list`）。 */
+  workspaces?: ProjectWorkspaceItem[]
+  /** 创建项目时传 true：直接进入目录浏览器，不展示「最近打开」（旧目录不是新项目源）。 */
+  startInBrowser?: boolean
 }>(), {
   enabled: true,
+  sessionKey: '',
+  multi: false,
+  selectedIds: () => [],
+  primaryId: '',
+  workspaces: () => [],
+  startInBrowser: false,
 })
 const emit = defineEmits<{
   close: []
   choose: [path: string]
+  /** 多选模式确认：完整的附加项目 id 集合（不含主根）。 */
+  apply: [ids: string[]]
 }>()
 const { t } = useI18n()
 const rpc = useRpcStore()
 const dialogRef = ref<HTMLElement | null>(null)
 const pathInputRef = ref<HTMLInputElement | null>(null)
+const recentListRef = ref<HTMLDivElement | null>(null)
 const newDirectoryInputRef = ref<HTMLInputElement | null>(null)
 const phase = ref<PickerPhase>('closed')
 const currentDirectory = ref('')
@@ -201,10 +389,22 @@ const creatingDirectoryBusy = ref(false)
 const systemPickerBusy = ref(false)
 const systemPickerAvailable = ref(false)
 const newDirectoryName = ref('')
+const multiSelection = ref<string[]>([])
+const recentWorkspaces = ref<NormalizedProjectWorkspace[]>([])
+const recentSelectedPath = ref('')
+const recentFailed = ref(false)
 let openEpoch = 0
 let browseSequence = 0
 
+const dialogTitle = computed(() => (
+  props.multi ? t('chat.composer.projectRoots.dialogTitle') : t('workspaces.chooseProject')
+))
+
 const webLoading = computed(() => phase.value === 'web-loading')
+// 帮助函数：避免 TS 在 `await` 之后仍把 `phase.value` 收窄成赋值时的字面量。
+function phaseIs(value: PickerPhase): boolean {
+  return phase.value === value
+}
 const directories = computed(() =>
   entries.value.filter(entry => entry.kind === 'directory' && entry.selectable),
 )
@@ -274,6 +474,110 @@ async function browse(target?: string, epoch = openEpoch) {
 
 function selectDirectory(path: string) {
   selectedDirectory.value = path
+}
+
+function selectRecent(path: string) {
+  recentSelectedPath.value = path
+}
+
+/** 确认最近工作区：回车/双击/主按钮都走这一条出口。 */
+function chooseRecent(path = recentSelectedPath.value) {
+  if (!props.enabled) return
+  const selected = path.trim()
+  if (!selected) return
+  const row = recentWorkspaces.value.find(item => item.path === selected)
+  // 目录已被删除的工作区不能确认：`workspaces.open` 会失败，静默关窗只会让人
+  // 以为打开成功。就地给出原因，把选择留在弹窗里。
+  if (row && row.available === false) {
+    recentSelectedPath.value = selected
+    error.value = t('workspaces.unavailableRecentSelection', { name: row.name })
+    return
+  }
+  invalidateAndClose()
+  emit('choose', selected)
+}
+
+/**
+ * 打开即加载「最近打开」。列表非空 → 默认选中第一条 **可用** 的（最近打开的），
+ * 不再弹原生目录选择器；只有首次使用（列表为空）才自动弹一次。
+ */
+async function loadRecent(epoch: number) {
+  if (!props.open || !props.enabled || epoch !== openEpoch) return
+  phase.value = 'recent-loading'
+  error.value = ''
+  recentFailed.value = false
+  try {
+    const response = await rpc.call<ProjectWorkspacesResponse>('workspaces.list')
+    // 用户可能已经转去原生选择器/目录浏览器：迟到的列表结果不得抢回界面。
+    if (epoch !== openEpoch || !props.open || phase.value !== 'recent-loading') return
+    const rows = Array.isArray(response?.workspaces) ? response.workspaces : []
+    recentWorkspaces.value = sortWorkspacesByRecent(
+      rows
+        .map(normalizeWorkspace)
+        .filter((item): item is NormalizedProjectWorkspace => item !== null),
+    ).slice(0, 50)
+    recentSelectedPath.value = recentWorkspaces.value.find(item => item.available)?.path || ''
+    if (recentWorkspaces.value.length === 0) {
+      // 首次使用：保留一次自动原生选择器（无原生能力时 runNativePicker 回退到网页浏览器）。
+      await runNativePicker(epoch)
+      return
+    }
+    phase.value = 'recent-ready'
+    await nextTick()
+    if (epoch === openEpoch && props.open) recentListRef.value?.focus()
+  } catch (cause) {
+    if (epoch !== openEpoch || !props.open || phase.value !== 'recent-loading') return
+    // 列表读不到时退到既有的目录浏览器：不把「读取失败」伪装成「首次使用」去弹原生选择器。
+    const message = errorMessage(cause)
+    recentFailed.value = true
+    await browse(props.initialPath?.trim() || undefined, epoch)
+    if (epoch === openEpoch && props.open && phaseIs('web-ready')) error.value = message
+  }
+}
+
+function retryRecentList() {
+  if (!props.open || !props.enabled) return
+  void loadRecent(openEpoch)
+}
+
+/** 列表还在加载时用户想去选目录：放弃这次列表请求，走既有的原生/浏览器兜底。 */
+function browseFoldersWhileLoading() {
+  if (!props.open || !props.enabled || systemPickerBusy.value) return
+  const epoch = openEpoch
+  systemPickerBusy.value = true
+  void runNativePicker(epoch).finally(() => {
+    if (epoch === openEpoch) systemPickerBusy.value = false
+  })
+}
+
+function browseFolders() {
+  if (!props.open || !props.enabled || systemPickerBusy.value) return
+  const epoch = openEpoch
+  systemPickerBusy.value = true
+  void runNativePicker(epoch, {
+    keepOpenOnCancel: true,
+    initialPath: recentSelectedPath.value || undefined,
+  }).finally(() => {
+    if (epoch === openEpoch) systemPickerBusy.value = false
+  })
+}
+
+/** 主项目永远不可取消；其余项目点击切换勾选。 */
+function isRootSelected(id: string): boolean {
+  return multiSelection.value.includes(id)
+}
+
+function toggleRoot(id: string) {
+  if (!id || id === props.primaryId) return
+  multiSelection.value = isRootSelected(id)
+    ? multiSelection.value.filter(candidate => candidate !== id)
+    : [...multiSelection.value, id]
+}
+
+function applySelection() {
+  if (!props.enabled) return
+  invalidateAndClose()
+  emit('apply', multiSelection.value.filter(id => id !== props.primaryId))
 }
 
 async function beginCreateDirectory() {
@@ -370,28 +674,35 @@ async function openSystemPicker() {
   }
 }
 
-async function runNativePicker(epoch: number) {
+async function runNativePicker(
+  epoch: number,
+  options: { keepOpenOnCancel?: boolean; initialPath?: string } = {},
+) {
   if (!props.enabled) return
+  const initialPath = (options.initialPath ?? props.initialPath ?? '').trim() || undefined
   const nativePicker = getPlatform().files.chooseProjectDirectory
   if (typeof nativePicker !== 'function') {
     await nextTick()
     if (epoch !== openEpoch || !props.open) return
     pathInputRef.value?.focus()
-    await browse(props.initialPath?.trim() || undefined, epoch)
+    await browse(initialPath, epoch)
     return
   }
 
   phase.value = 'native-picking'
   error.value = ''
   try {
-    const choice = await nativePicker({
-      initialPath: props.initialPath?.trim() || undefined,
-    })
+    const choice = await nativePicker({ initialPath })
     if (epoch !== openEpoch || !props.open) return
     if (choice?.path) {
       const selected = choice.path
       invalidateAndClose()
       emit('choose', selected)
+    } else if (options.keepOpenOnCancel) {
+      // 从「浏览文件夹…」进来时取消：回到最近列表，而不是把整个对话框关掉。
+      phase.value = 'recent-ready'
+      await nextTick()
+      if (epoch === openEpoch && props.open) recentListRef.value?.focus()
     } else {
       closeDialog()
     }
@@ -400,7 +711,13 @@ async function runNativePicker(epoch: number) {
     error.value = t('workspaces.directoryPickerFailed', {
       error: errorMessage(cause),
     })
-    phase.value = 'desktop-error'
+    if (options.keepOpenOnCancel) {
+      phase.value = 'recent-ready'
+      await nextTick()
+      if (epoch === openEpoch && props.open) recentListRef.value?.focus()
+    } else {
+      phase.value = 'desktop-error'
+    }
   }
 }
 
@@ -424,6 +741,10 @@ watch(
     systemPickerBusy.value = false
     systemPickerAvailable.value = false
     newDirectoryName.value = ''
+    multiSelection.value = [...(props.selectedIds || [])]
+    recentWorkspaces.value = []
+    recentSelectedPath.value = ''
+    recentFailed.value = false
     if (!open) {
       phase.value = 'closed'
       return
@@ -432,8 +753,18 @@ watch(
       phase.value = 'closed'
       return
     }
+    if (props.multi) {
+      // 多选只是勾选已注册项目，不碰文件系统，也不弹原生目录选择器。
+      phase.value = 'web-ready'
+      return
+    }
     const epoch = openEpoch
-    await runNativePicker(epoch)
+    if (props.startInBrowser) {
+      // 创建项目：「最近打开」里全是旧目录，不能当成新项目源。
+      await browse(props.initialPath?.trim() || undefined, epoch)
+      return
+    }
+    await loadRecent(epoch)
   },
   { immediate: true },
 )
@@ -447,13 +778,20 @@ watch(
   },
 )
 
+// v-if 卸载后迟到的 RPC 响应仍可能触发 runNativePicker（首个版本的 epoch 只在
+// close/reopen 时递增）。卸载时同样作废所有在途请求。
+onScopeDispose(() => {
+  openEpoch += 1
+  browseSequence += 1
+  phase.value = 'closed'
+})
+
 useDialogA11y(
   dialogRef,
   computed(
     () => props.open
       && props.enabled
-      && phase.value !== 'closed'
-      && phase.value !== 'native-picking',
+      && (props.multi || (phase.value !== 'closed' && phase.value !== 'native-picking')),
   ),
   closeDialog,
   { initialFocus: pathInputRef },
@@ -589,6 +927,73 @@ useDialogA11y(
 }
 .project-picker__entry:hover,
 .project-picker__entry.is-selected { background: var(--bg-hover); }
+.project-picker__roots {
+  gap: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.project-picker__root {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.project-picker__root:hover,
+.project-picker__root:focus-visible { background: var(--bg-hover); }
+.project-picker__root:focus-visible { outline: 0; box-shadow: var(--focus-ring); }
+.project-picker__root:disabled { cursor: default; opacity: 0.72; }
+.project-picker__root.is-selected,
+.project-picker__root.is-primary {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.project-picker__root-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.project-picker__root.is-selected .project-picker__root-mark,
+.project-picker__root.is-primary .project-picker__root-mark { color: var(--accent); }
+.project-picker__root-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.project-picker__root-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-picker__root-path {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-picker__root-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+  font-size: var(--fs-xs);
+}
+.project-picker__root-badge--warn {
+  background: color-mix(in srgb, var(--warn, var(--accent)) 20%, transparent);
+}
 .project-picker__error { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
 .project-picker__footer { justify-content: flex-end; }
 .project-picker__choose {

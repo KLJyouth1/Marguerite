@@ -11,7 +11,7 @@
 //!   4. 预压缩快照 + 可回滚（[`ContextLedger::rollback`]），保证可追溯。
 //! - 质量评估：`compression_ratio`（1 - 压缩后/压缩前 token）+ 摘要模式记录。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,16 +70,36 @@ pub struct SessionContext {
     pub snapshot_count: u32,
     /// 会话关联的项目根目录（跨重启持久化；None = 未绑定项目，属「最近」）
     pub project_path: Option<String>,
+    /// 会话关联的全部项目目录（P2-9 多根；首项与 `project_path` 一致）。
+    ///
+    /// `#[serde(default)]` 兼容旧台账 JSON：缺字段 → 空 Vec，读取时回退
+    /// `project_path` 单值（见 [`session_projects`]）。
+    #[serde(default)]
+    pub project_paths: Vec<String>,
     /// 流式生成中的「部分文本」（F1：turn 进行中增量持久化，
     /// 供前端切走再切回时恢复正在生成的消息占位，不丢流式文本）。
     #[serde(default)]
     pub partial_text: Option<String>,
-    /// 非对话文本的 token 开销：工具输出 / 工具 schema / 系统提示等。
+    /// 非对话文本的 token 开销：**工具调用参数 + 工具输出**。
     ///
     /// 此前 `used_tokens()` 只统计 user/assistant 聊天文本，工具密集的长任务会被
     /// 严重低估 → `ratio()` 偏低 → 压缩触发过晚 → 撞上 provider 上下文窗口（HTTP 400）。
     /// 这里**只累计 token 数、不保存原文**，保证落盘有界；`#[serde(default)]` 兼容
     /// 既有磁盘 JSON（缺该字段时反序列化为 0）。
+    ///
+    /// 口径边界（2026-10-24 核实，避免注释再次漂移）：这里的账只有一个来源——
+    /// **工具文本真正进入模型上下文**（工具调用入参 + `Message::Tool.output`）。
+    /// 写入点：
+    /// - `agent::stream_loop`（真流式回路，完整输出）与 `agent::runtime`
+    ///   （非流式回路，完整入参 + 输出）—— 主路径（在 `Message::Tool` 入历史处同步记）；
+    /// - `gateway::chat` 的事件桥与 `plan::runner` 的 `LedgerTap` —— 工具结果**兜底**
+    ///   （引擎侧已按同一 `call_id` 记过则被幂等键跳过）；流式路径的**调用入参**
+    ///   目前由事件桥记一次；
+    /// - `agent::multi_strategy`（多策略工具回路，不发事件，只能自记）。
+    ///
+    /// **工具 schema 与系统提示不计**：它们是每轮恒定的基线，既不随对话增长、
+    /// 也不由本台账的「累计」语义表达；若需要把它们纳入，应作为 `used_tokens()`
+    /// 之外的独立基线项，而不是累加进这里。
     #[serde(default)]
     pub overhead_tokens: u64,
 }
@@ -97,6 +117,7 @@ impl SessionContext {
             compression_ratio: None,
             snapshot_count: 0,
             project_path: None,
+            project_paths: Vec::new(),
             partial_text: None,
             overhead_tokens: 0,
         }
@@ -107,6 +128,23 @@ impl SessionContext {
         if self.project_path.as_deref() != Some(project) {
             self.project_path = Some(project.to_string());
         }
+    }
+
+    /// 绑定会话的全部项目目录（P2-9 多根）：去重保序，首个同步为 `project_path`。
+    /// 空列表视为无操作——不得把已有归属清空。
+    fn set_projects(&mut self, projects: &[String]) {
+        let normalized = normalize_projects(projects);
+        if normalized.is_empty() {
+            return;
+        }
+        self.project_path = normalized.first().cloned();
+        self.project_paths = normalized;
+    }
+
+    /// 读取项目目录集合：`project_paths` 优先（去重保序），空则回退旧字段
+    /// `project_path` 单值；都空 → 空 Vec。
+    fn projects(&self) -> Vec<String> {
+        projects_of(&self.project_paths, self.project_path.as_deref())
     }
 
     /// 当前 token 用量（对话条目 + 非对话开销）
@@ -127,6 +165,39 @@ impl SessionContext {
 pub struct ContextLedger {
     dir: std::path::PathBuf,
     sessions: HashMap<String, SessionContext>,
+    /// 每会话最近记账过的工具文本幂等键（**仅内存**，不落盘）。
+    ///
+    /// 同一工具结果可能被两条路径看到：引擎侧（文本真正写进 `Message::Tool` 时）
+    /// 与网关事件桥（`ToolResult` 事件回流兜底）。谁先记都行，但只能记一次 ——
+    /// 这里按 `call_id`（缺 id 时按「工具名 + 内容 hash」）去重。
+    recent_tool_keys: HashMap<String, RecentToolKeys>,
+}
+
+/// 每会话保留的幂等键上限（超出按 FIFO 淘汰，内存有界）。
+const RECENT_TOOL_KEYS_MAX: usize = 512;
+
+/// 有界的幂等键集合（FIFO 淘汰）。
+#[derive(Default)]
+struct RecentToolKeys {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl RecentToolKeys {
+    fn contains(&self, key: &str) -> bool {
+        self.set.contains(key)
+    }
+
+    fn insert(&mut self, key: String) {
+        if self.set.insert(key.clone()) {
+            self.order.push_back(key);
+            while self.order.len() > RECENT_TOOL_KEYS_MAX {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 impl ContextLedger {
@@ -134,7 +205,11 @@ impl ContextLedger {
         let dir = data_dir.join("context");
         let _ = std::fs::create_dir_all(&dir);
         let sessions = HashMap::new();
-        Self { dir, sessions }
+        Self {
+            dir,
+            sessions,
+            recent_tool_keys: HashMap::new(),
+        }
     }
 
     fn path(&self, session: &str) -> std::path::PathBuf {
@@ -177,9 +252,18 @@ impl ContextLedger {
         loaded
     }
 
+    /// 落盘（原子写，走 `persistence::write_json_atomic`）。
+    ///
+    /// R13（2026-10-18）：此前 `std::fs::write` 直写——该 API 先截断再写。
+    /// 这是**全仓最高频**的台账写入（每轮对话写两次：用户消息 + 助手回复），
+    /// 一旦在写入途中被杀/断电，文件留半截 JSON，而 `load()` 的兜底是
+    /// `SessionContext::new(session)`（**整份归零**）。用户可见后果是：
+    /// 聊了几十轮后某次崩溃重开 → 上下文全丢，`memory_search` / 压缩 / 令牌
+    /// 计量同时失去依据，且界面看不出「曾经有过历史」。
+    /// 改原子写后，读者要么看到旧完整内容、要么看到新完整内容。
     fn persist(&self, ctx: &SessionContext) {
         if let Ok(raw) = serde_json::to_string_pretty(ctx) {
-            let _ = std::fs::write(self.path(&ctx.session), raw);
+            let _ = crate::persistence::write_json_atomic(&self.path(&ctx.session), &raw);
         }
     }
 
@@ -215,9 +299,55 @@ impl ContextLedger {
         ratio
     }
 
+    /// 带幂等键的工具文本记账。
+    ///
+    /// - `dedupe = true`（事件桥兜底）：键已记过 → 直接返回当前占比，不再累加；
+    /// - `dedupe = false`（引擎侧主路径）：**必定**累加（同一工具产生相同文本的
+    ///   多次真实调用各算一次），但同样登记键 —— 引擎在发送 `ToolResult` 事件
+    ///   **之前**调用，故桥上后到的同一条结果一定能看到键并跳过。
+    fn record_tool_overhead_keyed(
+        &mut self,
+        session: &str,
+        key: Option<String>,
+        tokens: u64,
+        dedupe: bool,
+    ) -> f64 {
+        if let Some(k) = key {
+            let already = {
+                let seen = self
+                    .recent_tool_keys
+                    .entry(session.to_string())
+                    .or_default();
+                if dedupe && seen.contains(&k) {
+                    true
+                } else {
+                    seen.insert(k);
+                    false
+                }
+            };
+            if already {
+                return self.load(session).ratio();
+            }
+        }
+        self.record_overhead(session, tokens)
+    }
+
     /// 读取会话状态
     fn status(&mut self, session: &str) -> SessionContext {
         self.load(session)
+    }
+
+    /// 写入会话的全部项目目录（P2-9；原子落盘，语义同 [`Self::persist`]）。
+    fn set_projects(&mut self, session: &str, projects: &[String]) {
+        let mut ctx = self.load(session);
+        ctx.set_projects(projects);
+        self.persist(&ctx);
+        self.sessions.insert(session.to_string(), ctx);
+    }
+
+    /// 读取会话的项目目录集合（多值优先，旧单值字段回退）。
+    fn projects(&mut self, session: &str) -> Vec<String> {
+        self.status(session).projects()
     }
 
     /// 列出目录下的快照文件，按**修改时间**升序（最旧在前）。
@@ -452,6 +582,7 @@ fn llm_config() -> Option<LLMConfig> {
         timeout_secs: 30,
         thinking: crate::model::thinking::ThinkingEffort::Off,
         context_window: crate::model::thinking::CONTEXT_WINDOW_DEFAULT,
+        wire_api: m.wire_api,
     })
 }
 
@@ -726,6 +857,127 @@ pub fn record_tool_output(session: &str, tool: &str, output: &str) -> f64 {
     record_overhead(session, tokens)
 }
 
+/// 工具文本的幂等键（引擎侧与事件桥按同一键去重）。
+///
+/// `call_id` 优先：两边拿到的是同一个模型调用 id，与文本序列化格式无关；
+/// 缺 id 时（部分本地模型的 `tool_calls` 不带 id）退化为「工具名 + 内容 hash」。
+fn tool_record_key(call_id: Option<&str>, slot: &str, tool: &str, text: &str) -> String {
+    match call_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("{slot}:id:{id}"),
+        None => format!(
+            "{slot}:txt:{tool}:{:016x}",
+            SummaryCache::content_hash(text)
+        ),
+    }
+}
+
+/// 引擎侧：工具输出**真正写入模型上下文**（`Message::Tool.output`）时调用。
+///
+/// 与 [`record_tool_output`] 的区别是带 `call_id` 幂等键：**必定**累加本次文本
+/// （同一工具产生相同文本的多次真实调用各算一次），同时登记键，使随后到达的
+/// 网关 `ToolResult` 事件（见 [`record_tool_output_event_fallback`]）不会重复计数。
+pub fn record_tool_output_at_context(
+    session: &str,
+    call_id: Option<&str>,
+    tool: &str,
+    output: &str,
+) -> f64 {
+    if output.trim().is_empty() {
+        return ledger()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status(session)
+            .ratio();
+    }
+    let tokens = estimate_tokens(output);
+    let key = tool_record_key(call_id, "out", tool, output);
+    tracing::debug!(
+        session = %session, tool = %tool, tokens, call_id = ?call_id,
+        "工具输出进入模型上下文，计入台账"
+    );
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_tool_overhead_keyed(session, Some(key), tokens, false)
+}
+
+/// 引擎侧：工具**入参**进入模型上下文（与输出共用同一套幂等键，slot=`in`）。
+///
+/// 与 [`record_tool_output_at_context`] 的区别只在幂等槽位：入参与输出是同一
+/// `call_id` 的两段不同文本，必须分别登记，否则「入参已记 → 输出被误跳过」。
+pub fn record_tool_input_at_context(
+    session: &str,
+    call_id: Option<&str>,
+    tool: &str,
+    input: &str,
+) -> f64 {
+    if input.trim().is_empty() {
+        return ledger()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status(session)
+            .ratio();
+    }
+    let tokens = estimate_tokens(input);
+    let key = tool_record_key(call_id, "in", tool, input);
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_tool_overhead_keyed(session, Some(key), tokens, false)
+}
+
+/// 事件桥：同一条**入参**事件若引擎侧已记过 → 跳过（与输出同一套去重语义）。
+pub fn record_tool_input_event_fallback(
+    session: &str,
+    call_id: Option<&str>,
+    tool: &str,
+    input: &str,
+) -> f64 {
+    if input.trim().is_empty() {
+        return ledger()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status(session)
+            .ratio();
+    }
+    let tokens = estimate_tokens(input);
+    let key = tool_record_key(call_id, "in", tool, input);
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_tool_overhead_keyed(session, Some(key), tokens, true)
+}
+
+/// 网关事件桥兜底：同一工具结果若已由引擎侧（或前一条事件）记过 → 跳过。
+///
+/// 只在**没有引擎记账**的路径（如 `Envelope::tool_result` 只带摘要的链路/工作台）
+/// 真正生效；它不替代引擎侧记账，只是补漏。失败结果（`ok:false`）同样按实际
+/// 事件文本计，不因失败跳过。
+pub fn record_tool_output_event_fallback(
+    session: &str,
+    call_id: Option<&str>,
+    tool: &str,
+    text: &str,
+) -> f64 {
+    if text.trim().is_empty() {
+        return ledger()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status(session)
+            .ratio();
+    }
+    let tokens = estimate_tokens(text);
+    let key = tool_record_key(call_id, "out", tool, text);
+    tracing::debug!(
+        session = %session, tool = %tool, tokens, call_id = ?call_id,
+        "事件桥兜底记录工具结果 token 开销"
+    );
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_tool_overhead_keyed(session, Some(key), tokens, true)
+}
+
 /// 增量持久化流式「部分文本」（F1）：turn 进行中调用，切走再切回可恢复。
 pub fn record_partial(session: &str, text: &str) {
     let mut g = ledger().lock().unwrap_or_else(|e| e.into_inner());
@@ -768,6 +1020,68 @@ pub fn context_entries(session: &str) -> Vec<ContextEntry> {
         .entries
 }
 
+/// 最后一条台账条目的时间戳（R70：供逐条落盘时取与台账一致的毫秒时间）。
+///
+/// 与 `context_entries(session).last()` 等价，但**不复制整段条目** —— 每轮对话
+/// 都会调用，长会话（数千条）下避免一次 O(n) 克隆。
+pub fn last_entry_at_ms(session: &str) -> Option<u64> {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .status(session)
+        .entries
+        .last()
+        .map(|e| e.at_ms)
+}
+
+/// 项目目录归一化：去空白、丢空串、去重（保持首次出现顺序）。
+fn normalize_projects(projects: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(projects.len());
+    for p in projects {
+        let p = p.trim();
+        if !p.is_empty() && !out.iter().any(|x| x == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// 读取口径：`project_paths` 优先；为空则回退旧字段 `project_path` 单值。
+fn projects_of(project_paths: &[String], project_path: Option<&str>) -> Vec<String> {
+    let paths = normalize_projects(project_paths);
+    if !paths.is_empty() {
+        return paths;
+    }
+    project_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default()
+}
+
+/// 绑定会话的全部项目目录（P2-9 多根；跨重启持久化到台账 JSON）。
+///
+/// 与 [`bind_session_project`] 的区别：这里是**集合**语义（去重保序），并把
+/// `project_path` 同步为第一个，保证旧读取方（单值 API / 旧前端）行为不变。
+/// 空列表为无操作，不会清空已有归属。
+pub fn bind_session_projects(session: &str, projects: &[String]) {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_projects(session, projects);
+}
+
+/// 读取会话绑定的全部项目目录（P2-9）。
+///
+/// 优先返回 `project_paths`；为空时回退旧字段 `project_path`（`vec![p]`）；
+/// 都空返回空 Vec。
+pub fn session_projects(session: &str) -> Vec<String> {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .projects(session)
+}
+
 /// 绑定会话到项目根目录（跨重启持久化到台账 JSON）。
 /// `chat.send` 携带 workspaceId 时调用，使台账层面的会话归属不丢。
 pub fn bind_session_project(session: &str, project: &str) {
@@ -800,6 +1114,8 @@ pub struct ContextSessionSummary {
     pub title: String,
     /// 关联的项目根目录（None = 未绑定项目，归「最近」）
     pub project_path: Option<String>,
+    /// 关联的全部项目目录（P2-9 多根；首项与 `project_path` 一致，空 = 未绑定）
+    pub project_paths: Vec<String>,
 }
 
 /// 枚举全部有上下文台账的会话（扫描 `data_dir/context/*.json`，跳过快照目录）。
@@ -834,12 +1150,15 @@ pub fn context_sessions() -> Vec<ContextSessionSummary> {
             .summary
             .clone()
             .unwrap_or_else(|| last.map(|e| e.text.clone()).unwrap_or_default());
+        // 先按「多根优先、旧单值回退」取值，再把 `project_path` 移入结构体。
+        let project_paths = ctx.projects();
         out.push(ContextSessionSummary {
             session: ctx.session,
             message_count: ctx.entries.len(),
             updated_ms,
             title: clip(&title, 200),
             project_path: ctx.project_path,
+            project_paths,
         });
     }
     out.sort_by_key(|cs| std::cmp::Reverse(cs.updated_ms));
@@ -873,9 +1192,37 @@ pub fn context_status(session: &str) -> Value {
     })
 }
 
+/// 由模型上下文窗口推导台账预算：预留 25% 给输出与系统提示，
+/// 并钳制在 `[32K, 1.5M]`（小窗口不能用不可用的低预算，异常配置不能抬到无穷）。
+///
+/// 历史缺陷：预算曾是固定 128K —— 1M 窗口的旗舰模型在 ~109K 就被判定
+/// `compact_required`，长任务关键中间结论被有损摘要掉（表现即「越聊越差」）；
+/// 小窗口模型又压得太晚，直接撞 provider 400。
+pub fn budget_for_window(context_window: u64) -> u64 {
+    if context_window == 0 {
+        return DEFAULT_BUDGET;
+    }
+    ((context_window * 3) / 4).clamp(32_000, 1_500_000)
+}
+
+/// 按当前生效模型窗口设置本会话上下文预算（写台账并持久化）。
+pub fn set_budget(session: &str, context_window: u64) -> u64 {
+    let budget = budget_for_window(context_window);
+    if context_window == 0 {
+        return budget;
+    }
+    let mut l = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = l.load(session);
+    if ctx.budget != budget {
+        ctx.budget = budget;
+        l.persist(&ctx);
+        l.sessions.insert(session.to_string(), ctx);
+    }
+    budget
+}
+
 /// `context.compact`：确定性压缩（快速路径，chat 自动压缩使用）。
-pub fn context_compact(session: &str, bus: Option<&EventBus>) -> Value {
-    let compaction_id = format!("cmp-{}", uuid::Uuid::new_v4());
+pub fn context_compact(session: &str, bus: Option<&EventBus>) -> Value {    let compaction_id = format!("cmp-{}", uuid::Uuid::new_v4());
     if let Some(b) = bus {
         b.publish(Envelope::new(
             EventType::Compaction,
@@ -1034,6 +1381,62 @@ mod tests {
         assert_eq!(l.status("none").entries.len(), 0);
     }
 
+    /// P2-9：多路径写入后按原序读出；只有旧字段时回退为单值。
+    #[test]
+    fn session_projects_multi_roundtrip_and_legacy_fallback() {
+        let (mut l, dir) = tmp_ledger("projects");
+        l.set_projects(
+            "s-multi",
+            &[
+                "D:/proj/a".to_string(),
+                "D:/proj/b".to_string(),
+                "D:/proj/a".to_string(), // 重复 → 丢弃
+            ],
+        );
+        assert_eq!(
+            l.projects("s-multi"),
+            vec!["D:/proj/a".to_string(), "D:/proj/b".to_string()],
+            "多值必须去重且保持写入顺序"
+        );
+        assert_eq!(
+            l.status("s-multi").project_path.as_deref(),
+            Some("D:/proj/a"),
+            "旧单值字段必须同步为第一个"
+        );
+
+        // 旧台账只有 project_path 字段 → 回退单值
+        let mut legacy = SessionContext::new("s-legacy");
+        legacy.project_path = Some("D:/proj/only".to_string());
+        std::fs::write(
+            l.path("s-legacy"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            l.projects("s-legacy"),
+            vec!["D:/proj/only".to_string()],
+            "旧字段必须回退为单值"
+        );
+
+        // 两者都空 → 空 Vec
+        assert!(l.projects("s-none").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn budget_follows_model_window_with_output_reserve() {
+        // 1M 窗口：预留 25% 输出空间，而不是固定 128K 提早丢历史
+        assert_eq!(budget_for_window(1_000_000), 750_000);
+        // 均衡档 64K：预算 48K
+        assert_eq!(budget_for_window(65_536), 49_152);
+        // Turbo 16K：不可压到不可用，钳到 32K 下限
+        assert_eq!(budget_for_window(16_384), 32_000);
+        // 未声明窗口：保持历史默认
+        assert_eq!(budget_for_window(0), DEFAULT_BUDGET);
+        // 异常超大窗口：上限防呆
+        assert_eq!(budget_for_window(10_000_000), 1_500_000);
+    }
+
     #[test]
     fn test_compact_short_session_skips() {
         let (mut l, _d) = tmp_ledger("short");
@@ -1113,10 +1516,28 @@ mod tests {
         assert_eq!(report.mode, "deterministic");
         assert!(report.tokens_before > report.tokens_after);
         assert!(report.compression_ratio > 0.0);
+        // E13：压缩必须覆盖**可见历史的开头**，不能只压中间一段。
+        // 第 0 步只存在于最早那条 user 消息里；摘要里出现它，说明压缩窗口
+        // 是从会话起点算起的，而不是从某个保留锚点之后才开始的。
+        assert!(
+            report.summary.contains("第 0 步"),
+            "摘要必须覆盖最早的可见历史：{}",
+            report.summary
+        );
         let ctx = l.status("s3");
         assert!(ctx.compaction_count >= 1);
         // 压缩后条目 = 摘要 1 + 保留最近 KEEP_RECENT_TURNS 条
         assert_eq!(ctx.entries.len(), 1 + KEEP_RECENT_TURNS);
+        // 最近一轮原文必须原样保留；被压掉的早期条目不得再以原文出现。
+        let tail: Vec<&str> = ctx.entries.iter().skip(1).map(|e| e.text.as_str()).collect();
+        assert!(
+            tail.iter().any(|t| t.contains("第 19 步")),
+            "最近条目必须原样保留：{tail:?}"
+        );
+        assert!(
+            !tail.iter().any(|t| t.contains("第 0 步")),
+            "已压缩的早期条目不应再以原文出现：{tail:?}"
+        );
         assert!(ctx.summary.is_some());
         assert_eq!(ctx.last_mode.as_deref(), Some("deterministic"));
         assert!(ctx.compression_ratio.unwrap_or(0.0) > 0.0);
@@ -1167,6 +1588,7 @@ mod tests {
             compression_ratio: None,
             snapshot_count: 0,
             project_path: None,
+            project_paths: Vec::new(),
             partial_text: None,
             overhead_tokens: 0,
         };
@@ -1404,6 +1826,122 @@ mod tests {
             "空输出不应改变 overhead"
         );
         assert!((r0 - ratio).abs() < 1e-12);
+        cleanup_ledger_file(&session);
+    }
+
+    /// E12 回归：工具输出**真正进入模型上下文**时按完整文本记账，事件桥随后收到
+    /// 同一条结果（按同一 `call_id`）不得重复计数。
+    #[test]
+    fn test_record_tool_output_at_context_counts_full_once() {
+        let session = format!("mgt-ctx-e12-full-{}", uuid::Uuid::new_v4());
+        let big = "x".repeat(40_000); // 拉丁字符 ≈ 10k token
+        let expected = estimate_tokens(&big);
+        assert!(expected > 5_000, "40k 字符应估算出大量 token：{expected}");
+
+        // 引擎侧：完整输出进上下文 → 计满
+        record_tool_output_at_context(&session, Some("call-1"), "read_file", &big);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "完整输出必须计满（而不是摘要的个位数）"
+        );
+
+        // 事件桥兜底：同一 call_id 的同一条结果 → 跳过（即便事件只带摘要）
+        record_tool_output_event_fallback(&session, Some("call-1"), "read_file", "ok");
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "同一工具结果被引擎与事件桥各看到一次时只能记一次"
+        );
+
+        // 另一次真实调用（不同 call_id）即使输出完全相同，也必须各记一次
+        record_tool_output_at_context(&session, Some("call-2"), "read_file", &big);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected * 2),
+            "不同调用 id 的相同输出是两次真实上下文开销"
+        );
+
+        let ratio = context_status(&session)["ratio"].as_f64().unwrap_or(0.0);
+        assert!(ratio > 0.1, "40k×2 字符输出应显著抬升 ratio：{ratio}");
+        cleanup_ledger_file(&session);
+    }
+
+    /// 入参与输出共用同一 `call_id` 但必须分别记账：槽位不同（`in` / `out`），
+    /// 否则「入参已记 → 输出被误判重复而丢掉」。事件桥重复收到时两边都要跳过。
+    #[test]
+    fn test_tool_input_and_output_dedupe_independently() {
+        let session = format!("mgt-ctx-inout-{}", uuid::Uuid::new_v4());
+        let input = r#"{"path":"src/main.rs"}"#;
+        let output = "file body";
+        let expected = estimate_tokens(input) + estimate_tokens(output);
+
+        record_tool_input_at_context(&session, Some("call-1"), "read_file", input);
+        record_tool_output_at_context(&session, Some("call-1"), "read_file", output);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "入参与输出必须各记一次，不能互相吞掉"
+        );
+
+        // 网关桥/计划 tap 随后看到同两条事件 → 都跳过
+        record_tool_input_event_fallback(&session, Some("call-1"), "read_file", input);
+        record_tool_output_event_fallback(&session, Some("call-1"), "read_file", output);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "重复事件不得二次计入"
+        );
+        cleanup_ledger_file(&session);
+    }
+
+    /// 无 `call_id`（部分本地模型不带 id）时按「工具名 + 内容 hash」去重：
+    /// 引擎侧仍对每次真实调用各记一次，事件桥只跳过已登记的那些。
+    #[test]
+    fn test_tool_output_dedupes_without_call_id_by_content() {
+        let session = format!("mgt-ctx-e12-noid-{}", uuid::Uuid::new_v4());
+        let text = "same tool output";
+        let one = estimate_tokens(text);
+
+        // 两次真实调用（都无 id）→ 各记一次
+        record_tool_output_at_context(&session, None, "shell", text);
+        record_tool_output_at_context(&session, None, "shell", text);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(one * 2)
+        );
+
+        // 桥随后收到这两条事件 → 全部跳过（引擎已登记）
+        record_tool_output_event_fallback(&session, None, "shell", text);
+        record_tool_output_event_fallback(&session, None, "shell", text);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(one * 2),
+            "无 call_id 时也必须靠内容键去重"
+        );
+        cleanup_ledger_file(&session);
+    }
+
+    /// 失败结果按实际错误文本计；空输出（实际文本为空）不改变台账。
+    #[test]
+    fn test_tool_output_event_fallback_counts_failure_and_skips_empty() {
+        let session = format!("mgt-ctx-e12-fail-{}", uuid::Uuid::new_v4());
+        let err_text = "[工具错误 E_TIMEOUT] shell_exec 超时 120s";
+        let expected = estimate_tokens(err_text);
+
+        record_tool_output_event_fallback(&session, Some("call-f"), "shell_exec", err_text);
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "失败的工具结果不得因失败而跳过记账"
+        );
+
+        record_tool_output_event_fallback(&session, Some("call-e"), "shell_exec", "   ");
+        assert_eq!(
+            context_status(&session)["overhead_tokens"].as_u64(),
+            Some(expected),
+            "空输出不改变台账"
+        );
         cleanup_ledger_file(&session);
     }
 

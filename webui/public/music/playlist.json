@@ -1,8 +1,15 @@
 {
   "//": [
-    "This tracked manifest ships EMPTY by design. The app's built-in ambient pad is generated at runtime via the Web Audio API (see src/composables/useAmbientSynth.ts) — it ships no audio file, so it survives a clean checkout, needs no license, and never trips the personal-BGM release gate.",
+    "This tracked manifest ships Marguerite's built-in, original BGM catalog: four procedurally-synthesised tracks (see scripts/generate-music.mjs and scripts/GENERATOR.md). They are original works by the Marguerite project, released to the public domain under CC0 1.0 — no copyright exposure, ever.",
+    "The app's built-in ambient pad is additionally generated at runtime via the Web Audio API (see src/composables/useAmbientSynth.ts) and needs no license at all.",
     "To add your own tracks, drop audio files here and create playlist.local.json (gitignored). When present, playlist.local.json fully replaces this file. Track src is either a filename relative to this directory or an absolute https:// stream.",
     "See README.md in this directory for the full format."
   ],
-  "tracks": []
+  "localOverlay": false,
+  "tracks": [
+    { "id": "dusk-pad", "title": "Dusk Pad", "artist": "Marguerite Generative", "src": "dusk-pad.mp3", "duration": 75, "genre": "ambient" },
+    { "id": "neon-arp", "title": "Neon Arpeggio", "artist": "Marguerite Generative", "src": "neon-arp.mp3", "duration": 80, "genre": "synthwave" },
+    { "id": "lofi-drift", "title": "Lo-fi Drift", "artist": "Marguerite Generative", "src": "lofi-drift.mp3", "duration": 80, "genre": "lo-fi chill" },
+    { "id": "focus-pulse", "title": "Focus Pulse", "artist": "Marguerite Generative", "src": "focus-pulse.mp3", "duration": 85, "genre": "focus electronic" }
+  ]
 }

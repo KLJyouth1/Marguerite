@@ -79,10 +79,14 @@ pub struct ToolCall {
 impl ToolCall {
     /// 创建新的工具调用
     pub fn new(name: &str, arguments: HashMap<String, String>) -> Self {
+        // 模型显式声明的 timeout_sec 必须真的生效，否则「模型说给 300s，外层 30s
+        // 就掐死」——用户看到的就是工具超时。长任务命令再按命令特征自动放宽。
+        let timeout = declared_or_inferred_timeout(name, &arguments)
+            .unwrap_or_else(|| default_timeout_for(name));
         Self {
             name: name.to_string(),
             arguments,
-            timeout: Duration::from_secs(30),
+            timeout,
         }
     }
 
@@ -90,6 +94,152 @@ impl ToolCall {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+}
+
+/// 从调用参数里解析模型声明的超时，或按命令特征推断长任务预算。
+///
+/// - 模型写了 `timeout_sec`：以它为准，外加 30s 收尾余量（进程退出/日志读取），
+///   硬上限 1800s；
+/// - `shell_exec` 的常见长命令（构建、装依赖、跑测试、容器构建）：900s；
+/// - 其它情况返回 `None`，走 [`default_timeout_for`] 的保守默认。
+fn declared_or_inferred_timeout(
+    name: &str,
+    arguments: &HashMap<String, String>,
+) -> Option<Duration> {
+    const MARGIN_SECS: u64 = 30;
+    const MAX_SECS: u64 = 1_800;
+    if let Some(secs) = arguments
+        .get("timeout_sec")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+    {
+        return Some(Duration::from_secs((secs + MARGIN_SECS).min(MAX_SECS)));
+    }
+    if name == "shell_exec" {
+        let command = arguments.get("command")?.to_ascii_lowercase();
+        const LONG_COMMANDS: &[&str] = &[
+            "cargo build",
+            "cargo test",
+            "cargo clippy",
+            "npm install",
+            "npm ci",
+            "npm run build",
+            "npm run test",
+            "pnpm install",
+            "yarn install",
+            "pip install",
+            "pytest",
+            "vitest",
+            "cmake",
+            "docker build",
+            "dotnet build",
+            "gradle",
+            "mvn ",
+            "go build",
+            "go test",
+            "playwright",
+            "cypress",
+            "make ",
+        ];
+        if LONG_COMMANDS.iter().any(|hint| command.contains(hint)) {
+            return Some(Duration::from_secs(900));
+        }
+    }
+    None
+}
+
+/// 按工具名给出默认超时（R14）。
+///
+/// 历史缺陷：所有工具统一 30s。对**长任务工具**（媒体转码、3D 渲染、Office 批处理）
+/// 这不是「保护」而是「必杀」—— 一段 2 分钟的视频转码在 30s 被强杀，用户看到的是
+/// 「工具超时」，而真实原因是超时预算给错了。这类工具的正确做法是给足预算，并让
+/// 工具自己按操作类型再收紧（如 `media probe` 内部只用 30s）。
+///
+/// 只放宽**确定性长任务**；`shell_exec` 等任意命令执行仍保持默认值（它的风险不在
+/// 耗时而在副作用，放宽超时只会扩大影响窗口）。
+pub fn default_timeout_for(name: &str) -> Duration {
+    match name {
+        // 媒体转码/抽帧：540s 内部预算 + 外层余量
+        "media" => Duration::from_secs(600),
+        // 3D 渲染（Blender 桥接入后使用）
+        "blender" => Duration::from_secs(900),
+        // Office COM 批处理（大批量表格/幻灯片常见数十秒）
+        "office_automation" => Duration::from_secs(180),
+        // 云端生图：主流服务商 1024×1024 单张 10–60s，高清/多张会到分钟级。
+        "image_generate" => Duration::from_secs(300),
+        // 云端生视频：一段 5–10s 的视频常见 1–5 分钟，且上游会排队。
+        "video_generate" => Duration::from_secs(600),
+        // 本地生视频：逐帧渲染 + x264 编码，长代码/长时长会到分钟级。
+        "code_video" | "web_video" => Duration::from_secs(600),
+        // Manim 首次渲染要编译场景 + 排版，给足时间。
+        "manim_video" => Duration::from_secs(900),
+        // 云端 ASR/TTS：长音频转写常见分钟级。
+        "audio_transcribe" | "audio_speak" => Duration::from_secs(360),
+        // 操作回放：按录制时间轴逐事件重放，60s 的宏 + 循环会超过默认 30s。
+        "auto_replay" => Duration::from_secs(600),
+        // 录制只做启动/停止（真正的录制在后台进程里），无需放宽。
+        _ => Duration::from_secs(30),
+    }
+}
+
+#[cfg(test)]
+mod timeout_policy_tests {
+    use super::*;
+
+    #[test]
+    fn long_running_tools_get_a_budget_they_can_finish_in() {
+        // 回归：统一 30s 会把真实转码/渲染/批处理强杀，用户看到「超时」而非真实原因。
+        assert!(default_timeout_for("media") >= Duration::from_secs(300));
+        assert!(default_timeout_for("blender") >= Duration::from_secs(600));
+        assert!(default_timeout_for("office_automation") > Duration::from_secs(30));
+    }
+
+    #[test]
+    fn ordinary_and_dangerous_tools_keep_the_short_default() {
+        // shell_exec 的风险在副作用而非耗时，放宽超时只会扩大影响窗口。
+        for name in ["shell_exec", "read_file", "grep", "web_fetch", "browser"] {
+            assert_eq!(
+                default_timeout_for(name),
+                Duration::from_secs(30),
+                "{name} 不应被放宽超时"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_new_uses_the_policy() {
+        let call = ToolCall::new("media", HashMap::new());
+        assert_eq!(call.timeout, default_timeout_for("media"));
+        // 显式覆盖仍然优先（调用方说了算）
+        let call = ToolCall::new("media", HashMap::new()).with_timeout(Duration::from_secs(5));
+        assert_eq!(call.timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn model_declared_timeout_sec_is_actually_honored() {
+        // 回归：模型写 timeout_sec=600，外层却按 30s 掐死。
+        let mut args = HashMap::new();
+        args.insert("command".to_string(), "python slow.py".to_string());
+        args.insert("timeout_sec".to_string(), "600".to_string());
+        let call = ToolCall::new("shell_exec", args);
+        assert!(call.timeout >= Duration::from_secs(600), "{:?}", call.timeout);
+    }
+
+    #[test]
+    fn long_build_commands_get_a_longer_budget() {
+        let mut args = HashMap::new();
+        args.insert("command".to_string(), "cargo test --all".to_string());
+        let call = ToolCall::new("shell_exec", args);
+        assert!(call.timeout >= Duration::from_secs(600), "{:?}", call.timeout);
+
+        // 普通命令仍走保守默认，不因为一次长任务把所有 shell 放宽。
+        let mut quick = HashMap::new();
+        quick.insert("command".to_string(), "ls -la".to_string());
+        assert_eq!(
+            ToolCall::new("shell_exec", quick).timeout,
+            Duration::from_secs(30)
+        );
     }
 }
 
@@ -122,8 +272,14 @@ pub struct ToolCycle {
 impl ToolCycle {
     /// 创建新的工具循环（默认注入幂等工具结果缓存，W-3）。
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
+        // 单批工具调用上限不再写死 10：按自适应预算的 Standard 档取值
+        // （24），既容得下「模型一次读完一组文件」的合法批量，又仍是有限值。
+        // 调用方仍可用 [`ToolCycle::set_max_iterations`] 按实际任务收窄/放宽。
+        let batch_cap = crate::agent::budget_policy::resolve("[[budget:standard]]", 1, 0)
+            .tool_rounds
+            .max(10);
         Self {
-            max_iterations: 10,
+            max_iterations: batch_cap as u32,
             max_concurrent: 5,
             default_timeout: Duration::from_secs(30),
             registry,
@@ -336,6 +492,21 @@ async fn dispatch_cached(
     args: &HashMap<String, String>,
     timeout: Duration,
 ) -> ToolResult {
+    // 0) 高危闸门（P0-4）：**必须在超时包裹之外**。
+    //
+    // `execute_tool_internal` 被 `tokio::time::timeout(t, …)` 包着，而 t 是工具自身
+    // 的超时（默认 30s），短于审批门的 60s 超时 —— 审批若放在里面，用户在第 45 秒
+    // 点「允许」时工具早已被判 Timeout，批准永远到不了执行。故在超时之外先挂起审批。
+    //
+    // Plan 模式下写类工具会被 `execute_tool_internal` 硬拒，这里先跳过闸门，
+    // 避免「先弹确认卡、批准后又被模式拒绝」这种浪费用户操作的顺序。
+    if !crate::mode::runtime_denies_tool(name) {
+        let gate = crate::guard::gateway::agent_gate();
+        let host_present = crate::guard::gateway::agent_approval_host_present();
+        if let Some(blocked) = suspend_for_high_risk(gate, host_present, name, args).await {
+            return blocked;
+        }
+    }
     if let Some(cache) = &cache {
         // 缓存键用独立副本，执行闭包用另一副本，避免与 execute_cached 的 & 借用冲突。
         let key_tool = name.to_string();
@@ -387,6 +558,182 @@ async fn dispatch_cached(
             },
         };
     maybe_compress(&compressor, name, raw)
+}
+
+/// `tool_intent` 表按**工具名尾段 + 参数**判定，覆盖不到「动词在参数里」的系统级
+/// 不可逆动作。`process_manage` 是唯一一例：尾段是 `manage`，`kill`/`stop` 由参数携带，
+/// 于是它落在 `IntentKind::Unknown`（Medium、不拦）—— 而终止进程与桌面控制同属高影响
+/// 动作（审计 P0-4 明确把「进程」列入高危面）。这里显式补齐，不靠概率。
+const SYSTEM_IRREVERSIBLE_TOOLS: &[&str] = &["process_manage"];
+
+/// 该 (工具, 参数) 是否**需要人工确认**；需要时返回结构化意图（纯函数，可单测）。
+///
+/// 判定面刻意保持窄：只拦「破坏性 / 不可逆 / 桌面驱动 / 系统级不可逆动作」。
+/// `read_file`、普通 `write_file`（非覆盖）一律不拦 —— 否则每次写文件都要用户点确认，
+/// 产品不可用。规则表复用 [`crate::guard::tool_intent::analyze`]（与确认卡渲染同源，
+/// 不另造第二套判定）。
+fn approval_required(
+    name: &str,
+    args: &HashMap<String, String>,
+) -> Option<crate::guard::tool_intent::ToolIntention> {
+    let intent = crate::guard::tool_intent::analyze(name, &args_json_of(args));
+    let desktop = crate::mode::is_desktop_class(name);
+    let system_irreversible = SYSTEM_IRREVERSIBLE_TOOLS.contains(&name);
+    if intent.high_risk || intent.destructive || intent.irreversible || desktop
+        || system_irreversible
+    {
+        Some(intent)
+    } else {
+        None
+    }
+}
+
+/// 高危动作的审批闸门（P0-4）：命中即挂起审批，未批准不放行（fail-closed）。
+///
+/// # 为什么需要
+///
+/// 链式执行器（`chain::executor`）分发步骤前会走 `ModeManager::gate` + `ApprovalGate`，
+/// 但智能体工具回路此前只有「Plan 模式硬拒」一道门 —— 同一条聊天回合里模型调
+/// `shell_exec` 删目录、`delete_file_permanent` 永久删文件、`system_control` 驱动本机
+/// UI，都不弹确认卡直接执行。两条执行路径的安全口径必须一致。
+///
+/// # 参数为何显式传入 gate / host_present
+///
+/// 生产路径传进程级单门 + [`crate::guard::gateway::agent_approval_host_present`]；
+/// 单测传自己的短超时门 + 显式的宿主位。若在函数里直接读全局单例，测试就只能靠
+/// 全局副作用造场景（同进程并行用例互相串扰，且要么白等 60s、要么无法验证「批准后
+/// 真的执行」）。
+///
+/// # 返回
+///
+/// - `None`：无需审批，或审批通过 → 调用方继续执行；
+/// - `Some(ToolResult::Error)`：拒绝 / 超时 / 无审批通道 → **不执行**。
+async fn suspend_for_high_risk(
+    gate: Arc<crate::guard::gateway::ApprovalGate>,
+    host_present: bool,
+    name: &str,
+    args: &HashMap<String, String>,
+) -> Option<ToolResult> {
+    suspend_with_risk(gate, host_present, name, args, false).await
+}
+
+/// W3.1：远程命令（`collab.ssh.exec`）的审批入口。
+///
+/// 复用与工具回路**完全相同**的一条链路（`ApprovalGate` → 全局注册表 →
+/// 控制台审批卡 → 裁决），只是把「是否高危」显式置位：远程命令的破坏力
+/// （在远端执行 `rm -rf`、改生产配置）无法用本机文件系统启发式判定。
+pub(crate) async fn suspend_for_remote_command(
+    gate: Arc<crate::guard::gateway::ApprovalGate>,
+    host_present: bool,
+    name: &str,
+    args: &HashMap<String, String>,
+) -> Option<ToolResult> {
+    suspend_with_risk(gate, host_present, name, args, true).await
+}
+
+/// `force_high = true` 时跳过「是否需要审批」的启发式判定，一律按高危挂起。
+async fn suspend_with_risk(
+    gate: Arc<crate::guard::gateway::ApprovalGate>,
+    host_present: bool,
+    name: &str,
+    args: &HashMap<String, String>,
+    force_high: bool,
+) -> Option<ToolResult> {
+    let intent = if force_high {
+        crate::guard::tool_intent::analyze(name, &args_json_of(args))
+    } else {
+        approval_required(name, args)?
+    };
+
+    // 无宿主（CLI / 未启动控制台）时没有人能裁决 → 立即 fail-closed，
+    // 而不是让工具循环白等 60s 审批超时。
+    gate.set_interactive(host_present);
+
+    let risk = if force_high || intent.high_risk || intent.destructive || intent.irreversible {
+        crate::guard::gateway::RiskLevel::High
+    } else {
+        crate::guard::gateway::RiskLevel::Medium
+    };
+    // `RiskLevel` 无 `Display`，事件里按 wire 值（`low`/`medium`/`high`）如实上报。
+    let risk_str = match risk {
+        crate::guard::gateway::RiskLevel::Low => "low",
+        crate::guard::gateway::RiskLevel::Medium => "medium",
+        crate::guard::gateway::RiskLevel::High => "high",
+    };
+    let pending = gate.request(name, args_json_of(args).to_string(), risk);
+    let Some(pending) = pending else {
+        return Some(ToolResult::Error {
+            message: format!("已有其它待裁决的高危操作，{name} 本次不执行（fail-closed）"),
+            code: "APPROVAL_BUSY".to_string(),
+        });
+    };
+    // 注册进全局注册表：WebUI 每 2s 轮询 `/api/approvals` 据此渲染确认卡，
+    // 裁决时经同一注册表定位到**本**门（与 chain::executor 抬升路径完全同源）。
+    crate::guard::approval_registry::global_registry().register(gate.clone(), &pending);
+    // 事件总线在线时额外推一条 approval 事件：TUI 的内联审批框靠它进入
+    // AwaitingApproval 状态（`tui/workbench/state.rs` 的 EventType::Approval 分支）。
+    if let Some(bus) = crate::events::global_bus() {
+        bus.publish(crate::events::Envelope::new(
+            crate::events::EventType::Approval,
+            serde_json::json!({
+                // 双键：TUI 读 `id`，链式执行器 / WebUI 读 `approval_id`
+                "id": pending.id,
+                "approval_id": pending.id,
+                "tool": name,
+                "tool_name": name,
+                "args": pending.args,
+                "risk": risk_str,
+                "intent": serde_json::to_value(&intent).unwrap_or_default(),
+                "reason": format!("高危操作需人工确认：{}", intent.scope),
+                "source": "agent.tool_cycle",
+            }),
+            "agent",
+        ));
+    }
+
+    let outcome = loop {
+        match gate.outcome(&pending.id) {
+            crate::guard::gateway::ApprovalOutcome::Pending => {
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
+            other => break other,
+        }
+    };
+    // 已消费 → 从注册表移除，防止陈旧 ID 被重复裁决（与 executor 同语义）
+    crate::guard::approval_registry::global_registry().unregister(&pending.id);
+
+    match outcome {
+        crate::guard::gateway::ApprovalOutcome::Approved => None,
+        crate::guard::gateway::ApprovalOutcome::Denied => Some(ToolResult::Error {
+            message: format!(
+                "高危操作被拒绝，未执行：{}（{}）",
+                intent.scope,
+                intent.side_effects.join("；")
+            ),
+            code: "APPROVAL_DENIED".to_string(),
+        }),
+        crate::guard::gateway::ApprovalOutcome::Timeout => Some(ToolResult::Error {
+            message: format!("高危操作审批超时（fail-closed），未执行：{}", intent.scope),
+            code: "APPROVAL_TIMEOUT".to_string(),
+        }),
+        crate::guard::gateway::ApprovalOutcome::Pending => Some(ToolResult::Error {
+            message: format!("高危操作未获批准，未执行：{}", intent.scope),
+            code: "APPROVAL_PENDING".to_string(),
+        }),
+    }
+}
+
+/// 把工具参数（`HashMap<String,String>`）渲染成意图分析 / 审批门要用的 JSON 对象。
+///
+/// 工具回路的参数是「字符串化的 JSON 值」，故这里统一按字符串装箱：`intent` 表里的
+/// 布尔/数组信号（`overwrite`/`recursive`/`paths`）在字符串形态下也能命中
+/// （`tool_intent::flag` 与 `batch_marker` 都接受字符串形态）。
+fn args_json_of(args: &HashMap<String, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        args.iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -846,7 +1193,14 @@ mod tests {
     fn test_tool_cycle_defaults() {
         let registry = Arc::new(ToolRegistry::new());
         let cycle = ToolCycle::new(registry);
-        assert_eq!(cycle.max_iterations(), 10);
+        // 单批上限来自自适应预算（Standard 档 24），不再是硬编码 10；
+        // 但必须始终有限且不小于历史值，避免一次批量把整轮拖死。
+        assert!(
+            (10..=crate::agent::budget_policy::MAX_TOOL_ROUNDS as u32)
+                .contains(&cycle.max_iterations()),
+            "unexpected batch cap: {}",
+            cycle.max_iterations()
+        );
         assert_eq!(cycle.max_concurrent(), 5);
         assert_eq!(cycle.default_timeout().as_secs(), 30);
     }
@@ -998,5 +1352,253 @@ mod tests {
             data
         );
         assert!(comp.stats().compressed >= 1, "压缩器应记录一次压缩");
+    }
+}
+
+/// 高危审批闸门（P0-4）的回归守卫。
+///
+/// 所有用例的 gate 与「宿主在场」标志都**显式注入**，不读进程级单例 ——
+/// 否则同进程并行用例会互相串扰（一个用例把宿主点亮，另一个用例就白等审批超时）。
+#[cfg(test)]
+mod approval_gate_tests {
+    use super::*;
+    use crate::guard::gateway::{ApprovalGate, ApprovalOutcome, RiskLevel};
+    use crate::mcp::registry::{ToolExecutor, ToolRegistry};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 计数工具：`shell_exec` 是真实 ExecWrite 工具名，会命中高危判定。
+    struct SpyShell(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl ToolExecutor for SpyShell {
+        fn name(&self) -> &str {
+            "shell_exec"
+        }
+        fn description(&self) -> &str {
+            "spy shell executor"
+        }
+        async fn execute(&self, _args: &HashMap<String, String>) -> Result<ToolResult> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::Success {
+                data: "ran".into(),
+                metadata: HashMap::new(),
+            })
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    fn args_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// 判定面：只拦破坏性/不可逆/桌面/系统级不可逆；普通读写一律放行。
+    ///
+    /// 这条用例同时是「产品可用性」的守卫：若哪天把普通 `write_file` 也纳入确认，
+    /// 每个写文件都要用户点一次按钮。
+    #[test]
+    fn approval_required_scopes_exactly_the_high_risk_surface() {
+        // 必须拦：永久删除 / 删除 / 覆盖写 / 危险 shell / 终止进程 / 桌面控制
+        let must_gate = [
+            ("delete_file_permanent", args_of(&[("path", "D:/x/report.txt")])),
+            ("delete_file", args_of(&[("path", "D:/x/a.txt")])),
+            ("fs_delete", args_of(&[("path", "D:/x/a.txt")])),
+            (
+                "write_file",
+                args_of(&[("path", "a.md"), ("content", "x"), ("overwrite", "true")]),
+            ),
+            ("shell_exec", args_of(&[("command", "rm -rf build")])),
+            (
+                "shell_exec",
+                args_of(&[("command", "Remove-Item -Recurse D:\\old")]),
+            ),
+            (
+                "process_manage",
+                args_of(&[("action", "kill"), ("pid", "4321")]),
+            ),
+            ("system_control", args_of(&[("action", "click")])),
+            ("office_automation", args_of(&[("action", "export_pdf")])),
+            ("window_manage", args_of(&[("action", "focus")])),
+            // 2026-10-23：回放会真实驱动本机键鼠，与 system_control 同属高危面。
+            ("auto_replay", args_of(&[("name", "daily-report")])),
+            ("auto_record", args_of(&[("action", "start"), ("name", "m")])),
+        ];
+        for (tool, args) in must_gate {
+            assert!(
+                approval_required(tool, &args).is_some(),
+                "{tool}({args:?}) 属高危面，必须要求人工确认"
+            );
+        }
+
+        // 必须放行：只读 / 普通写 / 无害命令 / 只读执行 / 出网
+        let must_pass = [
+            ("read_file", args_of(&[("path", "a.md")])),
+            ("write_file", args_of(&[("path", "a.md"), ("content", "x")])),
+            (
+                "append_file",
+                args_of(&[("path", "log.txt"), ("content", "x")]),
+            ),
+            ("make_dir", args_of(&[("path", "out")])),
+            ("shell_exec", args_of(&[("command", "cargo test")])),
+            ("run_tests", args_of(&[("command", "cargo test")])),
+            ("git_status", args_of(&[])),
+            ("web_search", args_of(&[("query", "rust")])),
+            ("kb_search", args_of(&[("query", "q")])),
+            // 多模态产物工具不驱动本机 UI，只读写工作区 → 不应每次点确认。
+            ("image_generate", args_of(&[("prompt", "a cat")])),
+            ("audio_transcribe", args_of(&[("path", "a.wav")])),
+            ("audio_speak", args_of(&[("text", "你好")])),
+        ];
+        for (tool, args) in must_pass {
+            assert!(
+                approval_required(tool, &args).is_none(),
+                "{tool}({args:?}) 不属高危面，不应打断用户（否则每次操作都要点确认）"
+            );
+        }
+    }
+
+    /// 无宿主（CLI / 未启动控制台）→ 立即 fail-closed，**且不白等审批超时**。
+    #[tokio::test]
+    async fn no_host_is_immediately_denied_without_waiting_for_timeout() {
+        // 60s 门 + 无宿主：若实现退化成「等超时」，这里会挂满 60s
+        let gate = Arc::new(ApprovalGate::new(Duration::from_secs(60)));
+        let started = std::time::Instant::now();
+        let blocked = suspend_for_high_risk(
+            gate,
+            false,
+            "shell_exec",
+            &args_of(&[("command", "rm -rf build")]),
+        )
+        .await;
+        let blocked = blocked.expect("无宿主时必须 fail-closed");
+        assert!(blocked.is_error(), "应是错误结果（未执行）: {blocked:?}");
+        assert!(blocked.data().is_none(), "不得输出任何伪装成成功的内容");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "无宿主必须立即拒绝，不得白等审批超时（实测 {:?}）",
+            started.elapsed()
+        );
+    }
+
+    /// 宿主在场 + 批准 → 闸门放行（返回 None），调用方得以继续执行。
+    #[tokio::test]
+    async fn host_present_and_approved_releases_the_call() {
+        let gate = Arc::new(ApprovalGate::new(Duration::from_secs(10)));
+        let judge = gate.clone();
+        let approver = tokio::spawn(async move {
+            // 直接向**本门**轮询挂起项：走全局注册表会拿到并行用例的项，误伤他人。
+            for _ in 0..500 {
+                if let Some(p) = judge.pending() {
+                    return judge.approve(&p.id);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        });
+
+        let out = suspend_for_high_risk(
+            gate,
+            true,
+            "shell_exec",
+            &args_of(&[("command", "rm -rf build")]),
+        )
+        .await;
+        assert!(out.is_none(), "批准后应放行: {out:?}");
+        assert!(approver.await.unwrap_or(false), "裁决方应真的批准到本门");
+    }
+
+    /// 宿主在场 + 拒绝 → 不执行，错误码可诊断。
+    #[tokio::test]
+    async fn host_present_and_denied_blocks_the_call() {
+        let gate = Arc::new(ApprovalGate::new(Duration::from_secs(10)));
+        let judge = gate.clone();
+        tokio::spawn(async move {
+            for _ in 0..500 {
+                if let Some(p) = judge.pending() {
+                    let _ = judge.deny(&p.id);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let out = suspend_for_high_risk(
+            gate,
+            true,
+            "delete_file_permanent",
+            &args_of(&[("path", "D:/x/report.txt")]),
+        )
+        .await;
+        match out.expect("拒绝后必须阻断") {
+            ToolResult::Error { code, .. } => {
+                assert_eq!(code, "APPROVAL_DENIED", "错误码必须可诊断")
+            }
+            other => panic!("拒绝应是 Error，实际 {other:?}"),
+        }
+    }
+
+    /// 同一时刻只允许一个挂起项：第二个高危调用必须 fail-closed，不得静默排队。
+    #[tokio::test]
+    async fn second_high_risk_call_fails_closed_while_one_is_pending() {
+        let gate = Arc::new(ApprovalGate::new(Duration::from_secs(60)));
+        gate.set_interactive(true);
+        let held = gate
+            .request("shell_exec", "{}".to_string(), RiskLevel::High)
+            .expect("首个挂起应成功");
+
+        let out = suspend_for_high_risk(
+            gate.clone(),
+            true,
+            "shell_exec",
+            &args_of(&[("command", "rm -rf build")]),
+        )
+        .await;
+        match out.expect("已有挂起项时第二个应 fail-closed") {
+            ToolResult::Error { code, .. } => {
+                assert_eq!(code, "APPROVAL_BUSY", "应给出 APPROVAL_BUSY")
+            }
+            other => panic!("应是 Error，实际 {other:?}"),
+        }
+        assert_eq!(gate.outcome(&held.id), ApprovalOutcome::Pending);
+    }
+
+    /// **接线守卫**：闸门必须真的接在 `dispatch_cached` 上，而不是个没人调用的辅助函数。
+    ///
+    /// 本用例走完整 `call_tool` 路径（进程级门 + 自动宿主判定）。逐案情况：
+    /// - 无宿主（CLI/库调用）→ `APPROVAL_DENIED`；
+    /// - 宿主在场（同进程网关用例注册过全局总线）→ 10ms 测试超时后 `APPROVAL_TIMEOUT`；
+    /// - 同进程若有用例把全局模式留在 `Plan`，则是 `MODE_DENIED`（同样是 fail-closed）。
+    ///
+    /// 三条分支都满足要守的不变量：① 不假装成功；② `shell_exec` 底层实现一次都没执行。
+    #[tokio::test]
+    async fn dispatch_blocks_high_risk_tool_and_never_executes_it() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register_local(Box::new(SpyShell(calls.clone())));
+        let cycle = ToolCycle::new(Arc::new(registry));
+
+        let result = cycle
+            .call_tool("shell_exec", &args_of(&[("command", "rm -rf build")]))
+            .await;
+
+        match result {
+            ToolResult::Error { code, message } => {
+                assert!(
+                    code.starts_with("APPROVAL_") || code == "MODE_DENIED",
+                    "必须是 fail-closed 类错误码，实际 {code}: {message}"
+                );
+            }
+            other => panic!("高危工具未获批准时不得返回成功/超时: {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "未获批准的 `rm -rf` 绝不能落到真实执行"
+        );
     }
 }

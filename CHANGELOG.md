@@ -9,6 +9,78 @@
 > 四端（core / tui / gui / webui）的版本号由 `python scripts/check-version-sync.py` 强制对齐，
 > 并已接入 `bash scripts/verify.sh --all` 门禁。
 
+## [Unreleased]
+
+按 `docs/plans/2026-10-26-capability-cache-computer-use-remediation.md` 推进 W0–W12：门禁复位、双引擎事件契约、占位清理、安全边界、能力路由与缓存口径。
+
+### Added
+
+- **能力卡与能力自述注入**（`core/src/agent/capability_cards.rs`、`capability.rs::brief_from`）：按「意图 → 能力族 → 真实工具」生成确定性文本，进入系统提示稳定半区；不可用能力保留一行说明，团队编排明确「本轮模型无工具」。
+- **反脚本守卫**（`core/src/agent/capability_guard.rs`）：当模型用 `shell_exec`/`code_exec` 模拟已可用的桌面/浏览器/文件写能力时，返回一次 `CAPABILITY_MISROUTE` 纠偏（同 turn 每能力一次，`MARGUERITE_CAPABILITY_GUARD=off` 可关）。
+- **固定高频工具面扩到 18 项**（`tool_schema.rs::FIXED_FACE`）：文件/浏览器/记忆/知识/技能/桌面/脚本七族首轮可见；首轮不再按请求词裁剪，工具面不随用户文本变化。
+- **工作区最近列表**（`workspaces.rs` + 选择器）：`last_opened_at` 排序、置顶优先、单选默认选中最近一条，不再强制弹原生文件夹选择器；列表为空才自动弹一次。
+- **i18n 中文硬编码棘轮**（`webui/scripts/check-i18n.mjs` + 基线 18 文件/408 行）：只许下降不许上升，`--update-baseline` 拒绝抬高。
+- **core 集成测试入闸门**（`verify.sh` 第 25 项）：`e2e`/`plugin_manifest_gate`/`plugin_patch_gate`/`tui_model_panel` 离线必跑；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过）。
+- **诚实缓存指标**：`cache.status` 新增 `server_cache_coverage_pct`、`server_cache_request_hit_rate_pct`、`eligible/hit_requests`；`server_cache_hit_rate` 改为 coverage 别名，旧的 `read/(read+creation)` 仅作诊断。
+- **Anthropic 前缀缓存断点**（`llm.rs`）：system / 最后一个 tool / 最后一条 user 三处 `cache_control: ephemeral`。
+- **电脑操控结构化矩阵（W6）**：UIA 新增 find/invoke/set_value/type/toggle/select/expand/collapse/scroll/focus/wait/window_activate 与 7 类 pattern 分发（10s 超时、节点上限）；`ActionReceipt` 增加 before/after/verified/effect（observe→act→verify）；`desktop_action` 的 handle 可省略并按 window 附着，新增 `desktop_attach` 工具；网关新增 `desktop.attach` / `desktop.windows` / `desktop.a11y`。
+- **能力评测集（W4.7）**：`core/src/agent/capability_bench.rs` 内置 60 条离线路由用例（11 个能力族、55 条「不得脚本替代」负例），输出 JSON / Markdown 报告；真实模型端到端基准仍需 provider key，已在 `scripts/bench/capability/README.md` 注明。
+- **命令面板补齐（W8.2）**：`workspace:` / `model:` / `team:` / `agent:` provider 与 `ws`/`工作区`/`模型`/`团队` 别名；只列出网关声明支持的方法。
+- **会话级稳定工具面（W4.2）**：`SessionToolFace` 会话内只增不减、按名排序；发现只追加，会话切换重建；首轮面不再随用户文本变化。
+- **漂移分域（W5.3）**：`stable_prefix_drift_by_scope` 区分 `agent.stable_half` 与 `compress.tool_results`。
+
+### Changed
+
+- **pyengine 事件透传**（W1）：`session.event.state_change`/`cron_result`/`task_group.*`/`run_heartbeat` 原样到达前端，不再统一拍平成 `status`。
+- **工具指引去掉「本轮可调用工具共 N 个」**：该行随发现增长逐轮变化，是 KV 前缀的头号抖动源；工具清单只经 function schema 与能力自述呈现。
+
+### Fixed
+
+- **跨会话事件泄漏**（`event_bridge.rs`）：pyengine payload 不带会话键，转发时注入 `session_key`；否则别的会话的 `state_change` 会把当前聊天凭空拉成 Working/Sending 并冲掉审批卡。
+- **假成功占位清理**：`sandbox.resume` 与 `skills.deps.install` 删除 Rust 假实现（在线代理侧车，离线如实 `NOT_IMPLEMENTED`）；`sessions.messages.subscribe/hydrate/snapshot` 不再谎报「已完整水合」，在线代理真实快照、离线返回 `degraded`。
+- **远程 SSH 执行需审批**（`collab.ssh.exec`）：复用工具回路的审批链路，批准前绝不 spawn ssh。
+- **系统打开加固**（`gateway/open_path.rs`）：工作区边界 + 可执行扩展名/控制字符拦截 + `ShellExecuteW`（不再 `cmd /c start`）。
+- **`poker.auto` 座位越界 panic**：空房/损坏座位返回 `SEAT_OUT_OF_RANGE`，不再带走常驻网关（变异测试实测有牙）。
+- **限流接线**（`gateway/rate_limit.rs` → 中间件）：只限 `/api/*`，`/api/health` 与 WS/静态资源豁免；超限 429 + `RATE_LIMITED` JSON-RPC 错误体。
+- **注入扫描语义化**：只扫命令面字段；「比较 cmd 与 powershell」不再误拦，点击「删除」等危险目标改为二次确认（词边界避免「发送者信息」误伤）。
+- **cron wire shape**：在线代理侧车；离线返回数组（`next_run` ISO），修复 App.vue 按数组读导致的「受影响定时任务数恒 0」。
+- **workbench 健康检查**：`getHealth` 由 `/api../health`（404）改为 `/api/health`；`/harness/capabilities` 按服务源解析。
+- **桌宠 ACL**：`pet_overlay_show/toggle` 补进构建清单与主窗口权限；新增 `pet-overlay` 窗口能力（含回环 remote、拖动/隐藏）。
+- **e2e 门禁确定性**：首启 BootOrchestra 由 storageState 预置跳过；deliverables 助手修复水合竞态与 `D:\Downloads\…` 子串误匹配；`verify.sh` 等侧车真正接管 `/api/config` 后再启动 Playwright。
+
+## [0.2.17] - 2026-10-26
+
+补齐「插件 / MCP / 工具 / 技能」四页的独立管理 UI（增删改查 + 启停开关），并把 DSH 来源插件的适配情况变成可审计证据。
+
+### Added
+
+- **`/tools` 工具管理页**（`webui/src/views/ToolsView.vue`）：工具总表 + 来源（内置 / 仅 MCP）与启停状态筛选、
+  逐项启停开关、详情抽屉（补丁文件路径、生效边界说明）。开关写入 `tools.patch.set`，`appliesTo: next_turn`。
+- **插件管理 tab**（`PluginsView.vue` manage）：17 个内置清单的统计、7 类筛选、详情抽屉（清单原文、诊断、
+  声明的能力、可调用的原生 RPC、对应页面）、新建（manifest / URL 安装）、启停、重载、删除（带依赖检查）。
+- **`core/src/plugins/adaptation.rs`**：DSH 清单 → 真实 RPC / 页面 的适配映射单一事实源，状态分
+  `native` / `partial` / `declarative`，随 `plugins.coverage` 与 `plugins.detail` 一并下发；单测校验
+  「映射的 RPC 必须在 `SUPPORTED_METHODS` 中声明」「映射的页面必须存在于 `sharedRoutes.ts`」。
+- **网关新增方法**：`plugins.detail`、`plugins.delete`、`mcp.servers.setEnabled`、`skills.update`、
+  `skills.setEnabled`（`SUPPORTED_METHODS` 447 条）。
+- **技能停用落盘语义**：YAML 与目录型技能改名为 `.disabled` 并写 `.disabled-index.json` 索引；
+  扫描器与 `load()` 均跳过停用项，`skills.list` 另返回 `disabledSkills`。
+
+### Changed
+
+- **MCP 服务器新增 `enabled` 字段**（`config.yaml`，缺省 `true`）：运行期连接、工具注册、
+  批量探测、能力清单均按启停过滤；`mcp.tools.list` 回传被跳过的服务器名单。
+- **插件删除具备可回滚性**：先校验依赖（被依赖时返回 `PLUGIN_IN_USE`），删清单与注册表条目失败时
+  恢复原文件并重跑 DI。
+
+### Fixed
+
+- **能力中枢（CapabilitiesHub）跳转整页刷新**：裸 `<a href="/control/...">` 改为 `<RouterLink>`，
+  并新增全局 `installInternalLinkGuard` 捕获阶段拦截，任何遗留裸锚点都不再脱离 SPA（不再新开标签 / 整页重载）。
+- **安装版 MCP 页误报「网关未声明所需方法」**：视图挂载早于 WebSocket 握手，`supportsMethod` 读到空表；
+  三个加载函数改为先 `await rpc.waitForConnection()`。
+- **工具页来源列被误标为「扩展」**：改用 `server` 字段区分内置 / MCP。
+
 ## [0.2.13] - 2026-10-16
 
 岛屿从「可视化」升级为**可玩的 3D 开放世界**，并补齐资产热加载闭环、会话级成本治理与三处真缺陷修复。

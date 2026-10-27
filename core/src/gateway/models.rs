@@ -69,6 +69,12 @@ pub fn models_config_path() -> Value {
 }
 
 /// `models.profiles.list`：列出 Rust 模型档案（ModelSelector/models.json），WebUI 可视。
+///
+/// 每条档案回传两组能力：
+/// - `capabilities`：用户声明的原始值（`declared=false` 时全 false，前端据此回填勾选框为「未声明」）；
+/// - `effectiveCapabilities`：真正生效的能力（声明优先，否则按模型名识别）。
+///
+/// 只给一组都会让前端"想显示自动识别结果，却把识别结果当成用户已声明"而写回磁盘。
 pub fn models_profiles_list() -> Value {
     use crate::model::registry::ProfileKind;
     use crate::model::selector::ModelSelector;
@@ -89,6 +95,8 @@ pub fn models_profiles_list() -> Value {
                         "builtin": p.builtin,
                         "active": reg.active == p.id,
                         "copilot": reg.copilot.as_deref() == Some(&p.id),
+                        "capabilities": p.capabilities,
+                        "effectiveCapabilities": p.effective_capabilities(),
                     })
                 })
                 .collect();
@@ -100,6 +108,131 @@ pub fn models_profiles_list() -> Value {
             })
         }
         Err(e) => json!({ "ok": false, "error": e.to_string(), "profiles": [] }),
+    }
+}
+
+/// models.profiles.set_capabilities：保存某个档案的多模态能力声明（含端点覆盖与自定义参数）。
+///
+/// 单独一条 RPC 而不是复用 `onboarding.llmProfile.upsert`：后者要求同时提供
+/// provider/model/baseUrl，会让「只想改一个勾选框」的前端被迫重发整份档案，
+/// 任何一项取值漂移都会顺带改写凭据与端点。这条只动 `capabilities` 一个字段。
+///
+/// `reset=true` → 清除声明，回到自动识别（写 `declared=false` 的空结构）。
+pub fn models_profiles_set_capabilities(params: &Value) -> Value {
+    use crate::model::registry::ModelCapabilities;
+    use crate::model::selector::ModelSelector;
+
+    let id = param_str(params, "id", "id", "").trim().to_string();
+    if id.is_empty() {
+        return json!({ "ok": false, "error": "缺少 id" });
+    }
+    let reset = params.get("reset").and_then(Value::as_bool).unwrap_or(false);
+    let caps = if reset {
+        ModelCapabilities::default()
+    } else {
+        match params.get("capabilities") {
+            Some(v) => ModelCapabilities::from_json(v),
+            None => return json!({ "ok": false, "error": "缺少 capabilities（或传 reset=true）" }),
+        }
+    };
+
+    let mut selector = match ModelSelector::load() {
+        Ok(s) => s,
+        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+    };
+    let Some(mut profile) = selector.registry().get(&id).cloned() else {
+        return json!({ "ok": false, "error": format!("档案不存在: {id}") });
+    };
+    profile.capabilities = caps;
+    selector.registry_mut().upsert(profile);
+    if let Err(e) = selector.save() {
+        return json!({ "ok": false, "error": e.to_string() });
+    }
+    let mut out = models_profiles_list();
+    out["ok"] = json!(true);
+    out
+}
+
+
+/// `model.deepseek.render`：把一段对话按 DeepSeek 官方 recipe 渲染成 V4.1 prompt。
+///
+/// 用途是**诊断与自托管校验**（DeepInfer 服务接进来后，模型到底收到什么 prompt
+/// 此前是黑盒）。不发请求、不碰磁盘，纯函数。
+///
+/// params: `{ messages: [{role, content}...], model?: string }`
+///
+/// 返回体里的 `tokensEstimate` 是**估算**（复用 `context::session` 的既有口径），
+/// 刻意不命名为 `tokens`，避免被误读成精确计数。
+pub fn deepseek_render_prompt(params: &Value) -> Value {
+    let messages = params.get("messages").cloned().unwrap_or(Value::Null);
+    let model = params
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match crate::model::deepseek_recipe::render_v41_prompt(&messages, model) {
+        Ok(prompt) => {
+            let (exact, exact_err) = match crate::model::tokenizer::count_exact(&prompt) {
+                Ok(n) => (json!(n), Value::Null),
+                Err(e) => (Value::Null, json!(e)),
+            };
+            json!({
+                "ok": true,
+                "model": model.unwrap_or("DeepSeek-V4.1-Flash"),
+                "chars": prompt.chars().count(),
+                "tokensEstimate": crate::model::deepseek_recipe::estimate_tokens(&prompt),
+                // 精确值：词表可用时给数字，不可用时为 null 并在 tokensExactError 里说明原因。
+                "tokensExact": exact,
+                "tokensExactError": exact_err,
+                "prompt": prompt,
+            })
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// `model.deepseek.parse`：把模型返回的 DeepSeek V4 / V4.1 原始输出解析成结构化 JSON。
+///
+/// 与 `model.deepseek.render` 成对：render 看「发出去的 prompt」，parse 看
+/// 「收回来的原始输出」，用途是自托管 DeepInfer / 量化评测时核对模板对齐。
+/// **不参与正常对话链路**（对话链路的解析由上游 OpenAI 兼容层负责）。
+///
+/// params: `{ raw: string }`
+///
+/// 返回：`{ ok: true, messages, reasoning, answer, tokensFound, tokensEstimate }`；
+/// `raw` 缺失、非字符串或空白时返回 `{ ok: false, error }`，不 panic。
+/// `tokensEstimate` 是对 `raw` 的**估算**，不是精确 token 数。
+pub fn deepseek_parse_response(params: &Value) -> Value {
+    let raw = match params.get("raw") {
+        Some(Value::String(s)) => s,
+        Some(_) => return json!({ "ok": false, "error": "raw 必须是字符串" }),
+        None => return json!({ "ok": false, "error": "缺少 raw" }),
+    };
+    if raw.trim().is_empty() {
+        return json!({ "ok": false, "error": "raw 不能为空" });
+    }
+    match crate::model::deepseek_recipe::parse_v41_response(raw) {
+        Ok(mut parsed) => {
+            if let Some(obj) = parsed.as_object_mut() {
+                obj.insert("ok".to_string(), json!(true));
+                obj.insert(
+                    "tokensEstimate".to_string(),
+                    json!(crate::model::deepseek_recipe::estimate_tokens(raw)),
+                );
+                match crate::model::tokenizer::count_exact(raw) {
+                    Ok(n) => {
+                        obj.insert("tokensExact".to_string(), json!(n));
+                        obj.insert("tokensExactError".to_string(), Value::Null);
+                    }
+                    Err(e) => {
+                        obj.insert("tokensExact".to_string(), Value::Null);
+                        obj.insert("tokensExactError".to_string(), json!(e));
+                    }
+                }
+            }
+            parsed
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
@@ -260,6 +393,7 @@ pub fn models_profiles_add(params: &Value) -> Value {
         provider,
         base_url,
         api_key: String::new(),
+        api_key_env: String::new(),
         model,
         kind,
         builtin: false,
@@ -268,6 +402,13 @@ pub fn models_profiles_add(params: &Value) -> Value {
         tier: crate::model::tier::ModelTier::Balanced,
         tier_caps: crate::model::tier::TierCaps::default(),
         tier_caps_declared: false,
+        // 目录部署路径（本地权重）：只走 Chat Completions。
+        wire_api: crate::model::wire::WireApi::Chat,
+        // 自定义接入模型时用户可勾选/填写多模态能力；未填 → 走名字自动识别。
+        capabilities: match params.get("capabilities") {
+            Some(v) => crate::model::registry::ModelCapabilities::from_json(v),
+            None => Default::default(),
+        },
     };
     match crate::model::selector::ModelSelector::load().and_then(|mut s| {
         s.add(profile)?;
@@ -340,15 +481,26 @@ mod tests {
         );
         assert!(expected.is_file(), "models.json 应已落盘");
 
-        // ③ artifacts.open_in_system {path}：真实调 OS 默认程序，业务信封 code=0
+        // ③ artifacts.open_in_system {path}：W3.2 之后裸路径只允许工作区内的文件。
+        //    配置目录在 %TEMP%（工作区之外）→ 必须拒绝，且**不得**真的启动系统程序。
         let res = crate::gateway::artifacts::artifacts_open_in_system(
             &json!({ "path": path }),
         );
-        assert_eq!(res["code"], 0, "open_in_system 应 code=0: {res}");
-        assert_eq!(
-            res["data"]["path"], path,
-            "回显 path 应与请求一致"
+        assert_eq!(res["code"], 1403, "工作区外的裸路径应拒 1403: {res}");
+        assert!(
+            res["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("PATH_NOT_ALLOWED_FOR_OPEN"),
+            "错误信息必须带稳定可识别的码: {res}"
         );
+
+        // ③b 已登记产物（有 id）允许在台账目录（即使在工作区外），但仍受可执行拦截。
+        //     这里不真的打开：用一个不存在的 id 验证「未登记 → 1404」，避免测试拉起 GUI。
+        let unknown = crate::gateway::artifacts::artifacts_open_in_system(
+            &json!({ "id": "artifact:probe:missing" }),
+        );
+        assert_eq!(unknown["code"], 1404, "未登记产物应拒 1404: {unknown}");
 
         // ④ 路径校验反例：不存在的路径必须被拒（1404，不落 OS 打开）
         let bad = crate::gateway::artifacts::artifacts_open_in_system(
@@ -463,5 +615,206 @@ mod tests {
         // 非内置 provider 且无显式 url → 返回 None（调用方据此报「缺少 base_url」）。
         assert_eq!(resolve_base_url("custom", &json!({})), None);
         assert_eq!(resolve_base_url("unknown", &json!({})), None);
+    }
+
+    // ── DeepSeek recipe RPC：渲染带估算字段 / 解析拒绝坏入参 ──
+
+    #[test]
+    fn deepseek_render_reports_tokens_estimate() {
+        let r = deepseek_render_prompt(&json!({
+            "messages": [{ "role": "user", "content": "你好" }]
+        }));
+        assert_eq!(r["ok"], true, "应渲染成功: {r}");
+        // 字段名必须是 tokensEstimate（估算），不能被误读为精确 tokens 计数。
+        assert!(
+            r["tokensEstimate"].as_u64().is_some_and(|n| n >= 1),
+            "tokensEstimate 应为正整数: {r}"
+        );
+        assert!(r.get("tokens").is_none(), "不得输出精确计数字段 tokens: {r}");
+    }
+
+    #[test]
+    fn deepseek_parse_rpc_rejects_bad_raw() {
+        for params in [json!({}), json!({ "raw": 42 }), json!({ "raw": "   " })] {
+            let r = deepseek_parse_response(&params);
+            assert_eq!(r["ok"], false, "坏入参应返回 ok:false（不得 panic）: {r}");
+            assert!(
+                r["error"].as_str().is_some_and(|s| !s.is_empty()),
+                "应给出可读错误: {r}"
+            );
+        }
+        let r = deepseek_parse_response(&json!({ "raw": "<｜User｜>问<｜Assistant｜>答" }));
+        assert_eq!(r["ok"], true, "正常入参应 ok:true: {r}");
+        assert_eq!(r["answer"], "答");
+        assert!(r["tokensEstimate"].as_u64().is_some_and(|n| n >= 1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 本地模型存在性校验（2026-10-22）
+// ---------------------------------------------------------------------------
+
+/// provider 是否属于「本地推理运行时」（只有这些才需要查 Ollama 的 tag 列表）。
+fn is_ollama_like(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "ollama" | "llamacpp" | "llama.cpp" | "llama_cpp" | "lmstudio" | "koboldcpp" | "local" | "ggml"
+    )
+}
+
+/// 把档案里的 `base_url` 归一成 Ollama 的根地址。
+///
+/// 档案里常见两种写法：`http://localhost:11434` 与 `http://localhost:11434/v1`
+/// （后者是 OpenAI 兼容路径）。`fetch_ollama_tags` 会拼 `/api/tags`，
+/// 若不剥掉 `/v1` 就会请求 `/v1/api/tags` —— 404，于是"探测失败"被误读成"模型不存在"。
+fn normalize_ollama_root(base_url: &str) -> String {
+    let s = base_url.trim().trim_end_matches('/');
+    let s = s.strip_suffix("/v1").unwrap_or(s);
+    let s = s.trim_end_matches('/');
+    if s.is_empty() {
+        "http://localhost:11434".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// 目标模型名是否在 Ollama 的 tag 列表里。
+///
+/// Ollama 会把无 tag 的模型名补成 `:latest`（`omnipilot` ≡ `omnipilot:latest`），
+/// 所以两侧都做一次 `:latest` 归一，避免"用户填 omnipilot、列表里是 omnipilot:latest"
+/// 被误判为不存在。
+fn local_model_exists(want: &str, available: &[String]) -> bool {
+    let w = want.trim();
+    if w.is_empty() {
+        return true;
+    }
+    available.iter().any(|a| {
+        let a = a.trim();
+        a == w
+            || a.strip_suffix(":latest") == Some(w)
+            || w.strip_suffix(":latest") == Some(a)
+    })
+}
+
+/// 保存 / 激活本地模型前的存在性校验。
+///
+/// 返回 `Some(Value)` = **应当拒绝本次调用**（值即 RPC 响应体，`ok:false` + 可操作提示）。
+/// 返回 `None` = 放行。
+///
+/// # 为什么需要它（2026-10-22 实测）
+///
+/// 用户把 `qwen3.8:27b` 加进路由候选并保存成功，但该模型**在 Ollama 里根本不存在**
+/// （`/api/tags` 只有 16 个模型，没有它）。应用照收不误，用户以为配好了，
+/// 之后怎么都"接不上"—— 因为任何路由都不可能选中一个不存在的模型。
+///
+/// 保存时校验一次，就能把这类"静默假成功"变成一句可操作的报错。
+///
+/// # 三态判据（不许默认成功，也不许默认失败）
+///
+/// | 探测结果 | 处置 | 理由 |
+/// |---|---|---|
+/// | Ollama 可达且模型存在 | 放行 | — |
+/// | Ollama 可达但模型不存在 | **拒绝** | 有确定证据，必须拦 |
+/// | Ollama 不可达 | 放行 | 拿不到"确定不存在"的证据。用户可能先存档案、稍后再启动 Ollama |
+pub async fn precheck_local_model(method: &str, params: &Value) -> Option<Value> {
+    let (provider, model, base_url) = match method {
+        "models.profiles.add" => (
+            param_str(params, "provider", "provider", "custom")
+                .trim()
+                .to_string(),
+            param_str(params, "model", "model", "").trim().to_string(),
+            param_str(params, "baseUrl", "base_url", "").trim().to_string(),
+        ),
+        "models.profiles.set_active" => {
+            let id = param_str(params, "id", "id", "").trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let Ok(sel) = crate::model::selector::ModelSelector::load() else {
+                return None;
+            };
+            let p = sel.registry().get(&id).cloned()?;
+            (p.provider.trim().to_string(), p.model.trim().to_string(), p.base_url.trim().to_string())
+        }
+        _ => return None,
+    };
+
+    if !is_ollama_like(&provider) || model.is_empty() {
+        return None;
+    }
+    let root = normalize_ollama_root(if base_url.is_empty() {
+        "http://localhost:11434"
+    } else {
+        &base_url
+    });
+
+    let tags = match crate::gateway::local_models::fetch_ollama_tags(&root).await {
+        Ok(t) => t,
+        // Ollama 不可达：放行（见函数文档的三态判据）。
+        Err(_) => return None,
+    };
+    let names: Vec<String> = tags
+        .iter()
+        .filter_map(|t| {
+            t.get("name")
+                .or_else(|| t.get("model"))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+        })
+        .collect();
+    if local_model_exists(&model, &names) {
+        return None;
+    }
+    Some(json!({
+        "ok": false,
+        "code": "local_model.not_found",
+        "error": format!(
+            "本地模型 `{model}` 不在 Ollama 里（{root}）。已安装的：{}",
+            if names.is_empty() { "（无）".to_string() } else { names.join("、") }
+        ),
+        "hint": "先 `ollama pull <模型>`，或改用上面已存在的模型名。",
+        "available": names,
+    }))
+}
+
+#[cfg(test)]
+mod precheck_tests {
+    use super::*;
+
+    #[test]
+    fn ollama_root_normalization_strips_v1_and_trailing_slash() {
+        assert_eq!(normalize_ollama_root("http://localhost:11434"), "http://localhost:11434");
+        assert_eq!(normalize_ollama_root("http://localhost:11434/"), "http://localhost:11434");
+        // 档案里最常见的写法：OpenAI 兼容路径
+        assert_eq!(normalize_ollama_root("http://localhost:11434/v1"), "http://localhost:11434");
+        assert_eq!(normalize_ollama_root("http://localhost:11434/v1/"), "http://localhost:11434");
+        // 空值回落到默认端口
+        assert_eq!(normalize_ollama_root(""), "http://localhost:11434");
+        assert_eq!(normalize_ollama_root("   "), "http://localhost:11434");
+    }
+
+    #[test]
+    fn model_existence_treats_latest_as_equivalent() {
+        let avail = vec!["omnipilot:latest".to_string(), "qwen3:4b".to_string()];
+        assert!(local_model_exists("omnipilot:latest", &avail));
+        assert!(local_model_exists("omnipilot", &avail));
+        assert!(local_model_exists("qwen3:4b", &avail));
+        // 这正是用户踩到的那个：配了不存在的大模型
+        assert!(!local_model_exists("qwen3.8:27b", &avail));
+        // 前缀相同但 tag 不同，不能算命中
+        assert!(!local_model_exists("qwen3:0.6b", &avail));
+        // 空名字不拦（交给上层报"缺少 model"）
+        assert!(local_model_exists("", &avail));
+    }
+
+    #[test]
+    fn only_local_runtimes_are_checked() {
+        assert!(is_ollama_like("ollama"));
+        assert!(is_ollama_like("OLLAMA"));
+        assert!(is_ollama_like("lmstudio"));
+        // 云厂商不该走 Ollama 探测
+        assert!(!is_ollama_like("deepseek"));
+        assert!(!is_ollama_like("openai"));
+        assert!(!is_ollama_like("custom"));
     }
 }

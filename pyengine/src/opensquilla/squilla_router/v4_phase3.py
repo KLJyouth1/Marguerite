@@ -14,7 +14,9 @@ import structlog
 import yaml
 
 from opensquilla.router_runtime_diagnostics import (
+    ROUTER_PYTHON_DEPENDENCY_MISSING,
     ROUTER_WEIGHTS_NOT_FETCHED,
+    REPAIRABLE_ROUTER_DEGRADATIONS,
     classify_router_runtime_error,
     router_runtime_hint,
 )
@@ -112,12 +114,29 @@ class V4Phase3Strategy:
             # layout is intact and the bytes were simply never pulled. Logging
             # ``init_failed`` for them (as this used to) made a one-command
             # operator fix look like a broken installation.
-            event = (
-                "v4_phase3.weights_not_fetched"
-                if error_kind == ROUTER_WEIGHTS_NOT_FETCHED
-                else "v4_phase3.init_failed"
+            #
+            # 2026-10-22：把同一判据推广到「Python 依赖缺失」（典型：装完
+            # 桌面版后 `No module named 'lightgbm'`）。它与 LFS 未拉取是**同一类**：
+            #   · 安装本身是完整的（RouterBundleDegraded 的 docstring 已写明
+            #     "ML routing is an optional enhancement and the rule-based router
+            #     still serves every turn"）；
+            #   · 一条 `pip install opensquilla[recommended]` 即可修复；
+            #   · 之前却记成 init_failed + ERROR —— 用户看到启动日志里 12 条 ERROR
+            #     会以为系统坏了，而不是"有个可选增强没装"。
+            # 上一轮只修了 LFS 那一种，留下这半修；这里补齐。
+            if error_kind == ROUTER_WEIGHTS_NOT_FETCHED:
+                event = "v4_phase3.weights_not_fetched"
+            elif error_kind == ROUTER_PYTHON_DEPENDENCY_MISSING:
+                event = "v4_phase3.deps_missing"
+            else:
+                event = "v4_phase3.init_failed"
+            # 级别同样是契约：可一条命令修复的降级 → warning；真损坏 → error。
+            emit = (
+                log.warning
+                if error_kind in REPAIRABLE_ROUTER_DEGRADATIONS
+                else log.error
             )
-            log.error(
+            emit(
                 event,
                 bundle_dir=str(self.bundle_dir),
                 error=str(exc),

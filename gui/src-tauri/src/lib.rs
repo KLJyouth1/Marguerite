@@ -83,8 +83,16 @@ impl AppState {
         let evolution = Arc::new(Mutex::new(SelfEvolution::new(ledger, long_term)));
 
         // Phase D/F：接入真实引擎，并注入自进化经验台账
+        //
+        // 配置必须来自**磁盘 + 生效模型叠加**，不能用 `Config::default()`：后者
+        // api_key / provider / base_url 全为空，一旦前端经 `run_turn` 走这条内嵌引擎，
+        // 就会在「已配置密钥」的机器上必然鉴权失败（真实用户看到的是一句 401）。
+        // 叠加 `models.json` active 档案，与 CLI / TUI / 网关看到同一个模型。
+        let boot_config = marguerite_core::model::selector::apply_effective_model(
+            &Config::load().unwrap_or_default(),
+        );
         let engine: Arc<dyn EngineRunner> = Arc::new(
-            RealEngine::from_config(Config::default()).with_evolution(Some(evolution.clone())),
+            RealEngine::from_config(boot_config).with_evolution(Some(evolution.clone())),
         );
 
         // Phase H4：模型选择器（加载 models.json，首次运行落盘种子默认值）
@@ -308,6 +316,8 @@ fn py_status_to_str(s: PyEngineStatus) -> &'static str {
         PyEngineStatus::Running => "running",
         PyEngineStatus::Restarting => "restarting",
         PyEngineStatus::Failed => "failed",
+        // P0-1：崩溃循环熔断——UI 据此提示「侧车反复崩溃，已停止自动重启」。
+        PyEngineStatus::Degraded => "degraded",
     }
 }
 
@@ -329,6 +339,19 @@ async fn sidecar_status(state: State<'_, Arc<AppState>>) -> Result<SidecarStatus
             base_url: None,
         },
     })
+}
+
+/// 侧车日志目录（Runtime 面板展示 + 排障入口）。
+///
+/// 与 `core/src/pyengine/sidecar.rs` 的 `sidecar_log_dir()` **同源**：
+/// 不让前端自己拼 `%TEMP%/marguerite-sidecar`，否则一旦上游改了布局
+/// （见该函数注释里的 `MARGUERITE_SIDECAR_LOG_DIR` 覆盖与迁移取舍），
+/// 面板会指向一个不存在的路径 —— 那正是"看起来有功能、实际点不动"。
+#[tauri::command]
+fn sidecar_log_dir() -> String {
+    marguerite_core::pyengine::sidecar::sidecar_log_dir()
+        .display()
+        .to_string()
 }
 
 /// 首次启动 Python 侧车（懒启动）：detect → start；如果已运行则复用。
@@ -456,7 +479,11 @@ async fn run_turn(
     session: String,
     mode: String,
 ) -> Result<(), String> {
-    let config = Config::load().unwrap_or_default();
+    // 与构造 `state.engine` 时用的是**同一份**生效配置：若这里只看 config.yaml，
+    // 而引擎用的是叠加后的档案密钥，两处判据会分叉（一处说「未配置」、另一处却真发请求）。
+    let config = marguerite_core::model::selector::apply_effective_model(
+        &Config::load().unwrap_or_default(),
+    );
     if config.model.api_key.is_empty() {
         let event_name = format!("mgt:{session}");
         let _ = app.emit(&event_name, serde_json::json!({
@@ -634,6 +661,110 @@ fn pet_overlay_move(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), String>
     Ok(())
 }
 
+// ───────────── P0-4：任务悬浮球（task-overlay）─────────────
+//
+// 与 pet-overlay 同源同风格：同样由网关托管的 Vue 页面渲染（/control/task-overlay），
+// 窗口配置、生命周期与拖拽命令完全复用 pet-overlay 的写法，不新增窗口管理层。
+
+const TASK_OVERLAY_LABEL: &str = "task-overlay";
+const TASK_OVERLAY_W: f64 = 120.0;
+const TASK_OVERLAY_H: f64 = 120.0;
+
+/// 任务悬浮球 URL：端口同样取自 `marguerite_core::gateway::DEFAULT_PORT`。
+fn task_overlay_url() -> String {
+    format!("http://localhost:{DEFAULT_PORT}/control/task-overlay")
+}
+
+/// 任务悬浮球缺省位置：屏幕右下角，但落在桌宠悬浮窗顶部之上（12px 间距），
+/// 避免两者在缺省位置重叠。纯函数（可单测）。
+fn task_overlay_default_position(
+    workarea: Option<(f64, f64, f64, f64)>,
+    w: f64,
+    h: f64,
+) -> (f64, f64) {
+    match workarea {
+        Some((x, y, ww, wh)) => (
+            x + ww - w - 24.0,
+            y + wh - PET_OVERLAY_H - 24.0 - h - 12.0,
+        ),
+        None => (640.0, 120.0),
+    }
+}
+
+/// 创建 / 显示任务悬浮球（幂等：已存在则 show + 置前）。
+#[tauri::command]
+fn task_overlay_show(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri::WebviewWindowBuilder;
+
+    if let Some(win) = app.get_webview_window(TASK_OVERLAY_LABEL) {
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        return Ok(());
+    }
+
+    let work = match app.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let a = monitor.work_area();
+            Some((
+                a.position.x as f64,
+                a.position.y as f64,
+                a.size.width as f64,
+                a.size.height as f64,
+            ))
+        }
+        _ => None,
+    };
+    let (x, y) = task_overlay_default_position(work, TASK_OVERLAY_W, TASK_OVERLAY_H);
+
+    let _win = WebviewWindowBuilder::new(&app, TASK_OVERLAY_LABEL, tauri::WebviewUrl::External(task_overlay_url().parse().map_err(|e| format!("非法任务悬浮球 URL: {e}"))?))
+        .title("Marguerite Tasks")
+        .inner_size(TASK_OVERLAY_W, TASK_OVERLAY_H)
+        .position(x, y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .visible(true)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| format!("任务悬浮球创建失败: {e}"))?;
+
+    Ok(())
+}
+
+/// 隐藏任务悬浮球（存在则 hide，不存在静默跳过，保持幂等）。
+#[tauri::command]
+fn task_overlay_hide(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window(TASK_OVERLAY_LABEL) {
+        let _ = win.hide();
+    }
+    Ok(())
+}
+
+/// 切换显示/隐藏（托盘菜单快捷入口）。
+#[tauri::command]
+fn task_overlay_toggle(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    match app.get_webview_window(TASK_OVERLAY_LABEL) {
+        Some(win) if win.is_visible().unwrap_or(false) => {
+            let _ = win.hide();
+            Ok(())
+        }
+        _ => task_overlay_show(app),
+    }
+}
+
+/// 任务悬浮球：拖拽到新屏幕坐标（x,y 为窗口左上角，由前端上报）。
+#[tauri::command]
+fn task_overlay_move(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window(TASK_OVERLAY_LABEL) {
+        let _ = win.set_position(tauri::LogicalPosition { x, y });
+    }
+    Ok(())
+}
+
 /// 经验视图（序列化给前端）
 #[derive(serde::Serialize)]
 struct ExperienceView {
@@ -795,6 +926,10 @@ fn model_add(
         },
         base_url: base_url.trim().to_string(),
         api_key: stored_key,
+        // GUI 的「添加接入点」表单只收**密钥本体**，不收集环境变量名，故这里显式留空。
+        // 留空 = 该档案不声明 env 来源，运行期只用上面的加密密钥；
+        // 设置页里选「使用环境变量」走的是 `llmProfile.activate` 的另一条路径。
+        api_key_env: String::new(),
         model: model.trim().to_string(),
         kind: match kind.as_str() {
             "local" => ProfileKind::Local,
@@ -811,6 +946,14 @@ fn model_add(
         // 与「已声明（用 caps 严格卡线）」。若给 true，会把默认均衡档当成作者的
         // 严格声明，把该档案错误地卡在旗舰候选链之外。
         tier_caps_declared: false,
+        // GUI「添加接入点」表单没有多模态勾选项：显式写入 `Default`（全 false + declared=false），
+        // 语义是「用户未声明」→ 运行期按 provider/model 名做保守自动识别（见 registry::recognize）；
+        // 若这里省略字段，`ModelProfile` 的构造会直接编译失败（真机 2026-10-23 构建阻断）。
+        capabilities: marguerite_core::model::registry::ModelCapabilities::default(),
+        // GUI「添加接入点」表单暂不提供协议选择，默认 chat。
+        // 需要 responses 的用户走设置页 / `marguerite model add --wire-api responses`，
+        // 那两条路径都会把这个字段写进同一个 models.json。
+        wire_api: marguerite_core::model::wire::WireApi::Chat,
     };
     let mut sel = state.model_selector.lock().map_err(|e| e.to_string())?;
     sel.add(profile).map_err(|e| e.to_string())
@@ -849,6 +992,8 @@ fn model_config_to_llm(
         timeout_secs: 120,
         thinking: ThinkingEffort::Off,
         context_window: CONTEXT_WINDOW_DEFAULT,
+        // 协议随 `config.yaml` 的 `[model] wire_api`；缺省 Chat。
+        wire_api: m.wire_api,
     }
 }
 
@@ -1613,6 +1758,251 @@ fn usage_daily(days: u32) -> Result<serde_json::Value, String> {
     Ok(marguerite_core::usage::daily(days))
 }
 
+// ───────────── 自动化 / 定时任务（automation 面板的真实后端）─────────────
+//
+// 为什么需要这一组（2026-10-21 审计）：桌面端 nav 里的「自动化」此前是
+// `PlaceholderPanel`（"该模块正在开发中"），而 core 早已有完整的
+// `crate::schedule::ScheduleStore`（Reminder CRUD + 持久化到 SQLite），
+// WebUI 也有整套 `cron.*` RPC + CronView。也就是说**能力早就存在，只是桌面端没接**。
+//
+// 与网关的分工遵循既有约定：Tauri 做 dispatch + 序列化，`ScheduleStore` 持有状态。
+// 这里刻意**复用同一个 store**（`open_default`），而不是另建一张表——
+// 否则桌面端建的任务 WebUI/CLI 看不到，形成又一处"双配置源"。
+
+/// 列表：全部定时任务（不按会话过滤；桌面端是单用户视角，需要看到全部）。
+#[tauri::command]
+fn cron_list() -> Result<serde_json::Value, String> {
+    let store = marguerite_core::schedule::ScheduleStore::open_default()?;
+    let items: Vec<serde_json::Value> = store
+        .all()
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "session": r.session,
+                "message": r.message,
+                "trigger": trigger_to_json(&r.trigger),
+                "created_at_ms": r.created_at_ms,
+                "next_fire_ms": r.next_fire_ms,
+                "fired": r.fired,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "items": items }))
+}
+
+fn trigger_to_json(t: &marguerite_core::schedule::ReminderTrigger) -> serde_json::Value {
+    use marguerite_core::schedule::ReminderTrigger;
+    match t {
+        ReminderTrigger::After { seconds } => {
+            serde_json::json!({ "kind": "after", "value": seconds })
+        }
+        ReminderTrigger::At { ts_ms } => serde_json::json!({ "kind": "at", "value": ts_ms }),
+        ReminderTrigger::Every { interval_seconds } => {
+            serde_json::json!({ "kind": "every", "value": interval_seconds })
+        }
+    }
+}
+
+/// 把前端传来的 `{kind, value}` 解析成触发方式。
+///
+/// 校验放在这里而不是只信前端：`every` 有 ≥300 秒下限（防误填 1 秒把库打爆），
+/// `at` 必须是未来时刻。错误原样回传，不吞成"创建成功"。
+fn parse_trigger(kind: &str, value: i64) -> Result<marguerite_core::schedule::ReminderTrigger, String> {
+    use marguerite_core::schedule::ReminderTrigger;
+    match kind {
+        "after" => {
+            if value <= 0 {
+                return Err("延迟秒数必须大于 0".into());
+            }
+            Ok(ReminderTrigger::After {
+                seconds: value as u64,
+            })
+        }
+        "at" => Ok(ReminderTrigger::At { ts_ms: value }),
+        "every" => {
+            if value < 300 {
+                return Err("间隔不得小于 300 秒（防误填导致频繁触发）".into());
+            }
+            Ok(ReminderTrigger::Every {
+                interval_seconds: value as u64,
+            })
+        }
+        other => Err(format!("未知触发类型：{other}（可选 after / at / every）")),
+    }
+}
+
+/// 当前毫秒时间戳。
+///
+/// 刻意用 `std::time` 而不是引入 `chrono`：gui crate 没有 chrono 依赖，
+/// 为一个时间戳加依赖不值得。时钟回拨时返回 0（而非 panic），
+/// `ScheduleStore::register` 会据此报 `NotFuture`，错误可见。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 新建定时任务。
+#[tauri::command]
+fn cron_create(
+    session: String,
+    message: String,
+    kind: String,
+    value: i64,
+) -> Result<serde_json::Value, String> {
+    let trigger = parse_trigger(&kind, value)?;
+    let mut store = marguerite_core::schedule::ScheduleStore::open_default()?;
+    let now = now_ms();
+    let r = store
+        .register(&session, &message, trigger, now)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "item": {
+            "id": r.id,
+            "session": r.session,
+            "message": r.message,
+            "trigger": trigger_to_json(&r.trigger),
+            "created_at_ms": r.created_at_ms,
+            "next_fire_ms": r.next_fire_ms,
+            "fired": r.fired,
+        }
+    }))
+}
+
+/// 删除定时任务。返回是否真的删掉了（id 不存在 → false，不谎报成功）。
+#[tauri::command]
+fn cron_remove(id: String) -> Result<serde_json::Value, String> {
+    let mut store = marguerite_core::schedule::ScheduleStore::open_default()?;
+    let removed = store.cancel(&id);
+    Ok(serde_json::json!({ "ok": removed, "id": id }))
+}
+
+/// 立即触发一次（不等计划时刻）。
+///
+/// 语义选择：**一次性任务触发后即删除**（after/at 的语义就是"到点提醒一次"），
+/// 周期任务（every）只推进 `next_fire_ms` 而保留。这样"立即运行"不会在列表里
+/// 留下一条永远不会再触发的死任务。
+#[tauri::command]
+fn cron_run(id: String) -> Result<serde_json::Value, String> {
+    use marguerite_core::schedule::ReminderTrigger;
+    let mut store = marguerite_core::schedule::ScheduleStore::open_default()?;
+    let target = store.all().into_iter().find(|r| r.id == id);
+    let Some(r) = target else {
+        return Err(format!("未找到任务：{id}"));
+    };
+    let message = r.message.clone();
+    let recurring = matches!(r.trigger, ReminderTrigger::Every { .. });
+    if !recurring {
+        store.cancel(&id);
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": id,
+        "message": message,
+        "recurring": recurring,
+        // 桌面端据此把提醒作为系统消息投进当前会话，而不是"静默成功"
+        "delivered": true,
+    }))
+}
+
+// ───────────── 回合结束通知（turn-ended）─────────────
+//
+// 为什么需要：长任务（深度推理、批量执行）动辄几分钟，用户会切去干别的，
+// 回来才发现早跑完了 —— 或者更糟，一直等着。ChatGPT / Codex 桌面端都有这条。
+//
+// 为什么放在 Rust 侧发、而不是 webui 里直接调插件 JS：
+//   webui 是纯浏览器包，**没有** `@tauri-apps/api`（静态 import 会让 vite build 失败，
+//   见 `webui/src/utils/tauriBridge.ts` 的注释）。它只能用 `__TAURI_INTERNALS__.invoke`
+//   调 command。所以这里提供一个 command，把通知能力封装在壳内。
+//
+// 为什么不在前端用 Web Notification API：WebView2 / WKWebView 上行为不一致，
+// 窗口最小化时可能静默失败，且拿不到系统通知中心的历史。
+#[tauri::command]
+fn notify_turn_ended(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<bool, String> {
+    use tauri_plugin_notification::NotificationExt;
+    // 空标题的通知在 Windows 上会被静默丢弃；显式拒绝，让前端知道没发出去。
+    if title.trim().is_empty() {
+        return Err("通知标题不能为空".into());
+    }
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| format!("通知发送失败：{e}"))?;
+    Ok(true)
+}
+
+// ───────────── 三档模型分层 + 会话预算（四端同源展示）─────────────
+
+/// 档位决策 + 预算台账 + 各档候选链。
+///
+/// 与 CLI `marguerite model tier` / TUI 状态栏 / WebUI `model.tier.get` 同源，
+/// 都读 `SessionState`；桌面端不能再自算一套，否则四端数字会对不上。
+#[tauri::command]
+fn model_tier_get() -> Result<serde_json::Value, String> {
+    use marguerite_core::model::tier::{ModelTier, SessionState, TierRequest, TierRules};
+    let s = SessionState::load();
+    let rules = TierRules::from_embedded();
+    // 预算已用/剩余取 `usage` 台账实测：会话态里的 used 字段全仓无人写入（恒 0），
+    // 直接读会给出「剩余 100%」假读数（与 WebUI/CLI/TUI 的诚实性要求一致）。
+    let snap = marguerite_core::usage::tightest_budget_snapshot();
+    let budget = match &snap {
+        Some(b) => s.budget.clone().with_measured_snapshot(
+            b.tokens_cap,
+            b.usd_cap,
+            b.tokens_used,
+            b.usd_used,
+        ),
+        None => s.budget.clone(),
+    };
+    let decision = s.resolve_tier_with(TierRequest::default(), snap.as_ref().map(|b| b.remaining_ratio));
+    Ok(serde_json::json!({
+        "locked_tier": s.locked_tier.map(|t| t.as_str()),
+        "thinking_effort": s.thinking_effort.reasoning_effort(),
+        "effective_tier": decision.tier.as_str(),
+        "tier_reasons": decision.why,
+        "budget": {
+            "tokens_cap": budget.tokens_cap,
+            "usd_cap": budget.usd_cap,
+            "tokens_used": budget.tokens_used,
+            "usd_used": budget.usd_used,
+            "remaining_ratio": budget.remaining_ratio(),
+            "state": budget.state().as_str(),
+            "budget_source": if snap.is_some() { "usage_ledger" } else { "session_state" },
+        },
+        "tiers": {
+            "flagship": rules.chain_for(ModelTier::Flagship),
+            "balanced": rules.chain_for(ModelTier::Balanced),
+            "turbo": rules.chain_for(ModelTier::Turbo),
+        }
+    }))
+}
+
+/// 锁定档位（auto/none = 解除锁定）。返回最新档位，避免前端再读一次。
+#[tauri::command]
+fn model_tier_set(tier: String) -> Result<serde_json::Value, String> {
+    use marguerite_core::model::tier::{ModelTier, SessionState};
+    let mut s = SessionState::load();
+    s.locked_tier = match tier.trim() {
+        "" | "auto" | "none" => None,
+        other => Some(ModelTier::parse(other)),
+    };
+    s.save().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "locked_tier": s.locked_tier.map(|t| t.as_str()),
+        "effective_tier": s.effective_tier().as_str(),
+    }))
+}
+
 // ───────────── 鲸鱼娘桌宠（原生状态机，好感度持久化）─────────────
 
 #[derive(serde::Serialize)]
@@ -2002,6 +2392,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     // V2.1-P2：桌宠悬浮窗入口，缺省为可见状态（启动后未创建时点击会创建）。
     let pet_toggle = MenuItem::with_id(app, "pet_toggle", "桌宠悬浮窗 · 切换显示", true, Some("CmdOrCtrl+Shift+P"))?;
     let pet_hide = MenuItem::with_id(app, "pet_hide", "桌宠悬浮窗 · 隐藏", true, None::<&str>)?;
+    // P0-4：任务悬浮球入口（与桌宠同构，缺省未创建时点击会创建）。
+    let task_toggle = MenuItem::with_id(app, "task_toggle", "任务悬浮球 · 切换显示", true, None::<&str>)?;
+    let task_hide = MenuItem::with_id(app, "task_hide", "任务悬浮球 · 隐藏", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Marguerite", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -2011,6 +2404,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &pet_toggle,
             &pet_hide,
+            &task_toggle,
+            &task_hide,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -2031,6 +2426,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "pet_hide" => {
                 let _ = pet_overlay_hide(app.clone());
+            }
+            "task_toggle" => {
+                let _ = task_overlay_toggle(app.clone());
+            }
+            "task_hide" => {
+                let _ = task_overlay_hide(app.clone());
             }
             "quit" => app.exit(0),
             _ => {}
@@ -2392,6 +2793,161 @@ fn probe_control_page(timeout: std::time::Duration) -> ControlProbe {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 端口占用者判定（R14）：区分「本产品网关」与「别的程序」
+// ---------------------------------------------------------------------------
+//
+// 历史缺陷：端口被占 → 一律弹「Marguerite 已在运行」并 exit(1)。实测本机一个
+// 残留 `marguerite-core.exe` 占着 18790 时，桌面端因此**完全无法启动**，
+// 而桌面上并没有任何窗口 —— 用户被告知了一个不成立的事实，也没有恢复路径。
+//
+// 判定依据用 `/api/health` 的**结构化字段**（`engine == "rust"`），而不是
+// 「TCP 能连上」：后者任何监听进程都满足，等于没判。
+
+/// 端口占用者分类
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PortOwner {
+    /// 端口空闲，可以自起网关
+    Free,
+    /// 本产品的 Rust 网关已在跑（可附着复用）
+    OurGateway { version: String },
+    /// 别的程序占着（不可附着）
+    Foreign,
+}
+
+/// 从 `/api/health` 响应体判定占用者身份。
+///
+/// 纯函数，便于单测：输入是原始 HTTP 响应（含状态行），输出分类。
+/// 判定必须同时满足 `status == "ok"` 与 `engine == "rust"`——只认其中一个
+/// 会把恰好返回 `{"status":"ok"}` 的第三方服务误认成本产品网关。
+fn classify_port_owner(raw: &str) -> PortOwner {
+    let Some(body_start) = raw.find("\r\n\r\n").map(|i| i + 4) else {
+        return PortOwner::Foreign;
+    };
+    // 状态行必须是 200；别的状态码说明该端口上不是健康的本产品网关
+    if !raw.starts_with("HTTP/1.1 200") && !raw.starts_with("HTTP/1.0 200") {
+        return PortOwner::Foreign;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw[body_start..]) else {
+        return PortOwner::Foreign;
+    };
+    if v.get("engine").and_then(|x| x.as_str()) != Some("rust")
+        || v.get("status").and_then(|x| x.as_str()) != Some("ok")
+    {
+        return PortOwner::Foreign;
+    }
+    PortOwner::OurGateway {
+        version: v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+    }
+}
+
+/// 探测 18790 端口当前归属（Free / 本产品网关 / 别的程序）。
+fn probe_port_owner() -> PortOwner {
+    // 先试 bind：成功即空闲（guard 立刻释放，交给网关线程去绑）。
+    match std::net::TcpListener::bind(std::net::SocketAddr::from(([127u8, 0, 0, 1], DEFAULT_PORT))) {
+        Ok(_guard) => return PortOwner::Free,
+        Err(e)
+            if e.kind() != std::io::ErrorKind::AddrInUse
+                && e.kind() != std::io::ErrorKind::PermissionDenied =>
+        {
+            // 不是「被占用」而是别的绑定失败（如权限）：同样按不可用处理，
+            // 交给后续 alert_fatal 报准确原因，而不是在这里猜。
+            return PortOwner::Foreign;
+        }
+        Err(_) => {}
+    }
+    match fetch_health_probe(std::time::Duration::from_millis(1200)) {
+        Some(raw) => classify_port_owner(&raw),
+        None => PortOwner::Foreign,
+    }
+}
+
+/// `GET /api/health` 原始响应（供端口归属判定）。失败返回 None。
+fn fetch_health_probe(timeout: std::time::Duration) -> Option<String> {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127u8, 0, 0, 1], DEFAULT_PORT));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(
+            format!(
+                "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{DEFAULT_PORT}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 2048];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 64 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 冷启动超时后的**后台续探 + 自动导航**（R13，2026-10-18）。
+///
+/// 为什么需要：首轮就绪等待有截止时间（20s）。一旦超时，窗口停在 core 的
+/// `/control/` 诊断页（503）或 WebView 的连接错误页，而**原实现没有任何恢复
+/// 路径**——用户只能关掉重开，重开时网关早已就绪，于是表现为「重启一下就好了」
+/// 这种最难复现、也最难解释的缺陷。
+///
+/// 本函数起一个 detached 线程，最多再等 [`LATE_READY_BUDGET`]；一旦 `/control/`
+/// 真的就绪，就把主窗口导航回控制台。三项设计约束：
+/// 1. **不阻塞启动**：全程后台，主线程该干嘛干嘛；
+/// 2. **不重复建窗**：只对既有 `main` 窗口做 `navigate`，不新开窗口、不改变
+///    用户已手动导航到别处之外的会话状态（`navigate` 仅重载控制台入口）；
+/// 3. **失败静默**：再次超时只记一行 stderr，不再弹第二个对话框（避免叠加骚扰）。
+fn spawn_late_readiness_recovery(app: tauri::AppHandle) {
+    /// 首轮 20s 之后，再给 90s（覆盖首次运行解压 pyengine / 杀软全盘扫描）。
+    const LATE_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + LATE_READY_BUDGET;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if matches!(
+                probe_control_page(std::time::Duration::from_millis(1200)),
+                ControlProbe::Ready
+            ) {
+                let url = control_url();
+                if let Some(win) = app.get_webview_window("main") {
+                    // `navigate` 同时覆盖「诊断页」与「WebView 连接错误页」两种状态
+                    // （后者是浏览器内部页，`location.reload()` 无法从 Rust 侧触发）。
+                    match win.navigate(url.parse().unwrap_or_else(|_| {
+                        unreachable!("control_url 为编译期固定回环地址")
+                    })) {
+                        Ok(()) => eprintln!("[gateway] 延迟就绪：已自动把主窗口导航回控制台"),
+                        Err(e) => eprintln!("[gateway] 延迟就绪但导航失败：{e}"),
+                    }
+                }
+                return;
+            }
+        }
+        eprintln!(
+            "[gateway] 延迟续探 {}s 仍未就绪，停止自动恢复（请查看上方诊断按提示修复）",
+            LATE_READY_BUDGET.as_secs()
+        );
+    });
+}
+
+/// 控制台入口地址（单一定义，供窗口配置校验与延迟导航共用）。
+fn control_url() -> String {
+    format!("http://localhost:{DEFAULT_PORT}/control/")
+}
+
 /// 把探测结论转成「可执行的诊断」（摘要 + 修复动作），供 stderr 与原生对话框共用。
 ///
 /// 纯函数：`webui_missing` 为 `resolve_webui_dir` 的结果，`candidates` 为探测过的
@@ -2438,6 +2994,35 @@ fn diagnose_control_failure(
     (summary, hint)
 }
 
+// ───────────── 桌宠悬浮窗的运行时 ACL 能力（2026-10-25）─────────────
+//
+// 真机缺陷：「桌宠拖不动、拖不出窗体」。
+//
+// 根因不在前端坐标换算，而在**窗口级权限**：`capabilities/default.json` 的
+// `windows` 只有 `["main"]`，而 pet-overlay 是另建的独立 webview（加载
+// `http://localhost:PORT/control/pet-overlay`，属于 remote origin）。Tauri 2 的
+// `RuntimeAuthority::resolve_access` 要求「命令在白名单内 **且** 窗口标签匹配」，
+// 于是该窗口内的所有 IPC —— 原生拖拽 `plugin:window|start_dragging`、
+// 以及自定义的 `pet_overlay_move` / `pet_overlay_hide` —— 在安装版（release）
+// 全部被拒；`debug` 构建不落拒绝分支，所以本地开发看不出来，只有装包后复现。
+//
+// 这里在 setup 阶段为该窗口补一份最小能力集（不放松 main 窗口的权限，也不改
+// capabilities/default.json 的既有范围）。
+fn grant_pet_overlay_capability(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::ipc::CapabilityBuilder;
+    use tauri::Manager;
+
+    app.add_capability(
+        CapabilityBuilder::new("pet-overlay-runtime")
+            .window(PET_OVERLAY_LABEL)
+            // 悬浮窗由内嵌网关托管（remote origin），与 default.json 的 remote 段同源
+            .remote(format!("http://localhost:{DEFAULT_PORT}/*"))
+            .permission("core:window:allow-start-dragging")
+            .permission("allow-pet-overlay-move")
+            .permission("allow-pet-overlay-hide"),
+    )
+}
+
 /// 应用入口
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -2445,6 +3030,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        // 回合结束通知（2026-10-21）：长任务跑完时用户往往不在看屏幕。
+        // 用官方通知插件而不是 Web Notification API：后者在 WebView2 /
+        // WKWebView 上行为不一致（部分平台静默失败），且无法在窗口最小化时弹出。
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 第二实例启动：聚焦已存在的 “main” 窗口，而非再开一个进程。
             if let Some(win) = app.get_webview_window("main") {
@@ -2456,32 +3045,62 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // ── 单实例端口守卫（127.0.0.1:DEFAULT_PORT）──
-            // 若端口已被其它 Marguerite 实例（或残留进程）占用，说明已有实例在运行。
-            // 直接弹窗告知并退出，而非静默降级到陈旧实例。
-            match std::net::TcpListener::bind(std::net::SocketAddr::from(([127u8, 0, 0, 1], DEFAULT_PORT))) {
-                Ok(_guard) => { /* 端口空闲：立即释放，交由网关于线程内绑定 */ }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::AddrInUse
-                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
-                {
-                    alert_fatal(
-                        &handle,
-                        "Marguerite 已在运行",
-                        &format!(
-                            "检测到端口 127.0.0.1:{} 已被占用，另一个 Marguerite 实例可能正在运行。\n请先关闭已运行的实例后再启动本程序。",
-                            DEFAULT_PORT
-                        ),
-                    );
-                }
-                Err(e) => {
-                    alert_fatal(
-                        &handle,
-                        "无法启动内嵌网关",
-                        &format!("内嵌网关端口 {} 绑定失败：{e}", DEFAULT_PORT),
-                    );
-                }
+            // 桌宠悬浮窗是独立 webview，不在 capabilities/default.json 的 windows 名单里；
+            // 不补这份运行时能力，安装版的拖拽 / 隐藏会被 ACL 静默拒绝。
+            if let Err(e) = grant_pet_overlay_capability(&handle) {
+                eprintln!("[pet-overlay] 运行时 ACL 能力注册失败（拖拽/隐藏可能不可用）: {e}");
             }
+
+            // ── 单实例 / 端口占用守卫（127.0.0.1:DEFAULT_PORT）──
+            //
+            // R14（2026-10-19）修：原实现把「端口被占用」**一律**当成「另一个 Marguerite
+            // 正在运行」，弹窗后 `exit(1)`。但实测（2026-10-18 本机）一个残留的
+            // `marguerite-core.exe`（CLI/服务进程）占着 18790 时，桌面端会**拒绝启动**并
+            // 谎称「Marguerite 已在运行」——而桌面上根本没有窗口，用户唯一能做的只有
+            // 重启机器。这是把「端口冲突」误判成「单实例」的语义错误。
+            //
+            // 现在先**问清楚占用者是谁**（`GET /api/health` 的 `engine=rust` + `version`）：
+            // - 本产品网关 → **附着复用**（不再自起一个），窗口直接连它；版本不一致时
+            //   如实弹一次提示（不静默连旧版，避免界面出现无法解释的契约错误）；
+            // - 别的程序 → 给出可执行的处置指引（查 PID / 结束进程 / 改端口），不装作
+            //   「另一个 Marguerite 在跑」。
+            let port_owner = probe_port_owner();
+            if let PortOwner::Foreign = port_owner {
+                alert_fatal(
+                    &handle,
+                    "端口被其它程序占用",
+                    &format!(
+                        "127.0.0.1:{DEFAULT_PORT} 已被**非 Marguerite** 的程序占用，桌面端无法启动内嵌网关。\n\n\
+                         Marguerite 的网关特征：GET http://127.0.0.1:{DEFAULT_PORT}/api/health 应返回 \
+                         {{\"engine\":\"rust\"}}。当前该端口没有这个响应，说明占用者不是本程序。\n\n\
+                         处置（任选）：\n\
+                         1) 查占用者：netstat -ano | findstr :{DEFAULT_PORT}\n\
+                         2) 结束它：taskkill /PID <上一步的 PID> /F\n\
+                         3) 若是别的开发服务，请先停掉再启动 Marguerite。",
+                        DEFAULT_PORT = DEFAULT_PORT
+                    ),
+                );
+            }
+            let attached_gateway = match &port_owner {
+                PortOwner::OurGateway { version } => {
+                    eprintln!(
+                        "[gateway] 端口 {DEFAULT_PORT} 上已有 Marguerite 网关（version={version}），进入附着模式：复用现有网关，不再自起一个"
+                    );
+                    if version != env!("CARGO_PKG_VERSION") {
+                        alert_async(
+                            &handle,
+                            "已连接到另一个版本的网关",
+                            &format!(
+                                "127.0.0.1:{DEFAULT_PORT} 上运行的网关版本为 {version}，当前桌面端为 {}。\n\
+                                 界面由该网关托管，若出现功能缺失或契约错误，请先关闭那个进程（可能是 CLI/TUI 或旧版桌面端）再重启。",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                        );
+                    }
+                    true
+                }
+                _ => false,
+            };
 
             if let Err(e) = build_tray(&handle) {
                 // 托盘非致命：用原生对话框告知，但继续启动（不退出）。
@@ -2510,6 +3129,15 @@ pub fn run() {
             let bundled_skills = resolve_skills_dir(app);
             let gw_app = app.handle().clone();
             std::thread::spawn(move || {
+                // R14：附着模式下复用已在跑的网关，**不再自起一个**（否则必然 bind 失败，
+                // 原实现会在这里二次弹「Marguerite 已在运行」并退出，等于把可用的启动路径
+                // 变成死路）。放在闭包首行而非外面包 `if`，是为了不重排 200+ 行既有装配逻辑。
+                if attached_gateway {
+                    eprintln!(
+                        "[gateway] 附着模式：复用 127.0.0.1:{DEFAULT_PORT} 上已有的网关，跳过内嵌网关启动"
+                    );
+                    return;
+                }
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
                     Err(e) => {
@@ -2522,8 +3150,13 @@ pub fn run() {
                     }
                 };
                 rt.block_on(async move {
-                    let mut config = marguerite_core::persistence::config::Config::load()
-                        .unwrap_or_default();
+                    // 会话入口叠加「用户选择的模型」：网关的 `ctx.config` 是 chat 发信的
+                    // 密钥/模型判据（`gateway::chat` 的 api_key 门禁、`system.health` 上报的
+                    // provider/model），若这里只读 config.yaml，则会与 `models.json` 里
+                    // 用户选中的档案分叉——表现为「界面显示 A 模型，实际跑 B」。
+                    let mut config = marguerite_core::model::selector::apply_effective_model(
+                        &marguerite_core::persistence::config::Config::load().unwrap_or_default(),
+                    );
                     // 安装版：把打包内嵌的技能目录（resource_dir/skills 等）注入
                     // config.skills.skills_dir，使 WebUI skills.list 能枚举到内置技能；
                     // 开发期 src-tauri/skills 未复制时 bundled_skills 为 None，保留默认
@@ -2642,14 +3275,17 @@ pub fn run() {
                         Ok(state) => {
                             let state = std::sync::Arc::new(state);
                             if let Err(e) = gateway::run(state, DEFAULT_PORT).await {
-                                // 端口被占用（如另一 GUI/CLI 实例已占 18790）：bind 失败即视为
-                                // 已有实例在运行，弹窗告知并退出，避免「静默降级到陈旧实例」。
+                                // 走到这里说明：启动前的探测判定「端口空闲」，但真正 bind 时
+                                // 已被别的进程抢走（竞态）。如实报「端口冲突」，不再断言
+                                // 「Marguerite 已在运行」——那句话在没有第二个 Marguerite 时是假信息。
                                 alert_fatal(
                                     &gw_app,
-                                    "Marguerite 已在运行",
+                                    "端口冲突，内嵌网关无法启动",
                                     &format!(
-                                        "内嵌网关未能在 127.0.0.1:{} 启动（{e}）。\n端口可能已被另一个 Marguerite 实例占用，请先关闭它再启动本程序。",
-                                        DEFAULT_PORT
+                                        "内嵌网关未能在 127.0.0.1:{DEFAULT_PORT} 启动（{e}）。\n\
+                                         该端口在启动瞬间被其它进程占用（竞态）。请重试一次；\
+                                         若持续失败，用 netstat -ano | findstr :{DEFAULT_PORT} 查占用者。",
+                                        DEFAULT_PORT = DEFAULT_PORT
                                     ),
                                 );
                             }
@@ -2666,8 +3302,27 @@ pub fn run() {
             // ── 网关就绪等待（窗口加载 /control/ 前确保**界面**真的可用）──
             // 判定依据是真实 `GET /control/` 的 HTTP 200（且非兜底诊断页），
             // 不是 TCP connect：后者曾在产物缺失时谎报「就绪」（P0-D 缺陷 1）。
+            //
+            // R13（2026-10-18）两处修正，依据是**真实安装包启动日志**：
+            //   18:27:49 `gateway.startup_phase … startup_elapsed_ms=7051`
+            // ① 首轮截止从 8s 提到 20s。实测冷启动就要 7.05s，8s 只剩 0.95s 余量；
+            //    磁盘冷缓存 / 首次解压 pyengine / 杀软扫描任一发生就会超时（Windows
+            //     Defender 首次扫描新装的 240MB 程序集是常态，不是异常）。
+            // ② 超时不再"放弃"：起一个**后台续探**线程，最多再等 90s，一旦就绪立刻
+            //    把主窗口导航到 `/control/`。原实现超时后只弹对话框，窗口停在 core
+            //    的 503 诊断页，**没有任何自动恢复路径** —— 用户唯一选择是关掉重开
+            //    （而重开时网关早已就绪，于是"重启就好了"这类最难复现的体验缺陷）。
+            //
+            // 【2026-10-23 修复·首帧】该等待**不能**留在 setup 里同步跑：`setup` 在主线程
+            // 且早于事件循环启动，同步 sleep 多久窗口就多久不绘制 —— 启动动画会被自己的
+            // 等待逻辑挡住，表现为「白屏几秒」，与"第一帧就看到动画"正好相反。
+            // 改为后台线程：setup 立即返回 → 窗口立刻渲染 splash → 就绪后由它 navigate。
             {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                let handle = handle.clone();
+                let webui_candidates = webui_candidates.clone();
+                let splash_started = std::time::Instant::now();
+                std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
                 // 循环体内必定赋值后才可能 break，故此处无需初值（避免 unused_assignments）。
                 let mut last: ControlProbe;
                 loop {
@@ -2684,6 +3339,34 @@ pub fn run() {
                     eprintln!(
                         "[gateway] 内嵌网关已在 127.0.0.1:{DEFAULT_PORT} 就绪（GET /control/ → HTTP 200，真实控制台入口）"
                     );
+                    // 【2026-10-23 修复：首屏是本地启动动画，就绪后必须主动导航】
+                    //
+                    // tauri.conf 的窗口 url 已改为 `splash.html`（随包内嵌，秒开），
+                    // 目的是不让用户在网关冷启动期间看到 WebView2 的
+                    // 「无法连接到 127.0.0.1」内部错误页。
+                    // 但 splash 自己不探测网关（CSP 的 connect-src 不含回环地址），
+                    // 所以"就绪 → 进控制台"这一步只能由 Rust 完成。
+                    // 旧实现只打日志不导航 —— 实测会永远停在启动动画上。
+                    // 【2026-10-23】启动动画至少展示 MIN_SPLASH_MS 再跳转。
+                    //
+                    // 热启动时网关 1–2s 就绪，动画会"一闪而过"——观感像闪屏，用户
+                    // 根本看不清品牌素材（用户口径：启动界面和视频放久一点）。
+                    // 冷启动本来就 >6s，这段不会额外增加等待。
+                    const MIN_SPLASH_MS: u64 = 6000;
+                    let shown = splash_started.elapsed().as_millis() as u64;
+                    if shown < MIN_SPLASH_MS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            MIN_SPLASH_MS - shown,
+                        ));
+                    }
+                    if let Some(win) = handle.get_webview_window("main") {
+                        match win.navigate(control_url().parse().unwrap_or_else(|_| {
+                            unreachable!("control_url 为编译期固定回环地址")
+                        })) {
+                            Ok(()) => eprintln!("[gateway] 已把主窗口从启动动画导航到控制台"),
+                            Err(e) => eprintln!("[gateway] 就绪但导航失败：{e}"),
+                        }
+                    }
                 } else {
                     // 未就绪：打印可执行诊断（探测过的路径 + 修复动作），并用原生对话框
                     // 告知用户（非致命，不阻塞启动）。窗口本身会渲染 core 侧的 503
@@ -2699,7 +3382,11 @@ pub fn run() {
                         "内嵌网关界面未就绪",
                         &format!("{summary}\n\n{hint}"),
                     );
+                    // 后台续探：就绪后自动把窗口带回控制台（用户无需重启）。
+                    // 只读 argv 里的窗口句柄不成立，故经 AppHandle 回主线程取窗口。
+                    spawn_late_readiness_recovery(handle.clone());
                 }
+                });
             }
             Ok(())
         })
@@ -2722,6 +3409,11 @@ pub fn run() {
             pet_overlay_hide,
             pet_overlay_toggle,
             pet_overlay_move,
+            // P0-4：任务悬浮球（与桌宠同构的独立命令组）
+            task_overlay_show,
+            task_overlay_hide,
+            task_overlay_toggle,
+            task_overlay_move,
             record_experience,
             search_experience,
             model_list,
@@ -2734,6 +3426,7 @@ pub fn run() {
             capabilities_stats,
             harness_capabilities,
             sidecar_status,
+            sidecar_log_dir,
             sidecar_start,
             sidecar_stop,
             doctor_check,
@@ -2765,6 +3458,13 @@ pub fn run() {
             kb_graph_related,
             usage_summary,
             usage_daily,
+            cron_list,
+            cron_create,
+            cron_remove,
+            cron_run,
+            notify_turn_ended,
+            model_tier_get,
+            model_tier_set,
             pet_status,
             pet_action,
             fs_list_dir,
@@ -2821,6 +3521,43 @@ mod pet_overlay_tests {
     }
 }
 
+/// P0-4：任务悬浮球纯逻辑单测（与 pet_overlay_tests 同构）。
+#[cfg(test)]
+mod task_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn default_position_sits_above_pet_overlay() {
+        let (x, y) = task_overlay_default_position(
+            Some((0.0, 0.0, 1920.0, 1040.0)),
+            TASK_OVERLAY_W,
+            TASK_OVERLAY_H,
+        );
+        assert_eq!(x, 1920.0 - TASK_OVERLAY_W - 24.0);
+        let pet_top = 1040.0 - PET_OVERLAY_H - 24.0;
+        assert_eq!(y, pet_top - TASK_OVERLAY_H - 12.0);
+        // 与桌宠缺省矩形不重叠
+        assert!(y + TASK_OVERLAY_H <= pet_top);
+    }
+
+    #[test]
+    fn default_position_falls_back_without_monitor() {
+        let (x, y) = task_overlay_default_position(None, TASK_OVERLAY_W, TASK_OVERLAY_H);
+        assert_eq!((x, y), (640.0, 120.0));
+    }
+
+    #[test]
+    fn overlay_window_constants_are_consistent() {
+        let url = task_overlay_url();
+        assert!(
+            url.starts_with(&format!("http://localhost:{DEFAULT_PORT}/control/task-overlay")),
+            "got: {url}"
+        );
+        assert_eq!(TASK_OVERLAY_LABEL, "task-overlay");
+        assert_eq!((TASK_OVERLAY_W, TASK_OVERLAY_H), (120.0, 120.0));
+    }
+}
+
 /// P0-D 缺陷 1：内嵌网关「界面就绪」判定的单测。
 ///
 /// 原缺陷是「TCP connect 成功即判就绪」——产物缺失时 `/control/` 实为 404 白屏，
@@ -2828,7 +3565,6 @@ mod pet_overlay_tests {
 #[cfg(test)]
 mod gateway_readiness_tests {
     use super::*;
-
     const REAL_INDEX: &str =
         "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<!doctype html><html><body><div id=\"app\"></div></body></html>";
 
@@ -2920,5 +3656,58 @@ mod gateway_readiness_tests {
         assert!(summary.contains("无法访问"), "摘要: {summary}");
         assert!(hint.contains("18790"), "端口指引: {hint}");
         assert!(!hint.contains("npm run build"), "不该误报产物缺失: {hint}");
+    }
+
+    // ── R14：端口占用者判定 ──────────────────────────────────────────
+    // 缺陷背景：端口被占时一律弹「Marguerite 已在运行」并 exit(1)。实测本机
+    // 一个残留 marguerite-core.exe 占着 18790 就让桌面端完全无法启动。
+
+    #[test]
+    fn port_owner_recognises_own_gateway_with_version() {
+        let raw = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n\
+                   {\"status\":\"ok\",\"engine\":\"rust\",\"version\":\"0.2.13\",\"uptime_ms\":42}";
+        assert_eq!(
+            classify_port_owner(raw),
+            PortOwner::OurGateway {
+                version: "0.2.13".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn port_owner_treats_third_party_ok_as_foreign() {
+        // 第三方服务也可能回 {"status":"ok"}：缺 engine=rust 必须判为外部占用，
+        // 否则会「附着」到一个根本不是本产品的端口上，界面全错。
+        let raw = "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}";
+        assert_eq!(classify_port_owner(raw), PortOwner::Foreign);
+        // engine 存在但不是 rust（如 Python 侧车）同样不是可附着的网关
+        let py = "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\",\"engine\":\"python\"}";
+        assert_eq!(classify_port_owner(py), PortOwner::Foreign);
+    }
+
+    #[test]
+    fn port_owner_rejects_non_200_and_non_json() {
+        // 状态码非 200：即便 body 像健康检查也不认（可能是网关的错误页）
+        let raw = "HTTP/1.1 503 Service Unavailable\r\n\r\n\
+                   {\"status\":\"ok\",\"engine\":\"rust\",\"version\":\"0.2.13\"}";
+        assert_eq!(classify_port_owner(raw), PortOwner::Foreign);
+        // 纯文本（如 `upstream connect failed …`）不是 JSON
+        let text = "HTTP/1.1 502 Bad Gateway\r\n\r\nupstream connect failed";
+        assert_eq!(classify_port_owner(text), PortOwner::Foreign);
+        // 没有 header/body 分隔符
+        assert_eq!(classify_port_owner("HTTP/1.1 200 OK"), PortOwner::Foreign);
+    }
+
+    #[test]
+    fn port_owner_accepts_health_without_version_field() {
+        // 旧版网关（本次改动前）不带 version：仍应可附着，版本记为 unknown，
+        // 由调用方决定是否提示「版本未知」——不能因为缺字段就判定成外部程序。
+        let raw = "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\",\"engine\":\"rust\"}";
+        assert_eq!(
+            classify_port_owner(raw),
+            PortOwner::OurGateway {
+                version: "unknown".to_string()
+            }
+        );
     }
 }

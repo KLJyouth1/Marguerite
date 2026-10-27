@@ -341,9 +341,18 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
       if (document.visibilityState === 'visible') schedule()
     }
     const onFocus = () => schedule()
-    const unbindRouting = options.rpc.on?.('models.routing.changed', (payload) => {
+const unbindModels = options.rpc.on?.('models.changed', (payload) => {
       if (payload && typeof payload === 'object') {
-        applyModelRoutingSnapshot(payload as ModelRoutingSnapshot)
+        const p = payload as ModelRoutingSnapshot & { reason?: string }
+        // P3 打通：后端所有「模型/配置变更」（local_deploy / llm_profile upsert /
+        // onboarding 路由保存 / mode.routing_set）统一发 `models.changed`
+        // （此前订阅的 `models.routing.changed` 后端从未发布，是死订阅）。
+        // 仅路由模式保存（routing_set）带 `mode` 快照字段，走快照应用；
+        // 其余变更只需重读 feature toggles —— 配置可能已变，但路由快照没动。
+        const applied = applyModelRoutingSnapshot(p)
+        if (!applied) {
+          void loadFeatureToggles()
+        }
         scheduleHistorySync?.()
       }
     })
@@ -353,7 +362,7 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
       if (timer) clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('focus', onFocus)
-      unbindRouting?.()
+      unbindModels?.()
     }
   }
 

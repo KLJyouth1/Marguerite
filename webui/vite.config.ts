@@ -1,8 +1,13 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { createConnection } from 'net'
+
+const APP_VERSION = (
+  JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string }
+).version
 
 // Where the dev server forwards backend traffic. The built bundle is served by
 // the gateway itself (same origin), so this proxy only matters under `npm run
@@ -61,6 +66,7 @@ export default defineConfig(async ({ command }) => {
       __VUE_I18N_FULL_INSTALL__: 'true',
       __VUE_I18N_LEGACY_API__: 'false',
       __INTLIFY_PROD_DEVTOOLS__: 'false',
+      __APP_VERSION__: JSON.stringify(APP_VERSION),
     },
     server: {
       proxy: {

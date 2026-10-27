@@ -263,7 +263,10 @@ describe('AssistantMessage activity disclosure', () => {
     expect(activity?.dataset.shareExpanded).toBe('false')
     const reasoningFold = activity?.querySelector<HTMLDetailsElement>('details.thinking-fold')
     expect(reasoningFold).not.toBeNull()
-    expect(reasoningFold?.open).toBe(false)
+    // 短思考（≤600 字）在 ReasoningPart 内默认展开：这是「模型的思考看不见」
+    // 的真机修复。外层活动区仍按 hasVisibleActivityItem 决定默认开合，
+    // 因此这里的 outer summary 保持折叠。
+    expect(reasoningFold?.open).toBe(true)
     expect(activity?.querySelector('.assistant-activity__chevron')).toBeNull()
     expect(activity?.querySelector('.assistant-activity__summary-arrow')).not.toBeNull()
     expect(activity?.textContent).toContain('Checked the available evidence.')
@@ -722,7 +725,7 @@ describe('AssistantMessage activity disclosure', () => {
     expect(el.querySelector('.assistant-activity__summary')?.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('does not apply the tool-detail preference to reasoning-only activity', async () => {
+  it('expands reasoning-only activity so the thinking text is visible', async () => {
     useToolDetailPreference().setMode('expanded')
     const el = mountMessage(baseMessage({
       timelineItems: [],
@@ -730,8 +733,12 @@ describe('AssistantMessage activity disclosure', () => {
     }))
     await nextTick()
 
-    expect(el.querySelector('.assistant-activity__summary')?.getAttribute('aria-expanded')).toBe('false')
-    expect(el.querySelector<HTMLDetailsElement>('.thinking-fold')?.open).toBe(false)
+    // 契约变更（真机反馈「模型的思考我总是看不见」）：一轮里只有思考时，
+    // 若外层活动区还默认折叠，用户只能看到「思考了 N 秒 · M 字」一行摘要。
+    // 现在外层默认展开；展开与「工具详情偏好」无关，因此上一个用例仍保证
+    // 有工具调用的轮次不会被该偏好强行打开。
+    expect(el.querySelector('.assistant-activity__summary')?.getAttribute('aria-expanded')).toBe('true')
+    expect(el.querySelector<HTMLDetailsElement>('.thinking-fold')?.open).toBe(true)
   })
 
   it('expands the settled activity from the whole summary row with a hover affordance', async () => {

@@ -2,7 +2,12 @@
 //!
 //! 本模块为 [`crate::desktop_automation::a11y_tree::A11ySource`] 提供 Windows 后端
 //! [`WindowsUiaSource`]：用 `windows` crate 的 UI Automation COM 客户端枚举**前台窗口**
-//! 的控件树（role / name / bounds / clickable），并按 `ref_id` 找回元素后激活它。
+//! 的控件树（role / name / automation_id / bounds / enabled / patterns），并按 `ref_id`
+//! 找回元素后执行 pattern 级操作（Invoke / Toggle / SelectionItem / Value /
+//! ExpandCollapse / Scroll / SetFocus）。
+//!
+//! 数据契约与「哪一个动作对应哪一个 pattern」的映射定义在
+//! [`crate::desktop_automation::a11y_tree`]；本文件只做 COM 实现。
 //!
 //! # 线程模型（关键设计，务必保持）
 //!
@@ -21,8 +26,8 @@
 //! # 失败语义（沿用仓内 vision 通道惯例）
 //!
 //! 绝不编造控件树：读不到就返回 [`A11yError::Unavailable`] 或 [`A11yError::OsFailure`]，
-//! 找不到 `ref_id` 就返回 [`A11yError::NodeNotFound`]。空树是合法结果（真的没有可读控件），
-//! 它不等于「假数据」。
+//! 找不到 `ref_id` 就返回 [`A11yError::NodeNotFound`]，控件不支持目标 pattern 就返回
+//! [`A11yError::Unsupported`]。空树是合法结果（真的没有可读控件），它不等于「假数据」。
 
 #![cfg(windows)]
 
@@ -37,27 +42,37 @@ use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
+    IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
+    IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+    IUIAutomationTreeWalker, IUIAutomationValuePattern, ExpandCollapseState_Collapsed,
+    ExpandCollapseState_Expanded, ExpandCollapseState_LeafNode,
+    ExpandCollapseState_PartiallyExpanded, ScrollAmount_LargeDecrement,
+    ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, ScrollAmount_SmallDecrement,
+    ScrollAmount_SmallIncrement, ToggleState_Indeterminate, ToggleState_Off, ToggleState_On,
     UIA_AppBarControlTypeId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
     UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CONTROLTYPE_ID,
     UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
-    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
-    UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
+    UIA_GroupControlTypeId, UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId,
+    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId,
+    UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
     UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
     UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_SelectionItemPatternId, UIA_SemanticZoomControlTypeId,
-    UIA_SeparatorControlTypeId, UIA_SliderControlTypeId, UIA_SpinnerControlTypeId,
-    UIA_SplitButtonControlTypeId, UIA_StatusBarControlTypeId, UIA_TabControlTypeId,
-    UIA_TabItemControlTypeId, UIA_TableControlTypeId, UIA_TextControlTypeId,
+    UIA_ScrollBarControlTypeId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
+    UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId, UIA_SliderControlTypeId,
+    UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId, UIA_StatusBarControlTypeId,
+    UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TableControlTypeId, UIA_TextControlTypeId,
     UIA_ThumbControlTypeId, UIA_TitleBarControlTypeId, UIA_TogglePatternId,
     UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId, UIA_TreeControlTypeId,
-    UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
+    UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
-use crate::desktop_automation::a11y_tree::{A11yError, A11ySource, UiNode, UiSnapshot};
+use crate::desktop_automation::a11y_tree::{
+    A11yError, A11ySource, NodeState, PatternOp, SnapshotOptions, UiNode, UiPattern, UiSnapshot,
+    MAX_DEPTH, MAX_NODES,
+};
 
 /// 单次 UIA 调用的硬超时。COM 调用可能因目标进程无响应而永久阻塞（UIA 有跨进程 RPC），
 /// 超时后调用方拿到明确的 `Unavailable`，而不是整个工作台卡死。
@@ -65,10 +80,6 @@ const UIA_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 遍历上限（防退化 UI 树把内存/时间吃光）。超过即截断——快照本就是「采样」。
 const MAX_VISITED: usize = 2000;
-/// 单次快照输出的节点上限（过滤后的有效节点）。
-const MAX_NODES: usize = 400;
-/// 控件视图最大递归深度。
-const MAX_DEPTH: usize = 14;
 
 // ─────────────────────────────────────────────── 阶段 2（B2）：纯映射，可脱离 COM 单测
 
@@ -132,7 +143,7 @@ fn control_type_role(ct: UIA_CONTROLTYPE_ID) -> &'static str {
 /// 把 UIA runtime ID（i32 数组）编码成稳定的 `ref_id`。
 ///
 /// UIA 的 runtime ID 在同一元素的生存期内稳定，跨快照可复现，所以它能作为 `ref_id`：
-/// 快照里拿到的 id，下一次 `click` 时重新走一遍树就能找回同一个元素。
+/// 快照里拿到的 id，下一次动作时重新走一遍树就能找回同一个元素。
 fn format_runtime_id(ids: &[i32]) -> String {
     ids.iter()
         .map(|i| i.to_string())
@@ -141,7 +152,7 @@ fn format_runtime_id(ids: &[i32]) -> String {
 }
 
 /// [`format_runtime_id`] 的逆运算。任何非数字/空段都判为不合法（返回 `None`），
-/// 保证 `click` 收到畸形 ref 时能立刻给出 `NodeNotFound` 而不是去做一次无意义的遍历。
+/// 保证动作收到畸形 ref 时能立刻给出 `NodeNotFound` 而不是去做一次无意义的遍历。
 fn parse_runtime_id(s: &str) -> Option<Vec<i32>> {
     if s.is_empty() {
         return None;
@@ -162,6 +173,22 @@ fn rect_to_bounds(r: windows::Win32::Foundation::RECT) -> Option<(i32, i32, i32,
         return None;
     }
     Some((r.left, r.top, w, h))
+}
+
+/// 一次遍历的边界（避免 `visit` 参数爆炸）。
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    max_depth: usize,
+    max_nodes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_depth: MAX_DEPTH,
+            max_nodes: MAX_NODES,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────── 阶段 1（B2）：COM 侧
@@ -227,23 +254,80 @@ fn visit(
     root: &IUIAutomationElement,
     out: &mut Vec<(String, IUIAutomationElement)>,
     depth: usize,
+    limits: Limits,
 ) {
     unsafe {
-        if depth > MAX_DEPTH || out.len() >= MAX_VISITED {
+        if depth > limits.max_depth || out.len() >= MAX_VISITED || out.len() >= limits.max_nodes {
             return;
         }
         let mut child = walker.GetFirstChildElement(root).ok();
         while let Some(c) = child {
-            if out.len() >= MAX_VISITED {
+            if out.len() >= MAX_VISITED || out.len() >= limits.max_nodes {
                 return;
             }
             if let Ok(ids) = read_runtime_id(&c) {
                 out.push((format_runtime_id(&ids), c.clone()));
             }
-            visit(walker, &c, out, depth + 1);
+            visit(walker, &c, out, depth + 1, limits);
             child = walker.GetNextSiblingElement(&c).ok();
         }
     }
+}
+
+/// 探测元素支持的 pattern（`GetCurrentPatternAs` 成功即视为可用）。
+///
+/// 这是 W6.1 的 pattern 分发的**发现侧**：控制台/模型先知道「这个控件能做什么」，
+/// 再决定用 invoke 还是 set_value，而不是盲试。
+fn probe_patterns(el: &IUIAutomationElement) -> Vec<UiPattern> {
+    let mut out = Vec::new();
+    unsafe {
+        if el
+            .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::Invoke);
+        }
+        if el
+            .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::Toggle);
+        }
+        if el
+            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::SelectionItem);
+        }
+        if el
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::Value);
+        }
+        if el
+            .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::ExpandCollapse);
+        }
+        if el
+            .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+            .is_ok()
+        {
+            out.push(UiPattern::Scroll);
+        }
+        // SetFocus 不是独立 pattern（是 element 方法）：只在元素**可获焦**时才声明支持，
+        // 否则 `focus` 动作会在静态文本上「看起来支持、实际失败」。
+        let focusable = el
+            .CurrentIsKeyboardFocusable()
+            .map(|b| b != FALSE)
+            .unwrap_or(false);
+        if focusable {
+            out.push(UiPattern::SetFocus);
+        }
+    }
+    out
 }
 
 /// 元素 → [`UiNode`]。宽高非正或已离屏的元素直接判为不可见，不进快照。
@@ -255,17 +339,30 @@ fn build_node(el: &IUIAutomationElement, ref_id: String) -> Option<UiNode> {
         }
         let bounds = rect_to_bounds(el.CurrentBoundingRectangle().ok()?)?;
         let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+        let automation_id = el
+            .CurrentAutomationId()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
         let enabled = el.CurrentIsEnabled().map(|b| b != FALSE).unwrap_or(false);
+        let focused = el
+            .CurrentHasKeyboardFocus()
+            .map(|b| b != FALSE)
+            .unwrap_or(false);
         let focusable = el
             .CurrentIsKeyboardFocusable()
             .map(|b| b != FALSE)
             .unwrap_or(false);
+        let patterns = probe_patterns(el);
         Some(UiNode {
             role: control_type_role(ct).to_string(),
             name,
             ref_id,
+            automation_id,
             bounds,
             clickable: enabled && focusable,
+            enabled,
+            focused,
+            patterns,
         })
     }
 }
@@ -299,6 +396,236 @@ fn activate_element(el: &IUIAutomationElement) -> Result<(), A11yError> {
         Err(A11yError::OsFailure(
             "目标控件不支持 Invoke/Toggle/Select，SetFocus 亦失败".into(),
         ))
+    }
+}
+
+fn pattern_unavailable(op: &PatternOp, e: windows::core::Error) -> A11yError {
+    A11yError::Unsupported(format!(
+        "{} pattern 不可用（{}）: {e}",
+        op.pattern().as_str(),
+        op.as_str()
+    ))
+}
+
+/// 读元素当前值（ValuePattern）；不支持时 `None`。
+fn read_value(el: &IUIAutomationElement) -> Option<String> {
+    unsafe {
+        el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .ok()
+            .and_then(|p| p.CurrentValue().ok())
+            .map(|b| b.to_string())
+    }
+}
+
+/// 写值：ValuePattern 优先，退化到 LegacyIAccessiblePattern.SetValue。
+fn set_element_value(el: &IUIAutomationElement, value: &str) -> Result<(), A11yError> {
+    unsafe {
+        if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
+            return p
+                .SetValue(&windows::core::BSTR::from(value))
+                .map_err(|e| A11yError::OsFailure(format!("ValuePattern.SetValue 失败: {e}")));
+        }
+        if let Ok(p) =
+            el.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+                UIA_LegacyIAccessiblePatternId,
+            )
+        {
+            let wide = windows::core::HSTRING::from(value);
+            return p
+                .SetValue(&wide)
+                .map_err(|e| A11yError::OsFailure(format!("LegacyIAccessible.SetValue 失败: {e}")));
+        }
+        Err(A11yError::Unsupported(
+            "目标控件既无 ValuePattern 也无 LegacyIAccessiblePattern，无法写值".into(),
+        ))
+    }
+}
+
+/// 滚动格数 → UIA `ScrollAmount`（|delta| > 1 视为大增量，否则小增量）。
+fn scroll_amount(delta: i32) -> windows::Win32::UI::Accessibility::ScrollAmount {
+    if delta > 1 {
+        ScrollAmount_LargeIncrement
+    } else if delta > 0 {
+        ScrollAmount_SmallIncrement
+    } else if delta < -1 {
+        ScrollAmount_LargeDecrement
+    } else if delta < 0 {
+        ScrollAmount_SmallDecrement
+    } else {
+        ScrollAmount_NoAmount
+    }
+}
+
+fn toggle_state_name(state: &windows::Win32::UI::Accessibility::ToggleState) -> &'static str {
+    if *state == ToggleState_On {
+        "on"
+    } else if *state == ToggleState_Off {
+        "off"
+    } else if *state == ToggleState_Indeterminate {
+        "indeterminate"
+    } else {
+        "unknown"
+    }
+}
+
+fn expand_state_name(
+    state: &windows::Win32::UI::Accessibility::ExpandCollapseState,
+) -> &'static str {
+    if *state == ExpandCollapseState_Expanded {
+        "expanded"
+    } else if *state == ExpandCollapseState_Collapsed {
+        "collapsed"
+    } else if *state == ExpandCollapseState_PartiallyExpanded {
+        "partially_expanded"
+    } else if *state == ExpandCollapseState_LeafNode {
+        "leaf"
+    } else {
+        "unknown"
+    }
+}
+
+/// **pattern 分发**（W6.1 核心）：把跨平台 [`PatternOp`] 落到具体 COM pattern。
+///
+/// 只做精确映射，不做「猜一个能用的 pattern」：目标不支持就返回
+/// [`A11yError::Unsupported`]，让上层如实告诉用户/模型。
+fn dispatch_pattern(el: &IUIAutomationElement, op: &PatternOp) -> Result<(), A11yError> {
+    unsafe {
+        match op {
+            PatternOp::Invoke => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Invoke()
+                    .map_err(|e| A11yError::OsFailure(format!("Invoke 失败: {e}")))
+            }
+            PatternOp::Toggle => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Toggle()
+                    .map_err(|e| A11yError::OsFailure(format!("Toggle 失败: {e}")))
+            }
+            PatternOp::Select => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Select()
+                    .map_err(|e| A11yError::OsFailure(format!("SelectionItem.Select 失败: {e}")))
+            }
+            PatternOp::Expand => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Expand()
+                    .map_err(|e| A11yError::OsFailure(format!("Expand 失败: {e}")))
+            }
+            PatternOp::Collapse => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Collapse()
+                    .map_err(|e| A11yError::OsFailure(format!("Collapse 失败: {e}")))
+            }
+            PatternOp::Focus => el
+                .SetFocus()
+                .map_err(|e| A11yError::OsFailure(format!("SetFocus 失败: {e}"))),
+            PatternOp::SetValue(value) => set_element_value(el, value),
+            PatternOp::TypeText { text, clear } => {
+                let next = if *clear {
+                    text.clone()
+                } else {
+                    let mut current = read_value(el).unwrap_or_default();
+                    current.push_str(text);
+                    current
+                };
+                set_element_value(el, &next)
+            }
+            PatternOp::Scroll {
+                horizontal,
+                vertical,
+            } => {
+                let p = el
+                    .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+                    .map_err(|e| pattern_unavailable(op, e))?;
+                p.Scroll(scroll_amount(*horizontal), scroll_amount(*vertical))
+                    .map_err(|e| A11yError::OsFailure(format!("Scroll 失败: {e}")))
+            }
+        }
+    }
+}
+
+/// 读元素的完整可观测状态（observe→act→verify 的观测面）。
+fn read_element_state(el: &IUIAutomationElement) -> Result<NodeState, A11yError> {
+    unsafe {
+        let ids = read_runtime_id(el)?;
+        let role = el
+            .CurrentControlType()
+            .map(control_type_role)
+            .unwrap_or("other")
+            .to_string();
+        let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+        let automation_id = el
+            .CurrentAutomationId()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
+        let enabled = el.CurrentIsEnabled().map(|b| b != FALSE).unwrap_or(false);
+        let focused = el
+            .CurrentHasKeyboardFocus()
+            .map(|b| b != FALSE)
+            .unwrap_or(false);
+        let bounds = el
+            .CurrentBoundingRectangle()
+            .ok()
+            .and_then(rect_to_bounds)
+            .unwrap_or((0, 0, 0, 0));
+
+        let toggle_state = el
+            .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            .ok()
+            .and_then(|p| p.CurrentToggleState().ok())
+            .map(|s| toggle_state_name(&s).to_string());
+        let expand_collapse_state = el
+            .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
+            .ok()
+            .and_then(|p| p.CurrentExpandCollapseState().ok())
+            .map(|s| expand_state_name(&s).to_string());
+        let selected = el
+            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                UIA_SelectionItemPatternId,
+            )
+            .ok()
+            .and_then(|p| p.CurrentIsSelected().ok())
+            .map(|b| b != FALSE);
+        let scroll_percent = el
+            .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+            .ok()
+            .and_then(|p| {
+                let h = p.CurrentHorizontalScrollPercent().ok()?;
+                let v = p.CurrentVerticalScrollPercent().ok()?;
+                // UIA_ScrollPatternNoScroll = -1.0：表示该方向不可滚动，不是「0%」。
+                (h >= 0.0 && v >= 0.0).then_some((h, v))
+            });
+
+        Ok(NodeState {
+            ref_id: format_runtime_id(&ids),
+            role,
+            name,
+            automation_id,
+            value: read_value(el),
+            enabled,
+            focused,
+            toggle_state,
+            expand_collapse_state,
+            selected,
+            scroll_percent,
+            bounds,
+        })
     }
 }
 
@@ -352,17 +679,32 @@ where
     })
 }
 
+/// 在前台窗口控件树里按 `ref_id` 找回元素。
+fn locate(uia: &IUIAutomation, ref_id: &str) -> Result<IUIAutomationElement, A11yError> {
+    let ids = parse_runtime_id(ref_id).ok_or_else(|| A11yError::NodeNotFound(ref_id.to_string()))?;
+    let want = format_runtime_id(&ids);
+    let root = foreground_root(uia)?;
+    let walker = unsafe { uia.ControlViewWalker() }
+        .map_err(|e| A11yError::OsFailure(format!("取 ControlViewWalker 失败: {e}")))?;
+    let mut raw: Vec<(String, IUIAutomationElement)> = Vec::new();
+    visit(&walker, &root, &mut raw, 0, Limits::default());
+    raw.iter()
+        .find(|(id, _)| *id == want)
+        .map(|(_, e)| e.clone())
+        .ok_or_else(|| A11yError::NodeNotFound(ref_id.to_string()))
+}
+
 /// 枚举前台窗口的控件树。
-fn enumerate_foreground() -> Result<UiSnapshot, A11yError> {
-    with_uia(|uia| {
+fn enumerate_foreground(limits: Limits) -> Result<UiSnapshot, A11yError> {
+    with_uia(move |uia| {
         let root = foreground_root(uia)?;
         let walker = unsafe { uia.ControlViewWalker() }
             .map_err(|e| A11yError::OsFailure(format!("取 ControlViewWalker 失败: {e}")))?;
         let mut raw: Vec<(String, IUIAutomationElement)> = Vec::new();
-        visit(&walker, &root, &mut raw, 0);
+        visit(&walker, &root, &mut raw, 0, limits);
         let mut nodes = Vec::new();
         for (ref_id, el) in &raw {
-            if nodes.len() >= MAX_NODES {
+            if nodes.len() >= limits.max_nodes {
                 break;
             }
             if let Some(n) = build_node(el, ref_id.clone()) {
@@ -373,25 +715,32 @@ fn enumerate_foreground() -> Result<UiSnapshot, A11yError> {
     })
 }
 
-/// 按 `ref_id` 找回元素并激活。
+/// 按 `ref_id` 找回元素并激活（click 的退化链）。
 fn click_ref(ref_id: &str) -> Result<(), A11yError> {
-    let ids = parse_runtime_id(ref_id).ok_or_else(|| A11yError::NodeNotFound(ref_id.to_string()))?;
-    let want = format_runtime_id(&ids);
     // 闭包要送进 'static 线程：错误文案用的 ref_id 必须提前拷成 owned String。
     let not_found = ref_id.to_string();
-
     with_uia(move |uia| {
-        let root = foreground_root(uia)?;
-        let walker = unsafe { uia.ControlViewWalker() }
-            .map_err(|e| A11yError::OsFailure(format!("取 ControlViewWalker 失败: {e}")))?;
-        let mut raw: Vec<(String, IUIAutomationElement)> = Vec::new();
-        visit(&walker, &root, &mut raw, 0);
-        let el = raw
-            .iter()
-            .find(|(id, _)| *id == want)
-            .map(|(_, e)| e.clone())
-            .ok_or_else(|| A11yError::NodeNotFound(not_found.clone()))?;
+        let el = locate(uia, &not_found)?;
         activate_element(&el)
+    })
+}
+
+/// 按 `ref_id` 读节点状态。
+fn state_by_ref(ref_id: &str) -> Result<NodeState, A11yError> {
+    let not_found = ref_id.to_string();
+    with_uia(move |uia| {
+        let el = locate(uia, &not_found)?;
+        read_element_state(&el)
+    })
+}
+
+/// 按 `ref_id` 执行 pattern 操作。
+fn perform_by_ref(ref_id: &str, op: &PatternOp) -> Result<(), A11yError> {
+    let not_found = ref_id.to_string();
+    let op = op.clone();
+    with_uia(move |uia| {
+        let el = locate(uia, &not_found)?;
+        dispatch_pattern(&el, &op)
     })
 }
 
@@ -417,11 +766,27 @@ impl WindowsUiaSource {
 
 impl A11ySource for WindowsUiaSource {
     fn snapshot(&self) -> Result<UiSnapshot, A11yError> {
-        enumerate_foreground()
+        enumerate_foreground(Limits::default())
+    }
+
+    fn snapshot_with(&self, opts: &SnapshotOptions) -> Result<UiSnapshot, A11yError> {
+        let (max_depth, max_nodes) = opts.bounded();
+        enumerate_foreground(Limits {
+            max_depth,
+            max_nodes,
+        })
     }
 
     fn click(&self, ref_id: &str) -> Result<(), A11yError> {
         click_ref(ref_id)
+    }
+
+    fn node_state(&self, ref_id: &str) -> Result<NodeState, A11yError> {
+        state_by_ref(ref_id)
+    }
+
+    fn perform(&self, ref_id: &str, op: &PatternOp) -> Result<(), A11yError> {
+        perform_by_ref(ref_id, op)
     }
 }
 
@@ -490,6 +855,101 @@ mod tests {
         }
     }
 
+    // ── pattern 分发的纯映射层（不需要 COM） ──
+
+    #[test]
+    fn scroll_amount_maps_sign_and_magnitude() {
+        assert_eq!(scroll_amount(0), ScrollAmount_NoAmount);
+        assert_eq!(scroll_amount(1), ScrollAmount_SmallIncrement);
+        assert_eq!(scroll_amount(5), ScrollAmount_LargeIncrement);
+        assert_eq!(scroll_amount(-1), ScrollAmount_SmallDecrement);
+        assert_eq!(scroll_amount(-5), ScrollAmount_LargeDecrement);
+    }
+
+    #[test]
+    fn toggle_and_expand_state_names_are_stable() {
+        assert_eq!(toggle_state_name(&ToggleState_On), "on");
+        assert_eq!(toggle_state_name(&ToggleState_Off), "off");
+        assert_eq!(toggle_state_name(&ToggleState_Indeterminate), "indeterminate");
+        assert_eq!(
+            expand_state_name(&ExpandCollapseState_Expanded),
+            "expanded"
+        );
+        assert_eq!(
+            expand_state_name(&ExpandCollapseState_Collapsed),
+            "collapsed"
+        );
+        assert_eq!(
+            expand_state_name(&ExpandCollapseState_PartiallyExpanded),
+            "partially_expanded"
+        );
+        assert_eq!(expand_state_name(&ExpandCollapseState_LeafNode), "leaf");
+    }
+
+    /// 每个 [`PatternOp`] 都必须在 COM 分发里有对应分支（源码级守卫：新增 op 忘了接线会红）。
+    #[test]
+    fn every_pattern_op_is_handled_by_dispatch_pattern() {
+        let src = include_str!("windows_uia.rs");
+        let dispatch_start = src
+            .find("fn dispatch_pattern(")
+            .expect("dispatch_pattern 必须存在");
+        let body = &src[dispatch_start..];
+        for arm in [
+            "PatternOp::Invoke =>",
+            "PatternOp::Toggle =>",
+            "PatternOp::Select =>",
+            "PatternOp::Expand =>",
+            "PatternOp::Collapse =>",
+            "PatternOp::Focus =>",
+            "PatternOp::SetValue(value) =>",
+            "PatternOp::TypeText { text, clear } =>",
+            "PatternOp::Scroll {",
+        ] {
+            assert!(body.contains(arm), "dispatch_pattern 缺少分支: {arm}");
+        }
+    }
+
+    /// 「单次 UIA 调用 10s 硬超时」不是文档口号：每个 COM 入口都必须经 `with_uia`/`on_uia_thread`。
+    ///
+    /// 源码级守卫：将来新增一个直接 `CoCreateInstance` 干活的入口，会在这里红。
+    #[test]
+    fn every_com_entry_point_goes_through_the_timeout_wrapper() {
+        assert_eq!(
+            UIA_CALL_TIMEOUT,
+            Duration::from_secs(10),
+            "10s 是 W6.1 的既有约束，不得悄悄改小/改大"
+        );
+        let src = include_str!("windows_uia.rs");
+        for entry in [
+            "fn click_ref(",
+            "fn state_by_ref(",
+            "fn perform_by_ref(",
+            "fn enumerate_foreground(",
+        ] {
+            let start = src.find(entry).unwrap_or_else(|| panic!("{entry} 必须存在"));
+            let rest = &src[start..];
+            let body = &rest[..rest.find("\n}\n").unwrap_or(rest.len())];
+            assert!(
+                body.contains("with_uia("),
+                "{entry} 未经 with_uia/on_uia_thread，会绕过 10s 超时"
+            );
+        }
+    }
+
+    /// 遍历上限必须与共享契约同源（`MAX_NODES` / `MAX_DEPTH`），不允许后端私设更松的边界。
+    #[test]
+    fn default_limits_match_the_shared_bounds() {
+        let limits = Limits::default();
+        assert_eq!(limits.max_nodes, MAX_NODES, "节点上限必须是共享的 MAX_NODES");
+        assert_eq!(limits.max_depth, MAX_DEPTH, "深度上限必须是共享的 MAX_DEPTH");
+        const {
+            assert!(
+                MAX_VISITED >= MAX_NODES,
+                "MAX_VISITED 不得比 MAX_NODES 更紧（否则节点上限被遍历上限悄悄压低）"
+            );
+        }
+    }
+
     // ── 会话相关层：断言「诚实」，不假设一定有桌面 ──
 
     #[test]
@@ -498,6 +958,14 @@ mod tests {
         let src = WindowsUiaSource::new();
         assert_eq!(
             src.click("not-a-runtime-id"),
+            Err(A11yError::NodeNotFound("not-a-runtime-id".into()))
+        );
+        assert_eq!(
+            src.node_state("not-a-runtime-id"),
+            Err(A11yError::NodeNotFound("not-a-runtime-id".into()))
+        );
+        assert_eq!(
+            src.perform("not-a-runtime-id", &PatternOp::Invoke),
             Err(A11yError::NodeNotFound("not-a-runtime-id".into()))
         );
     }
@@ -516,6 +984,20 @@ mod tests {
                         n.ref_id
                     );
                     assert!(n.bounds.2 > 0 && n.bounds.3 > 0, "包围盒必须为正: {:?}", n.bounds);
+                    assert!(
+                        n.patterns.iter().all(|p| UiPattern::all().contains(p)),
+                        "patterns 只能来自已知枚举: {:?}",
+                        n.patterns
+                    );
+                    // 可点节点必然可获焦（clickable = enabled && focusable），所以它必须声明 SetFocus；
+                    // 反过来不成立（可获焦但被禁用）。
+                    if n.clickable {
+                        assert!(
+                            n.patterns.contains(&UiPattern::SetFocus),
+                            "可点节点必须声明 SetFocus: {:?}",
+                            n.patterns
+                        );
+                    }
                 }
             }
             // 无桌面会话 / UIA 不可用 / 前台窗口不响应：都必须是明确错误。
@@ -523,6 +1005,23 @@ mod tests {
             Err(e @ A11yError::NodeNotFound(_)) => {
                 panic!("snapshot 不应返回 NodeNotFound（那是 click 的语义）: {e:?}")
             }
+            Err(e @ A11yError::Unsupported(_)) => {
+                panic!("snapshot 不应返回 Unsupported（那是 pattern 的语义）: {e:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_with_respects_bounds() {
+        let src = WindowsUiaSource::new();
+        let opts = SnapshotOptions {
+            max_depth: Some(1),
+            max_nodes: Some(3),
+        };
+        match src.snapshot_with(&opts) {
+            Ok(snap) => assert!(snap.nodes.len() <= 3, "max_nodes 必须生效: {}", snap.nodes.len()),
+            Err(A11yError::Unavailable(_)) | Err(A11yError::OsFailure(_)) => {}
+            Err(e) => panic!("snapshot_with 失败了: {e:?}"),
         }
     }
 
@@ -535,6 +1034,7 @@ mod tests {
                 assert!(!m.is_empty(), "错误文案不得为空");
             }
             Err(A11yError::NodeNotFound(_)) => {}
+            Err(A11yError::Unsupported(_)) => {}
         }
     }
 

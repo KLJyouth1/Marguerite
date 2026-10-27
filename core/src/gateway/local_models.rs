@@ -466,10 +466,13 @@ pub struct HostSpec {
     pub os: String,
     pub ram_gb: u32,
     pub cores: u32,
-    /// 是否检测到可用于本地推理/训练的 GPU（nvidia-smi / rocm-smi 在 PATH）
+    /// 是否检测到可用于本地推理/训练的**独立** GPU（仅 nvidia-smi / rocm-smi 命中）
     pub gpu: bool,
-    /// 探测到的 GPU 名（未知则空）
+    /// 探测到的 GPU 名（优先加速器型号；无加速器时为系统枚举的显卡名，未知则空）
     pub gpu_name: String,
+    /// GPU 类型：discrete / integrated / none。仅用于展示，不参与推荐分档。
+    #[serde(default)]
+    pub gpu_kind: String,
     /// 数据来源标记（恒为 "host"）
     pub source: String,
 }
@@ -539,15 +542,50 @@ fn detect_cores() -> u32 {
         .unwrap_or(4)
 }
 
-/// 探测 GPU：返回 (是否检测到, 名称)。诚实探测，不臆测。
-fn detect_gpu() -> (bool, String) {
-    if let Some(name) = probe_gpu("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]) {
-        return (true, name);
+/// GPU 探测结果。
+///
+/// 语义边界（关键）：`accelerator` 只由 nvidia-smi / rocm-smi 命中决定；
+/// `name` 在没有加速器时会回退到系统枚举的显卡名（可能是核显），仅用于展示，
+/// **不会**让 `gpu` 变 true，也不会影响 [`tier_for`] 的推荐档位。
+struct GpuProbe {
+    accelerator: bool,
+    name: String,
+    kind: &'static str,
+}
+
+/// 由「加速器探测结果 + 系统枚举显卡名」推导最终结果（纯函数，便于单测）。
+fn resolve_gpu(smi_name: Option<String>, display_name: Option<String>) -> GpuProbe {
+    match smi_name {
+        Some(name) => GpuProbe {
+            accelerator: true,
+            name,
+            kind: "discrete",
+        },
+        None => match display_name {
+            Some(name) => GpuProbe {
+                accelerator: false,
+                name,
+                kind: "integrated",
+            },
+            None => GpuProbe {
+                accelerator: false,
+                name: String::new(),
+                kind: "none",
+            },
+        },
     }
-    if let Some(name) = probe_gpu("rocm-smi", &["--showproductname"]) {
-        return (true, name);
-    }
-    (false, String::new())
+}
+
+/// 探测 GPU：加速器（nvidia-smi / rocm-smi）优先，未命中时再枚举系统显卡名兜底。
+fn detect_gpu() -> GpuProbe {
+    let smi = probe_gpu("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"])
+        .or_else(probe_rocm);
+    let display = if smi.is_none() {
+        detect_display_adapter()
+    } else {
+        None
+    };
+    resolve_gpu(smi, display)
 }
 
 fn probe_gpu(exe: &str, args: &[&str]) -> Option<String> {
@@ -565,16 +603,199 @@ fn probe_gpu(exe: &str, args: &[&str]) -> Option<String> {
     None
 }
 
+/// rocm-smi `--showproductname` 的输出首行常是横幅/表头，必须解析而非直接取首行。
+fn probe_rocm() -> Option<String> {
+    let out = std::process::Command::new("rocm-smi")
+        .silent()
+        .args(["--showproductname"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_rocm_product_name(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 从 `rocm-smi --showproductname` 输出中解析产品型号（纯函数）。
+///
+/// 跳过空行、纯分隔线、横幅与表头；`GPU[0] : Card series: AMD Radeon ...`
+/// 只取最后一个冒号后的值；多卡取第一张有型号的。
+fn parse_rocm_product_name(raw: &str) -> Option<String> {
+    let mut bare: Option<String> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // 纯分隔线：只由 = - + 组成
+        if line.chars().all(|c| matches!(c, '=' | '-' | '+')) {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        // 横幅 / 日志边界行
+        if lower.contains("rocm system management")
+            || lower.contains("rocm smi")
+            || lower.contains("product info")
+        {
+            continue;
+        }
+        let Some((_, value)) = line.rsplit_once(':') else {
+            // 少数版本直接输出裸型号行：保守收集，优先 Card series
+            if bare.is_none() && !lower.contains("gpu") && !lower.contains("card") {
+                bare = Some(line.to_string());
+            }
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue; // 表头行，如 `GPU[0] : Card series:`
+        }
+        if lower.contains("card series") {
+            return Some(value.to_string());
+        }
+        // Card model / vendor / SKU 是元数据，不是产品型号
+        if lower.contains("card model")
+            || lower.contains("card vendor")
+            || lower.contains("card sku")
+        {
+            continue;
+        }
+        // 旧版无标签行：`GPU[0] : AMD Radeon ...`
+        if lower.starts_with("gpu[") {
+            return Some(value.to_string());
+        }
+    }
+    bare
+}
+
+/// 解析 `Win32_VideoController` 的 `Name` 列表（一行一个，纯函数）。
+///
+/// 跳过 wmic 表头与「无实例」提示；微软基础/远程显示适配器不算真实型号，
+/// 只有这类适配器时视为未探测到（返回 None，交由上层显示「未检测到」）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_video_controller_names(raw: &str) -> Option<String> {
+    let mut first: Option<String> = None;
+    for line in raw.lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower == "name" || lower.contains("no instance(s) available") {
+            continue;
+        }
+        if lower.contains("microsoft basic display adapter")
+            || lower.contains("microsoft remote display adapter")
+        {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(name.to_string());
+        }
+    }
+    first
+}
+
+/// 系统接口枚举显卡名（兜底，仅用于填充 gpu_name）。
+///
+/// Windows：优先 PowerShell CIM，失败/为空再退回 wmic（新系统可能已移除 wmic）；
+/// 非 Windows 不臆测，直接返回 None。超时 5 秒，任何失败都当作「没探测到」。
+fn detect_display_adapter() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(raw) = run_probe_with_timeout(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-CimInstance Win32_VideoController).Name",
+            ],
+        ) {
+            if let Some(name) = parse_video_controller_names(&raw) {
+                return Some(name);
+            }
+        }
+        if let Some(raw) = run_probe_with_timeout(
+            "wmic",
+            &["path", "win32_VideoController", "get", "name"],
+        ) {
+            if let Some(name) = parse_video_controller_names(&raw) {
+                return Some(name);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// 带 5 秒超时执行探测命令；超时/启动失败/非零退出均返回 None（不向上抛错）。
+#[cfg(target_os = "windows")]
+fn run_probe_with_timeout(exe: &str, args: &[&str]) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.silent()
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+
+    // 独立线程抽干 stdout，避免管道写满导致子进程阻塞
+    let mut pipe = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = pipe.read_to_string(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let raw = reader.join().ok()?;
+    if raw.trim().is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
 /// 宿主真实规格（运行 Marguerite 的机器）。
 pub fn host_system_spec() -> HostSpec {
     let ram_gb = (detect_ram_bytes() / (1024 * 1024 * 1024)) as u32;
-    let (gpu, gpu_name) = detect_gpu();
+    let probe = detect_gpu();
     HostSpec {
         os: std::env::consts::OS.to_string(),
         ram_gb: ram_gb.max(1),
         cores: detect_cores().max(1),
-        gpu,
-        gpu_name,
+        gpu: probe.accelerator,
+        gpu_name: probe.name,
+        gpu_kind: probe.kind.to_string(),
         source: "host".into(),
     }
 }
@@ -870,7 +1091,7 @@ pub fn local_download(params: &Value) -> Value {
 }
 
 /// `models.local.deploy`：把本地模型注册为模型路由档案（kind=Local），标记为本地。
-pub fn local_deploy(params: &Value) -> Value {
+pub fn local_deploy(ctx: &crate::gateway::methods::GatewayContext, params: &Value) -> Value {
     let id = params.get("id").and_then(Value::as_str).unwrap_or("");
     let entry = local_catalog().into_iter().find(|e| e.id == id);
     let Some(entry) = entry else {
@@ -888,12 +1109,14 @@ pub fn local_deploy(params: &Value) -> Value {
             "gate_blocking": gate.blocking.iter().map(|e| e.name()).collect::<Vec<_>>(),
         });
     }
-    // 兜底 base_url（默认 Ollama OpenAI 兼容端点）
+    // 兜底 base_url（默认 Ollama OpenAI 兼容端点的**根地址**，不含 /v1）。
+    // ⚠️ 旧值写成 `http://localhost:11434/v1`，而 LLMClient::chat_url 会再拼一段
+    // `/v1/chat/completions` → `/v1/v1/...` 404。根地址由 build_chat_url 归一化。
     let base_url = params
         .get("baseUrl")
         .and_then(Value::as_str)
         .map(String::from)
-        .unwrap_or_else(|| "http://localhost:11434/v1".into());
+        .unwrap_or_else(|| "http://localhost:11434".into());
     let provider = params
         .get("provider")
         .and_then(Value::as_str)
@@ -929,6 +1152,7 @@ pub fn local_deploy(params: &Value) -> Value {
             provider,
             base_url,
             api_key: String::new(),
+            api_key_env: String::new(),
             model: if entry.ollama_tag.is_empty() {
                 entry.id.clone()
             } else {
@@ -941,23 +1165,72 @@ pub fn local_deploy(params: &Value) -> Value {
             tier: crate::model::tier::ModelTier::Balanced,
             tier_caps: crate::model::tier::TierCaps::default(),
             tier_caps_declared: false,
+            // 本地运行时（Ollama / 本地权重目录）只实现 Chat Completions，
+            // 显式写死而非留默认值：将来若默认值变化，本地档案不应被牵连。
+            wire_api: crate::model::wire::WireApi::Chat,
+            // 不声明能力 → 交给 `recognize` 按模型名保守识别（llava 判能读图，
+            // 普通权重判纯文本）。用户仍可在设置页手动勾选覆盖。
+            capabilities: Default::default(),
         };
         sel.registry_mut().upsert(p);
         sel.save()
     });
 
     match deploy_res {
-        Ok(()) => json!({
-            "ok": true,
-            "deployed": true,
-            "profile_id": profile_id,
-            "kind": "local",
-            "gate": {
-                "passed": gate.passed,
-                "blocking": gate.blocking.iter().map(|e| e.name()).collect::<Vec<_>>(),
-            },
-            "note": "已注册为本地模型路由档案，可在模型选择器切换主模型",
-        }),
+        Ok(()) => {
+            // 默认激活（闭环核心）：部署即把该本地档案置为 active，并经
+            // `activate_profile_by_id` 完成 use_active + 镜像 config.model +
+            // 发布生效快照，路由引擎下一轮即走回环本地端点（见 ModelRouter::pin_active_model）。
+            let activate = params
+                .get("activate")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let mut activated = false;
+            if activate {
+                if let Err(e) =
+                    crate::gateway::llm_profile::activate_profile_by_id(ctx, &profile_id)
+                {
+                    return json!({
+                        "ok": false,
+                        "error": format!("激活失败: {e}"),
+                        "code": "local_model.activate_failed",
+                    });
+                }
+                activated = true;
+            }
+            // 部署/激活即并入路由候选并发布生效快照（候选列表即时对 UI/引擎可见）。
+            let _ = crate::gateway::llm_profile::reconcile_routing_candidates(ctx);
+            // 广播模型变更事件，供前端被动刷新（P3 复用）。
+            crate::events::product::emit(
+                "models.changed",
+                "",
+                json!({ "reason": "local_deploy", "profile_id": profile_id, "activated": activated }),
+            );
+            let cand = Config::load()
+                .map(|c| c.model_routing.candidate_models.len())
+                .unwrap_or(0);
+            let mode = Config::load()
+                .map(|c| c.model_routing.mode.clone())
+                .unwrap_or_default();
+            json!({
+                "ok": true,
+                "deployed": true,
+                "activated": activated,
+                "profile_id": profile_id,
+                "kind": "local",
+                "candidate_count": cand,
+                "routing_mode": mode,
+                "gate": {
+                    "passed": gate.passed,
+                    "blocking": gate.blocking.iter().map(|e| e.name()).collect::<Vec<_>>(),
+                },
+                "note": if activated {
+                    "已自动激活并接入路由"
+                } else {
+                    "已注册为本地模型路由档案，可在模型选择器切换主模型"
+                },
+            })
+        }
         Err(e) => {
             json!({ "ok": false, "error": e.to_string(), "code": "local_model.deploy_failed" })
         }
@@ -1060,6 +1333,275 @@ pub fn local_status(_params: &Value) -> Value {
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 实时 Ollama 枚举 / 部署（models.local.ollama[.deploy]）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 把任意 base URL 规范成 **Ollama 根地址**（不含 `/v1`、无末尾 `/`）。
+///
+/// 部署档案的 `base_url` 必须是根地址：chat URL 由 `build_chat_url` 归一化拼接；
+/// 若这里残留 `/v1`，发请求会拼出 `/v1/v1/...`。纯函数便于单测。
+pub fn normalize_ollama_root(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    // 去掉可能的 /v1 或 /api/v1 后缀（/api/v1 也以 /v1 结尾）。
+    let stripped = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    stripped.to_string()
+}
+
+/// 解析 Ollama 根地址：入参 `baseUrl` > env `MARGUERITE_OLLAMA_URL` > `http://localhost:11434`。
+fn resolve_ollama_base_url(params: &Value) -> String {
+    let from_param = params
+        .get("baseUrl")
+        .or_else(|| params.get("base_url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !from_param.is_empty() {
+        return normalize_ollama_root(from_param);
+    }
+    if let Ok(env) = std::env::var("MARGUERITE_OLLAMA_URL") {
+        let env = env.trim();
+        if !env.is_empty() {
+            return normalize_ollama_root(env);
+        }
+    }
+    "http://localhost:11434".to_string()
+}
+
+/// 把 Ollama tag 规范成 ModelProfile id：`ollama-` 前缀 + 所有非 `[a-z0-9]` 字符
+/// 归并为单个 `-`（大写先转小写），去首尾 `-`。纯函数便于单测。
+/// `omnipilot17:latest` → `ollama-omnipilot17-latest`。
+pub fn sanitize_ollama_id(model: &str) -> String {
+    let mut out = String::from("ollama-");
+    let mut prev_dash = false;
+    for ch in model.chars() {
+        if ch.is_ascii_alphanumeric() && ch.is_ascii_lowercase() {
+            out.push(ch);
+            prev_dash = false;
+        } else if ch.is_ascii_uppercase() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if ch.is_ascii_digit() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// 解析 `/api/tags` 响应体为模型数组（纯函数：不碰网络，便于单测）。
+fn parse_ollama_tags(body: &Value) -> Vec<Value> {
+    let Some(arr) = body.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|m| {
+            let details = m.get("details");
+            let family = details
+                .and_then(|d| d.get("family"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let families = details
+                .and_then(|d| d.get("families"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let parameter_size = details
+                .and_then(|d| d.get("parameter_size"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let quantization = details
+                .and_then(|d| d.get("quantization_level"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let size_bytes = m.get("size").and_then(Value::as_u64).unwrap_or(0);
+            // GiB（1024^3），保留 2 位小数，与 `ollama list` 的 SIZE 列口径一致。
+            let size_gb =
+                ((size_bytes as f64 / 1_073_741_824.0) * 100.0).round() / 100.0;
+            json!({
+                "name": m.get("name").and_then(Value::as_str).unwrap_or(""),
+                "model": m.get("model").and_then(Value::as_str).unwrap_or(""),
+                "digest": m.get("digest").and_then(Value::as_str).unwrap_or(""),
+                "size_bytes": size_bytes,
+                "size_gb": size_gb,
+                "family": family,
+                "families": families,
+                "parameter_size": parameter_size,
+                "quantization": quantization,
+                "modified_at": m.get("modified_at").and_then(Value::as_str).unwrap_or(""),
+            })
+        })
+        .collect()
+}
+
+/// 拉取并解析 `{root}/api/tags`。Ok(模型数组)；Err(可读原因)。3s 短超时，避免拖死页面。
+pub(crate) async fn fetch_ollama_tags(root: &str) -> Result<Vec<Value>, String> {
+    let url = format!("{root}/api/tags");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama 不可达（{url}）: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Ollama 返回 HTTP {status}"));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
+    Ok(parse_ollama_tags(&body))
+}
+
+/// `models.local.ollama`：枚举 **live** Ollama 服务已装模型（打 `GET /api/tags`）。
+///
+/// 与 `local_status` 的 `ollama_present`（纯 PATH 文件探测）互补：这里回答的是
+/// 「服务在线吗、里面到底有哪些 tag」。服务不在线/超时**不报错**，而是
+/// `{ online:false, models:[], error }` 诚实标注 —— 前端据此渲染离线态而非崩溃。
+pub async fn local_ollama_list(params: &Value) -> Value {
+    let root = resolve_ollama_base_url(params);
+    match fetch_ollama_tags(&root).await {
+        Ok(models) => {
+            json!({ "ok": true, "online": true, "base_url": root, "models": models })
+        }
+        Err(error) => {
+            json!({ "ok": true, "online": false, "base_url": root, "models": [], "error": error })
+        }
+    }
+}
+
+/// `models.local.ollama.deploy`：把一个 live Ollama tag 注册为 kind=Local 路由档案，
+/// 可选**立即激活**（走 use_active + 镜像 config + 发布生效快照的完整路径）。
+pub async fn local_ollama_deploy(
+    ctx: &crate::gateway::methods::GatewayContext,
+    params: &Value,
+) -> Value {
+    let model = params
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if model.is_empty() {
+        return json!({
+            "ok": false,
+            "error": "缺少 model（tag，如 omnipilot17:latest）",
+            "code": "ollama_deploy.no_model",
+        });
+    }
+    let root = resolve_ollama_base_url(params);
+
+    // 先在线校验该 tag 真实存在于 /api/tags（不在线 / 缺模型都明确报错，绝不静默建档）。
+    let models = match fetch_ollama_tags(&root).await {
+        Ok(m) => m,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "error": format!("Ollama 不可达，无法部署 {model}: {e}"),
+                "code": "ollama_deploy.offline",
+            });
+        }
+    };
+    if !models.iter().any(|m| m["name"].as_str() == Some(model)) {
+        return json!({
+            "ok": false,
+            "error": format!("Ollama 中没有 tag \"{model}\"（先 `ollama pull {model}` 或核对名称）"),
+            "code": "ollama_deploy.model_not_found",
+        });
+    }
+
+    let label = params
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("Ollama · {model}"));
+    let activate = params.get("activate").and_then(Value::as_bool).unwrap_or(false);
+
+    match upsert_ollama_profile(ctx, model, &root, activate, label) {
+        Ok(v) => v,
+        Err(e) => json!({
+            "ok": false,
+            "error": e,
+            "code": "ollama_deploy.save_failed",
+        }),
+    }
+}
+
+/// 把一个已校验存在的 Ollama tag 写入 models.json（kind=Local），可选激活。
+///
+/// 与网络校验解耦：纯文件 I/O + 激活路径，便于在隔离临时目录单测，不必依赖本机
+/// 是否真的跑着 Ollama。`base_url` 用根地址（不含 `/v1`）。
+fn upsert_ollama_profile(
+    ctx: &crate::gateway::methods::GatewayContext,
+    model: &str,
+    root: &str,
+    activate: bool,
+    label: String,
+) -> Result<Value, String> {
+    let profile_id = sanitize_ollama_id(model);
+    let upsert = crate::model::selector::ModelSelector::load().and_then(|mut sel| {
+        let p = crate::model::registry::ModelProfile {
+            id: profile_id.clone(),
+            label,
+            provider: "ollama".into(),
+            base_url: root.to_string(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            model: model.to_string(),
+            kind: crate::model::registry::ProfileKind::Local,
+            builtin: false,
+            temperature: 0.7,
+            max_tokens: 4096,
+            tier: crate::model::tier::ModelTier::Balanced,
+            tier_caps: crate::model::tier::TierCaps::default(),
+            tier_caps_declared: false,
+            // 本地运行时（Ollama / 本地权重目录）只实现 Chat Completions，
+            // 显式写死而非留默认值：将来若默认值变化，本地档案不应被牵连。
+            wire_api: crate::model::wire::WireApi::Chat,
+            // 同上：留给名字识别（llava 等能读图的本地权重不被误判为纯文本）。
+            capabilities: Default::default(),
+        };
+        sel.registry_mut().upsert(p);
+        sel.save()
+    });
+    upsert.map_err(|e| format!("档案写入失败: {e}"))?;
+
+    let mut activated = false;
+    if activate {
+        crate::gateway::llm_profile::activate_profile_by_id(ctx, &profile_id)?;
+        // P1·B：激活即并入路由候选并发布生效快照（与 local_deploy 一致），
+        // 设置中心/本地中心共用同一候选真源，保存 provider 后即时对 UI/引擎可见。
+        crate::gateway::llm_profile::reconcile_routing_candidates(ctx)?;
+        crate::events::product::emit(
+            "models.changed",
+            "",
+            json!({ "reason": "ollama_upsert", "profile_id": profile_id, "activated": true }),
+        );
+        activated = true;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "deployed": true,
+        "profile_id": profile_id,
+        "activated": activated,
+        "model": model,
+        "provider": "ollama",
+    }))
+}
+
 /// `models.local.system`：宿主真实系统规格（RAM/核心/GPU），驱动智能推荐。
 pub fn local_system(_params: &Value) -> Value {
     let s = host_system_spec();
@@ -1071,6 +1613,7 @@ pub fn local_system(_params: &Value) -> Value {
         "cores": s.cores,
         "gpu": s.gpu,
         "gpu_name": s.gpu_name,
+        "gpu_kind": s.gpu_kind,
     })
 }
 
@@ -1332,7 +1875,10 @@ mod tests {
     #[test]
     fn deploy_registers_local_profile_and_marks_source() {
         let _g = lock_home();
-        let v = local_deploy(&json!({ "id": "qwen3-4b", "baseUrl": "http://localhost:11434/v1" }));
+        let v = local_deploy(
+            &test_ctx(),
+            &json!({ "id": "qwen3-4b", "baseUrl": "http://localhost:11434/v1" }),
+        );
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["kind"], "local");
 
@@ -1356,6 +1902,44 @@ mod tests {
             .unwrap()
             .iter()
             .any(|p| p["id"].as_str() == Some("local-qwen3-4b")));
+    }
+
+    #[test]
+    fn local_deploy_activates_and_reconciles_candidates() {
+        let _g = lock_home();
+        let ctx = test_ctx();
+        let v = local_deploy(
+            &ctx,
+            &json!({ "id": "qwen3-4b", "baseUrl": "http://localhost:11434" }),
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        // 闭环核心：部署默认即激活，并返回候选计数
+        assert_eq!(v["activated"], true, "部署默认应激活: {v}");
+        assert!(v["candidate_count"].as_u64().unwrap_or(0) >= 1, "候选应 ≥1: {v}");
+
+        // 执行侧真相源 1：models.json 的 active 必须是新本地档案
+        let sel = crate::model::selector::ModelSelector::load().unwrap();
+        assert_eq!(sel.registry().active, "local-qwen3-4b");
+
+        // 执行侧真相源 2/3：candidate_models 并入 + base_url 回环（直接读 YAML，
+        // 不过 Config::load，避免 CWD .env 的 MARGUERITE_BASE_URL 覆盖断言）
+        let raw = std::fs::read_to_string(Config::config_path()).unwrap();
+        let cfg: Config = serde_yaml::from_str(&raw).unwrap();
+        assert!(
+            cfg.model_routing
+                .candidate_models
+                .contains(&"local-qwen3-4b".to_string()),
+            "候选列表应含部署的本地档案: {:?}",
+            cfg.model_routing.candidate_models
+        );
+
+        // 激活后 config.model.base_url 指向回环本地端点
+        // → ModelRouter::pin_active_model=true，路由引擎下一轮即走本地模型（无需重启）
+        assert!(
+            cfg.model.base_url.contains("localhost") || cfg.model.base_url.contains("127.0.0.1"),
+            "激活后 base_url 应为回环: {}",
+            cfg.model.base_url
+        );
     }
 
     #[test]
@@ -1400,7 +1984,96 @@ mod tests {
         assert!(!s.os.is_empty(), "os 应非空");
         assert!(s.ram_gb >= 1, "RAM 应 ≥1G");
         assert!(s.cores >= 1, "核心数应 ≥1");
+        assert!(
+            matches!(s.gpu_kind.as_str(), "discrete" | "integrated" | "none"),
+            "gpu_kind 取值非法: {}",
+            s.gpu_kind
+        );
         // gpu/gpu_name 由环境决定，仅断言类型一致
+    }
+
+    // ── GPU 探测：纯函数解析与语义 ──
+    #[test]
+    fn rocm_product_skips_banner_and_header() {
+        // 真机巡检缺口：首行是分隔线/表头时不能当型号
+        let raw = "======================= ROCm System Management Interface =======================\n\
+                   GPU[0] : Card series:\n\
+                   GPU[0] : Card series: AMD Radeon RX 7900 XTX\n\
+                   ======================= End of ROCm SMI Log =======================";
+        assert_eq!(
+            parse_rocm_product_name(raw).as_deref(),
+            Some("AMD Radeon RX 7900 XTX")
+        );
+    }
+
+    #[test]
+    fn rocm_product_reads_card_series_value() {
+        let raw = "GPU[0]\t\t: Card series:\t\tAMD Radeon Graphics";
+        assert_eq!(
+            parse_rocm_product_name(raw).as_deref(),
+            Some("AMD Radeon Graphics")
+        );
+    }
+
+    #[test]
+    fn rocm_product_multi_gpu_takes_first_named() {
+        let raw = "GPU[0] : Card series:\n\
+                   GPU[1] : Card series: AMD Radeon RX 6800\n\
+                   GPU[2] : Card series: AMD Radeon RX 7900 XTX";
+        assert_eq!(
+            parse_rocm_product_name(raw).as_deref(),
+            Some("AMD Radeon RX 6800")
+        );
+    }
+
+    #[test]
+    fn video_controller_names_skip_microsoft_basic() {
+        let raw = "Microsoft Basic Display Adapter\nMicrosoft Remote Display Adapter\nIntel(R) UHD Graphics 630";
+        assert_eq!(
+            parse_video_controller_names(raw).as_deref(),
+            Some("Intel(R) UHD Graphics 630")
+        );
+        // 只有微软虚拟/基础适配器时视为未探测到，避免把虚拟显卡当真实硬件
+        assert_eq!(
+            parse_video_controller_names("Microsoft Basic Display Adapter"),
+            None
+        );
+    }
+
+    #[test]
+    fn video_controller_names_read_wmic_list() {
+        // wmic 输出首行是 Name 表头，必须跳过
+        let raw = "Name\r\nIntel(R) UHD Graphics 630\r\nNVIDIA GeForce RTX 4060 Laptop GPU\r\n";
+        assert_eq!(
+            parse_video_controller_names(raw).as_deref(),
+            Some("Intel(R) UHD Graphics 630")
+        );
+    }
+
+    #[test]
+    fn gpu_flag_not_flipped_by_integrated_display() {
+        // 核显只填 gpu_name，不得让 gpu=true，也不得改变推荐档位
+        let integrated = resolve_gpu(None, Some("Intel(R) UHD Graphics 630".into()));
+        assert!(!integrated.accelerator);
+        assert_eq!(integrated.name, "Intel(R) UHD Graphics 630");
+        assert_eq!(integrated.kind, "integrated");
+        assert_eq!(tier_for(16, integrated.accelerator), "workstation");
+
+        // 只有 nvidia-smi / rocm-smi 命中才算加速器（discrete）
+        let discrete = resolve_gpu(
+            Some("NVIDIA GeForce RTX 4090".into()),
+            Some("Intel(R) UHD Graphics 630".into()),
+        );
+        assert!(discrete.accelerator);
+        assert_eq!(discrete.name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(discrete.kind, "discrete");
+        assert_eq!(tier_for(16, discrete.accelerator), "server");
+
+        // 什么都没探测到：空名、kind=none、仍不是加速器
+        let none = resolve_gpu(None, None);
+        assert!(!none.accelerator);
+        assert!(none.name.is_empty());
+        assert_eq!(none.kind, "none");
     }
 
     #[test]
@@ -1409,6 +2082,13 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["source"], "host");
         assert!(v["ram_gb"].as_u64().unwrap_or(0) >= 1);
+        // 旧字段保留，新增 gpu_kind 不破坏兼容
+        assert!(v["gpu"].is_boolean());
+        assert!(v["gpu_name"].is_string());
+        assert!(matches!(
+            v["gpu_kind"].as_str(),
+            Some("discrete" | "integrated" | "none")
+        ));
     }
 
     #[test]
@@ -1459,5 +2139,167 @@ mod tests {
         let no_ds = local_finetune(&json!({ "baseId": "qwen3-4b" }));
         assert_eq!(no_ds["ok"], false);
         assert_eq!(no_ds["code"], "finetune.no_dataset");
+    }
+
+    // ── Ollama 实时枚举 / 部署（纯函数 + 隔离目录）──
+
+    #[test]
+    fn sanitize_ollama_id_collapses_non_alnum() {
+        assert_eq!(
+            sanitize_ollama_id("omnipilot17:latest"),
+            "ollama-omnipilot17-latest"
+        );
+        assert_eq!(sanitize_ollama_id("omnipilot16c"), "ollama-omnipilot16c");
+        assert_eq!(
+            sanitize_ollama_id("Qwen2.5-Coder:14b"),
+            "ollama-qwen2-5-coder-14b"
+        );
+        // 连续非法字符归并为单个 '-'
+        assert_eq!(
+            sanitize_ollama_id("weird__name..v2"),
+            "ollama-weird-name-v2"
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_root_strips_version_suffix() {
+        assert_eq!(
+            normalize_ollama_root("http://localhost:11434"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_root("http://localhost:11434/"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_root("http://localhost:11434/v1"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_root("http://localhost:11434/v1/"),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn parse_ollama_tags_extracts_fields() {
+        // 真实形状的 /api/tags 响应（本机实测结构）
+        let body = json!({
+            "models": [
+                {
+                    "name": "omnipilot17:latest",
+                    "model": "omnipilot17:latest",
+                    "modified_at": "2026-10-19T10:00:00Z",
+                    "digest": "sha256-421e1507f821",
+                    "size": 1_034_000_000u64,
+                    "details": {
+                        "format": "gguf",
+                        "family": "qwen2",
+                        "families": ["qwen2"],
+                        "parameter_size": "7.6B",
+                        "quantization_level": "Q4_K_M"
+                    }
+                },
+                { "name": "bare:tag" }
+            ]
+        });
+        let out = parse_ollama_tags(&body);
+        assert_eq!(out.len(), 2);
+        let first = &out[0];
+        assert_eq!(first["name"], "omnipilot17:latest");
+        assert_eq!(first["family"], "qwen2");
+        assert_eq!(first["families"], json!(["qwen2"]));
+        assert_eq!(first["parameter_size"], "7.6B");
+        assert_eq!(first["quantization"], "Q4_K_M");
+        assert!(first["size_gb"].as_f64().unwrap() > 0.9);
+        let second = &out[1];
+        assert_eq!(second["family"], "");
+        assert_eq!(second["families"], json!([]));
+        // 无 models 字段 → 空数组不 panic
+        assert!(parse_ollama_tags(&json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_ollama_list_offline_returns_online_false_not_error() {
+        // 不可达端口：必须诚实返回 online:false，而不是抛异常 / ok:false。
+        let v = local_ollama_list(&json!({ "baseUrl": "http://127.0.0.1:1" })).await;
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["online"], false);
+        assert!(v["models"].as_array().unwrap().is_empty());
+        assert!(v["error"].as_str().is_some_and(|s| !s.is_empty()));
+        // base_url 应规范化为根地址（去末尾 '/'，不去端口）
+        assert_eq!(v["base_url"], "http://127.0.0.1:1");
+    }
+
+    fn test_ctx() -> crate::gateway::methods::GatewayContext {
+        crate::gateway::methods::GatewayContext {
+            config: Config::default(),
+            token: "t".into(),
+            started_at: std::time::Instant::now(),
+            bus: std::sync::Arc::new(crate::events::EventBus::default()),
+        }
+    }
+
+    #[test]
+    fn upsert_ollama_profile_writes_local_profile_and_activates() {
+        let _g = lock_home();
+        let ctx = test_ctx();
+        let v = upsert_ollama_profile(
+            &ctx,
+            "omnipilot17:latest",
+            "http://localhost:11434",
+            true,
+            "Ollama · omnipilot17:latest".to_string(),
+        )
+        .expect("upsert 应成功");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["profile_id"], "ollama-omnipilot17-latest");
+        assert_eq!(v["activated"], true);
+
+        // 执行侧真相源：models.json 的 active 必须是新档案
+        let after = crate::model::selector::ModelSelector::load().unwrap();
+        assert_eq!(after.registry().active, "ollama-omnipilot17-latest");
+        let p = after.registry().get("ollama-omnipilot17-latest").unwrap();
+        assert_eq!(p.provider, "ollama");
+        assert_eq!(p.kind, crate::model::registry::ProfileKind::Local);
+        assert_eq!(
+            p.base_url, "http://localhost:11434",
+            "base_url 必须是根地址，不含 /v1"
+        );
+        assert_eq!(p.model, "omnipilot17:latest");
+        // config.yaml 三要素镜像（不过 Config::load，避免 .env 覆盖）
+        let raw = std::fs::read_to_string(Config::config_path()).unwrap();
+        let cfg: Config = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.model.provider, "ollama");
+        assert_eq!(cfg.model.model_name, "omnipilot17:latest");
+        assert_eq!(cfg.model.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn upsert_ollama_profile_without_activate_leaves_active_untouched() {
+        let _g = lock_home();
+        let ctx = test_ctx();
+        // 先把 active 指到种子默认
+        {
+            let mut sel = crate::model::selector::ModelSelector::load().unwrap();
+            sel.use_active("deepseek-chat").unwrap();
+            sel.save().unwrap();
+        }
+        let v = upsert_ollama_profile(
+            &ctx,
+            "omnipilot16c:latest",
+            "http://localhost:11434",
+            false,
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(v["activated"], false);
+        let after = crate::model::selector::ModelSelector::load().unwrap();
+        assert_ne!(
+            after.registry().active,
+            "ollama-omnipilot16c-latest",
+            "未要求激活不得改 active"
+        );
+        assert!(after.registry().get("ollama-omnipilot16c-latest").is_some());
     }
 }

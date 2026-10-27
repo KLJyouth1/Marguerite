@@ -216,10 +216,10 @@ afterEach(() => {
 describe('SkillsView stats navigation', () => {
   it('returns to Installed when a status tile is clicked from Community', async () => {
     const { app, el, nextTick, setStatusFilter } = await mountSkillsView()
-    const installedPanel = el.querySelector<HTMLElement>('#sk-panel-installed')
-    const registryPanel = el.querySelector<HTMLElement>('#sk-panel-registry')
+    const installedPanel = el.querySelector<HTMLElement>('#sk-panel-skills')
+    const registryPanel = el.querySelector<HTMLElement>('#sk-panel-community')
 
-    el.querySelector<HTMLButtonElement>('#sk-tab-registry')?.click()
+    el.querySelector<HTMLButtonElement>('#sk-tab-community')?.click()
     await nextTick()
     expect(installedPanel?.style.display).toBe('none')
     expect(registryPanel?.style.display).not.toBe('none')
@@ -232,16 +232,16 @@ describe('SkillsView stats navigation', () => {
     expect(setStatusFilter).toHaveBeenCalledWith('needs-setup')
     expect(installedPanel?.style.display).not.toBe('none')
     expect(registryPanel?.style.display).toBe('none')
-    expect(el.querySelector('#sk-tab-installed')?.getAttribute('aria-selected')).toBe('true')
+    expect(el.querySelector('#sk-tab-skills')?.getAttribute('aria-selected')).toBe('true')
     app.unmount()
   })
 
   it('returns to Installed before scrolling to proposed skills', async () => {
     const { app, el, nextTick, scrollIntoView } = await mountSkillsView()
-    const installedPanel = el.querySelector<HTMLElement>('#sk-panel-installed')
-    const registryPanel = el.querySelector<HTMLElement>('#sk-panel-registry')
+    const installedPanel = el.querySelector<HTMLElement>('#sk-panel-skills')
+    const registryPanel = el.querySelector<HTMLElement>('#sk-panel-community')
 
-    el.querySelector<HTMLButtonElement>('#sk-tab-registry')?.click()
+    el.querySelector<HTMLButtonElement>('#sk-tab-community')?.click()
     await nextTick()
 
     el.querySelector<HTMLButtonElement>('[data-testid="skills-overview"]')?.click()
