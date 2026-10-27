@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Marguerite">
+  <defs>
+    <linearGradient id="petalg" x1="18" y1="54" x2="46" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F9E90"/>
+      <stop offset=".5" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#A9D3F2"/>
+    </linearGradient>
+    <path id="petal" d="M32 33.4C27.2 25.6 27.2 16.4 32 8.6c4.8 7.8 4.8 17 0 24.8Z"/>
+  </defs>
+  <g fill="url(#petalg)">
+    <use href="#petal" transform="rotate(0 32 32)"/>
+    <use href="#petal" transform="rotate(30 32 32)"/>
+    <use href="#petal" transform="rotate(60 32 32)"/>
+    <use href="#petal" transform="rotate(90 32 32)"/>
+    <use href="#petal" transform="rotate(120 32 32)"/>
+    <use href="#petal" transform="rotate(150 32 32)"/>
+    <use href="#petal" transform="rotate(180 32 32)"/>
+    <use href="#petal" transform="rotate(210 32 32)"/>
+    <use href="#petal" transform="rotate(240 32 32)"/>
+    <use href="#petal" transform="rotate(270 32 32)"/>
+    <use href="#petal" transform="rotate(300 32 32)"/>
+    <use href="#petal" transform="rotate(330 32 32)"/>
+  </g>
+  <g fill="#A9D3F2" opacity=".9" transform="translate(32 32) scale(.6) translate(-32 -32)">
+    <use href="#petal" transform="rotate(15 32 32)"/>
+    <use href="#petal" transform="rotate(60 32 32)"/>
+    <use href="#petal" transform="rotate(105 32 32)"/>
+    <use href="#petal" transform="rotate(150 32 32)"/>
+    <use href="#petal" transform="rotate(195 32 32)"/>
+    <use href="#petal" transform="rotate(240 32 32)"/>
+    <use href="#petal" transform="rotate(285 32 32)"/>
+    <use href="#petal" transform="rotate(330 32 32)"/>
+  </g>
+  <circle cx="32" cy="32" r="5.2" fill="#E8D9B8"/>
+  <circle cx="32" cy="32" r="2.6" fill="#FFD9A0"/>
+</svg>
