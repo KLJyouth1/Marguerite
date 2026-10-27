@@ -5,7 +5,7 @@
 :root{
   --bg:#0d0d0f; --bg-2:#121215; --surface:#161619; --surface-2:#1c1c21;
   --border:rgba(255,255,255,.08); --border-2:rgba(255,255,255,.16);
-  --text:#ECEDEF; --text-2:#9A9AA4; --text-3:#6B6B75;
+  --text:#ECEDEF; --text-2:#9A9AA4; --text-3:#7E7E89;
   --accent:#2DD4BF; --accent-2:#14B8A6;
   --accent-soft:rgba(45,212,191,.10); --accent-glow:rgba(45,212,191,.30);
   --accent-faint:rgba(45,212,191,.05); --on-accent:#06201c;
