@@ -40,6 +40,10 @@
       <a href="#entries">四入口</a>
       <a href="#shots">真实界面</a>
       <a href="#demo">操作演示</a>
+      <a href="#capabilities">能力全景</a>
+      <a href="#discipline">工程纪律</a>
+      <a href="#cases">案例复盘</a>
+      <a href="#story">开发史</a>
       <a href="#compare">差异</a>
       <a href="#trust">承诺</a>
       <a href="#faq">常见问题</a>
@@ -59,6 +63,10 @@
     <a href="#entries">四入口</a>
     <a href="#shots">真实界面</a>
     <a href="#demo">操作演示</a>
+    <a href="#capabilities">能力全景</a>
+    <a href="#discipline">工程纪律</a>
+    <a href="#cases">案例复盘</a>
+    <a href="#story">开发史</a>
     <a href="#compare">差异</a>
     <a href="#trust">承诺</a>
     <a href="#faq">常见问题</a>
@@ -185,8 +193,41 @@
             </div>
           </div>
 
-          <!-- ACT 3 · why different -->
-          <div class="act act--diff" data-act="diff" data-start="40.42" data-end="57.56">
+          <!-- ACT 4 · one engine, four doors（拍点 n=37→45，8 拍 = 8.57s） -->
+          <div class="act act--entries" data-act="entries" data-start="40.42" data-end="48.99">
+            <div class="entscene" aria-hidden="true">
+              <p class="entscene__engine">ONE ENGINE · Rust core</p>
+              <div class="entscene__grid">
+                <div class="entcell" data-ent>
+                  <p class="entcell__k">00</p>
+                  <p class="entcell__t">CLI</p>
+                  <p class="entcell__d">20 条路由</p>
+                </div>
+                <div class="entcell" data-ent>
+                  <p class="entcell__k">01</p>
+                  <p class="entcell__t">TUI</p>
+                  <p class="entcell__d">ratatui 工作台</p>
+                </div>
+                <div class="entcell" data-ent>
+                  <p class="entcell__k">02</p>
+                  <p class="entcell__t">DESKTOP</p>
+                  <p class="entcell__d">Tauri 壳</p>
+                </div>
+                <div class="entcell" data-ent>
+                  <p class="entcell__k">03</p>
+                  <p class="entcell__t">WEB</p>
+                  <p class="entcell__d">回环控制台</p>
+                </div>
+              </div>
+            </div>
+            <div class="act__caption">
+              <p class="act__en">ONE ENGINE,<br>FOUR DOORS</p>
+              <p class="act__zh">换界面不换引擎 · 20 条路由四处同源</p>
+            </div>
+          </div>
+
+          <!-- ACT 5 · why different（拍点 n=45→53；原为 n=37→53 的 16 拍，前半让给四入口幕） -->
+          <div class="act act--diff" data-act="diff" data-start="48.99" data-end="57.56">
             <div class="diff__bg" aria-hidden="true"><img src="assets/ui/wallpaper.png" alt="" loading="lazy" decoding="async"></div>
             <div class="diff__grid">
               <div class="diff__cell">
@@ -502,8 +543,8 @@
     <div class="wrap">
       <header class="sec-head reveal-up">
         <p class="sec-index">CAPABILITIES</p>
-        <h2 class="sec-title" id="capTitle">一个核心，四种硬功夫</h2>
-        <p class="sec-dek">不是功能清单，是写进代码、能在你自己机器上验证的事实。</p>
+        <h2 class="sec-title" id="capTitle">一个核心，八项硬功夫</h2>
+        <p class="sec-dek">不是功能清单，是写进代码、能在你自己机器上验证的事实——每张卡都标注了它住在仓库哪个目录。</p>
       </header>
 
       <div class="cards">
@@ -513,6 +554,7 @@
           </span>
           <h3 class="card__title">一个核心，两种外壳</h3>
           <p class="card__body">Rust 内核同时产出库与二进制，CLI 与 Tauri 桌面共用同一引擎——桌面端不另起后端进程。</p>
+          <p class="card__where"><code>core/</code> · <code>gui/src-tauri/</code></p>
         </article>
 
         <article class="card reveal-up">
@@ -521,6 +563,7 @@
           </span>
           <h3 class="card__title">本地优先网关</h3>
           <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
+          <p class="card__where"><code>core/src/gateway/</code> · 451 条 RPC 方法声明</p>
         </article>
 
         <article class="card reveal-up">
@@ -529,6 +572,7 @@
           </span>
           <h3 class="card__title">分层记忆</h3>
           <p class="card__body">感知、短期、长期三层记忆。长期记忆用本地特征哈希向量化做余弦检索，不依赖外部 embedding 服务。</p>
+          <p class="card__where"><code>core/src/memory/</code></p>
         </article>
 
         <article class="card reveal-up">
@@ -537,7 +581,362 @@
           </span>
           <h3 class="card__title">幻觉护栏</h3>
           <p class="card__body">语法、语义、事实、契约四道闸依次过闸。不过闸就进修复循环：规则修复最多两次，仍不过再交给模型。</p>
+          <p class="card__where"><code>core/src/governance/</code> · PlanGate</p>
         </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </span>
+          <h3 class="card__title">多智能体编排</h3>
+          <p class="card__body">团队 / 蜂群 / 专家团多形态编排：成员注册表、实时动向事件流、团队看板泳道。每张卡都来自真实进度帧，后端没给的显示「未报告」。</p>
+          <p class="card__where"><code>core/src/orchestration/</code> · <code>team.members</code></p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+          </span>
+          <h3 class="card__title">交付流水线与人审门</h3>
+          <p class="card__body">任务拆步成 DAG，逐步执行、产物落盘；每步落盘后进入「待审查」，由你给出通过或打回——最终决策权在人。计划运行支持人工逐步推进。</p>
+          <p class="card__where"><code>core/src/plan/</code> · <code>plans.run.advance</code></p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          </span>
+          <h3 class="card__title">真实终端与沙箱</h3>
+          <p class="card__body">Windows ConPTY / Unix openpty 真 PTY（取自 wezterm 的 portable-pty），shell 自动发现与档案化，分层沙箱执行。不是「两根管道 + cmd」。</p>
+          <p class="card__where"><code>core/src/terminal/</code> · <code>core/src/sandbox/</code></p>
+        </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="m10 13 2 2 4-4"/></svg>
+          </span>
+          <h3 class="card__title">产物台账与交接协议</h3>
+          <p class="card__body">每个产物登记造册、可回放、可在编辑器内联修改；<code>/handoff</code> 把会话产物清单写成工作区交接单，下一个模型或会话直接承接，不经对话传文件。</p>
+          <p class="card__where"><code>core/src/gateway/artifacts.rs</code> · <code>artifacts.*</code></p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DISCIPLINE · 工程纪律 ================= -->
+  <section class="band band--alt" id="discipline" aria-labelledby="discTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">ENGINEERING DISCIPLINE</p>
+        <h2 class="sec-title" id="discTitle">纪律不是口号，是会拦你合并的脚本</h2>
+        <p class="sec-dek">十三道架构守卫在每次 <code>npm run typecheck</code> 时全部执行，任何一道变红都不许声称「完成」。这一节的每个数字都是源码树实测。</p>
+      </header>
+
+      <div class="stats">
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="49">49</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="62">62</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="85">85</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">marguerite-core serve --health</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="451">451</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
+      </div>
+
+      <div class="guards reveal-up" role="list" aria-label="十三道架构守卫">
+        <span class="guard" role="listitem">架构分层</span>
+        <span class="guard" role="listitem">聊天安全</span>
+        <span class="guard" role="listitem">色板令牌</span>
+        <span class="guard" role="listitem">动效时长</span>
+        <span class="guard" role="listitem">圆角令牌</span>
+        <span class="guard" role="listitem">主题契约</span>
+        <span class="guard" role="listitem">主题作用域</span>
+        <span class="guard" role="listitem">跨面板令牌</span>
+        <span class="guard" role="listitem">i18n 六语全键对齐</span>
+        <span class="guard" role="listitem">频道目录 i18n</span>
+        <span class="guard" role="listitem">RPC 契约</span>
+        <span class="guard" role="listitem">索引注入契约</span>
+        <span class="guard" role="listitem">启动素材编解码</span>
+      </div>
+
+      <div class="cards cards--honest">
+        <article class="card reveal-up">
+          <h3 class="card__title">「未报告」纪律</h3>
+          <p class="card__body">后端没给的字段，界面一律显示「未报告」——不用 0 冒充、不用猜测补位。空态必须给出真实原因（单选直答 / 尚未派活 / 读取失败），绝不静默。</p>
+        </article>
+        <article class="card reveal-up">
+          <h3 class="card__title">「跳过 ≠ 通过」</h3>
+          <p class="card__body">门禁脚本里被跳过的检查在汇总中单独列出，永远不计入通过；任何「完成」声明都必须挂着当轮新鲜的退出码 0。</p>
+        </article>
+        <article class="card reveal-up">
+          <h3 class="card__title">硬编码棘轮</h3>
+          <p class="card__body">界面模板里的硬编码中文被棘轮基线锁死（当前 380 行）：只许降不许升，新文案必须走 i18n 六语言键。漏一个键，六语言对齐守卫直接变红。</p>
+        </article>
+        <article class="card reveal-up">
+          <h3 class="card__title">实测先于声称</h3>
+          <p class="card__body">2026-10-26 的独立审计结论原话：「这个应用比文档声称的完整得多」——审计同时发现文档里两项「待办」早已完成。照抄过期文档会返工，所以这里只写实测。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CASE FILES · 六个案例复盘 ================= -->
+  <section class="band" id="cases" aria-labelledby="casesTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">CASE FILES · FIELD NOTES</p>
+        <h2 class="sec-title" id="casesTitle">六个查了很久的问题，和它们真正的根因</h2>
+        <p class="sec-dek">每一例都附工作区结构、任务节点、留下的产物，以及一条能在本机复现的命令。这里展示的不是「用了什么工具」，而是「怎么把一个问题查到底」。</p>
+      </header>
+
+      <div class="cf">
+        <details class="cf__item reveal-up" open>
+          <summary class="cf__sum">
+            <span class="cf__no">01</span>
+            <span class="cf__head"><b class="cf__t">健康引擎被自己的限流判死</b><span class="cf__s">症状：端到端测试偶发变红，一红就连带十几例跳过</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">core/src/pyengine/sidecar.rs
+pyengine/src/opensquilla/gateway/middleware.py
+webui/e2e/settings-modal.spec.ts</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>误判</b>「超时抖动」——加等待只会把概率往后推</li>
+                  <li><b>取证</b>4 个并发 worker 下探 90 次 <code>/health</code>，21 次拿到 429</li>
+                  <li><b>根因</b>存活探测被自身限流挡下 → 看门狗把「活着」读成「死了」，杀掉健康进程（重启 21 秒）</li>
+                  <li><b>修复</b>两处：侧车永久豁免存活路径；内核侧改成「有回答即存活」（状态码 &lt; 500），且连续 3 次失手才复核</li>
+                  <li><b>守卫</b>4 条内核用例 + 1 条真实中间件用例（桶限 1：<code>/health</code> 连打 5 次全 200，<code>/api/config</code> 第 2 次 429）</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li>存活路径豁免表 <code>_LIVENESS_PATHS</code></li>
+                  <li>纯函数 <code>classify_health</code>（3 次失手 + 10 秒复核）</li>
+                  <li>用例 <code>rate_limited_probe_still_proves_liveness</code></li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">「偶发红」先量概率再改代码：21/90 是根因，加超时是掩盖。看门狗的判据必须能区分「没回答」与「回答慢」。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>cargo test -p marguerite-core --lib rate_limited_probe_still_proves_liveness</code></div>
+          </div>
+        </details>
+
+        <details class="cf__item reveal-up">
+          <summary class="cf__sum">
+            <span class="cf__no">02</span>
+            <span class="cf__head"><b class="cf__t">桌宠发灰：渐变贴图有一半是死区</b><span class="cf__s">症状：兽形皮肤在真机上整只泛白，没有体积感</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">webui/src/components/pet/pet3d/Pet3DScene.ts
+webui/src/components/pet/petSpec.ts
+webui/src/components/pet/petSpec.test.ts</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>误判</b>「贴图太亮」——把暗档调暗，采样像素差值恒为 0</li>
+                  <li><b>读引擎</b>渐变取样坐标是 <code>dotNL × 0.5 + 0.5</code>，而 <code>dotNL</code> 已被截断到 0–1 → 受光面只能落在贴图后半段</li>
+                  <li><b>根因</b>3 格贴图下暗档对受光面是死代码，可见明暗差只有 6.7%</li>
+                  <li><b>修复</b>贴图加宽到 6 格、可达三档放在后半段；兽形主光从 3.30 降到 1.90</li>
+                  <li><b>实测</b>兽形像素中位 255／亮部占比 75.4%，修后 221／30.9%，与四款精灵回到同一档</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li><code>PET_TOON_RAMP</code> + <code>toonRampBytes()</code></li>
+                  <li>四条守卫：受光面覆盖三档 · 明暗差 ≥ 0.20 · 单盏主光 ≤ 0.95 · 兽形裁切 ≤ 15%</li>
+                  <li>逐灯分解自证：关掉全部灯光后画面必须全黑</li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">「看起来不对」也要去读引擎源码。单点采样配一个形式错误的曝光公式，等于一个永远绿的守卫。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>cd webui &amp;&amp; npx vitest run src/components/pet/petSpec.test.ts</code></div>
+          </div>
+        </details>
+
+        <details class="cf__item reveal-up">
+          <summary class="cf__sum">
+            <span class="cf__no">03</span>
+            <span class="cf__head"><b class="cf__t">点「允许」，什么也没发生</b><span class="cf__s">症状：卡片推得到、点下去没反应；重连后挂起的卡片还会自己折叠</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">core/src/gateway/approvals.rs
+core/src/chain/executor.rs
+pyengine/src/opensquilla/gateway/app.py</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>观察</b><code>GET /api/approvals</code> 回 <code>pending: []</code></li>
+                  <li><b>对账</b><code>POST /api/approvals/resolve</code> 回 404；复查侧车队列仍是「待裁决」</li>
+                  <li><b>根因</b>双引擎各有一份审批队列，控制台只连内核一侧——卡片推得到，裁决落不了地</li>
+                  <li><b>修复</b>快照按 id 合并两侧；裁决未命中就转发侧车（2 秒拉快照／5 秒转发），侧车不可达则如实 404</li>
+                  <li><b>守卫</b>合并去重 · 侧车离线 · 真实 HTTP 往返：执行器抬升 → 后台拉快照拿到 id → 裁决 → 断言步骤真的执行成功</li>
+                  <li><b>第三面</b>反方向同样会坏：内核抬起的审批，状态探测被代理到侧车，侧车如实回「查无此 id」——前端把这句缺省判成终态，重连恢复时仍挂起的卡片自己折叠成「审批已不可用」</li>
+                  <li><b>补法</b>状态查询先问持有方（内核注册表，超时项不答「仍挂起」），未命中再转发侧车；两侧皆无才如实回缺省</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li><code>merge_pending</code> + forward-on-miss</li>
+                  <li>持有方应答：<code>registry_status</code> / <code>missing_status</code></li>
+                  <li>同源校验（跨源 403，回环兜底防 rebinding）</li>
+                  <li>用例 <code>approval_survives_console_rest_round_trip</code> · <code>dispatch_answers_status_for_rust_raised_approval</code></li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">「界面有反馈」不等于「后端生效」。跨进程状态必须有统一的可观测出口；每一条查询只能由持有方作答——另一侧如实说「没有」，会被读成「不存在」。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>cargo test -p marguerite-core --lib gateway::approvals</code></div>
+          </div>
+        </details>
+
+        <details class="cf__item reveal-up">
+          <summary class="cf__sum">
+            <span class="cf__no">04</span>
+            <span class="cf__head"><b class="cf__t">未绑定项目时，凭据目录就是工作区</b><span class="cf__s">症状：没有——这正是它危险的地方</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">core/src/workspace.rs
+core/src/security/scanner_l3.rs
+core/src/tools/builtin/fs.rs
+core/src/guard/trust.rs</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>审计落盘</b><code>vault.json</code> 早已 0600，而 <code>.env</code>、<code>gateway-token</code>、<code>credentials.json</code> 按默认 umask 落盘</li>
+                  <li><b>追调用链</b>未绑定项目时工作区回落到配置目录——凭据正躺在那里</li>
+                  <li><b>复核拦截面</b>预检只管写入；<code>grep</code> 的遍历也不过掉点文件，于是读文件工具能把 <code>.env</code> 整份读进上下文，再随下一次请求发往服务商</li>
+                  <li><b>修复</b>守卫按<em>文件名</em>拒绝读取（默认工作区就是凭据目录，路径前缀判不出来）；<code>grep</code>／<code>codebase_search</code> 跳过同一批；三处补 0600</li>
+                  <li><b>同轮加固</b>信任授予支持参数指纹绑定与有效期：「记住这次」不会顺带放行下一次同类操作</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li><code>is_credential_file</code>（<code>.env</code> 模板仍可读，写入仍放行）</li>
+                  <li><code>check_read_multi</code> · <code>harden_private_file</code></li>
+                  <li><code>args_fingerprint</code> + TTL（只存指纹，不存原文）</li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">安全审计要跟着「数据实际躺在哪」走，而不是跟着「我们以为默认值是什么」走。已知边界照实写：<code>vault.json</code> 的派生密钥与盐同文件，静态保护靠权限而非口令。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>cargo test -p marguerite-core --lib guard_denies_credential_file_reads_and_searches</code></div>
+          </div>
+        </details>
+
+        <details class="cf__item reveal-up">
+          <summary class="cf__sum">
+            <span class="cf__no">05</span>
+            <span class="cf__head"><b class="cf__t">门禁漏了自己的一项</b><span class="cf__s">症状：文档写 18 项检查，全量模式实际只调度 17 项</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">scripts/verify.sh
+scripts/check-readme-claims.py
+.github/workflows/ci.yml</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>事故</b>新检查只接进快闸与内核档，忘了接全量档——一个对部分代码库沉默的绿徽章</li>
+                  <li><b>为什么没人发现</b>没有任何东西在数「文档里的数字」与「脚本真正调度了几项」</li>
+                  <li><b>修复</b>新脚本直接读 <code>verify.sh</code> 的全量块，数真实调度项，再与两份 README 的闸门总数比对，不等即红</li>
+                  <li><b>同一轮</b>版本号同步、密钥扫描、文档链接、README 事实四条纯标准库检查接进 CI</li>
+                  <li><b>结果</b>这个守卫当场抓出一例「长得像真钥匙」的测试夹具，此后夹具必须自我标注</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li><code>check-readme-claims.py</code>（中英两份 README 硬事实比对）</li>
+                  <li><code>check-secrets.py</code>（只扫将随提交落地的文件，白名单要求自证）</li>
+                  <li>CI 的 docs job 接入五条纯标准库检查</li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">文档会腐烂，门禁不会。把「对账」写成脚本，让它替你记住——包括记住「门禁自己有没有被接线」。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>python3 scripts/check-readme-claims.py</code></div>
+          </div>
+        </details>
+
+        <details class="cf__item reveal-up">
+          <summary class="cf__sum">
+            <span class="cf__no">06</span>
+            <span class="cf__head"><b class="cf__t">点完「允许」，整条对话消失了</b><span class="cf__s">症状：结果行连同气泡一起不见，页面回到「暂无消息」，角标却还挂着一条待审</span></span>
+            <span class="cf__chev" aria-hidden="true"></span>
+          </summary>
+          <div class="cf__body">
+            <div class="cf__grid">
+              <div class="cf__cell">
+                <p class="cf__k">工作区结构</p>
+                <pre class="cf__tree">webui/src/composables/chat/useChatSessionSubscription.ts
+webui/src/composables/chat/useChatRpcEventHandlers.ts
+webui/e2e/approval-card.spec.ts</pre>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">任务节点</p>
+                <ol class="cf__nodes">
+                  <li><b>观察</b>门禁红在审批用例：点完「允许」，等不到结果行</li>
+                  <li><b>对照</b>同一套「重置实时轮次」的逻辑，在实时快照那条路径上会重挂中断帧，订阅路径不会——不对称本身就是线索</li>
+                  <li><b>根因</b>权威空闲快照落地时会清掉整条实时轮次；而审批／澄清帧不是流事件，重放不会把它们带回来。点「允许」让「有待审项」立刻变假，于是只要快照晚于这次点击落地，已裁决的结果行就连同气泡一起被抹掉</li>
+                  <li><b>先证明再修</b>先写单测：期望「重置后重挂 1 次」，未修时实得 0 次。修法是给订阅加一个重挂回调（重挂按 id 去重，幂等），在重置之后调用</li>
+                  <li><b>复现失败一次</b>先用浏览器网络限速压延迟，结果在「修复被禁用」的构建上照样通过——网络限速对 WebSocket 帧根本不生效，差点把真缺陷判成「偶发、不可复现」</li>
+                  <li><b>确定复现</b>改为在套接字层面转发帧、只把订阅与快照的响应压后 2 秒（预算 3 秒，所以是晚到不是丢失）——红出来的断言与门禁现场逐字节同形</li>
+                  <li><b>棘轮</b>端到端基线 95 → 96，整层 97 通过 / 2 跳过</li>
+                </ol>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">产物</p>
+                <ul class="cf__art">
+                  <li>订阅选项 <code>reappendInterruptFrames</code>（重置后重挂，幂等）</li>
+                  <li>单测 <code>re-appends interrupt records…</code>（变异即红）</li>
+                  <li>端到端 <code>a late authoritative idle snapshot keeps the approved outcome row</code></li>
+                </ul>
+              </div>
+              <div class="cf__cell">
+                <p class="cf__k">/handoff</p>
+                <p class="cf__note">「偶发」不是不查的理由，而是要换一种造法：把不可控的时序变成可控的延迟。另外，限速工具没覆盖的传输层会给你假绿——一个不改代码也能过的回归用例，等于没有。</p>
+              </div>
+            </div>
+            <div class="cf__repro"><span class="cf__repro-k">复现</span><code>cd webui &amp;&amp; npx playwright test e2e/approval-card.spec.ts -g "late authoritative idle snapshot"</code></div>
+          </div>
+        </details>
       </div>
     </div>
   </section>
@@ -574,6 +973,125 @@
     </div>
   </section>
 
+  <!-- ================= STORY ================= -->
+  <section class="band band--story" id="story" aria-labelledby="storyTitle">
+    <div class="wrap story">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">STORY · 一个人的开发史</p>
+        <h2 class="sec-title" id="storyTitle">一个人的工作台开发史</h2>
+        <p class="sec-dek">三年，一个人，从「写代码」到「造一台自己愿意每天打开的工作台」。这一页不讲卖点，只讲账。</p>
+      </header>
+
+      <ol class="chapters">
+        <li class="chap reveal-up">
+          <span class="chap__year">2023</span>
+          <div class="chap__body">
+            <h3>一个人接活</h3>
+            <p>写业务、带项目、上课。工具换了一茬又一茬，结论却越来越清楚：每个助手都只懂你正打开的那一个窗口——切走就忘，关掉就散，换台机器就等于从零开始。</p>
+          </div>
+        </li>
+        <li class="chap reveal-up">
+          <span class="chap__year">2024</span>
+          <div class="chap__body">
+            <h3>把能试的都试了</h3>
+            <p>国内外的对话模型、IDE、Agent 工作台、编辑器插件，接进来、拆开看、再换下一个。自己也拉过 LoRA 配置调模型，给每个助手写过一套 skills 和智能体，最后都散在各自的文件夹里。归档中还躺着当年拆过的东西：<code>archived-claude-code-source</code>、<code>archived-LLaMA-Factory</code>、<code>archived-hermes-telegram</code>、<code>agentpot</code>、<code>gui-agent</code>。试到最后发现：没有一个能留下「我的过程」。</p>
+          </div>
+        </li>
+        <li class="chap reveal-up">
+          <span class="chap__year">2025</span>
+          <div class="chap__body">
+            <h3>从零写内核</h3>
+            <p>第一版 agent 循环、第一套工具协议、第一个 MCP 子进程。目标也从「能用」改成了「可复核」：每一步要有回执，每个结论要能复跑，断网也要能开工。</p>
+          </div>
+        </li>
+        <li class="chap reveal-up">
+          <span class="chap__year">2026</span>
+          <div class="chap__body">
+            <h3>收口，不阉割</h3>
+            <p>30 天里从 0.2.7 走到 0.2.17，把 <strong>204.9 MB 离线 WebView2</strong>、<strong>209.6 MB 内置 Python 3.12</strong>、全绿门禁一起塞进安装包。有人说这是过度设计；他只回一句：我自己每天也要用这台机器。</p>
+          </div>
+        </li>
+      </ol>
+
+      <div class="price reveal-up">
+        <div class="price__item">
+          <b class="price__n">≈ $30,000</b>
+          <span class="price__l">三年里直接付给模型与 API 的账单<span class="price__tag">自述</span></span>
+        </div>
+        <div class="price__item">
+          <b class="price__n">≈ 400 亿</b>
+          <span class="price__l">按混合单价 $0.75 / 百万 token 反推的 token 量<span class="price__tag">估算</span></span>
+        </div>
+        <div class="price__item">
+          <b class="price__n">≈ 9,700</b>
+          <span class="price__l">小时：三年 × 每年 340 天 × 每天 9.5 小时<span class="price__tag">估算</span></span>
+        </div>
+      </div>
+
+      <p class="price__note reveal-up">token 数不是账单：$30,000 ÷ $0.75/百万 ≈ 400 亿，实际单价随模型、缓存命中与国内低价通道上下浮动，真实值在 300–600 亿之间。</p>
+
+      <figure class="curve reveal-up">
+        <figcaption class="curve__cap">提交最密集的两小时是 <b>21:00–23:00</b>，凌晨 2 点仍有提交。</figcaption>
+        <div class="curve__bars" role="img" aria-label="提交时段分布：21 点与 22 点各 8 次为最高，19 点到 23 点集中了大部分提交，凌晨 0 点 3 次、2 点 1 次">
+          <span style="--h:37%"><i></i><b>00</b></span>
+          <span style="--h:0%"><i></i></span>
+          <span class="is-night" style="--h:12%"><i></i><b>02</b></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:0%"><i></i><b>06</b></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:0%"><i></i></span>
+          <span style="--h:25%"><i></i><b>10</b></span>
+          <span style="--h:37%"><i></i></span>
+          <span style="--h:37%"><i></i><b>12</b></span>
+          <span style="--h:37%"><i></i></span>
+          <span style="--h:62%"><i></i></span>
+          <span style="--h:12%"><i></i></span>
+          <span style="--h:12%"><i></i><b>16</b></span>
+          <span style="--h:25%"><i></i></span>
+          <span style="--h:0%"><i></i><b>18</b></span>
+          <span class="is-night" style="--h:62%"><i></i></span>
+          <span class="is-night" style="--h:50%"><i></i><b>20</b></span>
+          <span class="is-night" style="--h:100%"><i></i></span>
+          <span class="is-night" style="--h:100%"><i></i><b>22</b></span>
+          <span class="is-night" style="--h:62%"><i></i><b>23</b></span>
+        </div>
+        <p class="curve__note">本仓库 54 次提交的时段分布（2026-08 → 2026-10，按提交者本地时间），只作样本。作息一度是 08:00 干到凌晨 03:30；后来进了几次医院，改成 05:00 起、23:30 收——不是变自律了，是身体先投了反对票。出门吃饭、在外游玩，包里永远开着一台远程桌面。</p>
+      </figure>
+
+      <div class="tried reveal-up">
+        <p class="tried__t">这三年真正接进过这台工作台的模型入口（以代码为准）</p>
+        <ul class="tried__list">
+          <li>DeepSeek</li><li>Ollama</li><li>OpenAI</li><li>Anthropic</li><li>Gemini</li>
+          <li>Qwen</li><li>Kimi</li><li>豆包</li><li>混元</li><li>智谱 GLM</li>
+          <li>Moonshot</li><li>Mistral</li><li>SiliconFlow</li><li>OpenRouter</li>
+        </ul>
+        <p class="tried__note">14 个 provider id，在 <code>core/src/provider</code> 里能查到；不是广告位，也没有排除谁。</p>
+      </div>
+
+      <div class="ledger reveal-up">
+        <div class="ledger__i"><b class="ledger__n">254,605<em> 行</em></b><span class="ledger__l">Rust · 548 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">308,344<em> 行</em></b><span class="ledger__l">前端 · 1,221 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">413,506<em> 行</em></b><span class="ledger__l">Python · 1,017 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">2,178<em> 份</em></b><span class="ledger__l">技能文档</span></div>
+        <div class="ledger__i"><b class="ledger__n">31<em> 个</em></b><span class="ledger__l">工具模块</span></div>
+        <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
+      </div>
+
+      <blockquote class="story__quote reveal-up">
+        <p>我不做阉割版，因为我自己就是那个每天要打开它的人。</p>
+        <span class="story__by">MARGUERITE · 作者</span>
+      </blockquote>
+
+      <p class="story__meta reveal-up">
+        数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-28）；三年、3 万美元、就医与作息为作者自述；
+        token 数为按混合单价反推的估算，不是账单。故事板块不写没发生过的事。
+      </p>
+    </div>
+  </section>
+
   <!-- ================= EVIDENCE ================= -->
   <section class="band band--alt" id="evidence" aria-labelledby="evTitle">
     <div class="wrap">
@@ -584,7 +1102,7 @@
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4162">4162</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4220">4220</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="4816">4816</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="25">25</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
@@ -593,7 +1111,7 @@
       <div class="gate reveal-up">
         <div class="term term--gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4162 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4220 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] webui tests · 4816 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
@@ -601,7 +1119,8 @@
           <p class="term__line term__ok">================ 25/25 全绿 · exit 0 ================</p>
         </div>
         <p class="gate__note">
-          基线为 2026-10-27 本树复测。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+          基线为 0.2.17 安装包打包复测（2026-10-27）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+          源码树在发布之后持续演进（以上游仓库实际提交为准），收口口径始终是同一句话：<code>verify.sh</code> 全绿才算数。
         </p>
       </div>
     </div>
@@ -643,8 +1162,13 @@
         </details>
 
         <details class="faq__item reveal-up">
+          <summary>它是单智能体还是多智能体？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>两者都是。简单问题单选直答；复杂任务会编排成团队 / 蜂群 / 专家团，每个成员的思考、工具调用与结论在看板上实时可见。产物落盘后进入「待审查」，由你确认通过或打回——最终决策权在人，不在自动流水线。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
           <summary>可以自己从源码构建吗？<span class="faq__mark" aria-hidden="true"></span></summary>
-          <div class="faq__body"><p>可以。内核是 Rust：<code>cargo build --release -p marguerite-core</code>；桌面壳在仓库的 <code>gui/</code> 目录下，与内核共用同一个引擎。</p></div>
+          <div class="faq__body"><p>仓库还没对外开放构建。内核是 Rust（<code>cargo build --release -p marguerite-core</code>），桌面壳在仓库的 <code>gui/</code> 目录下，与内核共用同一个引擎；开放之后这条就是标准流程，现在先留个位置。</p></div>
         </details>
       </div>
     </div>
@@ -688,14 +1212,12 @@
         <article class="dl__card reveal-up">
           <p class="dl__k">开发者</p>
           <h3 class="dl__t">从源码构建</h3>
-          <p class="dl__d">内核与桌面壳在同一个仓库，共用一套引擎。需要 Rust 工具链。</p>
+          <p class="dl__d">内核与桌面壳在同一个仓库，共用一套引擎。需要 Rust 工具链；仓库开放节奏还在准备，先留个位置。</p>
           <pre class="code"><code>cargo build --release -p marguerite-core</code></pre>
-          <a class="btn btn--ghost"
-             href="https://github.com/KLJyouth1/Marguerite"
-             target="_blank" rel="noopener noreferrer">
-            查看源码
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7"/><path d="M21 3 10 14"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
-          </a>
+          <span class="btn btn--soon" aria-disabled="true">
+            敬请期待
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          </span>
         </article>
       </div>
     </div>
@@ -878,7 +1400,10 @@
         <p class="scene__tag">山顶补给站，有人守着。灯亮着，你就知道还能再来一次。</p>
         <div class="scene__actions">
           <a class="btn btn--solid" href="#download">下载桌面端</a>
-          <a class="btn btn--ghost" href="https://github.com/KLJyouth1/Marguerite" target="_blank" rel="noopener noreferrer">查看源码</a>
+          <span class="btn btn--soon" aria-disabled="true">
+            源码敬请期待
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          </span>
         </div>
       </div>
     </div>
@@ -895,9 +1420,9 @@
     <nav class="foot__col" aria-label="仓库">
       <h2 class="foot__h">仓库</h2>
       <ul>
-        <li><a href="https://github.com/KLJyouth1/Marguerite" target="_blank" rel="noopener noreferrer">源码 · Marguerite</a></li>
+        <li><span class="foot__soon">源码 · Marguerite（敬请期待）</span></li>
         <li><a href="https://github.com/KLJyouth1/Marguerite-Releases" target="_blank" rel="noopener noreferrer">安装包 · Marguerite-Releases</a></li>
-        <li><a href="https://github.com/KLJyouth1/Marguerite/releases/latest" target="_blank" rel="noopener noreferrer">源码版本记录</a></li>
+        <li><span class="foot__soon">版本记录（敬请期待）</span></li>
       </ul>
     </nav>
     <div class="foot__col">
@@ -906,8 +1431,9 @@
         <li>版本 <code>0.2.17</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
+        <li>RPC 方法 451 条 · 内置工具 67 个</li>
+        <li>架构守卫 13 道 · 界面语言 6 种</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
-        <li>界面语言 6 种</li>
       </ul>
     </div>
   </div>
