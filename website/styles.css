@@ -220,6 +220,8 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--accent-soft);
 .dl__card .btn{width:100%;justify-content:center;margin-top:auto;}
 .dl__card .code{margin:0 0 1rem;padding:.7rem 3.2rem .7rem .8rem;font-size:.8rem;}
 .dl__card .code code{font-size:.8rem;}
+.dl__note{margin:1.5rem 0 0;font-size:.84rem;line-height:1.7;color:var(--text-3);}
+.dl__note a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;}
 @media (max-width:900px){.dl{grid-template-columns:minmax(0,1fr);}}
 
 /* ---- FAQ ---- */
@@ -818,8 +820,8 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
 .story{position:relative;}
 .story .sec-head{max-width:40rem;}
 
-/* 左时间轴 + 右侧夜景图。overflow:clip 而不是 hidden：hidden 会生成滚动容器，
-   让 position:sticky 失效（这正是第一版右侧插画「不跟着走」的原因）。 */
+/* 左时间轴 + 右侧夜景图。overflow 用 clip 而不是 hidden：hidden 会生成滚动容器，
+   position:sticky 在里面不生效；不支持 clip 的浏览器退回 hidden，插画只是不再跟随。 */
 .story__grid{display:grid;grid-template-columns:minmax(0,1fr) clamp(240px,26vw,330px);
   gap:clamp(2rem,4vw,3.6rem);align-items:start;margin-top:2.6rem;}
 .story__scene{position:sticky;top:104px;margin:0;}
@@ -912,4 +914,87 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
   .curve__bars span:nth-child(19) b,
   .curve__bars span:nth-child(24) b{display:block;}
 }
+
+/* ============================================================================
+   本地体验模型（LOCAL MODEL）
+   数据来自 KLJyouth-office-Modle 的 v0.17-C 模型卡；不引入新色。
+   ========================================================================== */
+.lm__grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr);
+  gap:clamp(2rem,4vw,3.4rem);align-items:start;margin-top:2.6rem;}
+.lm__lede{margin:0;font-size:.9rem;color:var(--text-2);}
+.lm__five{list-style:none;counter-reset:lm;margin:1.1rem 0 0;padding:0;display:grid;gap:.6rem;}
+.lm__five li{position:relative;padding:.75rem .95rem .75rem 2.7rem;border:1px solid var(--border);
+  border-radius:var(--r-sm);background:var(--surface-2);counter-increment:lm;}
+.lm__five li::before{content:counter(lm,decimal-leading-zero);position:absolute;left:.95rem;top:.82rem;
+  font-family:var(--font-mono);font-size:.66rem;letter-spacing:.06em;color:var(--accent);}
+.lm__five b{display:block;font-size:.9rem;font-weight:700;}
+.lm__five span{display:block;margin-top:.22rem;font-size:.78rem;line-height:1.6;color:var(--text-3);}
+.lm__note{margin:1rem 0 0;font-size:.76rem;line-height:1.8;color:var(--text-3);}
+.lm__note a{color:var(--accent);text-decoration:underline;text-underline-offset:2px;}
+
+.lm__card{padding:1.3rem 1.2rem 1.1rem;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);}
+.lm__row{display:grid;grid-template-columns:5.4rem minmax(0,1fr);gap:.9rem;padding:.72rem 0;
+  border-top:1px solid var(--border);}
+.lm__row:first-child{border-top:0;padding-top:0;}
+.lm__row:last-child{padding-bottom:0;}
+.lm__k{font-family:var(--font-mono);font-size:.62rem;letter-spacing:.16em;line-height:1.9;color:var(--text-3);}
+.lm__v{font-size:.83rem;line-height:1.65;color:var(--text-2);}
+.lm__v b{color:var(--text);font-weight:700;}
+
+.lm__eval{margin-top:2.8rem;padding:1.5rem 1.4rem 1.2rem;border:1px solid var(--border);
+  border-radius:var(--r);background:var(--surface);}
+.lm__cap{margin:0 0 1.2rem;font-size:.86rem;line-height:1.7;color:var(--text-2);}
+.lm__cap b{color:var(--accent);font-weight:700;}
+.lm__bars{display:grid;gap:.6rem;}
+.lm__bar{display:grid;grid-template-columns:13rem minmax(0,1fr) 4.2rem;align-items:center;gap:.9rem;}
+.lm__bar>span{font-size:.78rem;color:var(--text-2);}
+.lm__track{display:block;height:8px;border-radius:999px;background:var(--border);overflow:hidden;}
+.lm__track b{display:block;height:100%;width:var(--w);border-radius:999px;background:var(--accent);}
+.lm__bar.is-base .lm__track b{background:var(--text-3);}
+.lm__bar em{font-style:normal;font-family:var(--font-mono);font-size:.72rem;color:var(--text-2);text-align:right;}
+
+.lm__h{margin:2.8rem 0 1rem;font-size:1rem;font-weight:700;letter-spacing:-.005em;}
+.lm__cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;}
+.lm__dlc{display:flex;flex-direction:column;gap:.35rem;padding:1.1rem 1.1rem 1.15rem;
+  border:1px solid var(--border);border-radius:var(--r);background:var(--surface);color:var(--text);
+  transition:border-color var(--t) var(--ease),transform var(--t) var(--ease);}
+.lm__dlc:hover{border-color:var(--accent);transform:translateY(-2px);}
+.lm__dlk{font-family:var(--font-mono);font-size:.6rem;letter-spacing:.14em;color:var(--accent);}
+.lm__dlc b{font-size:.98rem;}
+.lm__dls{font-family:var(--font-mono);font-size:.74rem;color:var(--text-2);}
+.lm__dln{font-size:.76rem;line-height:1.65;color:var(--text-3);}
+.lm__dln code{font-size:.9em;}
+
+.lm__use{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1.6rem;align-items:start;margin-top:2.8rem;}
+/* 1fr 的 min-content 会被 pre 里最长的命令撑开（390px 下实测溢出到 482px），
+   所以子项统一 min-width:0，让 pre 自己横向滚动。 */
+.lm__use>*{min-width:0;}
+.lm__use .code-shell,.lm__use pre.code{min-width:0;max-width:100%;}
+.lm__use .lm__h,.lm__limits .lm__h{margin-top:0;}
+.lm__use-copy p{margin:0;font-size:.86rem;line-height:1.8;color:var(--text-2);}
+.lm__use .code{font-size:.76rem;line-height:1.8;padding-right:5.4rem;}
+
+.lm__limits{margin-top:2.6rem;padding:1.4rem 1.4rem 1.2rem;border:1px solid var(--border);
+  border-radius:var(--r);background:var(--surface-2);}
+.lm__limits ul{margin:0;padding-left:1.1rem;display:grid;gap:.6rem;}
+.lm__limits li{font-size:.82rem;line-height:1.75;color:var(--text-2);}
+.lm__limits li b{color:var(--text);}
+.lm__limits .lm__note{margin-top:1rem;}
+
+@media (max-width:1023px){
+  .lm__grid{grid-template-columns:minmax(0,1fr);gap:1.6rem;}
+  .lm__cards{grid-template-columns:minmax(0,1fr);}
+  .lm__use{grid-template-columns:minmax(0,1fr);gap:1rem;}
+}
+@media (max-width:820px){
+  .lm__bar{grid-template-columns:minmax(0,1fr) 3.6rem;row-gap:.35rem;}
+  .lm__track{grid-column:1 / -1;}
+  .lm__row{grid-template-columns:4.6rem minmax(0,1fr);gap:.7rem;}
+  .lm__card{padding:1.15rem 1rem 1rem;}
+  /* 手机上不横滚：长命令折行，复制按钮独占一行（触屏下它始终可见，会压住首行） */
+  .lm__use .code{padding:2.9rem .9rem .9rem;}
+  .lm__use .code code{white-space:pre-wrap;}
+}
+
+
 

@@ -635,7 +635,7 @@
       <div class="stats">
         <div class="stat reveal-up"><b class="stat__n"><span data-count="49">49</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="62">62</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="85">85</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">marguerite-core serve --health</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="74">74</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">agent.selfcheck · tools.count</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="451">451</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
       </div>
 
@@ -1176,14 +1176,14 @@ webui/e2e/approval-card.spec.ts</pre>
           <li>Qwen</li><li>Kimi</li><li>豆包</li><li>混元</li><li>智谱 GLM</li>
           <li>Moonshot</li><li>Mistral</li><li>SiliconFlow</li><li>OpenRouter</li>
         </ul>
-        <p class="tried__note">14 个 provider id，在 <code>core/src/provider</code> 里能查到；不是广告位，也没有排除谁。</p>
+        <p class="tried__note">14 个 provider id，在 <code>core/src</code> 里逐个查得到；不是广告位，也没有排除谁。</p>
       </div>
 
       <div class="ledger reveal-up">
-        <div class="ledger__i"><b class="ledger__n">254,605<em> 行</em></b><span class="ledger__l">Rust · 548 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">308,344<em> 行</em></b><span class="ledger__l">前端 · 1,221 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">413,506<em> 行</em></b><span class="ledger__l">Python · 1,017 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">2,178<em> 份</em></b><span class="ledger__l">技能文档</span></div>
+        <div class="ledger__i"><b class="ledger__n">276,649<em> 行</em></b><span class="ledger__l">Rust · 559 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">339,170<em> 行</em></b><span class="ledger__l">前端 · 1,221 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">463,508<em> 行</em></b><span class="ledger__l">Python · 1,015 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
         <div class="ledger__i"><b class="ledger__n">31<em> 个</em></b><span class="ledger__l">工具模块</span></div>
         <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
       </div>
@@ -1200,6 +1200,118 @@ webui/e2e/approval-card.spec.ts</pre>
     </div>
   </section>
 
+  <!-- ================= LOCAL MODEL ================= -->
+  <section class="band band--alt band--local" id="local-model" aria-labelledby="lmTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">LOCAL MODEL · 自研本地体验模型</p>
+        <h2 class="sec-title" id="lmTitle">一个 1.5B 的判断模型，专门管「下一步该用哪个工具」</h2>
+        <p class="sec-dek">
+          OmniPilot 不是又一个聊天助手，而是工作台前面的判断层：六域路由、工具选择、判是非、打分、该不该弃答。
+          权重、训练代码、4,554 对数据、同口径评测与能力图全部公开；装好之后离线可跑，不产生 token 账单。
+        </p>
+      </header>
+
+      <div class="lm__grid">
+        <div class="lm__body reveal-up">
+          <p class="lm__lede">它只做五件事，每件都能被单独打分：</p>
+          <ol class="lm__five">
+            <li><b>选工具域</b><span>browser / code / office / media / system / blender</span></li>
+            <li><b>选工具</b><span>域内 45 个真实工具里挑一个</span></li>
+            <li><b>判是非</b><span>材料到底支不支持这个结论</span></li>
+            <li><b>打分</b><span>给支持程度，而不是只回「是 / 否」</span></li>
+            <li><b>该不该弃答</b><span>证据不够就如实说不够</span></li>
+          </ol>
+          <p class="lm__note">
+            为什么停在 1.5B：训练机是一张 <b>4 GB 显存的 RTX 3050 Ti Laptop</b>，4-bit QLoRA 下本地只能训到这个量级。
+            这是被硬件钉死的边界，不是选型偏好 —— 更大的模型走「接入 + 编排」，不假装本地训得动。
+          </p>
+        </div>
+
+        <aside class="lm__card reveal-up" aria-label="模型卡片">
+          <div class="lm__row"><span class="lm__k">BASE</span><span class="lm__v"><b>Qwen2.5-1.5B-Instruct</b> · Apache-2.0 · 32k 上下文</span></div>
+          <div class="lm__row"><span class="lm__k">TUNING</span><span class="lm__v">4-bit QLoRA · r=16 / α=32 · 可训练 <b>4,358,144</b>（0.2815%）</span></div>
+          <div class="lm__row"><span class="lm__k">DATA</span><span class="lm__v">15 个任务族 · <b>4,327</b> 训练 + 227 验证 · 2 epochs · seed 20261017</span></div>
+          <div class="lm__row"><span class="lm__k">TRAIN</span><span class="lm__v">1,082 步 · 1h47m37s · loss <b>0.0424</b></span></div>
+          <div class="lm__row"><span class="lm__k">SIZE</span><span class="lm__v">q4_K_M <b>940.4 MiB</b> · 适配器 16.7 MB · f16 分两卷</span></div>
+          <div class="lm__row"><span class="lm__k">EVAL</span><span class="lm__v">宏平均 <b>0.3936</b>（未微调基座 0.3060）· 字母合规率 1.0000</span></div>
+        </aside>
+      </div>
+
+      <div class="lm__eval reveal-up">
+        <p class="lm__cap">同批评测集、同一次跑完的宏平均（Jev 三接口，1,460 条）。<b>16d 与 17 打平</b>——这一版不是「刷分」发布。</p>
+        <div class="lm__bars" role="img" aria-label="宏平均对比：omnipilot17 0.3936，omnipilot16d 0.3937，omnipilot16c 0.3766，未微调基座 0.3060">
+          <div class="lm__bar"><span>omnipilot17 · V0.17-C</span><i class="lm__track"><b style="--w:78.7%"></b></i><em>0.3936</em></div>
+          <div class="lm__bar"><span>omnipilot16d</span><i class="lm__track"><b style="--w:78.7%"></b></i><em>0.3937</em></div>
+          <div class="lm__bar"><span>omnipilot16c · V0.16-C</span><i class="lm__track"><b style="--w:75.3%"></b></i><em>0.3766</em></div>
+          <div class="lm__bar is-base"><span>Qwen2.5-1.5B（未微调）</span><i class="lm__track"><b style="--w:61.2%"></b></i><em>0.3060</em></div>
+        </div>
+        <p class="lm__note">
+          拆到任务看也一样直白：17 的 <code>intent_massive</code> 0.492、<code>emotion6</code> 0.433 高于基座；
+          但 <code>nli_score</code> 0.087、<code>nli_mnli</code> 0.143 低于基座，<code>grounded</code> 在 17 / 16c 上只有 0.100。
+          这些红条在仓库里原样列着，没有藏。
+        </p>
+      </div>
+
+      <div class="lm__dl reveal-up">
+        <h3 class="lm__h">下载 · 全部在 GitHub Releases（v0.17-C，2026-10-19）</h3>
+        <div class="lm__cards">
+          <a class="lm__dlc" href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/download/v0.17-C/KLJyouth-office-V0.17-C-q4_K_M.gguf" rel="noopener">
+            <span class="lm__dlk">直接跑 · 推荐</span>
+            <b>q4_K_M.gguf</b>
+            <span class="lm__dls">940.4 MiB</span>
+            <span class="lm__dln">Ollama / llama.cpp 直接加载，4 GB 显存够用</span>
+          </a>
+          <a class="lm__dlc" href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/download/v0.17-C/KLJyouth-office-V0.17-C-adapter.safetensors" rel="noopener">
+            <span class="lm__dlk">最轻量</span>
+            <b>LoRA 适配器</b>
+            <span class="lm__dls">16.7 MB</span>
+            <span class="lm__dln">配公开基座自己合并，适合复现与二次训练</span>
+          </a>
+          <a class="lm__dlc" href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/tag/v0.17-C" rel="noopener">
+            <span class="lm__dlk">全精度</span>
+            <b>f16 GGUF（两卷）</b>
+            <span class="lm__dls">2.9 GiB</span>
+            <span class="lm__dln">part1 + part2，GitHub 单资产上限 2 GiB；按 <code>copy /b</code> 合并</span>
+          </a>
+        </div>
+        <p class="lm__note">
+          每个资产都在 <a href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/download/v0.17-C/SHA256SUMS.txt" rel="noopener">SHA256SUMS.txt</a> 里；
+          模型卡、评测原始 JSON、能力图与训练日志在
+          <a href="https://github.com/KLJyouth1/KLJyouth-office-Modle" rel="noopener">KLJyouth-office-Modle</a>。
+        </p>
+      </div>
+
+      <div class="lm__use reveal-up">
+        <div class="lm__use-copy">
+          <h3 class="lm__h">在工作台里接上它</h3>
+          <p>
+            先用 Ollama 建模型，再到 <b>设置 → 模型 → 新增本地档案</b>：<code>base_url</code> 填
+            <code>http://127.0.0.1:11434</code>，模型名填你注册的名字。想让它参与某一档回退，再把档案 id 加进
+            <code>tier_rules.json</code> 对应的档链。
+          </p>
+        </div>
+        <pre class="code"><code>ollama create KLJyouth-office-V0.17-C -f .\Modelfile
+ollama run  KLJyouth-office-V0.17-C
+
+# Modelfile: FROM 指向 q4_K_M.gguf
+# 决策模型必须 temperature 0；不要注入 SYSTEM，
+# 否则推理分布与训练不一致，字母概率会失真</code></pre>
+      </div>
+
+      <div class="lm__limits reveal-up">
+        <h3 class="lm__h">这一版做不到什么</h3>
+        <ul>
+          <li><b>4 GB 显存是硬边界。</b>本地只训得动 ≤1.5B；7B 及以上的本地训练在这台机器上不可行，工作台只做接入与编排。</li>
+          <li><b>定向路由只学会了 browser。</b>六域里只有 browser 召回接近 1.0，其余五域基本靠猜 —— 这也是 <code>directed_routing</code> 只有 0.178 的原因。</li>
+          <li><b>NLI 两项低于随机。</b>标签掩码起点错位一个助手头，代码已修，收益要等 V0.18 重训验证；本版适配器仍是修复前训练的。</li>
+          <li><b>它不是聊天模型。</b>不该拿来写文章或陪聊；它的价值是判断快、离线、零 token 账单。</li>
+        </ul>
+        <p class="lm__note">以上不是免责声明，是模型卡里本来就写着的「已知缺陷与限制」；官网只是把它搬到台面上。</p>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= EVIDENCE ================= -->
   <section class="band band--alt" id="evidence" aria-labelledby="evTitle">
     <div class="wrap">
@@ -1210,8 +1322,8 @@ webui/e2e/approval-card.spec.ts</pre>
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4220">4220</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4816">4816</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4230">4230</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4898">4898</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="25">25</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
       </div>
@@ -1219,8 +1331,8 @@ webui/e2e/approval-card.spec.ts</pre>
       <div class="gate reveal-up">
         <div class="term term--gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4220 passed / 0 failed</p>
-          <p class="term__line term__ok">[PASS] webui tests · 4816 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4230 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 4898 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
           <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
@@ -1328,6 +1440,7 @@ webui/e2e/approval-card.spec.ts</pre>
           </span>
         </article>
       </div>
+      <p class="dl__note reveal-up">配套本地模型：<a href="#local-model">OmniPilot 1.5B 判断模型 · q4 940.4 MiB · 离线零 token 账单 →</a></p>
     </div>
   </section>
 
@@ -1539,7 +1652,7 @@ webui/e2e/approval-card.spec.ts</pre>
         <li>版本 <code>0.2.17</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
-        <li>RPC 方法 451 条 · 内置工具 67 个</li>
+        <li>RPC 方法 451 条 · 内置工具 74 个</li>
         <li>架构守卫 13 道 · 界面语言 6 种</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
       </ul>
