@@ -12,7 +12,7 @@ memory. No account, no cloud relay, no telemetry.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-2704%20passing-brightgreen.svg)](#-quality-gates)
+[![Tests](https://img.shields.io/badge/core%20tests-4230%20passing-brightgreen.svg)](#-quality-gates)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-security-model)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-recursive-self-improvement)
 
@@ -25,6 +25,15 @@ memory. No account, no cloud relay, no telemetry.
 </div>
 
 ---
+
+**Contents** · [A look at it](#a-look-at-it) · [Why this exists](#why-this-exists) ·
+[How this got built](#-how-this-got-built) ·
+[How it fits together](#-how-it-fits-together) ·
+[Recursive self-improvement](#-recursive-self-improvement) · [Quickstart](#-quickstart) ·
+[What's actually in here](#-whats-actually-in-here) ·
+[Security model](#-security-model) · [Quality gates](#-quality-gates) ·
+[Layout](#-layout) · [Status](#-status) · [Related repositories](#-related-repositories) ·
+[Contributing](#-contributing)
 
 ## A look at it
 
@@ -70,7 +79,7 @@ session store, same local memory.
 
 | | Interface | What it's for |
 |---|---|---|
-| ⌨️ | **CLI** (`marguerite-core`) | Scriptable single-shot and pipe modes, 19 subcommands, `--json` contracts |
+| ⌨️ | **CLI** (`marguerite-core`) | Scriptable single-shot and pipe modes, 20 subcommands, `--json` contracts |
 | 🖥️ | **TUI** (`marguerite-tui`) | Full-screen ratatui workbench for long sessions |
 | 🪟 | **Desktop** (`marguerite-gui`) | Tauri 2 shell with tray, global hotkey and a floating desktop pet |
 | 🌐 | **Web console** | Vue 3 SPA served by the gateway on `127.0.0.1:18790` |
@@ -85,6 +94,87 @@ Three design rules fall out of that, and they are enforced in code, not just in 
 3. **Governance is a closed loop.** `PlanGate` checks the constitution *before*
    execution; `CompletionGate` verifies claimed artifacts actually landed on disk
    *after*. A run that claims a file it never wrote fails its own completion check.
+
+## 🕰️ How this got built
+
+> This section is not a pitch; it is a ledger. The full version — with the late-night
+> illustration and the commit-hour chart — is on the
+> [website](https://kljyouth1.github.io/Marguerite/#story).
+
+Three years, one person, from "writing code" to "building a workbench I want to open
+every day".
+
+| Year | That chapter |
+|---|---|
+| **2023 · Working solo** | Client work, project lead, teaching. Tools changed every few months; the conclusion did not: every assistant only knows the window you have open. Switch away and it forgets, close it and it scatters, change machines and you start from zero. |
+| **2024 · Trying all of it** | Chat models at home and abroad, IDEs, agent workbenches, editor plugins — wire one in, take it apart, move to the next. I also configured LoRA runs myself and wrote a set of skills and agents for each assistant; all of it ended up scattered across folders. The archive still holds what I dismantled: `archived-claude-code-source`, `archived-LLaMA-Factory`, `archived-hermes-telegram`, `agentpot`, `gui-agent`. None of them kept *my process*. |
+| **2025 · Writing the core** | First agent loop, first tool protocol, first MCP subprocess. The goal moved from "it works" to "it can be re-checked": every step leaves a receipt, every conclusion can be re-run, and it still starts offline. |
+| **2026 · Closing the loop, no cut-down build** | In 32 days it went from 0.2.7 to 0.2.17, packing a 204.9 MB offline WebView2, a 209.6 MB bundled Python 3.12 and all-green gates into one installer. Some call that over-engineering; the answer is one line: I use this machine every day too. |
+
+**Three numbers, three different kinds of claim:**
+
+| Number | What it is |
+|---|---|
+| ≈ **$30,000** | Paid directly to model and API bills over three years (author's account) |
+| ≈ **40 billion tokens** | Back-computed at a blended $0.75 per million; the real range is 300–600 billion — an estimate, not an invoice |
+| ≈ **9,700 hours** | 3 years × 340 days × 9.5 hours a day (an estimate) |
+
+**The hours leave a trace.** Across the 54 commits up to `0.2.17`, 21:00–23:00 are the
+busiest hours (8 each), with 3 commits at midnight and 1 at 02:00. The schedule used to
+run 08:00 to 03:30; after a few hospital visits it became 05:00 to 23:30 — not discipline,
+the body filing an objection. Meals out and trips away still meant a remote desktop open
+in the bag.
+
+**Fourteen model providers have actually been wired into this workbench**
+(see `core/src/provider`): DeepSeek · Ollama · OpenAI · Anthropic · Gemini · Qwen · Kimi ·
+Doubao · Hunyuan · Zhipu GLM · Moonshot · Mistral · SiliconFlow · OpenRouter. No ad slots,
+nobody excluded.
+
+> I don't ship a cut-down build, because I am the person who opens it every day.
+
+*Provenance: line counts, file counts, skill counts, tool modules and commit hours are
+measured from this repository (2026-10-28); three years, $30,000, hospital visits and the
+schedule are the author's account; the token figure is an estimate derived from a blended
+price. This section does not claim anything that did not happen.*
+
+## 🏗️ How it fits together
+
+One engine in the middle; four faces around it; nothing leaves the machine unless you
+point a model endpoint at one.
+
+```mermaid
+flowchart TB
+    subgraph faces["Four interfaces, one program"]
+        direction LR
+        CLI["<b>CLI</b><br/>marguerite-core<br/>scriptable · --json"]
+        TUI["<b>TUI</b><br/>marguerite-tui<br/>ratatui workbench"]
+        DESK["<b>Desktop</b><br/>Tauri 2 shell<br/>tray · hotkey · pet"]
+        WEB["<b>Console</b><br/>Vue 3 SPA<br/>/control"]
+    end
+
+    CORE["<b>Rust core engine</b><br/>intent → plan → act → verify → remember"]
+    GW["<b>Unified gateway</b><br/>127.0.0.1:18790 · loopback only"]
+    ACP["ACP server<br/>127.0.0.1 only"]
+    SIDE["Python sidecar<br/>optional · proxied per method group"]
+    GOV{{"Governance closed loop<br/>PlanGate → run → CompletionGate"}}
+    MEM[("Three-layer memory<br/>sensory · short-term · long-term")]
+    SURF["Tools · skills · MCP client and server<br/>computer use · sandbox · snapshots"]
+
+    CLI --> CORE
+    TUI --> CORE
+    DESK -->|loads the gateway URL| GW
+    WEB -->|served by| GW
+    CORE --- GW
+    GW --> ACP
+    GW -->|forward on miss| SIDE
+    CORE --> GOV --> MEM
+    CORE --> SURF
+```
+
+> [!NOTE]
+> `workbench/` is deliberately **not** in that diagram. It is a separate sub-project with
+> its own Python backend, its own React SPA and its own version line; it bridges the core
+> store the same way the sidecar does, and the Rust binaries do not import it.
 
 ## 🧬 Recursive self-improvement
 
@@ -108,7 +198,7 @@ improvements are allowed to survive.
 
 **Ten objects, one loop.** Improvement is not limited to the system prompt:
 
-> main agent · sub-agent · sub-sub-agent · expert (43 roles) · team (8) ·
+> main agent · sub-agent · sub-sub-agent · expert (48 roles) · team (9) ·
 > swarm · memory · experience · knowledge base · skills and tools
 
 **Three boundaries, enforced by types rather than by prose:**
@@ -158,7 +248,7 @@ for the exact list.
 
 ```bash
 git clone https://github.com/KLJyouth1/Marguerite.git
-cd REPO
+cd Marguerite
 
 # Fast path: just the CLI. Compiles in a minute or two.
 cargo build -p marguerite-core --bin marguerite-core
@@ -194,7 +284,7 @@ Sanity-check the install at any point:
 
 ```bash
 ./target/debug/marguerite-core doctor       # 10-point environment self-check
-./target/debug/marguerite-core --help       # all 19 subcommands
+./target/debug/marguerite-core --help       # all 20 subcommands
 ```
 
 ### Connect a model
@@ -246,6 +336,7 @@ The parts worth your attention:
 ```text
 doctor  model  mcp  skills  session  exec  deploy  serve  sandbox  subagent
 team    browser  chat  gateway  goal  capabilities  cache  dispatch  games
+export-diagnostics
 ```
 
 Every command honours the same output contract: structured errors on stderr with
@@ -285,26 +376,27 @@ bash scripts/verify.sh --workbench    # workbench sub-project only (71 offline t
 bash scripts/verify.sh --release      # adds the Tauri release bundle
 ```
 
-Current baseline — the full gate is **green (25/25)** as of 2026-09-25. Every layer
+Current baseline — the full gate dispatches 25 checks, and the last complete run that
+recorded **25/25** was on 2026-10-28; every number in the table below comes from that run. Every layer
 below runs in CI (`.github/workflows/ci.yml`) except the web e2e layer, which is
 **local-gate-only for now**: CI would need a Playwright browser cache and a
 Rust-built gateway in the same job (tracked as follow-up, not silently claimed).
 
 | Gate | Result |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 2704 passed / 0 failed / 17 ignored |
+| `cargo test -p marguerite-core --lib` | 4230 passed / 0 failed / 24 ignored |
 | core integration tests (`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`) | offline and deterministic; `third_party_integration` is `[SKIP]` when `third_party/` is absent (a skip is never counted as a pass) |
-| `webui` unit tests (Vitest) | 3509 passed / 0 failed (331 files) |
-| `pyengine` unit tests (pytest, `tests/unit`) | 768 passed / 0 failed / 6 skipped |
-| `pyengine` gateway contracts (pytest, `tests/test_gateway`) | 2929 passed / 0 failed / 11 skipped |
-| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4442 passed / 0 failed / 390 skipped |
+| `webui` unit tests (Vitest) | 4898 passed / 0 failed (495 files) |
+| `pyengine` unit tests (pytest, `tests/unit`) | 823 passed / 0 failed / 7 skipped |
+| `pyengine` gateway contracts (pytest, `tests/test_gateway`) | 2956 passed / 0 failed / 11 skipped |
+| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4445 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero warnings |
 | `npm run check:architecture` | 10 architecture guards green |
 | `scripts/check-doc-cli-drift.py` | every documented CLI token resolves to real code |
 | `scripts/check-version-sync.py` | core / tui / gui / webui versions pinned to `core/Cargo.toml`, incl. both npm lockfile self-entries |
 | `npm ci --dry-run` | console lockfile is self-consistent with `package.json` (the check `npm audit` cannot see) |
 | `npm audit --audit-level=moderate` | console dependency tree free of moderate+ advisories |
-| i18n | 6 locales at full parity (3862 keys each), plus a source-vs-dictionary check so a key no locale defines cannot ship |
+| i18n | 6 locales at full parity (6297 keys each), plus a source-vs-dictionary check so a key no locale defines cannot ship |
 | `scripts/check-secrets.py` | no real-looking API key in any file that would ship — a fixture must label itself (`sk-fake-…`) or it fails |
 | `scripts/check-doc-links.py` | every relative link in this project's own docs resolves (vendored skill packs are out of scope) |
 | `scripts/check-readme-claims.py` | the English and Chinese READMEs agree on every hard fact, and the gate total they print is the number of checks `verify.sh --all` actually dispatches |
@@ -358,7 +450,7 @@ stale incremental build cannot be mistaken for a passing one.
 ## 📁 Layout
 
 ```text
-core/        Rust engine + CLI binary + ACP shell      (~134k lines)
+core/        Rust engine + CLI binary + ACP shell      (~265k lines)
 tui/         ratatui full-screen workbench
 gui/         Tauri 2 desktop shell (Rust in src-tauri/)
 webui/       Vue 3 + Pinia console, served by the gateway
@@ -423,11 +515,12 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   and could not even be collected: a missing `pythonpath` entry meant a bare `pytest`
   resolved `1553 tests / 1146 errors`, which reads like mass breakage but was one config
   line. A bare `pytest` now collects **`20668 tests / 0 errors`**, and the gate runs
-  `tests/unit` (768 passing) plus `tests/test_gateway` (2929 passing). Collection being
+  `tests/unit` (823 passing), `tests/test_gateway` (2956 passing) and the contract family
+  as a third layer. Collection being
   clean is not the same as the suite being green, and the difference is now enumerated
   rather than assumed:
-  `pyengine/tests/conftest.py` refuses to collect **24 modules** and names the reason for
-  each in the terminal summary. Twenty are **missing prerequisites** — developer/release
+  `pyengine/tests/conftest.py` refuses to collect **45 modules** and names the reason for
+  each in the terminal summary. Forty-one are **missing prerequisites** — developer/release
   tooling never migrated into this tree (`pyengine/scripts/*`, `pyengine/.github/scripts/*`)
   or living in the optional dev-dependency group (`syrupy`, `laboratory`, `mypy`). Those are
   self-healing: restore the prerequisite and the module is collected again, no conftest edit.
@@ -436,7 +529,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   `scripts/classify-ci-changes.sh`, its `opensquilla-webui/` console directory). Those will
   **not** self-heal and are labelled as such. Measured effect on `tests/test_ci`:
   **94 failed / 41 passed → 0 failed / 35 passed**.
-  Everything outside those two layers is still executed by no gate, and a full-tree run
+  Everything outside those three layers is still executed by no gate, and a full-tree run
   does not complete here: it burned 22 minutes of wall clock at **8% CPU** — blocked on
   external I/O rather than computing, which is precisely why the gate confines itself to
   the layers it can actually finish. `tests/test_gateway` was one of those unrun

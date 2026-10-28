@@ -812,13 +812,27 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
    开发史（STORY）：编辑式长文 + 实测作息曲线
    只用现有 token：不引入新色，夜间柱用 --accent，白天柱用 --border-2。
    ========================================================================== */
-.band--story{position:relative;overflow:hidden;}
+.band--story{position:relative;overflow:hidden;overflow:clip;}
 .band--story::before{content:"";position:absolute;inset:0;pointer-events:none;
   background:radial-gradient(58% 46% at 6% 0%,var(--accent-faint),transparent 72%);}
 .story{position:relative;}
 .story .sec-head{max-width:40rem;}
 
+/* 左时间轴 + 右侧夜景图。overflow:clip 而不是 hidden：hidden 会生成滚动容器，
+   让 position:sticky 失效（这正是第一版右侧插画「不跟着走」的原因）。 */
+.story__grid{display:grid;grid-template-columns:minmax(0,1fr) clamp(240px,26vw,330px);
+  gap:clamp(2rem,4vw,3.6rem);align-items:start;margin-top:2.6rem;}
+.story__scene{position:sticky;top:104px;margin:0;}
+.story__scene svg{display:block;width:100%;height:auto;border:1px solid var(--border);border-radius:var(--r-lg);
+  background:#05080c;box-shadow:0 24px 70px -40px rgba(0,0,0,.95),0 0 0 1px rgba(255,255,255,.02);}
+.story__scene figcaption{margin-top:.85rem;font-family:var(--font-mono);font-size:.64rem;
+  letter-spacing:.12em;color:var(--text-3);}
+.scene__caret{animation:scene-caret 1.6s steps(1,end) infinite;}
+@keyframes scene-caret{0%,55%{opacity:.85;}56%,100%{opacity:.15;}}
+@media (prefers-reduced-motion:reduce){.scene__caret{animation:none;opacity:.7;}}
+
 .chapters{list-style:none;margin:2.6rem 0 0;padding:0 0 0 1.6rem;border-left:1px solid var(--border);}
+.story__grid .chapters{margin:0;}
 .chap{position:relative;display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:1.8rem;padding:1.9rem 0;}
 .chap::before{content:"";position:absolute;left:-1.6rem;top:2.45rem;width:9px;height:9px;margin-left:-4.5px;
   border-radius:50%;background:var(--bg);border:1px solid var(--accent);}
@@ -868,6 +882,12 @@ kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px s
 .story__by{display:block;margin-top:1rem;font-family:var(--font-mono);font-size:.68rem;letter-spacing:.16em;color:var(--text-3);}
 .story__meta{margin:2.2rem 0 0;font-size:.74rem;line-height:1.8;color:var(--text-3);}
 
+@media (max-width:1023px){
+  /* 两栏收成一栏：插画跟着时间轴后面走，不再 sticky（否则手机上会一直压住正文） */
+  .story__grid{grid-template-columns:1fr;gap:0;}
+  .story__scene{position:static;max-width:300px;margin:1.6rem auto 0;}
+  .story__scene figcaption{text-align:center;}
+}
 @media (max-width:820px){
   .chapters{padding-left:1.1rem;}
   .chap{grid-template-columns:1fr;gap:.45rem;padding:1.5rem 0;}

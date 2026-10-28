@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-2704%20passing-brightgreen.svg)](#-质量门禁)
+[![Tests](https://img.shields.io/badge/core%20tests-4230%20passing-brightgreen.svg)](#-质量门禁)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-安全模型)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-递归自我改进)
 
@@ -24,6 +24,12 @@
 </div>
 
 ---
+
+**目录** · [长什么样](#长什么样) · [为什么做这件事](#为什么做这件事) ·
+[开发史](#-一个人的工作台开发史) · [各部分如何咬合](#-各部分如何咬合) · [递归自我改进](#-递归自我改进) ·
+[快速开始](#-快速开始) · [里面到底有什么](#-里面到底有什么) ·
+[安全模型](#-安全模型) · [质量门禁](#-质量门禁) · [目录结构](#-目录结构) ·
+[当前状态](#-当前状态) · [相关仓库](#-相关仓库) · [参与贡献](#-参与贡献)
 
 ## 长什么样
 
@@ -65,7 +71,7 @@ Marguerite 拒绝这个取舍 —— 一个 Rust 内核暴露四个界面，而�
 
 | | 界面 | 用途 |
 |---|---|---|
-| ⌨️ | **CLI**（`marguerite-core`） | 可脚本化的单发与管道模式、19 个子命令、`--json` 契约 |
+| ⌨️ | **CLI**（`marguerite-core`） | 可脚本化的单发与管道模式、20 个子命令、`--json` 契约 |
 | 🖥️ | **TUI**（`marguerite-tui`） | ratatui 全屏工作台，适合长会话 |
 | 🪟 | **桌面端**（`marguerite-gui`） | Tauri 2 外壳：托盘、全局快捷键、桌宠悬浮窗 |
 | 🌐 | **Web 控制台** | 由网关在 `127.0.0.1:18790` 托管的 Vue 3 单页应用 |
@@ -78,6 +84,79 @@ Marguerite 拒绝这个取舍 —— 一个 Rust 内核暴露四个界面，而�
    报告它推导出的计划，并退出 `0`；它**绝不会伪造模型回答**。详见[快速开始](#-快速开始)。
 3. **治理是闭环的。** 执行前 `PlanGate` 校验宪法条款，产出后 `CompletionGate`
    核验自称落盘的文件是否真的在磁盘上 —— 声称写了文件却没写，会在自己的完成门禁上失败。
+
+## 🕰️ 一个人的工作台开发史
+
+> 这一节不讲卖点，只讲账。官网完整版（带深夜插画与提交时段图）：
+> [故事板块](https://kljyouth1.github.io/Marguerite/#story)。
+
+三年，一个人，从「写代码」到「造一台自己愿意每天打开的工作台」。
+
+| 年份 | 那一章 |
+|---|---|
+| **2023 · 一个人接活** | 写业务、带项目、上课。工具换了一茬又一茬，结论越来越清楚：每个助手都只懂你正打开的那一个窗口 —— 切走就忘，关掉就散，换台机器就等于从零开始。 |
+| **2024 · 把能试的都试了** | 国内外的对话模型、IDE、Agent 工作台、编辑器插件，接进来、拆开看、再换下一个。自己也拉过 LoRA 配置调模型，给每个助手写过一套 skills 与智能体，最后都散在各自的文件夹里。归档里还躺着 `archived-claude-code-source`、`archived-LLaMA-Factory`、`archived-hermes-telegram`、`agentpot`、`gui-agent`。试到最后发现：没有一个能留下「我的过程」。 |
+| **2025 · 从零写内核** | 第一版 agent 循环、第一套工具协议、第一个 MCP 子进程。目标从「能用」改成「可复核」：每一步要有回执，每个结论要能复跑，断网也要能开工。 |
+| **2026 · 收口，不阉割** | 32 天里从 0.2.7 走到 0.2.17，把 204.9 MB 离线 WebView2、209.6 MB 内置 Python 3.12、全绿门禁一起塞进安装包。有人说这是过度设计；他只回一句：我自己每天也要用这台机器。 |
+
+**三笔账**（三种口径，别混着读）：
+
+| 数字 | 是什么 |
+|---|---|
+| ≈ **$30,000** | 三年里直接付给模型与 API 的账单（作者自述） |
+| ≈ **400 亿 token** | 按混合单价 $0.75 / 百万反推；真实区间 300–600 亿，是估算，不是账单 |
+| ≈ **9,700 小时** | 三年 × 每年 340 天 × 每天 9.5 小时（估算） |
+
+**作息是有痕迹的。** 本仓库截至 `0.2.17` 的 54 次提交里，21:00–23:00 最密集（各 8 次），
+凌晨 0 点 3 次、2 点 1 次。一度 08:00 干到凌晨 03:30，后来进了几次医院，改成 05:00 起、
+23:30 收 —— 不是变自律了，是身体先投了反对票。出门吃饭、在外游玩，包里永远开着一台远程桌面。
+
+**这三年真正接进过这台工作台的 14 个模型入口**（以 `core/src/provider` 为准）：
+DeepSeek · Ollama · OpenAI · Anthropic · Gemini · Qwen · Kimi · 豆包 · 混元 · 智谱 GLM ·
+Moonshot · Mistral · SiliconFlow · OpenRouter。不是广告位，也没有排除谁。
+
+> 我不做阉割版，因为我自己就是那个每天要打开它的人。
+
+*数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-28）；
+三年、3 万美元、就医与作息为作者自述；token 数为按混合单价反推的估算。故事板块不写没发生过的事。*
+
+## 🏗️ 各部分如何咬合
+
+中间只有一个引擎，四周是四张脸；除非你自己把模型端点指向外网，否则什么都不会离开这台机器。
+
+```mermaid
+flowchart TB
+    subgraph faces["四个界面，同一个程序"]
+        direction LR
+        CLI["<b>CLI</b><br/>marguerite-core<br/>可脚本化 · --json"]
+        TUI["<b>TUI</b><br/>marguerite-tui<br/>ratatui 工作台"]
+        DESK["<b>桌面端</b><br/>Tauri 2 外壳<br/>托盘 · 快捷键 · 桌宠"]
+        WEB["<b>控制台</b><br/>Vue 3 单页应用<br/>/control"]
+    end
+
+    CORE["<b>Rust 核心引擎</b><br/>意图 → 计划 → 执行 → 核验 → 记忆"]
+    GW["<b>统一网关</b><br/>127.0.0.1:18790 · 仅回环"]
+    ACP["ACP 服务<br/>仅 127.0.0.1"]
+    SIDE["Python 侧车<br/>可选 · 按方法组代理"]
+    GOV{{"治理闭环<br/>PlanGate → 执行 → CompletionGate"}}
+    MEM[("三层记忆<br/>感觉 · 短期 · 长期")]
+    SURF["工具 · 技能 · MCP（既是客户端也是服务端）<br/>电脑操作 · 沙箱 · 快照回滚"]
+
+    CLI --> CORE
+    TUI --> CORE
+    DESK -->|加载网关地址| GW
+    WEB -->|由网关托管| GW
+    CORE --- GW
+    GW --> ACP
+    GW -->|本地未命中则转发| SIDE
+    CORE --> GOV --> MEM
+    CORE --> SURF
+```
+
+> [!NOTE]
+> `workbench/` 是**故意**不画进这张图的。它是独立子项目：自己的 Python 后端、自己的
+> React SPA、自己的版本线；它像侧车那样通过 `core_bridge` 桥接核心 store，
+> 而 Rust 二进制并不引用它。
 
 ## 🧬 递归自我改进
 
@@ -98,7 +177,7 @@ Marguerite 拒绝这个取舍 —— 一个 Rust 内核暴露四个界面，而�
 
 **十个对象，一个闭环。** 可改进的不只是 system prompt：
 
-> 主智能体 · 子代理 · 子智能体 · 专家（43 角色）· 团队（8 个）·
+> 主智能体 · 子代理 · 子智能体 · 专家（48 角色）· 团队（9 个）·
 > 蜂群 · 记忆 · 经验 · 知识库 · 技能与工具
 
 **三条边界，由类型强制，而不是靠文档口号：**
@@ -145,7 +224,7 @@ Tauri 2 在 Linux 上还需 WebKitGTK 开发包，确切清单见
 
 ```bash
 git clone https://github.com/KLJyouth1/Marguerite.git
-cd REPO
+cd Marguerite
 
 # 最快路径：只编 CLI，一两分钟即可
 cargo build -p marguerite-core --bin marguerite-core
@@ -179,7 +258,7 @@ cargo build -p marguerite-core --bin marguerite-core
 
 ```bash
 ./target/debug/marguerite-core doctor       # 10 项环境自检
-./target/debug/marguerite-core --help       # 全部 19 个子命令
+./target/debug/marguerite-core --help       # 全部 20 个子命令
 ```
 
 ### 接入模型
@@ -224,6 +303,7 @@ Marguerite 不声称自己跑不了的能力。`capabilities` 是一份自审清
 ```text
 doctor  model  mcp  skills  session  exec  deploy  serve  sandbox  subagent
 team    browser  chat  gateway  goal  capabilities  cache  dispatch  games
+export-diagnostics
 ```
 
 所有命令遵守同一输出契约：结构化错误走 stderr 并带明确退出码、`--json` 供机器消费、
@@ -256,26 +336,27 @@ bash scripts/verify.sh --workbench    # 只跑 workbench 子项目（71 个离�
 bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 ```
 
-当前基线 —— 整道闸门 **25/25 全绿**（2026-09-25 实测）。下表每一层都在 CI
+当前基线 —— 整道闸门调度 25 项检查，最近一次完整跑到 **25/25 全绿**是 2026-10-28；
+下表每一行数字都来自那次运行。其余每一层都在 CI
 （[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）里跑，**只有新增的 web e2e
 层暂时只在本机闸门里跑**：CI 需要把 Playwright 浏览器缓存与 Rust 构建出的网关放进
 同一个 job（列为后续项，不在这里悄悄声称已覆盖）。
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 2704 passed / 0 failed / 17 ignored |
+| `cargo test -p marguerite-core --lib` | 4230 passed / 0 failed / 24 ignored |
 | core 集成测试（`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`） | 离线且确定性；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过） |
-| `webui` 单测（Vitest） | 3509 passed / 0 failed（331 个文件） |
-| `pyengine` 单测（pytest，`tests/unit`） | 768 passed / 0 failed / 6 skipped |
-| `pyengine` 网关契约（pytest，`tests/test_gateway`） | 2929 passed / 0 failed / 11 skipped |
-| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4442 passed / 0 failed / 390 skipped |
+| `webui` 单测（Vitest） | 4898 passed / 0 failed（495 个文件） |
+| `pyengine` 单测（pytest，`tests/unit`） | 823 passed / 0 failed / 7 skipped |
+| `pyengine` 网关契约（pytest，`tests/test_gateway`） | 2956 passed / 0 failed / 11 skipped |
+| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4445 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 零告警 |
 | `npm run check:architecture` | 10 项架构守卫全绿 |
 | `scripts/check-doc-cli-drift.py` | 文档里的每个 CLI 记号都能解析到真实代码 |
 | `scripts/check-version-sync.py` | core / tui / gui / webui 版本号全部钉到 `core/Cargo.toml`（含两个 npm lockfile 的包自身条目） |
 | `npm ci --dry-run` | 控制台 lockfile 与 `package.json` 自洽（这条 `npm audit` 看不见） |
 | `npm audit --audit-level=moderate` | 控制台依赖树无 moderate 及以上公告 |
-| i18n | 6 种语言全量对齐（各 3862 键），并校验「源码引用的键必须有字典定义」，否则不许发布 |
+| i18n | 6 种语言全量对齐（各 6297 键），并校验「源码引用的键必须有字典定义」，否则不许发布 |
 | `scripts/check-secrets.py` | 将随提交落地的文件里没有真钥匙形态的字符串 —— 夹具必须自我标注（`sk-fake-…`），否则直接失败 |
 | `scripts/check-doc-links.py` | 本仓自己文档里的每条相对链接都能解析（vendored 技能包不在范围内） |
 | `scripts/check-readme-claims.py` | 中英两份 README 在所有硬事实上一致，且它们印出的闸门总数就是 `verify.sh --all` 真正调度的检查数 |
@@ -322,7 +403,7 @@ unset NO_COLOR && bash scripts/verify.sh --clean --all
 ## 📁 目录结构
 
 ```text
-core/        Rust 引擎 + CLI 二进制 + ACP 薄壳      （约 13.4 万行）
+core/        Rust 引擎 + CLI 二进制 + ACP 薄壳      （约 26.5 万行）
 tui/         ratatui 全屏工作台
 gui/         Tauri 2 桌面外壳（Rust 在 src-tauri/）
 webui/       Vue 3 + Pinia 控制台，由网关托管
@@ -375,18 +456,18 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
   在**侧车在线时由通用代理转发**（离线仍回 501，界面照旧优雅降级）。
 - Python 侧车的测试套件在此前**没有任何门禁跑它**，而且根本收集不起来：缺一条 `pythonpath`
   配置就让裸 `pytest` 得到 `1553 tests / 1146 errors`，看起来像大面积损坏，其实是一行配置。
-  现在裸 `pytest` 收集到 **`20668 tests / 0 errors`**，门禁跑 `tests/unit`（768 通过）加上
-  `tests/test_gateway`（2929 通过）。
+  现在裸 `pytest` 收集到 **`20668 tests / 0 errors`**，门禁跑 `tests/unit`（821 通过）、
+  `tests/test_gateway`（2956 通过），以及作为第三层的契约族。
   **「收集干净」不等于「套件全绿」**，这个差别现在被逐条列出而不是想当然：
-  `pyengine/tests/conftest.py` 拒绝收集 **24 个模块**，并在终端汇总里说明每一个的原因。
-  其中 20 个是**缺前置** —— 开发/发布工具链从未迁进这棵树（`pyengine/scripts/*`、
+  `pyengine/tests/conftest.py` 拒绝收集 **45 个模块**，并在终端汇总里说明每一个的原因。
+  其中 41 个是**缺前置** —— 开发/发布工具链从未迁进这棵树（`pyengine/scripts/*`、
   `pyengine/.github/scripts/*`），或落在可选的 dev 依赖组里（`syrupy`、`laboratory`、`mypy`）。
   这些是**自愈**的：前置补回来就会被重新收集，不需要改 conftest。另外 4 个是**继承来的上游契约** ——
   它们断言的是**另一个仓库**的 CI（它的 `.github/workflows/*.yml`、`.github/scripts/*`、
   `scripts/classify-ci-changes.sh`、它的 `opensquilla-webui/` 控制台目录）。它们**不会**自愈，
   汇总里也如实标注。对 `tests/test_ci` 的实测效果：**94 failed / 41 passed → 0 failed / 35 passed**。
-  这两层之外的一切仍然不被任何门禁执行，而且全树跑不完：本机实测烧掉 22 分钟墙钟、
-  CPU 占用仅 **8%** —— 卡在外部 I/O 而不是在算，这正是门禁把自己限定在**跑得完的那两层**的原因。
+  这三层之外的一切仍然不被任何门禁执行，而且全树跑不完：本机实测烧掉 22 分钟墙钟、
+  CPU 占用仅 **8%** —— 卡在外部 I/O 而不是在算，这正是门禁把自己限定在**跑得完的那几层**的原因。
   `tests/test_gateway` 正是这类长期无人执行的目录之一：**2901 个通过用例 + 29 个没人看得见的失败**，
   因为门禁只跑 `tests/unit`，CI 只多加了一条**只查收集**的检查。29 个失败全是历史漂移、
   不是产品损坏：13 处静态源契约读的是**从未迁移**的上游控制台目录（`opensquilla-webui/`，

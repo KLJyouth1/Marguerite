@@ -90,6 +90,11 @@ const SLOGAN = '让思考 成为你的工作台';
         storyChaps: document.querySelectorAll('#story .chap').length,
         storyBars: document.querySelectorAll('#story .curve__bars > span').length,
         storyLedger: document.querySelectorAll('#story .ledger__i').length,
+        // 右侧夜景插画：内联 SVG，不能是空的（空 svg 会让右栏看着像没画完）
+        storyScene: (() => {
+          const svg = document.querySelector('#story .story__scene svg');
+          return !!svg && svg.getBoundingClientRect().height > 120;
+        })(),
         // bento 尾行不得留空缺：6 列网格下每张卡的跨列总和必须是 6 的整数倍
         // ⚠️ `grid-column: span N` 简写的值落在 gridColumnStart 上，gridColumnEnd 是 "auto"
         //    （2026-10-27 第一版读了 End，把每张卡当 span 1，制造出假红）
@@ -134,7 +139,7 @@ const SLOGAN = '让思考 成为你的工作台';
       m.loopback && m.trustCards === 3 && m.counters === 8 && m.gateLines === 7 &&
       m.navLinks === 12 && m.bento === 8 && m.honestCards === 4 && m.bentoRowsFull &&
       m.caseCards === 6 && m.caseOpen === 1 &&
-      m.storyChaps === 4 && m.storyBars === 24 && m.storyLedger === 6;
+      m.storyChaps === 4 && m.storyBars === 24 && m.storyLedger === 6 && m.storyScene;
     if (!structureOk) {
       allPass = false;
       errors.push(s.name + ' structure: ' + JSON.stringify(m));

@@ -8,6 +8,7 @@
 | Document | What it covers |
 |---|---|
 | [Product positioning](PRODUCT.md) | Who this is for, the core journeys, the three differentiators, and the explicit **NOSO list** of things this project refuses to do. |
+| [Project story](https://kljyouth1.github.io/Marguerite/#story) | Three years, one person, four chapters — what it cost in money, tokens and hours, and the pain points that shaped the design. Also inline in [README.zh-Hans](../README.zh-Hans.md#-一个人的工作台开发史) and [README](../README.md#-how-this-got-built). |
 | [Architecture](architecture.md) | Module layering, data flow, configuration, and the quality gates that guard the design. |
 | [CLI reference](cli-reference.md) | The authoritative CLI contract — every subcommand, flag, exit code, and the `--json` envelope. |
 | [Commands and modes](commands-and-modes-reference.md) | Quick reference for the runtime modes (`plan` / `agent` / `ensemble` / `bloom` / `omni`). |

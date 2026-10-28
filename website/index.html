@@ -982,36 +982,144 @@ webui/e2e/approval-card.spec.ts</pre>
         <p class="sec-dek">三年，一个人，从「写代码」到「造一台自己愿意每天打开的工作台」。这一页不讲卖点，只讲账。</p>
       </header>
 
-      <ol class="chapters">
-        <li class="chap reveal-up">
-          <span class="chap__year">2023</span>
-          <div class="chap__body">
-            <h3>一个人接活</h3>
-            <p>写业务、带项目、上课。工具换了一茬又一茬，结论却越来越清楚：每个助手都只懂你正打开的那一个窗口——切走就忘，关掉就散，换台机器就等于从零开始。</p>
-          </div>
-        </li>
-        <li class="chap reveal-up">
-          <span class="chap__year">2024</span>
-          <div class="chap__body">
-            <h3>把能试的都试了</h3>
-            <p>国内外的对话模型、IDE、Agent 工作台、编辑器插件，接进来、拆开看、再换下一个。自己也拉过 LoRA 配置调模型，给每个助手写过一套 skills 和智能体，最后都散在各自的文件夹里。归档中还躺着当年拆过的东西：<code>archived-claude-code-source</code>、<code>archived-LLaMA-Factory</code>、<code>archived-hermes-telegram</code>、<code>agentpot</code>、<code>gui-agent</code>。试到最后发现：没有一个能留下「我的过程」。</p>
-          </div>
-        </li>
-        <li class="chap reveal-up">
-          <span class="chap__year">2025</span>
-          <div class="chap__body">
-            <h3>从零写内核</h3>
-            <p>第一版 agent 循环、第一套工具协议、第一个 MCP 子进程。目标也从「能用」改成了「可复核」：每一步要有回执，每个结论要能复跑，断网也要能开工。</p>
-          </div>
-        </li>
-        <li class="chap reveal-up">
-          <span class="chap__year">2026</span>
-          <div class="chap__body">
-            <h3>收口，不阉割</h3>
-            <p>32 天里从 0.2.7 走到 0.2.17，把 <strong>204.9 MB 离线 WebView2</strong>、<strong>209.6 MB 内置 Python 3.12</strong>、全绿门禁一起塞进安装包。有人说这是过度设计；他只回一句：我自己每天也要用这台机器。</p>
-          </div>
-        </li>
-      </ol>
+      <div class="story__grid">
+        <ol class="chapters">
+          <li class="chap reveal-up">
+            <span class="chap__year">2023</span>
+            <div class="chap__body">
+              <h3>一个人接活</h3>
+              <p>写业务、带项目、上课。工具换了一茬又一茬，结论却越来越清楚：每个助手都只懂你正打开的那一个窗口——切走就忘，关掉就散，换台机器就等于从零开始。</p>
+            </div>
+          </li>
+          <li class="chap reveal-up">
+            <span class="chap__year">2024</span>
+            <div class="chap__body">
+              <h3>把能试的都试了</h3>
+              <p>国内外的对话模型、IDE、Agent 工作台、编辑器插件，接进来、拆开看、再换下一个。自己也拉过 LoRA 配置调模型，给每个助手写过一套 skills 和智能体，最后都散在各自的文件夹里。归档中还躺着当年拆过的东西：<code>archived-claude-code-source</code>、<code>archived-LLaMA-Factory</code>、<code>archived-hermes-telegram</code>、<code>agentpot</code>、<code>gui-agent</code>。试到最后发现：没有一个能留下「我的过程」。</p>
+            </div>
+          </li>
+          <li class="chap reveal-up">
+            <span class="chap__year">2025</span>
+            <div class="chap__body">
+              <h3>从零写内核</h3>
+              <p>第一版 agent 循环、第一套工具协议、第一个 MCP 子进程。目标也从「能用」改成了「可复核」：每一步要有回执，每个结论要能复跑，断网也要能开工。</p>
+            </div>
+          </li>
+          <li class="chap reveal-up">
+            <span class="chap__year">2026</span>
+            <div class="chap__body">
+              <h3>收口，不阉割</h3>
+              <p>32 天里从 0.2.7 走到 0.2.17，把 <strong>204.9 MB 离线 WebView2</strong>、<strong>209.6 MB 内置 Python 3.12</strong>、全绿门禁一起塞进安装包。有人说这是过度设计；他只回一句：我自己每天也要用这台机器。</p>
+            </div>
+          </li>
+        </ol>
+
+        <!-- 右侧长图：黑暗房间里，一个人戴着耳机背对镜头，对着屏幕上的代码。纯装饰，读屏跳过。 -->
+        <figure class="story__scene" aria-hidden="true">
+          <svg viewBox="0 0 420 500" role="presentation" focusable="false">
+            <defs>
+              <linearGradient id="stWall" x1="0" y1="0" x2=".35" y2="1">
+                <stop offset="0" stop-color="#0b131a"/>
+                <stop offset=".55" stop-color="#070d12"/>
+                <stop offset="1" stop-color="#04070a"/>
+              </linearGradient>
+              <linearGradient id="stNight" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#0a1622"/>
+                <stop offset="1" stop-color="#050b11"/>
+              </linearGradient>
+              <radialGradient id="stGlow" cx=".5" cy=".5" r=".5">
+                <stop offset="0" stop-color="#2dd4bf" stop-opacity=".3"/>
+                <stop offset=".45" stop-color="#2dd4bf" stop-opacity=".1"/>
+                <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+              </radialGradient>
+              <radialGradient id="stHalo" cx=".5" cy=".5" r=".5">
+                <stop offset="0" stop-color="#5eead4" stop-opacity=".22"/>
+                <stop offset="1" stop-color="#5eead4" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="stDesk" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#0a1016"/>
+                <stop offset=".62" stop-color="#111c24"/>
+                <stop offset="1" stop-color="#0a1016"/>
+              </linearGradient>
+              <linearGradient id="stSil" x1="0" y1="270" x2="0" y2="442" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#111c26"/>
+                <stop offset=".55" stop-color="#0a1219"/>
+                <stop offset="1" stop-color="#05090d"/>
+              </linearGradient>
+            </defs>
+
+            <rect width="420" height="500" fill="url(#stWall)"/>
+
+            <!-- 窗：没开灯，只剩远处几点灯 -->
+            <g>
+              <rect x="28" y="46" width="106" height="140" rx="3" fill="url(#stNight)" stroke="#16222c"/>
+              <path d="M81 46v140M28 116h106" stroke="#16222c"/>
+              <circle cx="50" cy="76" r="1.2" fill="#7dd3fc" opacity=".45"/>
+              <circle cx="62" cy="96" r=".9" fill="#7dd3fc" opacity=".3"/>
+              <circle cx="104" cy="72" r="1" fill="#a5f3fc" opacity=".28"/>
+              <circle cx="117" cy="150" r=".8" fill="#7dd3fc" opacity=".22"/>
+            </g>
+
+            <!-- 屏幕打在墙上的光 -->
+            <ellipse cx="300" cy="272" rx="205" ry="185" fill="url(#stGlow)"/>
+            <ellipse cx="300" cy="282" rx="120" ry="88" fill="url(#stHalo)"/>
+            <!-- 人身后再补一层弱光，否则深色背影在深色墙上糊成一团 -->
+            <ellipse cx="176" cy="336" rx="140" ry="104" fill="url(#stHalo)" opacity=".45"/>
+
+            <!-- 显示器 -->
+            <rect x="196" y="202" width="208" height="154" rx="10" fill="#060b10" stroke="#1a2731"/>
+            <rect x="204" y="210" width="192" height="138" rx="4" fill="#03080c"/>
+            <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="7.6" fill="#7f8f9d">
+              <text x="212" y="226"><tspan fill="#2dd4bf">fn</tspan> main() {</text>
+              <text x="212" y="241">  <tspan fill="#2dd4bf">let</tspan> run = gate.open(</text>
+              <text x="212" y="256">    <tspan fill="#93c5fd">&quot;marguerite&quot;</tspan>);</text>
+              <text x="212" y="271">  run.step(|s| s.exec()?);</text>
+              <text x="212" y="286">  memory.persist(run.trace);</text>
+              <text x="212" y="301">}</text>
+              <text x="212" y="322" fill="#4b5b68">// 02:47，still here</text>
+            </g>
+            <rect class="scene__caret" x="219" y="294" width="4.5" height="9" fill="#2dd4bf" opacity=".8"/>
+            <path d="M288 356h24v66h-24z" fill="#0a1016"/>
+            <rect x="256" y="422" width="88" height="8" rx="4" fill="#0c141b"/>
+
+            <!-- 人：背影（无描边，只靠渐变与屏幕边缘光区分轮廓） -->
+            <g fill="url(#stSil)">
+              <path d="M44 430v-16c0-18 20-30 48-36l46-8 46 8c28 6 48 18 48 36v16Z"/>
+              <path d="M120 344h36v38h-36z"/>
+              <ellipse cx="138" cy="316" rx="44" ry="46"/>
+              <circle cx="94" cy="320" r="5"/>
+              <circle cx="182" cy="320" r="5"/>
+            </g>
+            <path d="M104 300c6-16 20-26 38-26" stroke="#1d2b38" stroke-width="3" stroke-opacity=".35" fill="none" stroke-linecap="round"/>
+
+            <!-- 耳机：深夜工作的最省事信号 -->
+            <path d="M94 314c0-30 20-46 44-46s44 16 44 46" fill="none" stroke="#0d1720" stroke-width="7" stroke-linecap="round"/>
+            <rect x="85" y="302" width="12" height="24" rx="6" fill="#0d1720"/>
+            <rect x="179" y="302" width="12" height="24" rx="6" fill="#0d1720"/>
+            <path d="M120 378c9 7 27 7 36 0" stroke="#16222c" fill="none" opacity=".8"/>
+
+            <!-- 屏幕光贴着头、耳机与肩的边缘 -->
+            <path d="M172 280c8 10 12 24 10 36" stroke="#2dd4bf" stroke-opacity=".45" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M187 305c3 8 3 15 0 21" stroke="#2dd4bf" stroke-opacity=".35" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            <path d="M192 386c12 5 22 13 28 24" stroke="#2dd4bf" stroke-opacity=".3" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+            <!-- 桌面：画在人之后，桌沿正好把人切在胸口——这才像「坐在桌前」 -->
+            <rect x="0" y="430" width="420" height="12" fill="url(#stDesk)"/>
+            <rect x="0" y="442" width="420" height="58" fill="#04070a"/>
+            <!-- 桌角的杯子，还冒着热气 -->
+            <path d="M40 400h26v22a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8Z" fill="#0b1219" stroke="#1c2935"/>
+            <path d="M66 405c7 0 7 12 0 12" fill="none" stroke="#1c2935"/>
+            <path d="M48 394c-3-4 3-6 0-10M56 392c-3-4 3-6 0-10" stroke="#2dd4bf" stroke-opacity=".18" fill="none" stroke-linecap="round"/>
+
+            <!-- 空气里的尘 -->
+            <circle cx="96" cy="212" r="1.1" fill="#5eead4" opacity=".28"/>
+            <circle cx="322" cy="150" r=".9" fill="#5eead4" opacity=".2"/>
+            <circle cx="372" cy="356" r="1" fill="#5eead4" opacity=".16"/>
+          </svg>
+          <figcaption>02:47 · 房间里只剩这一块光。</figcaption>
+        </figure>
+      </div>
+
 
       <div class="price reveal-up">
         <div class="price__item">
