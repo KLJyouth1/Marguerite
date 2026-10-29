@@ -134,6 +134,33 @@ const SLOGAN = '让思考 成为你的工作台';
         // ② 终端/JSON 块自带 overflow-x，长行会被静默裁在半截而不触发整页溢出
         termClipped: Array.from(document.querySelectorAll('.term'))
           .filter((t) => t.scrollWidth > t.clientWidth + 1).length,
+        // 2026-10-29 新增：每节必须有一句话结论（`sec-take`）。
+        // 判据是「可见且不是空串」，不是「DOM 里有 14 个」——被 CSS 隐藏或内容空掉
+        // 都等于没有电梯，而计数断言对这两种情况完全不敏感。
+        secTakes: Array.from(document.querySelectorAll('.sec-take'))
+          .filter((el) => el.getBoundingClientRect().height > 8 && (el.textContent || '').trim().length >= 8)
+          .length,
+        // 2026-10-29 新增：导航顺序必须与文档几何顺序一致。
+        // 实测过这个坑：`#compare` 的 section 在 DOM 里排在 `#capabilities` 之前，
+        // 而导航按另一个顺序排 —— 读者点「差异」会往回跳一整节，感觉像页面出错。
+        navOrderAscending: (() => {
+          const ids = Array.from(document.querySelectorAll('.nav__links a[href^="#"]'))
+            .map((a) => a.getAttribute('href').slice(1));
+          const ys = ids.map((id) => {
+            const el = document.getElementById(id);
+            return el ? el.getBoundingClientRect().top + window.scrollY : null;
+          });
+          if (ys.some((y) => y === null)) return false;
+          return ys.every((y, i) => i === 0 || y > ys[i - 1]);
+        })(),
+        // 2026-10-29 新增：社交卡片与图片格式必须有守卫，否则「加了又被人改回去」没人发现。
+        ogImage: !!document.querySelector('meta[property="og:image"]'),
+        twitterCard: !!document.querySelector('meta[name="twitter:card"]'),
+        canonical: !!document.querySelector('link[rel="canonical"]'),
+        pictureCount: document.querySelectorAll('picture > source[type="image/webp"]').length,
+        // 浏览器实际选中的是不是 webp（只看源码有没有 <source> 不够，要证明它生效了）
+        webpServed: Array.from(document.images)
+          .filter((i) => (i.currentSrc || '').endsWith('.webp')).length,
       };
     });
 
@@ -141,13 +168,22 @@ const SLOGAN = '让思考 成为你的工作台';
       m.notice && m.ask && m.faq === 7 && m.dl === 3 && m.bar && m.dock &&
       m.entryTabs === 4 && m.entryPanels === 4 && m.entryActive === 1 && m.tuiImgLoaded &&
       m.loopback && m.trustCards === 3 && m.counters === 8 && m.gateLines === 7 &&
-      m.navLinks === 12 && m.bento === 8 && m.honestCards === 4 && m.bentoRowsFull &&
+      m.navLinks === 14 && m.navOrderAscending && m.secTakes === 14 && m.bento === 8 && m.honestCards === 4 && m.bentoRowsFull &&
       m.caseCards === 6 && m.caseOpen === 1 &&
       m.storyChaps === 4 && m.storyBars === 24 && m.storyLedger === 6 && m.storyScene &&
       m.lmRows === 6 && m.lmBars === 4 && m.lmCards === 3;
     if (!structureOk) {
       allPass = false;
       errors.push(s.name + ' structure: ' + JSON.stringify(m));
+    }
+
+    // 社交卡片三件套 + WebP 生效（2026-10-29 补）。
+    // 这里刻意要求 `webpServed > 0`：只检查源码里有没有 `<source>` 会被"写了但浏览器没用"骗过。
+    const seoOk = m.ogImage && m.twitterCard && m.canonical && m.pictureCount > 0 && m.webpServed > 0;
+    if (!seoOk) {
+      allPass = false;
+      errors.push(s.name + ' seo/media: og=' + m.ogImage + ' tw=' + m.twitterCard
+        + ' canonical=' + m.canonical + ' picture=' + m.pictureCount + ' webpServed=' + m.webpServed);
     }
 
     const sloganOk = m.text === SLOGAN;
@@ -179,7 +215,10 @@ const SLOGAN = '让思考 成为你的工作台';
     console.log('  排版可读    : ' + (typographyOk ? 'PASS（导航单行 · 终端块不裁切）'
       : 'FAIL（导航逐字换行 ' + m.navWrapped + ' 项 / 终端块裁切 ' + m.termClipped + ' 处）'));
     console.log('  事实条目    : ' + m.facts + (m.facts === 4 ? ' OK' : ' *** 期望 4 ***'));
-    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 7 · 下载 3）' : 'FAIL ' + JSON.stringify(m)));
+    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 7 · 下载 3 · 导航顺序=文档顺序 · 每节一句话结论 14）' : 'FAIL ' + JSON.stringify(m)));
+    console.log('  社交卡片/图片格式: ' + (seoOk
+      ? 'PASS（og+twitter+canonical · WebP 生效 ' + m.webpServed + '/' + m.pictureCount + '）'
+      : 'FAIL'));
 
     try {
       await page.screenshot({ path: '_shot-' + s.name + '.png', fullPage: false, animations: 'disabled', timeout: 4000 });
@@ -189,9 +228,13 @@ const SLOGAN = '让思考 成为你的工作台';
     await ctx.close();
   }
 
-  // 1024–1180 是历史缺陷所在的窄带：桌面导航刚折叠、内容仍双栏、终端块最窄。
-  // 这三档不截图（截图交付物固定为三张），只跑排版与溢出断言。
-  for (const w of [1024, 1100, 1180]) {
+  // 1024–1360 是历史缺陷所在的窄带：桌面导航刚折叠/刚收字号、内容仍双栏、终端块最窄。
+  // 这几档不截图（截图交付物固定为三张），只跑排版与溢出断言。
+  //
+  // 2026-10-29 扩宽并加两条断言：14 项导航 + 语言切换 + 声音 + CTA 挤在同一行时，
+  // `.nav__cta` / `.sound__label` 会被 flex 压成**逐字竖排**（曾实测 5.7 行 / 2.8 行），
+  // 而整页 scrollWidth 仍然等于视口宽 —— 光看"有没有横向溢出"永远发现不了这个。
+  for (const w of [1024, 1100, 1180, 1220, 1280, 1360]) {
     const bandCtx = await browser.newContext({ viewport: { width: w, height: 900 } });
     const bandPage = await bandCtx.newPage();
     await bandPage.goto(URL, { waitUntil: 'load' });
@@ -203,14 +246,24 @@ const SLOGAN = '让思考 成为你的工作台';
         const lh = parseFloat(getComputedStyle(a).lineHeight) || 21;
         return r.height > lh * 1.5;
       }).length;
+      const lines = (sel, fallbackLh) => {
+        const el = document.querySelector(sel);
+        if (!el) return 0;
+        const cs = getComputedStyle(el);
+        const lh = parseFloat(cs.lineHeight) || fallbackLh;
+        return Math.round((el.getBoundingClientRect().height / lh) * 10) / 10;
+      };
       return {
         navWrapped,
         termClipped: Array.from(document.querySelectorAll('.term'))
           .filter((t) => t.scrollWidth > t.clientWidth + 1).length,
         overflowX: document.documentElement.scrollWidth > window.innerWidth,
+        ctaLines: lines('.nav__cta', 20),
+        soundLines: lines('.sound__label', 16),
       };
     });
-    const bandOk = band.navWrapped === 0 && band.termClipped === 0 && !band.overflowX;
+    const bandOk = band.navWrapped === 0 && band.termClipped === 0 && !band.overflowX
+      && band.ctaLines <= 1.8 && band.soundLines <= 1.6;
     if (!bandOk) { allPass = false; errors.push(w + 'px 窄带: ' + JSON.stringify(band)); }
     console.log('--- 窄带巡检 ' + w + 'px（不截图）---  ' + (bandOk ? 'PASS' : 'FAIL ' + JSON.stringify(band)));
     await bandCtx.close();
@@ -234,6 +287,34 @@ const SLOGAN = '让思考 成为你的工作台';
   console.log('--- prefers-reduced-motion: reduce ---');
   console.log('  标题/事实可见: ' + (rmPass ? 'PASS（降级后内容完整）' : 'FAIL ' + JSON.stringify(rm)));
   await ctx2.close();
+
+  // ── 英文落地页（index.en.html）────────────────────────────────────────────
+  // 中文页是主叙事，英文页是精简版；两者共用 styles.css，所以布局风险同样存在。
+  // 这里只断言最要紧的四条：不横向溢出、零控制台错误、有社交卡片、双语互指齐备。
+  {
+    const EN = URL.replace(/index\.html$/, 'index.en.html');
+    for (const w of [375, 768, 1440]) {
+      const c = await browser.newContext({ viewport: { width: w, height: 900 } });
+      const pg = await c.newPage();
+      const enErrors = [];
+      pg.on('console', (m) => { if (m.type() === 'error') enErrors.push(m.text().slice(0, 120)); });
+      await pg.goto(EN, { waitUntil: 'load' });
+      await pg.waitForTimeout(300);
+      const r = await pg.evaluate(() => ({
+        overflowX: document.documentElement.scrollWidth - window.innerWidth,
+        og: !!document.querySelector('meta[property="og:image"]'),
+        hreflang: document.querySelectorAll('link[rel="alternate"][hreflang]').length,
+        webpServed: Array.from(document.images).filter((i) => (i.currentSrc || '').endsWith('.webp')).length,
+      }));
+      const ok = !r.overflowX && r.og && r.hreflang >= 3 && r.webpServed > 0 && enErrors.length === 0;
+      if (!ok) {
+        allPass = false;
+        errors.push('index.en.html@' + w + ': ' + JSON.stringify(r) + ' console=' + enErrors.join('|'));
+      }
+      console.log('--- index.en.html (' + w + 'px) --- ' + (ok ? 'PASS' : 'FAIL ' + JSON.stringify(r)));
+      await c.close();
+    }
+  }
 
   console.log('\n=== 控制台错误 / 失败请求 ===');
   console.log(errors.length === 0 ? '零错误、零外部请求（证明无外部依赖、无 emoji CDN）' : errors.join('\n'));

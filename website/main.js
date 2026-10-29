@@ -347,3 +347,66 @@
     });
   })();
 })();
+
+/* ── 导航当前位置（2026-10-29 补）──────────────────────────────────────────
+   问题：styles.css 早就写好了 `.nav__links a.is-current`（正文色 + 2px 强调色下划线），
+   但**没有任何 JS 去加这个 class**，`aria-current` 也是 0 处 —— 于是这套样式是死代码，
+   用户在长页面里滚到哪一节，导航完全不给反馈；读屏用户更没有任何"当前在哪"的信号。
+
+   做法：滚动时取「最后一个顶部已越过参考线」的 section，给对应链接加 `is-current`
+   与 `aria-current="location"`（`location` 是 nav 里表示"当前视口位置"的合法值，
+   不是表示"当前页面"的 `page`）。用 rAF 节流，避免 scroll 事件里做布局查询。
+   无 JS / 脚本失败时导航只是没有高亮，功能不受影响。 */
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('.nav__links a[href^="#"]'));
+  if (!links.length) return;
+  var pairs = links.map(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    return { a: a, sec: id ? document.getElementById(id) : null };
+  }).filter(function (p) { return !!p.sec; });
+  if (!pairs.length) return;
+
+  var current = null;
+  var queued = false;
+
+  function mark(active) {
+    if (active === current) return;
+    pairs.forEach(function (p) {
+      var on = p.a === active;
+      p.a.classList.toggle('is-current', on);
+      if (on) p.a.setAttribute('aria-current', 'location');
+      else p.a.removeAttribute('aria-current');
+    });
+    current = active;
+  }
+
+  function update() {
+    queued = false;
+    // 参考线取视口上方 1/3：读者视线通常落在上三分之一，用它能得到"正在读的那一节"。
+    var line = window.innerHeight / 3;
+    // 取「离参考线最近的、已越过的」那一节 —— 不能按导航顺序取"最后一个"：
+    // 导航顺序与文档顺序**不一致**（实测 `#compare` 的 section 在 DOM 里排在 `#capabilities`
+    // 之前），按顺序取会高亮错一整节。这里按几何距离取，与文档顺序无关。
+    var best = null;
+    var bestTop = -Infinity;
+    for (var i = 0; i < pairs.length; i++) {
+      var top = pairs[i].sec.getBoundingClientRect().top;
+      if (top <= line && top > bestTop) { bestTop = top; best = pairs[i].a; }
+    }
+    // 滚到最底部时，最后一节可能永远越不过参考线 —— 显式兜底，避免"到底了却没高亮"。
+    if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 4) {
+      best = pairs[pairs.length - 1].a;
+    }
+    mark(best);
+  }
+
+  function onScroll() {
+    if (queued) return;
+    queued = true;
+    window.requestAnimationFrame(update);
+  }
+
+  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll, { passive: true });
+  update();
+})();

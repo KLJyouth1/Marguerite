@@ -104,8 +104,26 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--accent-soft);
 .nav__links a:hover{color:var(--text);}
 /* 当前所在章节（scroll 时更新），给导航一个位置感 */
 .nav__links a.is-current{color:var(--text);}
+/* 语言切换：独立于章节导航（它换文档，不跳锚点），所以不参与 .is-current 高亮 */
+.nav__lang{flex:0 0 auto;margin-left:.6rem;font-family:var(--font-mono);font-size:.72rem;letter-spacing:.08em;
+  color:var(--text-dim);text-decoration:none;padding:.32rem .5rem;border:1px solid var(--hairline);
+  border-radius:var(--r-sm);transition:color var(--t) var(--ease),border-color var(--t) var(--ease);}
+.nav__lang:hover,.nav__lang:focus-visible{color:var(--text);border-color:var(--accent);}
+@media (max-width:1023px){.nav__lang{display:none;}}
+/* 14 项导航在 1440 就会把 CTA 挤成竖排（实测），先收紧字号与间距；再窄就折叠成菜单。 */
+@media (max-width:1500px){.nav__links{gap:.9rem;font-size:.84rem;}}
+/* 1221–1360 这段最紧：全量导航 + 语言切换 + 声音 + CTA 刚好多出几十像素（实测 1280 溢出 42px），
+   再收一档字号与间距，换掉"折叠成菜单"这个更贵的选择。 */
+@media (max-width:1360px){.nav__links{gap:.7rem;font-size:.8rem;}}
+@media (max-width:1220px){
+  .nav__links{display:none;}
+  .nav__toggle{display:inline-flex;margin-left:auto;}
+  .nav__lang{display:none;}
+}
 .nav__links a.is-current::after{content:"";position:absolute;left:0;right:0;bottom:-7px;height:2px;border-radius:2px;background:var(--accent);}
-.nav__cta{margin-left:.4rem;min-height:40px;padding:.5rem 1.05rem;font-size:.92rem;border-radius:11px;}
+/* flex:0 0 auto + nowrap：中文在可收缩 flex item 里会被压成逐字竖排（实测 5.7 行） */
+.nav__cta{margin-left:.4rem;min-height:40px;padding:.5rem 1.05rem;font-size:.92rem;border-radius:11px;
+  flex:0 0 auto;white-space:nowrap;}
 .nav__toggle{display:none;margin-left:auto;width:42px;height:42px;align-items:center;justify-content:center;background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--text);cursor:pointer;}
 .nav__mobile[hidden]{display:none;}
 .nav__mobile{display:flex;flex-direction:column;gap:.2rem;padding:.6rem 1.5rem 1rem;border-top:1px solid var(--border);background:var(--nav-bg-2);backdrop-filter:blur(14px);}
@@ -154,6 +172,15 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--accent-soft);
 .sec-index{font-family:var(--font-mono);font-size:.74rem;letter-spacing:.26em;color:var(--accent);margin-bottom:1rem;}
 .sec-title{font-size:clamp(1.8rem,1.2rem+2.4vw,3rem);font-weight:800;letter-spacing:-.02em;margin-bottom:1rem;}
 .sec-dek{font-size:1.05rem;line-height:1.7;color:var(--text-2);}
+/* 每节一句话结论（2026-10-29）。
+   问题不是"太长"，是"没有电梯"：正文 7,700 余字、十四节，读者滚到任何一节都得先读两段才
+   知道这节要说什么。这句放在标题与正文之间，让「扫读」的人十秒内拿到结论，
+   让「细读」的人知道下面要论证什么。写成 2px 强调色竖线 + 略粗正文色：
+   它比正文更重、但比标题更轻，不能抢 h2 的层级。 */
+.sec-take{position:relative;margin:0 0 .8rem;padding-left:.85rem;font-size:1.06rem;line-height:1.62;
+  font-weight:600;color:var(--text);letter-spacing:.002em;}
+.sec-take::before{content:"";position:absolute;left:0;top:.42em;bottom:.42em;width:2px;
+  background:var(--accent);border-radius:1px;}
 
 /* ---- 能力卡片 ---- */
 .cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.2rem;}
@@ -194,6 +221,8 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--accent-soft);
 .cta{text-align:center;max-width:48rem;margin-inline:auto;}
 .cta__title{font-size:clamp(2rem,1.3rem+3vw,3.4rem);font-weight:800;letter-spacing:-.02em;margin-bottom:1rem;}
 .cta__dek{font-size:1.1rem;color:var(--text-2);margin-bottom:2rem;}
+/* 居中区块里的一句话结论：竖线要跟着文字走，所以收缩成行内块而不是满宽。 */
+.cta__take{display:inline-block;text-align:left;margin:0 0 1rem;}
 .code{margin:0;padding:1rem 1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow-x:auto;}
 .code code{background:transparent;color:var(--text);font-size:.9rem;white-space:pre;}
 .code-shell{position:relative;}
@@ -324,7 +353,7 @@ body.motion .reveal-up.in{opacity:1;transform:none;}
 kbd{font-family:var(--font-mono);font-size:.8em;padding:.05em .35em;border:1px solid var(--border-2);border-radius:4px;color:var(--text-2);}
 
 /* ---- 声音开关 ---- */
-.sound{display:inline-flex;align-items:center;gap:.5rem;margin-left:.4rem;padding:.42rem .7rem;
+.sound{flex:0 0 auto;white-space:nowrap;display:inline-flex;align-items:center;gap:.5rem;margin-left:.4rem;padding:.42rem .7rem;
   background:transparent;border:1px solid var(--border);border-radius:999px;color:var(--text-2);
   font-family:inherit;font-size:.76rem;cursor:pointer;
   transition:color var(--t) var(--ease),border-color var(--t) var(--ease),background-color var(--t) var(--ease);}

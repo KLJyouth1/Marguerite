@@ -9,9 +9,9 @@
     <Nullable>disable</Nullable>
     <AssemblyName>MargueriteDownloader</AssemblyName>
     <RootNamespace>MargueriteDownloader</RootNamespace>
-    <Version>0.2.17</Version>
-    <FileVersion>0.2.17.0</FileVersion>
-    <AssemblyVersion>0.2.17.0</AssemblyVersion>
+    <Version>0.2.19</Version>
+    <FileVersion>0.2.19.0</FileVersion>
+    <AssemblyVersion>0.2.19.0</AssemblyVersion>
     <Product>Marguerite Downloader</Product>
     <Company>Marguerite</Company>
     <Description>Cinematic downloader for Marguerite: the film plays a full pass before the installer opens</Description>

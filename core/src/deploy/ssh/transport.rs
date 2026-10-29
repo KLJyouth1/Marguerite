@@ -2,10 +2,11 @@
 //!
 //! 从 `deploy/ssh.rs` 拆分（M0.5，OD-003）。真实传输**密钥免密**
 //! （`BatchMode=yes` 禁止密码交互，依赖 `~/.ssh` agent 或 identity 文件）。
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
+
+use crate::proc::SilentCommand;
 
 use super::target::SshTarget;
 
@@ -51,7 +52,7 @@ impl SystemSshTransport {
 impl SshTransport for SystemSshTransport {
     fn exec(&self, cmd: &str) -> Result<String> {
         let mut c = std::process::Command::new("ssh");
-        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
+        c.silent();
         c.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -84,7 +85,7 @@ impl SshTransport for SystemSshTransport {
 
     fn upload(&self, local: &Path, remote: &Path) -> Result<()> {
         let mut c = std::process::Command::new("scp");
-        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
+        c.silent();
         c.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -115,7 +116,7 @@ impl SshTransport for SystemSshTransport {
 
     fn download(&self, remote: &Path, local: &Path) -> Result<()> {
         let mut c = std::process::Command::new("scp");
-        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：部署期不闪控制台
+        c.silent();
         c.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")

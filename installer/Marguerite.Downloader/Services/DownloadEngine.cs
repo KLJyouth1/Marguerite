@@ -42,6 +42,17 @@ namespace MargueriteDownloader
     {
         private const int MaxAttempts = 3;
 
+        /// <summary>
+        /// 取自程序集版本，不再写死 "0.2.17" —— 那个常量会随发版悄悄过期。
+        /// </summary>
+        private static readonly string UserAgent = BuildUserAgent();
+
+        private static string BuildUserAgent()
+        {
+            var version = typeof(DownloadEngine).Assembly.GetName().Version;
+            return "Marguerite-Downloader/" + (version == null ? "0" : version.ToString(3));
+        }
+
         static DownloadEngine()
         {
             // .NET 4.8 defaults to TLS 1.0 on older Windows builds; GitHub only
@@ -203,7 +214,7 @@ namespace MargueriteDownloader
             }
 
             var request = (HttpWebRequest)WebRequest.Create(uri);
-            request.UserAgent = "Marguerite-Downloader/0.2.17";
+            request.UserAgent = UserAgent;
             request.Timeout = 30_000;
             request.ReadWriteTimeout = 60_000;
             request.AllowAutoRedirect = true;
@@ -301,7 +312,7 @@ namespace MargueriteDownloader
                 try
                 {
                     var request = (HttpWebRequest)WebRequest.Create(new Uri(url, UriKind.Absolute));
-                    request.UserAgent = "Marguerite-Downloader/0.2.17";
+                    request.UserAgent = UserAgent;
                     request.Accept = "application/vnd.github+json";
                     request.Timeout = 20_000;
                     request.AllowAutoRedirect = true;

@@ -9,9 +9,9 @@
     <Nullable>disable</Nullable>
     <AssemblyName>MargueriteSetup</AssemblyName>
     <RootNamespace>MargueriteSetup</RootNamespace>
-    <Version>0.2.17</Version>
-    <FileVersion>0.2.17.0</FileVersion>
-    <AssemblyVersion>0.2.17.0</AssemblyVersion>
+    <Version>0.2.19</Version>
+    <FileVersion>0.2.19.0</FileVersion>
+    <AssemblyVersion>0.2.19.0</AssemblyVersion>
     <Product>Marguerite Setup</Product>
     <Company>Marguerite</Company>
     <Description>Cinematic installer for the Marguerite desktop workbench</Description>

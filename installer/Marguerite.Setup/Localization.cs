@@ -93,7 +93,7 @@ namespace MargueriteSetup
 
             { "WelcomeEyebrow", "WINDOWS · SETUP" },
             { "WelcomeTitle", "让思考，\n成为你的工作台。" },
-            { "WelcomeBody", "Marguerite 0.2.17 · Windows x64\n当前用户安装，无需管理员权限。" },
+            { "WelcomeBody", "Marguerite 0.2.19 · Windows x64\n当前用户安装，无需管理员权限。" },
             { "Feature1", "多智能体编排与专家团" },
             { "Feature2", "本地优先的会话与记忆" },
             { "Feature3", "桌面、浏览器与终端一体" },
@@ -116,7 +116,7 @@ namespace MargueriteSetup
             { "PayloadReady", "已校验" },
             { "PayloadPending", "安装前校验" },
             { "PayloadMissing", "未找到，点击选择" },
-            { "PayloadUnverified", "非 0.2.17 版本 · 需自带校验" },
+            { "PayloadUnverified", "非 0.2.19 版本 · 需自带校验" },
             { "ExistingInstall", "此位置已有 Marguerite，将继续安装并保留用户数据。" },
             { "OtherInstall", "检测到另一处 Marguerite 安装（{0}）；在新位置安装不会移动或删除旧文件。" },
             { "OptionsNote", "当前用户安装，无需管理员权限。" },
@@ -138,7 +138,7 @@ namespace MargueriteSetup
 
             { "FinishEyebrow", "COMPLETE" },
             { "FinishTitle", "现在，它是你的了。" },
-            { "FinishBody", "Marguerite 0.2.17 已安装到\n{0}" },
+            { "FinishBody", "Marguerite 0.2.19 已安装到\n{0}" },
             { "FinishNote", "配置与会话数据保存在同一目录；首次启动会自动生成。" },
 
             { "ErrorEyebrow", "INTERRUPTED" },
@@ -157,11 +157,11 @@ namespace MargueriteSetup
             { "CancelConfirmBody", "取消会中止正在进行的安装，可能留下不完整的文件。" },
 
             { "PayloadMissingTitle", "需要安装包" },
-            { "PayloadMissingBody", "请把 Marguerite_0.2.17_x64-setup.exe 与本安装器放在同一目录，或手动选择它。" },
+            { "PayloadMissingBody", "请把 Marguerite_0.2.19_x64-setup.exe 与本安装器放在同一目录，或手动选择它。" },
             { "PayloadInvalidTitle", "这不是有效的安装包" },
             { "PayloadInvalidBody", "请选择名为 Marguerite_<版本>_x64-setup.exe 的文件。" },
             { "PayloadVersionTitle", "版本不匹配" },
-            { "PayloadVersionBody", "此安装器为 Marguerite 0.2.17 定制；选择的安装包是 {0}，且没有校验文件。请选择 0.2.17 安装包。" },
+            { "PayloadVersionBody", "此安装器为 Marguerite 0.2.19 定制；选择的安装包是 {0}，且没有校验文件。请选择 0.2.19 安装包。" },
 
             { "DemoBadge", "演示模式 · 不会实际安装" },
 
@@ -170,7 +170,7 @@ namespace MargueriteSetup
             { "ErrExitCode", "安装程序返回错误代码 {0}。" },
             { "ErrMainBinaryMissing", "安装程序报告成功，但没有找到主程序。" },
             { "ErrSpawn", "无法启动安装程序：{0}" },
-            { "ErrPayloadVersion", "此安装器仅验证 0.2.17；所选安装包版本为 {0}。" },
+            { "ErrPayloadVersion", "此安装器仅验证 0.2.19；所选安装包版本为 {0}。" },
             { "ErrUnknown", "安装失败：{0}" },
         };
 
@@ -205,7 +205,7 @@ namespace MargueriteSetup
 
             { "WelcomeEyebrow", "WINDOWS · SETUP" },
             { "WelcomeTitle", "A quieter way\nto think and build." },
-            { "WelcomeBody", "Marguerite 0.2.17 · Windows x64\nInstalls for the current user. No admin required." },
+            { "WelcomeBody", "Marguerite 0.2.19 · Windows x64\nInstalls for the current user. No admin required." },
             { "Feature1", "Multi-agent orchestration" },
             { "Feature2", "Local-first sessions and memory" },
             { "Feature3", "Desktop, browser and terminal in one" },
@@ -228,7 +228,7 @@ namespace MargueriteSetup
             { "PayloadReady", "Verified" },
             { "PayloadPending", "Verified before install" },
             { "PayloadMissing", "Not found — choose file" },
-            { "PayloadUnverified", "Non-0.2.17 · sidecar hash required" },
+            { "PayloadUnverified", "Non-0.2.19 · sidecar hash required" },
             { "ExistingInstall", "An existing install was found here; user data will be kept." },
             { "OtherInstall", "Another Marguerite installation was found at {0}; installing here will not move or remove the old files." },
             { "OptionsNote", "Per-user install. No admin required." },
@@ -250,7 +250,7 @@ namespace MargueriteSetup
 
             { "FinishEyebrow", "COMPLETE" },
             { "FinishTitle", "It's yours now." },
-            { "FinishBody", "Marguerite 0.2.17 is installed at\n{0}" },
+            { "FinishBody", "Marguerite 0.2.19 is installed at\n{0}" },
             { "FinishNote", "Settings and sessions live in the same folder." },
 
             { "ErrorEyebrow", "INTERRUPTED" },
@@ -269,11 +269,11 @@ namespace MargueriteSetup
             { "CancelConfirmBody", "Cancelling stops the installation and may leave incomplete files." },
 
             { "PayloadMissingTitle", "Installer payload required" },
-            { "PayloadMissingBody", "Place Marguerite_0.2.17_x64-setup.exe next to this Setup, or choose it manually." },
+            { "PayloadMissingBody", "Place Marguerite_0.2.19_x64-setup.exe next to this Setup, or choose it manually." },
             { "PayloadInvalidTitle", "Not a valid installer" },
             { "PayloadInvalidBody", "Choose a file named Marguerite_<version>_x64-setup.exe." },
             { "PayloadVersionTitle", "Version mismatch" },
-            { "PayloadVersionBody", "This setup is built for Marguerite 0.2.17; the selected payload is {0} and has no checksum sidecar." },
+            { "PayloadVersionBody", "This setup is built for Marguerite 0.2.19; the selected payload is {0} and has no checksum sidecar." },
 
             { "DemoBadge", "Demo mode · no changes to your system" },
 
@@ -282,7 +282,7 @@ namespace MargueriteSetup
             { "ErrExitCode", "The installer returned error code {0}." },
             { "ErrMainBinaryMissing", "The installer reported success, but the main executable is missing." },
             { "ErrSpawn", "Could not start the installer: {0}" },
-            { "ErrPayloadVersion", "This setup only verifies 0.2.17; the selected payload is {0}." },
+            { "ErrPayloadVersion", "This setup only verifies 0.2.19; the selected payload is {0}." },
             { "ErrUnknown", "Installation failed: {0}" },
         };
     }

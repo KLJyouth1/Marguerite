@@ -36,6 +36,14 @@ namespace MargueriteDownloader
         private string _installerPath;
         private string _sourceLabel;
 
+        /// <summary>
+        /// 发布页没有「电影式安装界面」时，直接启动 NSIS 安装包本体。
+        /// 历史缺陷：旧逻辑一旦拿不到 MargueriteSetup.exe 就抛
+        /// 「找不到安装界面程序」，而发布资产里长期没有这个文件 ——
+        /// 结果是下载器在每台机器上都 100% 失败。
+        /// </summary>
+        private bool _directPayload;
+
         public DownloaderWindow()
         {
             InitializeComponent();
@@ -322,11 +330,12 @@ namespace MargueriteDownloader
             if (string.IsNullOrWhiteSpace(_installerPath))
             {
                 _installerPath = FindLocalSetupShell();
-                if (string.IsNullOrWhiteSpace(_installerPath))
-                {
-                    throw new InvalidOperationException(
-                        "找不到安装界面程序 MargueriteSetup.exe，请把它与下载器放在同一目录。");
-                }
+            }
+
+            // 拿不到电影式安装界面不算失败：下载完成后直接启动 NSIS 安装包。
+            if (string.IsNullOrWhiteSpace(_installerPath))
+            {
+                _directPayload = true;
             }
 
             var destination = string.IsNullOrWhiteSpace(DownloaderOptions.Output)
@@ -426,7 +435,7 @@ namespace MargueriteDownloader
             _sourceLabel = "演示";
             _installerPath = "MargueriteSetup.exe";
             SetPhase("演示模式：模拟下载…", 0);
-            StatusText.Text = "Marguerite_0.2.17_x64-setup.exe · 演示";
+            StatusText.Text = "Marguerite_" + DemoVersionText() + "_x64-setup.exe · 演示";
 
             const long total = 369904918L;
             for (var i = 0; i <= 100; i++)
@@ -535,17 +544,23 @@ namespace MargueriteDownloader
 
             try
             {
-                if (string.IsNullOrWhiteSpace(_installerPath) || string.IsNullOrWhiteSpace(_payloadPath))
+                if (string.IsNullOrWhiteSpace(_payloadPath))
                 {
-                    throw new InvalidOperationException("安装界面或安装包缺失。");
+                    throw new InvalidOperationException("安装包缺失。");
                 }
+
+                var executable = _directPayload || string.IsNullOrWhiteSpace(_installerPath)
+                    ? _payloadPath
+                    : _installerPath;
 
                 var startInfo = new ProcessStartInfo
                 {
-                    FileName = _installerPath,
-                    Arguments = "--payload \"" + _payloadPath + "\"",
+                    FileName = executable,
+                    Arguments = _directPayload || string.IsNullOrWhiteSpace(_installerPath)
+                        ? string.Empty
+                        : "--payload \"" + _payloadPath + "\"",
                     UseShellExecute = false,
-                    WorkingDirectory = Path.GetDirectoryName(_installerPath) ?? AppDomain.CurrentDomain.BaseDirectory
+                    WorkingDirectory = Path.GetDirectoryName(executable) ?? AppDomain.CurrentDomain.BaseDirectory
                 };
 
                 Process.Start(startInfo);
@@ -714,6 +729,13 @@ namespace MargueriteDownloader
         // =====================================================================
         // Helpers
         // =====================================================================
+
+        /// <summary>程序集版本（三段），用于演示界面的示例文件名，避免写死版本号。</summary>
+        private static string DemoVersionText()
+        {
+            var version = typeof(DownloaderWindow).Assembly.GetName().Version;
+            return version == null ? "0.0.0" : version.ToString(3);
+        }
 
         private static string NormalizeDigest(string digest)
         {

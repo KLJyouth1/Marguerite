@@ -64,6 +64,35 @@
 - **桌宠 ACL**：`pet_overlay_show/toggle` 补进构建清单与主窗口权限；新增 `pet-overlay` 窗口能力（含回环 remote、拖动/隐藏）。
 - **e2e 门禁确定性**：首启 BootOrchestra 由 storageState 预置跳过；deliverables 助手修复水合竞态与 `D:\Downloads\…` 子串误匹配；`verify.sh` 等侧车真正接管 `/api/config` 后再启动 Playwright。
 
+## [0.2.19] - 2026-10-29
+
+两个主题：**修掉 Linux / macOS 目标编译不过的三处根因**，以及**修掉整条桌面发行链路**（装完打不开、下载器失败、更新器不可用）。
+
+### Fixed（桌面发行链路）
+
+- **装完打不开：应用在启动时 panic 退出（exit 101，窗口都不出现）**（`gui/src-tauri/tauri.conf.json`）。根因是 `plugins.updater.active = true` 却**没有 `pubkey`**，Tauri 在 `setup` 之前就初始化失败：
+  ```
+  thread 'main' panicked at gui\src-tauri\src\lib.rs:3689:10:
+  error while running tauri application: PluginInitialization("updater",
+    "Error deserializing 'plugins.updater' within your Tauri configuration: missing field `pubkey`")
+  ```
+  现补齐 `pubkey`（私钥离线保管，不进仓库）并开启 `bundle.createUpdaterArtifacts`，安装包内同时产出 `.sig` 与 `latest.json` 所需的签名。
+- **下载器 100% 失败**（`installer/Marguerite.Downloader`）：旧逻辑拿不到电影式安装界面 `MargueriteSetup.exe` 就直接抛「找不到安装界面程序」，而发布资产里长期没有这个文件。现在改成：找不到界面壳就**直接启动 NSIS 安装包本体**（它自带向导），并且把写死的 `Marguerite-Downloader/0.2.17` UA 换成程序集版本。
+- **安装器只认 0.2.17**（`installer/Marguerite.Setup`）：`InstallerRunner.ExpectedVersion/ExpectedSha256` 与 12 条界面文案一直钉在 0.2.17，装 0.2.19 的载荷会被判成「版本不符」。已对齐到 0.2.19，并在 `installer/build.ps1` 增加**构建前 pin 守卫**：常量与真实载荷不一致就直接失败，不再给「打出一个装不上的安装器」的机会。
+- **发布资产缺项**：`MargueriteSetup.exe`、`SHA256SUMS.txt`、`latest.json` 与 `.sig` 此前都没有上传，下载器与更新器的链路因此各断一环。0.2.19 起随 release 一并上传。
+
+### Fixed（非 Windows 编译）
+
+- **`core/src/deploy/ssh/transport.rs` 在非 Windows 目标上无法编译**：`CREATE_NO_WINDOW` 是通过 `use std::os::windows::process::CommandExt` **无条件**引入的，Linux/macOS 上直接 `error[E0433]: cannot find windows in os`，连带三处 `error[E0599]: no method named creation_flags`（`exec` / `upload` / `download`）。改用仓库已有的 [`crate::proc::SilentCommand::silent()`](core/src/proc.rs)（文档本就写明「非 Windows 平台是空操作，调用点无需写 cfg」），删掉平台专属 import。
+- **`core/src/security/os_sandbox.rs` 的 Landlock 实现是照着 0.3 的 API 写的**：`Cargo.lock` 锁的是 `landlock 0.4.7`，其中 `AccessFs::from_exec` 根本不存在（`from_read` 已含 `Execute`）、`Ruleset::new()` 已废弃、`add_rule` / `restrict_self` 都在 `RulesetCreated` 上。按 0.4.7 重写为 `Ruleset::default().handle_access(..)?.create()?` → `add_rules(path_beneath_rules(..))` → `restrict_self()`，并把判定改成对 `RulesetStatus` 的显式匹配（`NotEnforced` 仍返回 `Unsupported`，fail-closed 语义不变；detail 里新增 `all_threads`，如实说明 Landlock 默认只约束调用线程）。同时把该文件的单测改成**不在进程内调 `apply`**：`restrict_self()` 与 macOS 的 `sandbox_init()` 都是不可逆的，会把 libtest 的工作线程锁死，之后复用该线程的用例会莫名 EACCES。
+- **`core/src/pyengine/memfence.rs` 的 `use std::os::unix::process::CommandExt` 恒为 unused**：`pre_exec` 是 tokio `Command` 的固有方法，这个 trait 导入在 Linux/macOS 上永远用不到，而 CI 的 `clippy -D warnings` 会把它升级成错误。删除该 import。
+
+### 说明
+
+- 这三处分别落在 `#[cfg(target_os = "linux")]`、平台专属 `use` 或 `#[cfg(unix)]` 里 —— Windows 上的 `verify.sh --all` **永远不会编译它们**，所以「本机 26/26 全绿」与「Linux 编译红」能同时成立。这与 `AGENTS.md` §8「增量/平台遮蔽」是同一类陷阱。
+- 修复前的事实：`CI` 在 `e7d2f14`（2026-10-28）就已是 failure；`v0.2.17` 的源码仓 release 只有 Windows zip。即 CI 红是**存量问题**，不是 0.2.18 引入的。
+- 0.2.18 的两个安装包**装完都打不开**（上面的 updater panic），现已由 0.2.19 修正；`v0.2.18` 的资产保留不动。
+
 ## [0.2.18] - 2026-10-29
 
 本次发版的主线是**上下文层（M1）**，附带一批桌面端「把静默失败变成可见状态」的修复。

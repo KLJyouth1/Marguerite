@@ -79,6 +79,9 @@ RE_TOML = re.compile(r'(?m)^(version\s*=\s*")([^"]+)(")')
 RE_JSON = re.compile(r'(?m)^(\s*"version":\s*")([^"]+)(")')
 
 
+WEBSITE_FILES = ["website/index.html", "website/index.en.html"]
+
+
 def read_canonical() -> str:
     path = os.path.join(ROOT, CANON)
     if not os.path.isfile(path):
@@ -186,6 +189,29 @@ def main() -> int:
         label = f'{lock_rel}  packages[""]'
         rows.append((label, self_entry["version"], 1))
         if self_entry["version"] != canon:
+            drifted.append(label)
+
+    # 官网版本位（2026-10-29 补）：`website/index.html` 有一批**硬编码兜底值**，
+    # 运行时会被 GitHub release tag 覆盖，但"页面源码里写几"这件事没人管 ——
+    # 当天真实事故：全仓已 0.2.19，页面还写着 0.2.18，而这条门禁当时完全不看 website/，
+    # 于是所有闸门全绿、页面在撒谎。
+    # 口径：所有带 `data-ver` 的版本展示位必须都是 canon（它们是 API 失败时的兜底）。
+    for site_rel in WEBSITE_FILES:
+        full = os.path.join(ROOT, site_rel)
+        if not os.path.isfile(full):
+            broken.append((site_rel, "文件不存在"))
+            continue
+        html = io.open(full, encoding="utf-8").read()
+        found = re.findall(r'data-ver[^>]*?>([^<]*)<', html)
+        # 只有属性、没有文本节点的（如 <b data-ver>Marguerite 0.2.19</b>）也要能抓到版本串
+        found += [m for m in re.findall(r'data-ver[^>]*>([^<]{0,80})', html) if m not in found]
+        vers = sorted({v for v in re.findall(r'\d+\.\d+\.\d+', " ".join(found))})
+        if not vers:
+            broken.append((site_rel, "解析不到 data-ver 版本位（标记被删了？）"))
+            continue
+        label = f"{site_rel} data-ver"
+        rows.append((label, ",".join(vers), len(vers)))
+        if vers != [canon]:
             drifted.append(label)
 
     # README 正文版本声明（P0-3）：同一把尺子对齐到 canon。

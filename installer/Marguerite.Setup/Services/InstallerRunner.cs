@@ -64,11 +64,12 @@ namespace MargueriteSetup
     /// </summary>
     public sealed class InstallerRunner : IDisposable
     {
-        public const string ExpectedVersion = "0.2.17";
+        public const string ExpectedVersion = "0.2.19";
 
-        public const string ExpectedSha256 = "38a56a6a58eee6aaf7578c67d0387beabe675d8deb26f8afd3b41fbeca1130fe";
+        public const string ExpectedSha256 = "ba16614c837d2a6050d11cb947ef070f34ccf2790262559dd2f74ef1641a73b9";
 
-        // ESTIMATEDSIZE in the generated installer.nsi is 647859 KB (0.2.17 内置 Python 运行时后重打)。
+        // ESTIMATEDSIZE 只是进度条上的估算（NSIS 生成脚本里的 ESTIMATEDSIZE），
+        // 与真实安装体积允许有出入；真正的完整性校验走 ExpectedSha256。
         public const long EstimatedInstalledBytes = 647859L * 1024L;
 
         private static readonly Regex PayloadName = new Regex(
@@ -283,9 +284,9 @@ namespace MargueriteSetup
                 return Fail("payload_missing", payload == null ? null : payload.Path, null, 0);
             }
 
-            // The shell is pinned to 0.2.17. A payload with another version is
+            // The shell is pinned to ExpectedVersion. A payload with another version is
             // only allowed when it carries its own sidecar checksum, otherwise
-            // the UI could claim 0.2.17 while installing something else.
+            // the UI could claim one version while installing something else.
             if (!string.Equals(payload.Version, ExpectedVersion, StringComparison.OrdinalIgnoreCase)
                 && !File.Exists(payload.Path + ".sha256"))
             {

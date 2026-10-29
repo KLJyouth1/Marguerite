@@ -149,7 +149,9 @@ pub(crate) use imp::MemoryFence;
 // =========================================================================
 #[cfg(unix)]
 pub(crate) fn apply_rlimit_as(cmd: &mut tokio::process::Command, limit_bytes: u64) -> Result<()> {
-    use std::os::unix::process::CommandExt;
+    // 不要在这里 `use std::os::unix::process::CommandExt;`：`pre_exec` 是 tokio
+    // `Command` 的**固有方法**，那个 trait 导入在 Linux/macOS 上恒为 unused，
+    // 而 CI 的 `clippy -D warnings` 会把它升级成错误（0.2.18 的 Linux 构建里就是一条 warning）。
     // 不引入 libc 依赖：手工声明 setrlimit（POSIX 稳定符号）。
     // RLIMIT_AS 在 Linux = 9。
     #[cfg(target_os = "linux")]

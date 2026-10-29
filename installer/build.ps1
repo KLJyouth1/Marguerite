@@ -46,6 +46,29 @@ if (-not $versionMatch.Success) {
 }
 $version = $versionMatch.Groups[1].Value
 
+# ---------------------------------------------------------------------------
+# 0. 安装器 pin 守卫
+#
+# MargueriteSetup.exe 里有两个常量钉着「它只认哪一版载荷」：
+#   InstallerRunner.ExpectedVersion / ExpectedSha256
+# 2026-10-29 之前它们一直停在 0.2.17，而发版时没人改 —— 于是 0.2.19 的载荷
+# 会被安装器判成「版本不符」直接拒绝。这里在构建前做机械对账：
+# 常量与真实载荷不一致就**直接失败**，不给「打出一个装不上的安装器」的机会。
+# ---------------------------------------------------------------------------
+$runnerFile = Join-Path $projectRoot "Marguerite.Setup\Services\InstallerRunner.cs"
+if (-not (Test-Path $runnerFile)) { throw "missing InstallerRunner.cs: $runnerFile" }
+$runnerText = Get-Content $runnerFile -Raw
+$pinnedVersion = [regex]::Match($runnerText, 'ExpectedVersion\s*=\s*"([^"]+)"').Groups[1].Value
+$pinnedHash = [regex]::Match($runnerText, 'ExpectedSha256\s*=\s*"([0-9a-fA-F]{64})"').Groups[1].Value
+$payloadHash = (Get-FileHash $payloadItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($pinnedVersion -ne $version) {
+    throw "InstallerRunner.ExpectedVersion=$pinnedVersion 与载荷版本 $version 不一致；先改 InstallerRunner.cs 再构建。"
+}
+if ($pinnedHash.ToLowerInvariant() -ne $payloadHash) {
+    throw "InstallerRunner.ExpectedSha256=$pinnedHash 与载荷实际 $payloadHash 不一致；先改 InstallerRunner.cs 再构建。"
+}
+Write-Host "[BUILD] installer pin OK: $version / $payloadHash"
+
 Write-Host "[BUILD] setup + downloader ($Configuration)"
 & dotnet build $setupProject -c $Configuration
 if ($LASTEXITCODE -ne 0) { throw "setup build failed ($LASTEXITCODE)" }

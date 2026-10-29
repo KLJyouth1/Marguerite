@@ -243,7 +243,8 @@ namespace MargueriteSetup
         {
             var directory = Path.Combine(Path.GetTempPath(), "MargueriteSetup");
             Directory.CreateDirectory(directory);
-            var target = Path.Combine(directory, "promo-0.2.17.mp4");
+            // 文件名带版本号只为避免缓存复用；版本取内置 pin，不写死。
+            var target = Path.Combine(directory, "promo-" + InstallerRunner.ExpectedVersion + ".mp4");
 
             var assembly = Assembly.GetExecutingAssembly();
             using (var source = assembly.GetManifestResourceStream("MargueriteSetup.Assets.promo.mp4"))

@@ -100,7 +100,7 @@
                                Foreground="{StaticResource IceBrush}"
                                VerticalAlignment="Center"
                                Margin="14,2,0,0" />
-                    <TextBlock Text="0.2.17"
+                    <TextBlock Text="0.2.19"
                                FontFamily="{StaticResource UiFont}"
                                FontSize="10"
                                Foreground="{StaticResource DimBrush}"

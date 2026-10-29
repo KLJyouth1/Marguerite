@@ -1,6 +1,6 @@
 [package]
 name = "marguerite-core"
-version = "0.2.18"
+version = "0.2.19"
 edition = "2021"
 description = "Marguerite CLI Workbench - Core Engine"
 

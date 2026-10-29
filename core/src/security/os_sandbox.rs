@@ -85,10 +85,15 @@ pub trait OsSandbox {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::os::fd::AsFd;
 
     /// Linux Landlock 实现：以最小权限限制文件系统访问面。
     pub struct LinuxLandlock;
+
+    /// 允许**只读 + 执行**的系统与运行时路径。
+    /// 动态加载器、系统库、时区/DNS 配置、设备节点都在这些根下。
+    const READ_ONLY_ROOTS: [&str; 8] = [
+        "/usr", "/lib", "/lib64", "/etc", "/dev", "/proc", "/bin", "/opt",
+    ];
 
     impl OsSandbox for LinuxLandlock {
         fn platform(&self) -> &'static str {
@@ -96,43 +101,52 @@ mod linux {
         }
 
         fn apply(&self, workspace: &Path) -> anyhow::Result<OsSandboxVerdict> {
-            use landlock::{AccessFs, BitFlags, PathBeneath, Ruleset};
+            // landlock 0.4 的调用顺序与 0.3 不同，这里按 **lockfile 里实际锁定的 0.4.7** 写：
+            //   `handle_access` / `create` 在 `Ruleset` 上，
+            //   `add_rules` / `restrict_self` 在 `RulesetCreated` 上（后两者的 trait 必须显式引入）。
+            // 另外 0.4 的 `AccessFs::from_read` 已包含 `Execute`（见 crate 的 `fs.rs`），
+            // 0.3 时代那句 `| AccessFs::from_exec(..)` 在 0.4 里根本不存在，是本次 Linux 编译红的主因。
+            use landlock::{
+                path_beneath_rules, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr,
+                RulesetCreatedAttr, RulesetStatus,
+            };
 
-            // 保守选择已广泛支持的 ABI V1；真实内核若更高会自动兼容。
-            let read_exec =
-                AccessFs::from_read(landlock::ABI::V1) | AccessFs::from_exec(landlock::ABI::V1);
+            // 保守选择已广泛支持的 ABI V1；真实内核若更高，crate 的兼容层会自动裁剪。
+            let abi = landlock::ABI::V1;
+            let read_only = AccessFs::from_read(abi);
+            let read_write = AccessFs::from_all(abi);
 
-            let mut ruleset = Ruleset::new();
-
-            // 工作区：允许读写执行（agent 需在此落地代码）
-            let ws_fd = std::fs::File::open(workspace)
+            let ruleset = Ruleset::default().handle_access(read_write)?.create()?;
+            // 工作区：读写 + 执行（agent 需在此落地代码并运行）。
+            // 这里**不用** `path_beneath_rules`：它会把打不开的路径静默跳过，
+            // 而「工作区规则缺失」等于把整个进程锁在自己的工作区之外 —— 必须显式报错。
+            let ws_fd = PathFd::new(workspace)
                 .map_err(|e| anyhow::anyhow!("打开工作区失败: {e}"))?;
-            ruleset.add_rule(PathBeneath::new(ws_fd.as_fd(), read_exec))?;
-
-            // 系统与运行时路径：仅允许读/执行，禁止越界写
-            for sys in [
-                "/usr", "/lib", "/lib64", "/etc", "/dev", "/proc", "/bin", "/opt",
-            ] {
-                if let Ok(f) = std::fs::File::open(sys) {
-                    let _ = ruleset.add_rule(PathBeneath::new(f.as_fd(), read_exec));
-                }
-            }
-
-            // restrict_self 可能因内核 ABI 低于请求而返回 Partial
+            let ruleset = ruleset.add_rule(PathBeneath::new(ws_fd, read_write))?;
+            // 系统 / 运行时路径：只读 + 执行，禁止越界写。
+            // 这一组**允许**静默跳过：不同发行版的 /lib64、/opt 未必存在。
+            let ruleset = ruleset.add_rules(path_beneath_rules(READ_ONLY_ROOTS, read_only))?;
             let status = ruleset.restrict_self()?;
-            let level = if status.ruleset_is_empty() {
-                // 没有任何规则生效（内核不支持 Landlock）→ 视为 Unsupported
-                return Ok(OsSandboxVerdict::unsupported(
-                    "内核不支持 Landlock（ruleset 为空）；回退命令级 sandbox/",
-                ));
-            } else if status.is_full() {
-                IsolationLevel::Full
-            } else {
-                IsolationLevel::Partial
+
+            // fail-closed：只有内核真的全量强制了才允许报 Full（IsolationLevel 的文档承诺）。
+            let enforced = &status.ruleset;
+            let level = match enforced {
+                RulesetStatus::FullyEnforced => IsolationLevel::Full,
+                RulesetStatus::PartiallyEnforced => IsolationLevel::Partial,
+                RulesetStatus::NotEnforced => {
+                    return Ok(OsSandboxVerdict::unsupported(format!(
+                        "内核不支持 Landlock（{enforced:?}）；回退命令级 sandbox/"
+                    )))
+                }
             };
             Ok(OsSandboxVerdict {
                 level,
-                detail: format!("Landlock 已施加（{:?}）", status),
+                // all_threads=false 时 Landlock 只约束调用线程 —— 如实写进 detail，
+                // 避免上层把「单线程受限」误读成「整个进程已隔离」。
+                detail: format!(
+                    "Landlock 已施加（{enforced:?}，abi={abi:?}，all_threads={}）",
+                    status.all_threads
+                ),
             })
         }
     }
@@ -235,21 +249,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_build_reports_unsupported_honestly() {
-        // 在 Windows 构建上，apply_for_current_platform 必须诚实返回 Unsupported，
+    fn unsupported_platforms_report_unsupported_honestly() {
+        if kernel_isolation_available() {
+            // Linux/macOS 上这里**真的**能建立内核隔离，但本用例刻意不在进程内调 apply：
+            // Landlock 的 `restrict_self()` 与 Seatbelt 的 `sandbox_init()` 都是**不可逆**的，
+            // 一旦在 libtest 的某个工作线程里生效，之后复用到该线程的用例（写 /tmp 的那些）
+            // 会莫名其妙 EACCES —— 一个「测试自己把测试环境锁死」的经典陷阱。
+            // 因此支持平台只断言实现存在且平台标识非空，真正的隔离效果必须由子进程验证。
+            let sb = platform_sandbox().expect("支持内核隔离的平台必须返回实现");
+            assert!(!sb.platform().is_empty());
+            return;
+        }
+
+        // Windows 构建：apply_for_current_platform 必须诚实返回 Unsupported，
         // 绝不伪造 Full（fail-closed 伦理）。
         let v = apply_for_current_platform(Path::new("."));
-        if !kernel_isolation_available() {
-            assert_eq!(v.level, IsolationLevel::Unsupported);
-            assert!(v.detail.contains("命令级"));
-            assert!(!v.has_kernel_isolation());
-        } else {
-            // 在 Linux/macOS CI 上至少不应 panic，且 level 不为空。
-            assert!(matches!(
-                v.level,
-                IsolationLevel::Full | IsolationLevel::Partial | IsolationLevel::Unsupported
-            ));
-        }
+        assert_eq!(v.level, IsolationLevel::Unsupported);
+        assert!(v.detail.contains("命令级"));
+        assert!(!v.has_kernel_isolation());
     }
 
     #[test]

@@ -421,7 +421,7 @@ scripts/     verify.sh 与打包流水线
 Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 
 - 四个前端的版本号现已全部钉到 `core/Cargo.toml`，由 `scripts/check-version-sync.py`
-  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.18`）。
+  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.19`）。
 - 桌面端需要 Web 控制台产物在它旁边。请从安装包或从仓库目录运行 ——
   单独拷一个 `.exe` 出去，它没有控制台可托管。这种情况**不再静默失败**：
   网关对 `/control/` 返回 `503` 加一张自包含诊断页（列出它探测过的每一条路径），
@@ -431,7 +431,7 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 - `workbench/` 是一个**独立子项目**，不是 Rust 引擎的第五个前端：它有自己的 Python 后端
   （`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`）、自己由 FastAPI 在 `:8011`
   同源托管的 React SPA、自己的打包流水线，以及**自己的版本线**
-  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.18` 相互独立）。它经 `core_bridge`
+  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.19` 相互独立）。它经 `core_bridge`
   桥接核心 store，思路与 `pyengine/` 一致；Rust 二进制并不 import 它。
   它的 71 个离线用例与版本门禁**此前没有任何门禁跑过**，而它是会随仓库发布的 ——
   现在由 `verify.sh --workbench` 覆盖。
