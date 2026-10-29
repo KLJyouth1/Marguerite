@@ -186,55 +186,45 @@ body > .settings-overlay .settings-modal .settings-rail__item:not(:disabled):act
     color var(--dur-fast);
 }
 
-/* New task CTA: the one orange strike in the sidebar. The filled control uses
-   accent-secondary (Marguerite's #F97316) as the identity — the rail keeps
-   quiet otherwise. Shadow is 50% opacity on hover (subtle elevation, not
-   glare). */
+/* New task CTA.
+   【2026-10-29 · P1-6】原实现用 accent-secondary（陶土橙）作填充，是黑白灰玻璃
+   体系里唯一的强彩色块，且与右下角错误提示撞色——用户分不清「主操作」和
+   「出错了」。改用主题的 `--accent` / `--accent-foreground` 配色对（与
+   `.btn--primary` 同一套，12 套主题都已做对比度校验），红色只留给错误状态。
+   阴影同样换到 accent，避免残留橙色光晕。 */
 .sidebar-new-session {
-  background: var(--accent-secondary);
-  border-color: var(--accent-secondary);
+  background: var(--accent);
+  border-color: var(--accent);
   color: var(--accent-foreground);
   font-weight: 600;
   letter-spacing: 0.01em;
   box-shadow:
     0 1px 2px color-mix(in srgb, var(--brand-ink) 4%, transparent),
-    0 6px 20px -10px color-mix(in srgb, var(--accent-secondary) 70%, transparent);
+    0 6px 20px -10px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 .sidebar-new-session:hover,
 .sidebar-new-session:focus-visible {
-  background: var(--accent-secondary-fill, var(--accent-secondary-hover));
-  border-color: var(--accent-secondary-fill, var(--accent-secondary-hover));
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
   box-shadow:
     0 2px 4px color-mix(in srgb, var(--brand-ink) 5.5%, transparent),
-    0 10px 26px -10px color-mix(in srgb, var(--accent-secondary) 85%, transparent);
+    0 10px 26px -10px color-mix(in srgb, var(--accent) 85%, transparent);
   outline: 0;
 }
 .sidebar-new-session:not(:disabled):active {
-  background: var(--accent-secondary-deep);
-  border-color: var(--accent-secondary-deep);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
   box-shadow:
     0 1px 2px color-mix(in srgb, var(--brand-ink) 4%, transparent),
-    0 4px 12px -6px color-mix(in srgb, var(--accent-secondary-deep) 85%, transparent);
+    0 4px 12px -6px color-mix(in srgb, var(--accent) 85%, transparent);
 }
 .sidebar-new-session .sidebar-kbd {
-  background: color-mix(in srgb, var(--accent-foreground) 18%, var(--accent-secondary));
-  border: 1px solid color-mix(in srgb, var(--accent-foreground) 22%, var(--accent-secondary));
+  background: color-mix(in srgb, var(--accent-foreground) 18%, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--accent-foreground) 22%, var(--accent));
   color: var(--accent-foreground);
 }
-@media (prefers-color-scheme: dark) {
-  [data-theme="auto"] .sidebar-new-session { color: var(--brand-ink); }
-  [data-theme="auto"] .sidebar-new-session .sidebar-kbd {
-    background: color-mix(in srgb, var(--brand-ink) 14%, var(--accent-secondary));
-    border-color: color-mix(in srgb, var(--brand-ink) 22%, var(--accent-secondary));
-    color: var(--brand-ink);
-  }
-}
-[data-theme="dark"] .sidebar-new-session { color: var(--brand-ink); }
-[data-theme="dark"] .sidebar-new-session .sidebar-kbd {
-  background: color-mix(in srgb, var(--brand-ink) 14%, var(--accent-secondary));
-  border-color: color-mix(in srgb, var(--brand-ink) 22%, var(--accent-secondary));
-  color: var(--brand-ink);
-}
+/* 深色主题不再单独改文字色：`--accent-foreground` 本来就是逐主题定义的
+   （原实现把文字改成 brand-ink 是为了压在橙色底上，换成 accent 后沿用主题对即可）。 */
 
 .sidebar-cmd-btn:hover,
 .sidebar-cmd-btn.is-active {

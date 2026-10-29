@@ -12,7 +12,7 @@
   <RouterLink
     v-if="visible"
     class="model-indicator"
-    :to="{ path: '/control/settings', query: { section: 'provider' } }"
+    :to="{ path: '/settings/provider' }"
     :title="tooltip"
     :aria-label="tooltip"
   >

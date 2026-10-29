@@ -161,7 +161,10 @@ describe('HostExitCard — visibility tracks the CURRENT sidecar, not a stale re
     )
 
     expect(card.el.querySelector('.host-exit')).not.toBeNull()
-    expect(card.el.querySelector('.error-state__message')?.textContent).toContain('exit')
+    // 细横幅只放人话标题；退出码/存活时长收在「详情」里（旧实现把它们塞进
+    // ErrorState 大卡片，真机上 400×180 常驻右下角遮挡主内容）。
+    expect(card.el.querySelector('.host-exit__text')?.textContent).toContain('helper engine')
+    expect(card.el.querySelector('.host-exit__panel')).toBeNull()
   })
 
   it('stays hidden when nothing has exited (normal, healthy state)', async () => {
@@ -172,6 +175,43 @@ describe('HostExitCard — visibility tracks the CURRENT sidecar, not a stale re
 
     expect(card.state().hasEvidence.value).toBe(false)
     expect(card.el.querySelector('.host-exit')).toBeNull()
+  })
+
+  it('closes on demand and re-arms only after the sidecar comes back', async () => {
+    const card = await mountCard()
+    await card.setPayload(
+      payload({
+        exited: true,
+        source: 'memory',
+        evidence: { code: 1, uptime_ms: 2000, stderr_tail: 'boom' },
+        sidecar_present: false,
+      }),
+    )
+
+    // 详情默认折叠：一屏只给一句人话，诊断信息按需展开。
+    expect(card.el.querySelector('.host-exit__panel')).toBeNull()
+    card.el.querySelector<HTMLButtonElement>('[data-testid="host-exit-details"]')?.click()
+    await nextTick()
+    expect(card.el.querySelector('.host-exit__panel')?.textContent).toContain('boom')
+
+    // 用户关闭后本次运行不再打扰。
+    card.el.querySelector<HTMLButtonElement>('[data-testid="host-exit-dismiss"]')?.click()
+    await nextTick()
+    expect(card.el.querySelector('.host-exit')).toBeNull()
+
+    // 侧车恢复 → 关闭状态复位（下一次真退出仍要能被看见）。
+    await card.setPayload(
+      payload({ exited: true, source: 'memory', evidence: null, sidecar_present: true }),
+    )
+    await card.setPayload(
+      payload({
+        exited: true,
+        source: 'memory',
+        evidence: { code: 2, uptime_ms: 3000, stderr_tail: '' },
+        sidecar_present: false,
+      }),
+    )
+    expect(card.el.querySelector('.host-exit')).not.toBeNull()
   })
 })
 
@@ -204,7 +244,7 @@ describe('HostExitCard — retry actually restarts the host process', () => {
       }),
     )
 
-    const retry = card.el.querySelector<HTMLButtonElement>('.error-state__retry')
+    const retry = card.el.querySelector<HTMLButtonElement>('[data-testid="host-exit-restart"]')
     expect(retry).not.toBeNull()
     retry?.click()
     // 让 restart() 里的 await 链跑完

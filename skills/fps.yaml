@@ -52,3 +52,11 @@ prompt_template: |
   {{/files}}
 
   请说明：1) 目标动作拆解（每步对应的 system_control action 与参数）；2) 预计耗时；3) 执行边界确认。
+
+# 供给面声明（2026-10-29 补）：安装前要展示「它要什么」。
+# 由 scripts/stamp-skill-requires.mjs 从上面的 tools 推导，规则见该脚本头部注释。
+requires:
+  network: false
+  fs_write: true
+  credentials: false
+  shell: true

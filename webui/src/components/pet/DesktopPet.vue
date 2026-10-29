@@ -215,6 +215,13 @@ const POSITION_KEY = 'pet.desktop.position'
 // 与 PetView 大舞台的造型一致，仍不遮挡输入区。
 const PET_W = 168
 const PET_H = 186
+// P2-E：桌宠不得压住底部状态栏（24px 状态栏 + 安全间距）。
+// 拖拽 / 散步 / 缺省落点统一预留 80px 底边，避免盖住「错误输出(stderr)」标签。
+const PET_BOTTOM_RESERVE = 80
+// 右侧 220px 是「跳到最新」胶囊（`bottom: calc(100% + 8px); right: 12px`）与发送按钮
+// 的活动区：缺省落点必须让开，否则桌宠会拦住这两个高频点击目标（e2e 实测
+// floating-composer 因此超时）。用户仍可手动拖回去。
+const PET_RIGHT_RESERVE = 220
 
 // 缺省开启：只有用户**显式关过**（写入 'false'）才不显示。
 // 旧实现把「从未设置」当成关闭 —— 新用户在任何页面都看不到桌宠，
@@ -326,10 +333,16 @@ function readPosition(): Point {
     const raw = localStorage.getItem(POSITION_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Point>
-      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return { x: parsed.x, y: parsed.y }
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+        // 旧版本可能把桌宠落在状态栏上方（y 越界），恢复时按新边界重新夹紧
+        return {
+          x: clamp(parsed.x, 8, Math.max(8, window.innerWidth - PET_W - 8)),
+          y: clamp(parsed.y, 8, Math.max(8, window.innerHeight - PET_H - PET_BOTTOM_RESERVE)),
+        }
+      }
     }
   } catch { /* fall through */ }
-  return { x: window.innerWidth - PET_W - 20, y: window.innerHeight - PET_H - 24 }
+  return { x: window.innerWidth - PET_W - PET_RIGHT_RESERVE, y: window.innerHeight - PET_H - PET_BOTTOM_RESERVE }
 }
 
 const petStyle = computed(() => ({
@@ -365,7 +378,7 @@ function petBounds() {
     minX: 8,
     minY: 8,
     maxX: Math.max(8, window.innerWidth - PET_W - 8),
-    maxY: Math.max(8, window.innerHeight - PET_H - 8),
+    maxY: Math.max(8, window.innerHeight - PET_H - PET_BOTTOM_RESERVE),
   }
 }
 
@@ -580,8 +593,10 @@ function triggerAction(b: Behavior) {
 
 // ── 自主行为 ──
 function walkToRandom() {
-  const targetX = clamp(pos.value.x + (Math.random() - 0.5) * 300, 8, window.innerWidth - PET_W - 8)
-  const targetY = clamp(pos.value.y + (Math.random() - 0.3) * 100, 8, window.innerHeight - PET_H - 8)
+  // 自主散步不进入右侧控制区（跳到最新/发送按钮），否则用户点按钮时会被桌宠拦住。
+  const wanderMaxX = Math.max(8, window.innerWidth - PET_W - PET_RIGHT_RESERVE)
+  const targetX = clamp(pos.value.x + (Math.random() - 0.5) * 300, 8, wanderMaxX)
+  const targetY = clamp(pos.value.y + (Math.random() - 0.3) * 100, 8, window.innerHeight - PET_H - PET_BOTTOM_RESERVE)
   flipped.value = targetX < pos.value.x
   behavior.value = 'walk'
   mood.value = 'normal'

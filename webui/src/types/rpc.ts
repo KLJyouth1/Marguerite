@@ -122,6 +122,8 @@ export interface RawSessionItem {
   parent?: Record<string, unknown>
   forked_from_parent?: boolean
   forkedFromParent?: boolean
+  parent_session_key?: string
+  parentSessionKey?: string
   cron?: RawSessionCron
   /** 会话级思考强度（'off'|'normal'|'deep'|'max'）；null/缺省 = 继承全局模型配置 */
   reasoningEffort?: string | null

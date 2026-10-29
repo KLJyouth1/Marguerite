@@ -245,6 +245,91 @@ impl UsageLedger {
         }))
     }
 
+    /// `usage.status` 的 `sessions` 载荷：**按会话聚合的行**，不是计数。
+    ///
+    /// # 为什么必须由 Rust 提供（真机缺陷，2026-10-29）
+    /// 前端刷新「本会话用量」只有一条路径：`usage.status` →
+    /// `sessions.find(row.session === sessionKey)` → 读 token 合计与 `contextStatus`
+    /// （`useChatUsageWidget.ts:173-198`）。侧车在这一位发的是**数组**
+    /// （`rpc_usage.py:710` 的 `"sessions": rows`），Rust 发的是**数字**，于是纯 Rust
+    /// 部署（安装包降级形态，AGENTS.md R61）里 `5.find(…)` 抛 TypeError、被那个
+    /// 空 `catch {}` 静默吞掉：页脚的台账 token 从不回填，压力芯片永不出现。
+    /// 计数没有丢 —— 同一个数继续由 `total_sessions` / `totalSessions` 承载。
+    ///
+    /// 与侧车的两处**如实**差异（是边界，不是漏抄）：
+    /// - 没有真实账单：单价取 `price_for` 估算表，与 [`Self::query_contract`] 同源，
+    ///   所以 `costSource` 写 `Marguerite_estimate`，绝不冒充 `provider_billed`；
+    /// - `usage_events` 只有 `created_ms`：所以只给 `created_at` / `updated_at`
+    ///   两个真值，不凭空造 `started_at` / `ended_at`。
+    fn session_rows(
+        &self,
+        session: Option<&str>,
+        ladder: [f64; 3],
+    ) -> rusqlite::Result<Vec<Value>> {
+        const SELECT: &str = "SELECT session, model, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens),
+                                     SUM(total_tokens), SUM(cache_read_tokens), SUM(cache_creation_tokens),
+                                     MIN(created_ms), MAX(created_ms)";
+        // `session <> ''` 是刻意的：未绑定会话的网关级事件落在空串上（AGENTS.md R64）。
+        // 它没有会话键，渲染成一行等于凭空造出一个「会话」—— 前端按键取不到它，
+        // 却会在用量页多出一行幽灵。总数口径不变（`total_sessions` 仍是 DISTINCT 计数）。
+        let from = match session {
+            Some(_) => " FROM usage_events WHERE session = ?1 AND session <> ''
+                        GROUP BY session, model ORDER BY session, model",
+            None => " FROM usage_events WHERE session <> ''
+                     GROUP BY session, model ORDER BY session, model",
+        };
+        // 聚合结束后**先释放连接锁**再折算 contextStatus：后者要拿上下文台账锁，
+        // 不在持有一把锁的时候去碰另一个子系统。
+        let mut grouped: std::collections::BTreeMap<String, SessionAgg> =
+            std::collections::BTreeMap::new();
+        {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let sql = format!("{SELECT}{from}");
+            let mut stmt = conn.prepare(&sql)?;
+            let mut fold = |r: &rusqlite::Row<'_>| -> rusqlite::Result<()> {
+                let key: String = r.get(0)?;
+                let model: String = r.get(1)?;
+                let calls: i64 = r.get(2)?;
+                let input: i64 = r.get(3)?;
+                let output: i64 = r.get(4)?;
+                let total: i64 = r.get(5)?;
+                let cache_read: i64 = r.get(6)?;
+                let cache_write: i64 = r.get(7)?;
+                let created: i64 = r.get(8)?;
+                let agg = grouped.entry(key).or_default();
+                agg.calls += calls;
+                agg.input += input;
+                agg.output += output;
+                agg.total += total;
+                agg.cache_read += cache_read;
+                agg.cache_write += cache_write;
+                agg.first_ms = Some(agg.first_ms.map_or(created, |m| m.min(created)));
+                agg.last_ms = Some(agg.last_ms.map_or(created, |m| m.max(created)));
+                // 与 `UsageTotalsAcc::add` / `task_cost_view` 同口径（同一份单价表），
+                // 否则同一个会话在三处账单上对不上。
+                let (p_in, p_out) = price_for(&model);
+                let usd = input as f64 / 1_000_000.0 * p_in + output as f64 / 1_000_000.0 * p_out;
+                agg.cost_nanos += (usd * 1_000_000_000.0).round() as i64;
+                agg.per_model
+                    .entry(model)
+                    .and_modify(|t| *t += total)
+                    .or_insert(total);
+                Ok(())
+            };
+            if let Some(s) = session {
+                let rows = stmt.query_map(rusqlite::params![s], &mut fold)?;
+                rows.collect::<rusqlite::Result<()>>()?;
+            } else {
+                let rows = stmt.query_map([], &mut fold)?;
+                rows.collect::<rusqlite::Result<()>>()?;
+            }
+        }
+        Ok(grouped
+            .into_iter()
+            .map(|(key, agg)| session_row_json(key, agg, ladder))
+            .collect())
+    }
+
     /// 最近 `limit` 条调用明细（倒序）。
     ///
     /// 生产路径已改走 [`Self::query_contract`]（四视图），这里只服务单测
@@ -981,9 +1066,17 @@ pub fn record_attributed(
 }
 
 /// `usage.status` 契约：全局（或按 `sessionKey` 过滤）聚合。
+///
+/// `sessions` 在这一层被换成**按会话的行**（[`Ledger::session_rows`]），而
+/// [`Ledger::status`] 仍返回计数 —— 刻意留这道缝：`Ledger::status` 是内部聚合，
+/// 本函数才是对外契约（侧车同名方法在这一位发的就是数组，见 `rpc_usage.py:710`）。
+/// 计数没有丢：`total_sessions` / `totalSessions` 继续承载同一个数。
 pub fn status(params: &Value) -> Value {
     let session = params.get("sessionKey").and_then(Value::as_str);
-    match LEDGER.get() {
+    // 阶梯取**一次**再往下传：每一行都要一个 contextStatus，而 Config::load() 无缓存
+    // （且缺文件时会写盘）。放在逐行路径里 = 每个会话一次读盘 + 一次可能的写入。
+    let ladder = crate::context::pressure::configured_ladder();
+    let mut body = match LEDGER.get() {
         None => json!({
             "total_tokens": 0, "totalTokens": 0,
             "total_input_tokens": 0, "totalInputTokens": 0,
@@ -1001,7 +1094,35 @@ pub fn status(params: &Value) -> Value {
                 "sessions": 0, "runs": 0, "models": [], "since": null,
             })
         }),
+    };
+    // 无台账 / 查询失败时上面已经是全零，这里同样发**空数组**而不是留着 0 ——
+    // 留着 0 就等于把「前端取不到行」的老缺陷原样封进契约里。
+    let mut rows = match LEDGER.get() {
+        Some(ledger) => ledger.session_rows(session, ladder).unwrap_or_else(|e| {
+            tracing::warn!(err = %e, "用量台账按会话聚合失败");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    // 「只有上下文、还没有用量事件」的会话也要有行，否则芯片照样不亮：
+    // 行来自 `usage_events`，而压力来自上下文台账 —— 两个数据源本就不是一回事
+    // （离线回显降级、以及 usage::record 尚未接通的会话都落在这一类里）。
+    // 只在**上下文台账真有话说**时补行：未知/拼错的会话键不该得到一行零，
+    // 侧车对不存在的会话就是不给行。
+    if let Some(key) = session {
+        let covered = rows.iter().any(|r| r["session"].as_str() == Some(key));
+        if !covered && crate::context::pressure::context_status_payload(key, ladder).is_some() {
+            rows.push(session_row_json(
+                key.to_string(),
+                SessionAgg::default(),
+                ladder,
+            ));
+        }
     }
+    if let Some(map) = body.as_object_mut() {
+        map.insert("sessions".into(), Value::Array(rows));
+    }
+    body
 }
 
 /// 最近 N 条明细（倒序）。独立函数是因为 `query_contract` 已持有连接锁，不能重入。
@@ -1041,6 +1162,75 @@ struct UsageAggRow {
     cache_write: i64,
     first_ms: i64,
     last_ms: i64,
+}
+
+/// `usage.status` 的按会话聚合中间态（一个会话在多个模型上的用量折叠成一行）。
+///
+/// 与 [`UsageTotalsAcc`] 分开放是刻意的：后者服务 `usage.query` 的四视图、
+/// 字段与前端 `normalizeUsageTotals` 一一对应；这一份只服务 `sessions` 行。
+#[derive(Default)]
+struct SessionAgg {
+    calls: i64,
+    input: i64,
+    output: i64,
+    total: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost_nanos: i64,
+    first_ms: Option<i64>,
+    last_ms: Option<i64>,
+    /// 该会话按模型分的 token（用于回答「这一会话主要在跑哪个模型」）
+    per_model: std::collections::BTreeMap<String, i64>,
+}
+
+/// 折叠态 → `usage.status.sessions` 的一行。
+///
+/// 单一构造点：`session_rows`（有用量事件）与 `status` 的「只有上下文、还没有
+/// 用量事件」补行，必须走同一个函数 —— 两处各写一个字面量，就会出现
+/// 「一种形状在前端读得到、另一种读不到」这类只在部分会话上复现的缺陷。
+fn session_row_json(key: String, agg: SessionAgg, ladder: [f64; 3]) -> Value {
+    let context_status =
+        crate::context::pressure::context_status_payload(&key, ladder).unwrap_or(Value::Null);
+    // 「这一会话主要在跑哪个模型」：按 token 取最大项，平票取字典序靠前
+    // （BTreeMap 已保序，`then_with` 反向比较才留得下首个）。空表兜底空串。
+    let model = agg
+        .per_model
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(m, _)| m.clone())
+        .unwrap_or_default();
+    let total = if agg.total > 0 { agg.total } else { agg.input + agg.output };
+    // 侧车把美元金额 round 到 6 位；账单为 0 时也给 0 而不是 null —— 前端
+    // `Number(current.cost_usd || 0)` 之后会把 null 与缺失并成同一条分支。
+    let cost = ((agg.cost_nanos as f64) / 1_000_000_000.0 * 1e6).round() / 1e6;
+    json!({
+        "session": key,
+        "sessionKey": key,
+        "key": key,
+        "model": model,
+        "inputTokens": agg.input,
+        "outputTokens": agg.output,
+        "totalTokens": total,
+        "cacheReadTokens": agg.cache_read,
+        "cacheWriteTokens": agg.cache_write,
+        "costUsd": cost,
+        "costSource": "Marguerite_estimate",
+        "createdAt": agg.first_ms,
+        "updatedAt": agg.last_ms,
+        "input_tokens": agg.input,
+        "output_tokens": agg.output,
+        "total_tokens": total,
+        "cache_read_tokens": agg.cache_read,
+        "cache_write_tokens": agg.cache_write,
+        "cost_usd": cost,
+        "cost_source": "Marguerite_estimate",
+        "created_at": agg.first_ms,
+        "updated_at": agg.last_ms,
+        // 键必须**恒在**（无数据时为 null）：侧车就是这么发的，而芯片读的是
+        // 「这一位有没有内容」—— 缺键与 null 在 `?? null` 之下是两种形状。
+        "contextStatus": context_status.clone(),
+        "context_status": context_status,
+    })
 }
 
 /// 累加器：把若干 [`UsageAggRow`] 折叠成前端 `normalizeUsageTotals` 认得的形状。
@@ -1406,6 +1596,102 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }
+    }
+
+    /// 打开进程级台账（测试构建下固定落在 `%TEMP%\marguerite-usage-test-<pid>.db`，
+    /// 永不打开真实用户库 —— 见 [`ledger_path`]）。返回其引用好按会话记账。
+    fn live_ledger() -> Arc<UsageLedger> {
+        init();
+        LEDGER.get().expect("usage::init 必须点亮进程级台账").clone()
+    }
+
+    /// 压力芯片的唯一数据路径（`useChatUsageWidget.ts:173-198`）：
+    /// `usage.status` → `sessions.find(row.session === key)` → `contextStatus`。
+    /// 这条测试钉的是**位置**，不是载荷 —— 载荷由 `context::pressure` 的跨实现守卫
+    /// 钉住。位置错了，键集全对也照样是黑的（计划初稿就把 `contextStatus` 附加在
+    /// 顶层，而顶层没有任何消费者：那是一条会自证的假绿）。
+    #[test]
+    fn usage_status_sessions_are_rows_the_chip_can_actually_find() {
+        let ledger = live_ledger();
+        let session = format!("mgt-t1-{}", uuid::Uuid::new_v4());
+        let _ = ledger.record(&session, "deepseek-chat", &usage(1_000, 200));
+        crate::context::session::set_budget(&session, 10_000);
+        crate::context::session::record_turn(&session, "user", &"话".repeat(400));
+
+        let v = status(&json!({ "sessionKey": session }));
+        let rows = v["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("sessions 必须是行数组（前端只会 .find()）：{v}"));
+        let row = rows
+            .iter()
+            .find(|r| r["session"].as_str() == Some(session.as_str()))
+            .unwrap_or_else(|| panic!("按 sessionKey 查必须带回这一行：{v}"));
+        assert_eq!(rows.len(), 1, "带 sessionKey 时只该有这一会话的行");
+        // 两种拼写的会话键都在：前端按 `s.session || s.sessionKey || s.key` 匹配
+        assert_eq!(row["sessionKey"], session.as_str());
+        assert_eq!(row["key"], session.as_str());
+        assert_eq!(row["inputTokens"], 1_000);
+        assert_eq!(row["output_tokens"], 200);
+        assert_eq!(row["totalTokens"], 1_200);
+
+        let cs = &row["contextStatus"];
+        assert!(cs.is_object(), "行里必须带 contextStatus，芯片才亮：{row}");
+        assert_eq!(
+            cs["contextWindowTokens"].as_u64(),
+            Some(10_000),
+            "窗口必须用台账里的**真值**，不是反推的预算（变异实测：10K 窗口会退到 32000，\
+             即 `clamp(32_000, …)` 的下限 —— 压力被低报到 2%）：{cs}"
+        );
+        assert_eq!(cs["windowSource"], "config");
+        assert!(cs["contextTokens"].as_u64().unwrap() > 0);
+        // 计数没丢：同一个数仍由 total_sessions / totalSessions 承载
+        assert_eq!(v["total_sessions"].as_i64(), Some(1));
+        assert_eq!(v["totalSessions"].as_i64(), Some(1));
+
+        // 否定面：从未被任何台账认识的会话，不该凭空得到一行零（侧车也是不给行）
+        let ghost = format!("mgt-t1-ghost-{}", uuid::Uuid::new_v4());
+        let g = status(&json!({ "sessionKey": ghost }));
+        assert!(
+            g["sessions"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "未知会话键不该有行：{g}"
+        );
+    }
+
+    /// 「只有上下文、还没有用量事件」的会话（离线回显降级、或 `usage::record`
+    /// 尚未接通）也必须有一行 —— 否则芯片在这类会话上仍然是黑的，
+    /// 而这恰是它最该亮的时刻（压力真实存在，只是账单还没有）。
+    #[test]
+    fn usage_status_backfills_a_row_for_pressure_without_usage_events() {
+        let _ = live_ledger();
+        let session = format!("mgt-t1-press-{}", uuid::Uuid::new_v4());
+        crate::context::session::set_budget(&session, 8_000);
+        crate::context::session::record_turn(&session, "user", &"话".repeat(600));
+        // 刻意**不**记账用量：这一会话在 usage_events 里一行都没有。
+        let v = status(&json!({ "sessionKey": session }));
+        let rows = v["sessions"].as_array().expect("sessions 数组");
+        assert_eq!(rows.len(), 1, "压力会话必须补出一行：{v}");
+        assert_eq!(rows[0]["totalTokens"], 0, "补行的用量如实为 0，不编数字");
+        assert!(
+            rows[0]["contextStatus"].is_object(),
+            "补行也必须带压力载荷：{}",
+            rows[0]
+        );
+    }
+
+    /// 空会话桶（AGENTS.md R64：网关级事件落在 `session=''`）不得渲染成一行 ——
+    /// 它没有会话键，前端永远取不到，却会在用量页多出一行幽灵。
+    #[test]
+    fn usage_status_rows_never_include_the_empty_session_bucket() {
+        let ledger = live_ledger();
+        let _ = ledger.record("", "deepseek-chat", &usage(500, 50));
+        let v = status(&json!({}));
+        let rows = v["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("全局查询的 sessions 也得是数组：{v}"));
+        assert!(
+            rows.iter().all(|r| r["session"].as_str() != Some("")),
+            "sessions 里不该有空会话行：{rows:?}"
+        );
     }
 
     /// 预算「已用」必须由**真实台账事件**算出，且计量起点 = 预算设定时刻

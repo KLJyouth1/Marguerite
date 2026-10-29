@@ -1,16 +1,26 @@
 <template>
-  <div class="control-stage cockpit-stage">
+  <div class="control-stage cockpit-stage" :class="{ 'cockpit-stage--focus': focusMode }">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
-        <h1 class="control-stage__title">浏览器驾驶舱</h1>
-        <p class="control-stage__subtitle">零依赖 CDP 操控：导航 / JS 控制台 / 截图点击 / 无障碍树 / Resource Timing 网络面板（browser.* RPC）</p>
+        <h1 class="control-stage__title">{{ t('cockpit.title') }}</h1>
+        <p class="control-stage__subtitle">{{ t('cockpit.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
+        <!-- 与 TerminalView 同一款专注模式：工作面打开后，标题头是死垂直空间 -->
+        <button
+          class="btn btn--ghost"
+          :aria-pressed="focusMode"
+          :title="focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode')"
+          @click="focusMode = !focusMode"
+        >
+          <Icon :name="focusMode ? 'collapse' : 'expand'" :size="16" />
+          <span>{{ focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode') }}</span>
+        </button>
         <button class="btn btn--ghost" :disabled="busy" @click="loadStatus">
-          <Icon name="refresh" :size="16" /><span>检测</span>
+          <Icon name="refresh" :size="16" /><span>{{ t('cockpit.detect') }}</span>
         </button>
         <button v-if="sessionId" class="btn btn--ghost" :disabled="busy" @click="closeSession">
-          <Icon name="x" :size="16" /><span>关闭会话</span>
+          <Icon name="x" :size="16" /><span>{{ t('cockpit.closeSession') }}</span>
         </button>
       </div>
     </header>
@@ -21,36 +31,36 @@
     <template v-if="status && status.available">
       <section class="cockpit-bar">
         <input v-model="url" class="cockpit-url" placeholder="https://example.com" @keyup.enter="openPage" />
-        <button class="btn btn--primary" :disabled="busy || !sessionId" @click="navigate">导航</button>
-        <button class="btn btn--ghost" :disabled="busy" @click="openPage">打开</button>
-        <span class="cockpit-meta" v-if="title">标题：{{ title }}</span>
+        <button class="btn btn--primary" :disabled="busy || !sessionId" @click="navigate">{{ t('cockpit.navigate') }}</button>
+        <button class="btn btn--ghost" :disabled="busy" @click="openPage">{{ t('cockpit.open') }}</button>
+        <span class="cockpit-meta" v-if="title">{{ t('cockpit.pageTitle', { title }) }}</span>
       </section>
 
       <div class="cockpit-layout">
         <section class="cockpit-view">
-          <div v-if="!sessionId" class="cockpit-empty">输入 URL 打开页面（真实 Chromium CDP，需本机 Chrome/Edge）</div>
+          <div v-if="!sessionId" class="cockpit-empty">{{ t('cockpit.emptyCdp') }}</div>
           <div v-else class="cockpit-shot-wrap" @click="onShotClick">
-            <img v-if="screenshot" :src="screenshot" class="cockpit-shot" alt="页面截图" />
-            <div v-else class="cockpit-empty">点击「刷新截图」查看页面</div>
-            <div v-if="screenshot" class="cockpit-shot-overlay">点击截图任意位置 = 真实鼠标点击</div>
+            <img v-if="screenshot" :src="screenshot" class="cockpit-shot" alt="screenshot" />
+            <div v-else class="cockpit-empty">{{ t('cockpit.emptyShot') }}</div>
+            <div v-if="screenshot" class="cockpit-shot-overlay">{{ t('cockpit.shotOverlay') }}</div>
           </div>
           <div class="cockpit-actions">
-            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="refreshShot">刷新截图</button>
-            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="dumpDom">DOM 快照</button>
+            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="refreshShot">{{ t('cockpit.refreshShot') }}</button>
+            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="dumpDom">{{ t('cockpit.dumpDom') }}</button>
           </div>
           <pre v-if="domDump" class="cockpit-dom">{{ domDump }}</pre>
         </section>
 
         <aside class="cockpit-side">
           <section class="cockpit-panel">
-            <div class="cockpit-panel__title">JS 控制台（evaluate）</div>
+            <div class="cockpit-panel__title">{{ t('cockpit.consoleTitle') }}</div>
             <textarea v-model="expression" class="cockpit-console" spellcheck="false" placeholder="document.title"></textarea>
-            <button class="btn btn--sm btn--primary" :disabled="busy || !sessionId" @click="evaluate">运行</button>
-            <pre v-if="consoleOut" class="cockpit-out">{{ consoleOut }}</pre>
+            <button class="btn btn--sm btn--primary" :disabled="busy || !sessionId" @click="evaluate">{{ t('cockpit.run') }}</button>
+            <pre v-if="consoleOut" class="cockpit-out">{{ consoleOut || t('cockpit.consoleEmpty') }}</pre>
           </section>
           <section class="cockpit-panel">
-            <div class="cockpit-panel__title">无障碍节点（a11y）</div>
-            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="a11y">读取</button>
+            <div class="cockpit-panel__title">{{ t('cockpit.a11yTitle') }}</div>
+            <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="a11y">{{ t('cockpit.a11yRead') }}</button>
             <ul class="cockpit-a11y">
               <li v-for="n in a11yNodes" :key="n.id"><code>{{ n.role }}</code> — {{ n.name }}</li>
             </ul>
@@ -59,14 +69,14 @@
       </div>
 
       <section class="cockpit-panel cockpit-network">
-        <div class="cockpit-panel__title">DevTools 网络面板（Resource Timing · 近似段）</div>
+        <div class="cockpit-panel__title">{{ t('cockpit.networkTitle') }}</div>
         <div class="cockpit-network__bar">
-          <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="captureNetwork">捕获</button>
-          <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="clearNetwork">清空</button>
-          <span class="cockpit-network__meta">{{ networkRows.length }} 条资源（近 100 条 · 按加载倒序）</span>
+          <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="captureNetwork">{{ t('cockpit.capture') }}</button>
+          <button class="btn btn--sm btn--ghost" :disabled="busy || !sessionId" @click="clearNetwork">{{ t('cockpit.clear') }}</button>
+          <span class="cockpit-network__meta">{{ t('cockpit.networkMeta', { n: networkRows.length }) }}</span>
         </div>
         <table v-if="networkRows.length" class="cockpit-network__table">
-          <thead><tr><th>资源</th><th>类型</th><th>耗时</th><th>大小</th></tr></thead>
+          <thead><tr><th>{{ t('cockpit.thResource') }}</th><th>{{ t('cockpit.thType') }}</th><th>{{ t('cockpit.thDuration') }}</th><th>{{ t('cockpit.thSize') }}</th></tr></thead>
           <tbody>
             <tr v-for="(n, i) in networkRows" :key="i">
               <td><code :title="n.name">{{ truncate(n.name) }}</code></td>
@@ -76,20 +86,20 @@
             </tr>
           </tbody>
         </table>
-        <div v-else class="cockpit-network__empty">暂无捕获（打开页面后点「捕获」；数据来自浏览器 Resource Timing API，不含请求头/响应体）</div>
+        <div v-else class="cockpit-network__empty">{{ t('cockpit.networkEmpty') }}</div>
       </section>
 
       <section class="cockpit-panel cockpit-iframe">
-        <div class="cockpit-panel__title">内置浏览器（iframe 直载 · 轻量预览）</div>
+        <div class="cockpit-panel__title">{{ t('cockpit.iframeTitle') }}</div>
         <div class="cockpit-bar">
           <input v-model="iframeUrl" class="cockpit-url" placeholder="https://example.com" @keyup.enter="goIframe" />
-          <button class="btn btn--primary" :disabled="busy || !iframeUrl.trim()" @click="goIframe">载入</button>
+          <button class="btn btn--primary" :disabled="busy || !iframeUrl.trim()" @click="goIframe">{{ t('cockpit.load') }}</button>
         </div>
         <div class="cockpit-iframe-wrap">
-          <iframe v-if="iframeActive" :src="iframeActive" class="cockpit-iframe" title="内置浏览器" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" />
-          <div v-else class="cockpit-empty">输入 URL 载入。跨域站点若拒绝被嵌套（X-Frame-Options / CSP），iframe 会留白 —— 请改用上方 CDP 驾驶舱（真实 Chromium）。</div>
+          <iframe v-if="iframeActive" :src="iframeActive" class="cockpit-iframe" title="iframe" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" />
+          <div v-else class="cockpit-empty">{{ t('cockpit.iframeEmpty') }}</div>
         </div>
-        <p class="cockpit-iframe__note">iframe 预览不携带你的会话凭据；登录型站点请走 CDP 会话。若站点拒绝嵌套，属于站点自身安全策略，非本工具缺陷。</p>
+        <p class="cockpit-iframe__note">{{ t('cockpit.iframeNote') }}</p>
       </section>
     </template>
   </div>
@@ -97,10 +107,14 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
 
 const rpc = useRpcStore()
+const { t } = useI18n()
+/** 专注模式：隐藏标题头，给截图/面板让出垂直空间（视图内瞬态，不持久化）。 */
+const focusMode = ref(false)
 
 interface Status { available: boolean; reason?: string }
 interface OpenResult { sessionId: string; title: string; url: string }
@@ -167,7 +181,7 @@ async function evaluate() {
   busy.value = true; error.value = ''
   try {
     const r = await safe(() => rpc.call<EvalResult>('browser.evaluate', { sessionId: sessionId.value, expression: expression.value, awaitPromise: true }))
-    consoleOut.value = r?.result ?? '(空)'
+    consoleOut.value = r?.result ?? ''
   } finally { busy.value = false }
 }
 
@@ -252,6 +266,7 @@ onMounted(loadStatus)
 
 <style scoped>
 .cockpit-stage { padding: 24px 28px; max-width: 1340px; margin: 0 auto; }
+.cockpit-stage--focus .control-stage__header { display: none; }
 .cockpit-error { margin: 12px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
 .cockpit-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
 .cockpit-url { flex: 1; min-width: 0; padding: 9px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 13px; }
@@ -262,21 +277,21 @@ onMounted(loadStatus)
 .cockpit-shot { width: 100%; border-radius: var(--radius-sm); border: 1px solid var(--hairline); cursor: crosshair; }
 .cockpit-shot-overlay { position: absolute; left: 10px; bottom: 10px; padding: 4px 8px; background: color-mix(in srgb, var(--bg) 70%, transparent); border-radius: 999px; font-size: 11px; color: var(--text-dim); pointer-events: none; }
 .cockpit-actions { display: flex; gap: 8px; margin-top: 10px; }
-.cockpit-dom { margin-top: 10px; max-height: 260px; overflow: auto; padding: 10px; background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; }
+/* 固定 260px 的 DOM 快照是拥挤感的主源之一：改随视口生长并夹住上下界 */
+.cockpit-dom { margin-top: 10px; height: clamp(200px, 42vh, 560px); overflow: auto; padding: 10px; background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; }
 .cockpit-side { display: flex; flex-direction: column; gap: 14px; }
 .cockpit-panel { background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 12px; }
 .cockpit-panel__title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
-.cockpit-console { width: 100%; min-height: 90px; padding: 8px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px; }
-.cockpit-out { margin-top: 8px; max-height: 220px; overflow: auto; padding: 8px; background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; }
-.cockpit-a11y { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; max-height: 240px; overflow: auto; }
+.cockpit-console { width: 100%; min-height: clamp(90px, 15vh, 200px); padding: 8px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px; }
+.cockpit-out { margin-top: 8px; max-height: clamp(220px, 36vh, 520px); overflow: auto; padding: 8px; background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; }
+.cockpit-a11y { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; max-height: clamp(240px, 42vh, 560px); overflow: auto; }
 .cockpit-a11y li { padding: 5px 0; border-bottom: 1px solid var(--hairline); }
 .cockpit-a11y code { color: var(--accent); }
 .cockpit-empty { padding: 20px; text-align: center; color: var(--text-dim); font-size: 13px; }
-.cockpit-iframe { margin-top: 14px; }
-.cockpit-iframe-wrap { margin-top: 10px; min-height: 320px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg); }
-.cockpit-iframe { width: 100%; height: 480px; border: 0; display: block; }
-.cockpit-iframe__note { margin: 8px 0 0; font-size: 11px; color: var(--text-dim); }
 .cockpit-network { margin-top: 14px; }
+.cockpit-iframe-wrap { margin-top: 10px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg); }
+.cockpit-iframe { width: 100%; height: clamp(420px, 64vh, 960px); border: 0; display: block; }
+.cockpit-iframe__note { margin: 8px 0 0; font-size: 11px; color: var(--text-dim); }
 .cockpit-network__bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .cockpit-network__meta { font-size: 11px; color: var(--text-dim); }
 .cockpit-network__table { width: 100%; border-collapse: collapse; font-size: 12px; }

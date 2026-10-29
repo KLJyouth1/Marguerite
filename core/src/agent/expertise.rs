@@ -18,6 +18,8 @@
 
 use serde::Serialize;
 
+use crate::model::thinking::RoleOverrides;
+
 /// 一条专家档案（行业领军人经验蒸馏的结构化载体）。
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpertProfile {
@@ -35,6 +37,42 @@ pub struct ExpertProfile {
     pub skills: &'static [&'static str],
     /// 分步问题解决路径（playbook）
     pub playbook: &'static [&'static str],
+    /// 角色级**可选**覆盖位（思考档位 / 模型）。
+    ///
+    /// 内置档案全部是 [`RoleOverrides::NONE`]：即「角色不声明档位，完全继承会话/
+    /// 模式档位」，因此这个字段的加入**不改变**任何一次真实请求的档位；它补的是
+    /// 「解析点从模式级扩到角色级」缺的那一层承载位（此前角色信息只有文本人设，
+    /// 档位根本传不进专家/团队/链执行体）。声明方式见 [`expert_overrides`]。
+    pub overrides: RoleOverrides,
+}
+
+/// 取某个角色的覆盖位（查不到档案 = 无覆盖，继承会话/模式档位）。
+///
+/// 匹配是**前缀式**的，因为蜂群/名册席位会把角色名扩写：
+/// `编码实现` → `编码实现·蜂群 3/6 号·风险反例`（[`crate::orchestration`]
+/// 的 `expand_roster_specs`），席位名带序号时还可能变成 `调研-2`
+/// （`unique_role`）。只按精确同名匹配会让这些席位悄悄丢掉自己的档案声明。
+/// 无匹配时返回 [`RoleOverrides::NONE`]，即「不覆盖」，行为与今日一致。
+pub fn expert_overrides(role: &str) -> RoleOverrides {
+    let role = role.trim();
+    if role.is_empty() {
+        return RoleOverrides::NONE;
+    }
+    let exact = EXPERT_LIBRARY
+        .iter()
+        .chain(TRAE_SPECIALISTS.iter())
+        .find(|e| e.label == role);
+    if let Some(e) = exact {
+        return e.overrides.clone();
+    }
+    // 席位扩写名：取「最长的一个 label 作为其前缀」的档案（label 之间互不为前缀，
+    // 见 specialist_labels_do_not_shadow_builtin_roles，故最长匹配无歧义）。
+    let prefixed = EXPERT_LIBRARY
+        .iter()
+        .chain(TRAE_SPECIALISTS.iter())
+        .filter(|e| role.starts_with(e.label))
+        .max_by_key(|e| e.label.chars().count());
+    prefixed.map(|e| e.overrides.clone()).unwrap_or_default()
 }
 
 /// 渲染专家档案为可注入子 Agent 的完整系统人设。
@@ -61,6 +99,7 @@ pub fn render_prompt(p: &ExpertProfile) -> String {
 /// 内建专家库（与 orchestration `RoleKey` 一一对应，label 保持一致）。
 pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "architecture",
         label: "架构设计",
         lineage: "Martin Fowler《企业应用架构模式》· Grady Booch《面向对象分析与设计》",
@@ -83,6 +122,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "engineering",
         label: "编码实现",
         lineage: "Robert C. Martin《Clean Code》· Kent Beck《实现模式》",
@@ -104,6 +144,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "testing",
         label: "测试",
         lineage: "Kent Beck《测试驱动开发》",
@@ -119,6 +160,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "documentation",
         label: "文档",
         lineage: "Diátaxis 文档框架（教程 / 指南 / 参考 / 解释）",
@@ -134,6 +176,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "debugging",
         label: "缺陷修复",
         lineage: "Brendan Gregg《性能之巅》· 根因分析法（5 Why / 鱼骨图）",
@@ -149,6 +192,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "refactoring",
         label: "重构优化",
         lineage: "Martin Fowler《重构：改善既有代码的设计》",
@@ -164,6 +208,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "security",
         label: "安全",
         lineage: "OWASP Top 10 · STRIDE 威胁建模",
@@ -179,6 +224,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "research",
         label: "调研",
         lineage: "循证研究 · 情报分析方法论（来源三角验证）",
@@ -202,6 +248,7 @@ pub static EXPERT_LIBRARY: &[ExpertProfile] = &[
 /// 合并进主库会让 `expert_by_label` 的语义变模糊（内建角色 vs 专项角色）。
 pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "ui-designer",
         label: "UI 设计",
         lineage: "TRAE 官方自定义智能体 UI Designer · 设计系统（Token / 变体 / 状态矩阵）",
@@ -217,6 +264,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "frontend-architect",
         label: "前端架构",
         lineage: "TRAE 官方自定义智能体 Frontend Architect · React/Vue/Angular 工程实践",
@@ -232,6 +280,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "backend-architect",
         label: "后端架构",
         lineage: "TRAE 官方自定义智能体 Backend Architect · 十二要素应用与 API 契约设计",
@@ -247,6 +296,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "api-test-pro",
         label: "API 测试",
         lineage: "TRAE 官方自定义智能体 API Test Pro · 契约测试与边界分析",
@@ -262,6 +312,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "ai-integration",
         label: "AI 集成",
         lineage: "TRAE 官方自定义智能体 AI Integration Engineer · LLM 应用工程实践",
@@ -277,6 +328,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "devops-architect",
         label: "DevOps",
         lineage: "TRAE 官方自定义智能体 DevOps Architect · 基础设施即代码与渐进发布",
@@ -292,6 +344,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "performance-expert",
         label: "性能优化",
         lineage: "TRAE 官方自定义智能体 Performance Expert · Brendan Gregg USE 方法",
@@ -307,6 +360,7 @@ pub static TRAE_SPECIALISTS: &[ExpertProfile] = &[
         ],
     },
     ExpertProfile {
+        overrides: RoleOverrides::NONE,
         id: "compliance-checker",
         label: "合规审查",
         lineage: "TRAE 官方自定义智能体 Compliance Checker · GDPR/CCPA 条款映射",
@@ -347,6 +401,7 @@ pub fn experts_list() -> Vec<&'static ExpertProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::thinking::ThinkingEffort;
 
     #[test]
     fn library_covers_all_role_labels() {
@@ -407,5 +462,55 @@ mod tests {
     #[test]
     fn expert_prompt_unknown_label_is_none() {
         assert!(expert_prompt("不存在的角色").is_none());
+    }
+
+    /// 内置档案的覆盖位必须全部是「无覆盖」：这是「加承载位 ≠ 改行为」的铁证。
+    /// 只要有人往内置表里塞一个 effort，这条用例就会红，强制他先面对
+    /// 「这会让所有会话的该角色默认档位发生变化」这件事。
+    #[test]
+    fn every_shipped_profile_inherits_session_effort() {
+        for e in EXPERT_LIBRARY.iter().chain(TRAE_SPECIALISTS.iter()) {
+            assert!(
+                e.overrides.is_empty(),
+                "{} 声明了覆盖位，会改变默认档位（必须显式评审）: {:?}",
+                e.id,
+                e.overrides
+            );
+        }
+    }
+
+    /// 角色覆盖位的查找：精确同名 / 蜂群与名册的扩写席位名 / 查不到时不覆盖。
+    #[test]
+    fn expert_overrides_matches_shipped_names_and_suffixed_seats() {
+        // 查不到的角色 = 无覆盖（继承会话档位），绝不能返回某个随机档案的覆盖。
+        assert!(expert_overrides("不存在的角色").is_empty());
+        assert!(expert_overrides("").is_empty());
+        // 内建 label 精确命中（当前全部 NONE，因此断言「命中且仍为空」的稳定性）
+        assert!(expert_overrides("编码实现").is_empty());
+        // 蜂群扩写席位名（`expand_roster_specs` 产出的 `{role}·蜂群 i/n 号·{facet}`）
+        assert!(expert_overrides("编码实现·蜂群 3/6 号·风险反例").is_empty());
+    }
+
+    /// 覆盖位真的能被读出来（用一条本地档案验证前缀匹配逻辑，不动内置表）。
+    #[test]
+    fn expert_overrides_reads_effort_declared_on_a_profile() {
+        let p = ExpertProfile {
+            overrides: RoleOverrides::with_effort(ThinkingEffort::Max),
+            id: "local-only",
+            label: "本地测试角色",
+            lineage: "测试",
+            mindset: "测试",
+            expertise: &["测试"],
+            skills: &["read_file"],
+            playbook: &["验证前缀匹配"],
+        };
+        assert_eq!(
+            p.overrides.effort,
+            Some(ThinkingEffort::Max),
+            "承载位必须能声明档位"
+        );
+        assert!(!p.overrides.is_empty());
+        // 内置表查不到的 label 依旧不覆盖（本地档案不会污染全局查找）
+        assert!(expert_overrides("本地测试角色").is_empty());
     }
 }

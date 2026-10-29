@@ -10,12 +10,14 @@
 //
 // Steps travel through the shared `useTaskWorkspace` store (bound to a fake RPC)
 // so this exercises the real event → state → render path, not a hand-built prop.
-import { createApp, defineComponent, h, nextTick } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import i18n from '@/i18n'
 import type { RpcEventHandler } from '@/lib/rpc'
+import type { TaskStep } from '@/types/rpc'
 import { useTaskWorkspaceStore } from '@/composables/task/useTaskWorkspace'
+import type { StepReviewRecord, StepReviewVerdict } from '@/composables/task/useStepReview'
 import StepList from './StepList.vue'
 
 interface FakeRpc {
@@ -139,5 +141,119 @@ describe('StepList — live task workspace', () => {
     expect(host.querySelector('.step-list__empty')).toBeFalsy()
 
     app.unmount()
+  })
+})
+
+describe('StepList — A4 review strip', () => {
+  interface Harness {
+    app: ReturnType<typeof createApp>
+    host: HTMLElement
+    events: Array<[string, ...unknown[]]>
+    setReviews: (reviews: Record<string, StepReviewRecord> | null) => void
+    setSteps: (steps: unknown[]) => void
+  }
+
+  function mountWithReview(initialReviews: Record<string, StepReviewRecord> | null = null): Harness {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const events: Array<[string, ...unknown[]]> = []
+    // 用 ref：闭包普通变量不触发重渲染
+    const steps = ref<TaskStep[]>([])
+    const reviews = ref<Record<string, StepReviewRecord> | null>(initialReviews)
+    const Harness = defineComponent({
+      setup() {
+        return () =>
+          h(StepList, {
+            steps: steps.value,
+            artifacts: [],
+            reviews: reviews.value,
+            onReview: (stepId: string, verdict: StepReviewVerdict) => {
+              events.push(['review', stepId, verdict])
+            },
+            onOpenArtifact: (path: string) => {
+              events.push(['open', path])
+            },
+          })
+      },
+    })
+    const app = createApp(Harness)
+    app.use(pinia)
+    app.use(i18n)
+    app.mount(host)
+    return {
+      app,
+      host,
+      events,
+      setReviews: (next) => {
+        reviews.value = next
+      },
+      setSteps: (next) => {
+        steps.value = next as TaskStep[]
+      },
+    }
+  }
+
+  it('marks a done step with a landed artifact as pending review and reports the verdict', async () => {
+    const h = mountWithReview()
+    h.setSteps([
+      { id: 'd1', title: 'Research', role: 'researcher', kind: 'Research', targetPath: 'a.md', dependsOn: [], status: 'done', artifactPath: 'a.md' },
+      { id: 'd2', title: 'Draft', role: 'writer', kind: 'Document', targetPath: 'b.md', dependsOn: [], status: 'in_progress' },
+    ])
+    await nextTick()
+
+    // 头部待审查计数
+    expect(h.host.querySelector('[data-testid="step-review-chip"]')?.textContent).toContain('Needs review')
+
+    const strip = h.host.querySelector('[data-step-id="d1"] [data-testid="step-review"]')
+    expect(strip).not.toBeNull()
+    expect(strip?.querySelector('[data-testid="step-review-state-pending"]')?.textContent).toContain('Needs review')
+    // 打开产物 + 通过 / 打回
+    expect(strip?.querySelector('[data-testid="step-review-open"]')).not.toBeNull()
+    expect(strip?.querySelector('[data-testid="step-review-approve"]')).not.toBeNull()
+    expect(strip?.querySelector('[data-testid="step-review-flag"]')).not.toBeNull()
+
+    // 没落盘产物的进行中步骤没有审查条
+    expect(h.host.querySelector('[data-step-id="d2"] [data-testid="step-review"]')).toBeNull()
+
+    ;(h.host.querySelector('[data-testid="step-review-approve"]') as HTMLButtonElement).click()
+    ;(h.host.querySelector('[data-testid="step-review-open"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(h.events).toContainEqual(['review', 'd1', 'approved'])
+    expect(h.events).toContainEqual(['open', 'a.md'])
+
+    h.app.unmount()
+  })
+
+  it('renders the recorded verdict instead of action buttons once reviewed', async () => {
+    const h = mountWithReview({
+      d1: { verdict: 'approved', note: '', at: Date.now() },
+    })
+    h.setSteps([
+      { id: 'd1', title: 'Research', role: 'researcher', kind: 'Research', targetPath: 'a.md', dependsOn: [], status: 'done', artifactPath: 'a.md' },
+    ])
+    await nextTick()
+
+    expect(h.host.querySelector('[data-testid="step-review-chip"]')).toBeNull()
+    const strip = h.host.querySelector('[data-testid="step-review"]')
+    expect(strip?.querySelector('[data-testid="step-review-state-approved"]')?.textContent).toContain('Approved')
+    expect(strip?.querySelector('[data-testid="step-review-approve"]')).toBeNull()
+    expect(strip?.querySelector('[data-testid="step-review-flag"]')).toBeNull()
+    // 已审仍可打开产物复核
+    expect(strip?.querySelector('[data-testid="step-review-open"]')).not.toBeNull()
+
+    h.app.unmount()
+  })
+
+  it('keeps failed steps out of the review flow entirely', async () => {
+    const h = mountWithReview()
+    h.setSteps([
+      { id: 'd3', title: 'Slides', role: 'designer', kind: 'Presentation', targetPath: 'c.pptx', dependsOn: [], status: 'failed', artifactPath: 'c.pptx' },
+    ])
+    await nextTick()
+
+    expect(h.host.querySelector('[data-testid="step-review"]')).toBeNull()
+    expect(h.host.querySelector('[data-testid="step-review-chip"]')).toBeNull()
+
+    h.app.unmount()
   })
 })

@@ -9,6 +9,8 @@
 //! 本模块只负责**生成文本与路由**，不执行任何动作；可用性永远来自调用方传入的
 //! 真实工具名（本轮 function schema 里的那份），绝不猜测。
 
+use serde_json::Value;
+
 use crate::model::llm::ToolDef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +152,9 @@ pub fn cards() -> &'static [CapabilityCard] {
         CapabilityCard {
             id: "mcp",
             family: CapabilityFamily::Mcp,
-            // MCP 工具是动态名（sanitize 后的外部工具），无法静态枚举；
-            // 可用性由调用方传入的 mcp 计数决定（见 render_stable_cards_with）。
+            // MCP 工具名是动态的（sanitize 后的外部工具名），无法静态写死；
+            // 渲染时给出权威枚举（配置的服务器名 + 运行中插件的工具名），
+            // 数据源见 collect_mcp_facts / render_mcp_line。
             tools: &[],
             entries: &["plugins.mcp.list（管理面，不是模型工具）"],
             triggers: &["mcp", "外部系统", "集成", "数据库", "工单"],
@@ -201,16 +204,155 @@ fn card_present_tools(card: &CapabilityCard, names: &[String]) -> Vec<&'static s
         .collect()
 }
 
+/// MCP 权威快照。两个字段都来自**既有只读源**，不新增任何 RPC / 配置键：
+/// - `configured`：config.yaml `mcp.servers` 中启用的服务器名（经 `capability::selfcheck`，
+///   与调用方传入的 `mcp_count` 同源，30s 缓存）；
+/// - `running_plugins`：`plugins::mcp_launch` 的内存快照（名字 + 工具名，不阻塞、不读盘）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct McpFacts {
+    pub(crate) configured: Vec<String>,
+    /// `(插件名, 该进程已上报的工具名)`，仅含 running=true 的条目。
+    pub(crate) running_plugins: Vec<(String, Vec<String>)>,
+}
+
+/// 枚举上限：超限必须**如实标注被截断**（口径同 `tool_catalog` 的技能索引）。
+const MAX_MCP_SERVERS_LISTED: usize = 12;
+const MAX_MCP_TOOLS_LISTED: usize = 8;
+
+/// 从既有源收集 MCP 事实；任何一环读不到都退化为空清单（诚实，不编造名字）。
+fn collect_mcp_facts() -> McpFacts {
+    let report = crate::agent::capability::selfcheck(&serde_json::json!({}));
+    let mut configured: Vec<String> = report["mcp"]["configuredServers"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    configured.sort();
+    configured.dedup();
+
+    let running = crate::plugins::mcp_launch::list();
+    let mut running_plugins: Vec<(String, Vec<String>)> = running["plugins"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let name = item.get("name").and_then(Value::as_str)?;
+                    let mut tools: Vec<String> = item
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .map(|tools| {
+                            tools
+                                .iter()
+                                .filter_map(|t| t.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // 排序保证同一状态下逐字节可复现（KV 前缀稳定）。
+                    tools.sort();
+                    Some((name.to_string(), tools))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    running_plugins.sort_by(|a, b| a.0.cmp(&b.0));
+
+    McpFacts {
+        configured,
+        running_plugins,
+    }
+}
+
+/// mcp 行的纯渲染：`(mcp_count, facts)` 决定文本，供单测注入合成事实。
+///
+/// `mcp_count` 以调用方为准（生产路径与 `configured` 同源于 selfcheck）；
+/// 两者不一致时计数优先，名称只作补充说明。
+fn render_mcp_line(mcp_count: usize, facts: &McpFacts) -> String {
+    if mcp_count == 0 && facts.running_plugins.is_empty() {
+        return "- mcp：不可用（未配置 MCP 服务器，也没有运行中的插件 MCP 进程）".to_string();
+    }
+    let mut clauses: Vec<String> = Vec::new();
+    if mcp_count > 0 {
+        let mut clause = format!("已配置 {mcp_count} 个 MCP 服务器");
+        if facts.configured.is_empty() {
+            clause.push_str("（未能读取到服务器名称清单）");
+        } else {
+            let shown: Vec<&str> = facts
+                .configured
+                .iter()
+                .map(String::as_str)
+                .take(MAX_MCP_SERVERS_LISTED)
+                .collect();
+            clause.push_str(&format!("：{}", shown.join("、")));
+            let hidden = facts.configured.len().saturating_sub(shown.len());
+            if hidden > 0 {
+                clause.push_str(&format!("（另有 {hidden} 个未列出，见 plugins.mcp.list）"));
+            }
+        }
+        clauses.push(clause);
+    } else {
+        clauses.push("未配置 MCP 服务器".to_string());
+    }
+    if !facts.running_plugins.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for (name, tools) in facts.running_plugins.iter().take(MAX_MCP_SERVERS_LISTED) {
+            if tools.is_empty() {
+                parts.push(format!("{name}（未暴露工具）"));
+                continue;
+            }
+            let shown: Vec<&str> = tools
+                .iter()
+                .map(String::as_str)
+                .take(MAX_MCP_TOOLS_LISTED)
+                .collect();
+            let hidden = tools.len().saturating_sub(shown.len());
+            if hidden > 0 {
+                parts.push(format!("{}（工具：{}，另有 {hidden} 个未列出）", name, shown.join("、")));
+            } else {
+                parts.push(format!("{}（工具：{}）", name, shown.join("、")));
+            }
+        }
+        let mut clause = format!("运行中的插件 MCP：{}", parts.join("；"));
+        let hidden_servers = facts.running_plugins.len().saturating_sub(MAX_MCP_SERVERS_LISTED);
+        if hidden_servers > 0 {
+            clause.push_str(&format!("（另有 {hidden_servers} 个插件进程未列出）"));
+        }
+        clauses.push(clause);
+    }
+    let mut line = format!("- mcp：{}", clauses.join("；"));
+    if mcp_count > 0 {
+        line.push_str("；其工具名会直接出现在本轮 function schema 里（未出现 = 未连接）");
+    }
+    if !facts.running_plugins.is_empty() {
+        line.push_str("；插件进程的工具经 plugins.mcp.call 调用");
+    }
+    line.push_str("。禁止：用 HTTP 脚本绕过 MCP");
+    line
+}
+
 /// 渲染能力卡文本。`mcp_count` 来自真实配置（`capability::selfcheck`）。
 ///
 /// 规则：只列**当前真实可用**的工具；不可用的卡片以一行「不可用」保留（让模型
 /// 知道「存在但离线」，而不是彻底隐藏）；纯编排型能力（team）明确写「本轮模型无工具」。
+/// mcp 行除计数外还枚举服务器与工具名（`collect_mcp_facts`，只读既有源）。
 pub fn render_stable_cards_with(available: &[ToolDef], mcp_count: usize) -> String {
     render_stable_cards_from_names(&tool_names(available), mcp_count)
 }
 
 /// 同 [`render_stable_cards_with`]，但直接接收工具名（调用方已排序/去重亦可）。
 pub fn render_stable_cards_from_names(names: &[String], mcp_count: usize) -> String {
+    render_stable_cards_from_names_with_mcp(names, mcp_count, &collect_mcp_facts())
+}
+
+/// 数据源显式注入的渲染入口（生产路径经 [`render_stable_cards_from_names`] 注入真实事实，
+/// 单测注入合成事实），mcp 行之外的卡片行为不受影响。
+fn render_stable_cards_from_names_with_mcp(
+    names: &[String],
+    mcp_count: usize,
+    mcp: &McpFacts,
+) -> String {
     let mut names = names.to_vec();
     names.sort();
     names.dedup();
@@ -222,13 +364,7 @@ pub fn render_stable_cards_from_names(names: &[String], mcp_count: usize) -> Str
         let present = card_present_tools(card, names);
         let label = card.id;
         if card.id == "mcp" {
-            if mcp_count > 0 {
-                lines.push(format!(
-                    "- {label}：已配置 {mcp_count} 个 MCP 服务器；其工具名会直接出现在本轮 function schema 里（未出现 = 未连接）。禁止：用 HTTP 脚本绕过 MCP",
-                ));
-            } else {
-                lines.push(format!("- {label}：不可用（未配置 MCP 服务器）"));
-            }
+            lines.push(render_mcp_line(mcp_count, mcp));
             continue;
         }
         if card.id == "team" || card.tools.is_empty() {
@@ -357,6 +493,84 @@ mod tests {
         let tools = available(&["read_file"]);
         assert!(render_stable_cards_with(&tools, 0).contains("未配置 MCP 服务器"));
         assert!(render_stable_cards_with(&tools, 2).contains("已配置 2 个 MCP 服务器"));
+    }
+
+    fn facts(configured: &[&str], running: &[(&str, &[&str])]) -> McpFacts {
+        McpFacts {
+            configured: configured.iter().map(|s| s.to_string()).collect(),
+            running_plugins: running
+                .iter()
+                .map(|(n, tools)| (n.to_string(), tools.iter().map(|t| t.to_string()).collect()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn mcp_card_line_enumerates_servers_and_plugin_tools() {
+        let f = facts(&["fs", "gh"], &[("btpanel", &["run_cmd", "query_devices"])]);
+        let text = render_stable_cards_from_names_with_mcp(&["read_file".to_string()], 2, &f);
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("- mcp："))
+            .expect("mcp card line");
+        assert!(line.contains("已配置 2 个 MCP 服务器"), "{line}");
+        // 还原成「只有计数」的旧渲染会在这里判红：名字与工具必须被点名。
+        assert!(line.contains("fs") && line.contains("gh"), "必须枚举配置的服务器名：{line}");
+        assert!(line.contains("btpanel"), "必须枚举运行中的插件：{line}");
+        assert!(
+            line.contains("query_devices") && line.contains("run_cmd"),
+            "必须带插件的工具名：{line}"
+        );
+        assert!(line.contains("禁止：用 HTTP 脚本绕过 MCP"), "{line}");
+    }
+
+    #[test]
+    fn mcp_line_truncation_is_labeled_not_silent() {
+        let f = McpFacts {
+            configured: (0..15).map(|i| format!("srv{i:02}")).collect(),
+            running_plugins: vec![("big".to_string(), (0..10).map(|i| format!("tool{i}")).collect())],
+        };
+        let line = render_mcp_line(15, &f);
+        assert!(line.contains("另有 3 个未列出"), "服务器截断必须如实标注：{line}");
+        assert!(!line.contains("srv14"), "被截断的条目不得出现：{line}");
+        assert!(line.contains("另有 2 个未列出"), "工具截断必须如实标注：{line}");
+        assert!(!line.contains("tool9"), "{line}");
+    }
+
+    #[test]
+    fn mcp_line_without_any_source_admits_nothing_configured() {
+        let line = render_mcp_line(0, &McpFacts::default());
+        assert!(line.contains("不可用"), "{line}");
+        assert!(line.contains("未配置 MCP 服务器"), "{line}");
+        // 不得为好看伪造条目
+        assert!(!line.contains("工具："), "{line}");
+    }
+
+    #[test]
+    fn mcp_line_surfaces_running_plugins_even_with_zero_config() {
+        let f = facts(&[], &[("gh", &["create_issue"])]);
+        let line = render_mcp_line(0, &f);
+        assert!(line.contains("未配置 MCP 服务器"), "配置面要如实陈述：{line}");
+        assert!(!line.contains("不可用"), "有运行中插件时不得整行判不可用：{line}");
+        assert!(line.contains("gh（工具：create_issue）"), "{line}");
+    }
+
+    #[test]
+    fn live_mcp_facts_are_sorted_and_deduplicated_for_kv_stability() {
+        let f = collect_mcp_facts();
+        let mut sorted = f.configured.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(f.configured, sorted, "配置的服务器名必须排序去重（稳定半区）");
+        let mut running_names: Vec<&str> = f.running_plugins.iter().map(|(n, _)| n.as_str()).collect();
+        running_names.sort();
+        let current: Vec<&str> = f.running_plugins.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(current, running_names, "插件条目必须按名字排序");
+        for (_, tools) in &f.running_plugins {
+            let mut st = tools.clone();
+            st.sort();
+            assert_eq!(tools, &st, "工具名必须排序");
+        }
     }
 
     #[test]

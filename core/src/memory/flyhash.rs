@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 
+use crate::memory::lexical;
+
 /// 高维投影维度（肯扬细胞数量）
 pub const FLY_DIM: usize = 2048;
 /// 目标稀疏度：每个 token 激活的肯扬细胞比例（约 5%）
@@ -71,22 +73,13 @@ fn activate_token(token: &str, seed: u64) -> Vec<usize> {
     out
 }
 
-/// 简单分词：拉丁词按非字母数字分隔，中日韩字符按单字切分
-/// （与 long_term 的 tokenize 相同口径，保证精排一致性）
+/// 分词口径统一在 [`crate::memory::lexical`]（单一事实源）。
+///
+/// 这里原本另有一份拷贝，注释写着「与 long_term 的 tokenize 相同口径」——
+/// 靠注释维持的口径一致必然漂移，而两路（flyhash 粗排 / 余弦精排）一旦口径不同，
+/// 「粗排候选 + 精排分数」的组合就变成两个互不相干的模型在猜同一件事。
 fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    for word in text.split(|c: char| !c.is_alphanumeric()) {
-        let word = word.trim().to_lowercase();
-        if !word.is_empty() && word.is_ascii() {
-            tokens.push(word);
-        }
-    }
-    for ch in text.chars() {
-        if ch.is_alphabetic() && !ch.is_ascii() {
-            tokens.push(ch.to_string());
-        }
-    }
-    tokens
+    lexical::tokens(text)
 }
 
 /// 高维稀疏向量（激活计数，u16 防重叠溢出）

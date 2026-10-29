@@ -27,6 +27,8 @@ pub mod terminal_backend;
 pub mod trash;
 pub mod versions;
 pub mod video_gen;
+/// 工作台面板薄工具（P0-1b）：只包既有 gateway RPC，不新增后端契约。
+pub mod workbench;
 pub mod web_video;
 
 pub use baota::register_baota_tools;

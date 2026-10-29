@@ -70,9 +70,15 @@ Marguerite 采用三层记忆架构：感知记忆 → 短期记忆 → 长期�
 
 ```yaml
 memory:
-  sensory_path: "memory/sensory"       # 感知记忆存储路径
-  short_term_path: "memory/short_term" # 短期记忆存储路径
+  sensory_path: "memory/sensory"           # 感知记忆存储路径
+  short_term_path: "memory/short_term"     # 短期记忆存储路径
+  short_term_max_sessions: 2000            # 跨会话检索的留存上限，超出按 updated_at 淘汰最旧的
 ```
+
+> 短期记忆的全文索引（SQLite FTS5）额外索引一份**分词后的副本** `search_text`，
+> 原始 `summary` 只用于展示。原因：FTS5 的 `unicode61` 会把一整段没有空格的中文当成
+> **一个**词元，直接索引原文时中文查询恒为 0 命中。用户文本进入检索前会先编译成
+> FTS5 表达式（逐词元加引号、丢弃 `and`/`or`/`not`/`near`），所以它永远是数据、不是语法。
 
 ## 性能指标
 

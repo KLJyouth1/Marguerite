@@ -12,6 +12,7 @@
     :class="{
       docked: appStore.sidebarOpen,
       'sidebar--drawer': isSidebarDrawer,
+      'sidebar--icons': iconRailActive,
     }"
     :inert="!appStore.sidebarOpen"
     :aria-hidden="appStore.sidebarOpen ? undefined : 'true'"
@@ -95,6 +96,47 @@
       class="sidebar-group"
       :data-group="section.id"
     >
+      <!-- Icon-rail mode: the group header becomes a centered icon anchor that
+           opens a hover/click flyout with the section's items. The anchor is
+           marked active whenever any item in the group matches the current
+           route, so a collapsed group never hides the active destination. -->
+      <div v-if="iconRailActive" class="sidebar-icon-anchor">
+        <button
+          type="button"
+          class="sidebar-fn-item sidebar-icon-anchor__btn"
+          :class="{ 'is-active': isGroupNavActive(section) }"
+          :aria-expanded="openIconGroupId === section.id"
+          :aria-label="section.title"
+          @click="toggleIconGroupFlyout(section.id)"
+          @mouseenter="openIconGroupId = section.id"
+          @mouseleave="onIconAnchorLeave(section.id)"
+          @focus="openIconGroupId = section.id"
+        >
+          <Icon :name="GROUP_ICONS[section.id] ?? 'boxes'" :size="16" />
+        </button>
+        <div
+          v-if="openIconGroupId === section.id"
+          class="sidebar-icon-flyout"
+          role="menu"
+          :aria-label="section.title"
+          @mouseenter="openIconGroupId = section.id"
+          @mouseleave="onIconAnchorLeave(section.id)"
+        >
+          <router-link
+            v-for="item in section.items"
+            :key="item.path"
+            :to="item.path"
+            class="sidebar-fn-item sidebar-fn-item--flyout"
+            :class="{ 'is-active': isPrimaryNavActive(item.path) }"
+            :aria-current="isPrimaryNavActive(item.path) ? 'page' : undefined"
+            @click="handleNavClick(); closeIconGroupFlyout()"
+          >
+            <Icon :name="item.icon" :size="16" />
+            <span class="sidebar-fn-label">{{ item.title }}</span>
+          </router-link>
+        </div>
+      </div>
+      <template v-else>
       <button
         type="button"
         class="sidebar-group__header"
@@ -136,15 +178,19 @@
           </router-link>
         </template>
       </div>
+      </template>
     </div>
     <!-- Shell extension seam (append-only; renders nothing while empty). -->
     <SlotHost slot="sidebar.nav" />
     </div><!-- /.sidebar-nav -->
 
-    <SidebarSetupBanner />
+    <SidebarSetupBanner v-if="!iconRailActive" />
 
-    <!-- Recent conversations -->
+    <!-- Recent conversations. Hidden in icon-rail mode: the strip carries
+         navigation only; conversations stay reachable via Ctrl+K / reopening
+         the full sidebar. -->
     <SidebarConversations
+      v-if="!iconRailActive"
       :sections="sidebarSections"
       :error="sessionListError"
       :loading="isLoading"
@@ -156,6 +202,7 @@
       @select="switchToSession"
       @refresh="loadSidebarData"
       @rename="onRenameSession"
+      @reset="onResetSession"
       @delete="onDeleteSession"
       @bulk-delete="onBulkDeleteSessions"
       @reorder="onReorderSidebarSession"
@@ -170,8 +217,20 @@
       @search="openCommandPalette"
     />
 
-    <!-- Fixed footer: settings + connection state -->
+    <!-- Fixed footer: icon-rail toggle + settings + connection state -->
     <div class="sidebar-foot">
+      <button
+        type="button"
+        class="sidebar-fn-item"
+        data-icon="icon-rail"
+        :aria-label="t('chrome.iconRail')"
+        :title="t('chrome.iconRail')"
+        :aria-pressed="appStore.sidebarIconRail"
+        @click="appStore.toggleSidebarIconRail()"
+      >
+        <Icon :name="appStore.sidebarIconRail ? 'panel-left-open' : 'panel-left-close'" :size="16" />
+        <span class="sidebar-fn-label">{{ t('chrome.iconRail') }}</span>
+      </button>
       <button
         type="button"
         class="sidebar-fn-item"
@@ -187,9 +246,9 @@
   </nav>
 
   <SidebarResizer
-    v-if="appStore.sidebarOpen && isSidebarResizable"
+    v-if="appStore.sidebarOpen && isSidebarResizable && !iconRailActive"
     ref="sidebarResizerRef"
-    :enabled="appStore.sidebarOpen && isSidebarResizable"
+    :enabled="appStore.sidebarOpen && isSidebarResizable && !iconRailActive"
     :width="sidebarEffectiveWidth"
     :min="SIDEBAR_MIN_WIDTH"
     :max="sidebarDynamicMaximum"
@@ -239,6 +298,7 @@
     :class="{
       docked: appStore.sidebarOpen,
       'main--sidebar-drawer': isSidebarDrawer,
+      'main--sidebar-icons': iconRailActive,
       'main--sidebar-compact': sidebarLayoutMode === 'compact',
       'main--chat': isChatRoute,
       'main--chat-sidebar-collapsed': isChatRoute && !appStore.sidebarOpen,
@@ -325,6 +385,18 @@
         >
           {{ t('chrome.approvalRequired') }}
         </button>
+        <!-- P2-4：侧车离线时它的挂起审批没有推送也没有卡片，只存在于侧车落盘
+             队列里。这里用黄色提示条如实说明「有 N 条待同步」，不混进红色审批
+             badge（那个指向可裁决的卡片）。点击进连接设置排查侧车。 -->
+        <button
+          v-if="appStore.sidecarOfflineApprovals > 0"
+          type="button"
+          class="approval-inline approval-inline--offline"
+          :title="t('chrome.sidecarOfflineApprovalsTitle')"
+          @click="openConnectionSettings"
+        >
+          {{ t('chrome.sidecarOfflineApprovals', { count: appStore.sidecarOfflineApprovals }) }}
+        </button>
         <button
           v-if="webConfigEnabled"
           type="button"
@@ -375,6 +447,9 @@
         :data-skin-variant="variants || undefined"
         id="content"
       >
+        <!-- S5: 宿主（Python 侧车）退出证据条。放在内容区第一个子节点 → 占位下推，
+             不覆盖任何面板；App.vue 持有唯一实例（provide/inject），跨路由存活。 -->
+        <HostExitCard class="app-host-exit" />
         <AppRouterView />
       </main>
       <AppWorkbench
@@ -433,15 +508,7 @@
   />
 
   <UpdateBanner />
-
-  <!-- S5: structured evidence card for a dead host (Python sidecar) process.
-       App.vue owns the single shared exit-evidence instance via
-       provide/inject — the same discipline `useGatewayReadiness` documents for
-       the readiness state: a per-call-site instance would multiply the
-       `host.exit_evidence` RPC on every disconnect and let two widgets disagree
-       about whether evidence had been fetched. Mounted here (the app shell)
-       rather than inside a view so it survives navigation while disconnected. -->
-  <HostExitCard class="app-host-exit" />
+  <UpdateDialog />
 
   <OnboardingOverlay />
 
@@ -505,6 +572,7 @@ import AppContextMenu from './components/AppContextMenu.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import ProjectWorkspaceEditDialog from './components/ProjectWorkspaceEditDialog.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
+import UpdateDialog from './components/UpdateDialog.vue'
 import OnboardingOverlay from './components/OnboardingOverlay.vue'
 import BootOrchestra from './components/boot/BootOrchestra.vue'
 import DesktopUpdateIndicator from './components/DesktopUpdateIndicator.vue'
@@ -548,8 +616,11 @@ import { useShortcutsStore } from './stores/shortcuts'
 import { bindingMatches, formatBinding } from './utils/keychord'
 import { SIDEBAR_MIN_WIDTH, type SidebarWidthPreference } from './utils/sidebarLayout'
 import {
+  dispatchLocalSessionReset,
   dispatchLocalSessionsDeleted,
+  localSessionResetDetail,
   localSessionsDeletedDetail,
+  LOCAL_SESSION_RESET_EVENT,
   LOCAL_SESSIONS_DELETED_EVENT,
 } from './utils/sessionSync'
 import { activeTaskWasDeletedWithProjectHistory } from './utils/projectHistory'
@@ -716,7 +787,7 @@ const removeInternalLinkGuard = installInternalLinkGuard(router)
 // the cold-start title is not left at the index.html placeholder.
 watch(() => appStore.locale, () => applyRouteDocumentTitle())
 void whenI18nReady().then(() => { applyRouteDocumentTitle() })
-const { allSessions, sessionListError, isLoading, loadSessions, applySessionRunStatus } = useSessions(
+const { allSessions, sessionListError, isLoading, loadSessions, applySessionRunStatus, forgetSessions } = useSessions(
   optionalSessionRpcCallOptions,
 )
 const { bottomRoutes, workNav, groupedNav, collapsedGroups, toggleGroup } = useNavigation()
@@ -1239,6 +1310,46 @@ function handleNavClick() {
   }
 }
 
+// ── Icon-rail mode ────────────────────────────────────────────────────────
+// Narrow icon-only sidebar. Docked-only (drawer mode keeps the full column)
+// and driven by the persisted `appStore.sidebarIconRail` preference.
+const iconRailActive = computed(
+  () => appStore.sidebarIconRail && appStore.sidebarOpen && !isSidebarDrawer.value,
+)
+
+/** Group anchors in icon-rail mode: one flyout open at a time. */
+const openIconGroupId = ref<string | null>(null)
+
+function toggleIconGroupFlyout(id: string) {
+  openIconGroupId.value = openIconGroupId.value === id ? null : id
+}
+
+function closeIconGroupFlyout() {
+  openIconGroupId.value = null
+}
+
+/** Leave only when the mouse isn't moving onto the flyout of the same group. */
+function onIconAnchorLeave(id: string) {
+  if (openIconGroupId.value === id) openIconGroupId.value = null
+}
+
+/**
+ * Section anchors carry no per-group metadata in the route table, so the
+ * glyphs are mapped here (ids come from NavGroupId in router/nav.ts).
+ */
+const GROUP_ICONS = {
+  Work: 'listChecks',
+  Operate: 'boxes',
+  Observe: 'eye',
+  Settings: 'settings',
+  Extras: 'sparkles',
+} as const
+
+/** A group anchor reads active when any of its items matches the route. */
+function isGroupNavActive(section: { items: Array<{ path: string }> }): boolean {
+  return section.items.some(item => isPrimaryNavActive(item.path))
+}
+
 function openSidebarDrawer() {
   if (appStore.sidebarOpen) return
   toggleDock('topbar-button')
@@ -1405,6 +1516,7 @@ async function onProjectDeleteHistory(workspaceId: string) {
       deletedSessionKeys: result.deletedSessionKeys,
     })
     sessionTaskAttention.removeMany(result.deletedSessionKeys)
+    forgetSessions(result.deletedSessionKeys)
     await loadSessions()
     if (leaveDeletedTask) void openDefaultDraft()
     pushToast(t('workspaces.historyDeleted'), { tone: 'ok' })
@@ -1513,10 +1625,10 @@ async function onRenameSession({ key, title }: { key: string; title: string }) {
   if (local) localChatSessions.value[key] = { ...local, title: next }
   try {
     await rpcStore.call('sessions.patch', { key, displayName: next })
-    pushToast('Session renamed', { tone: 'ok' })
+    pushToast(t('shared.sidebar.renameSessionDone'), { tone: 'ok' })
   } catch (err: unknown) {
     console.warn('[App] sessions.patch error:', errorMessage(err))
-    pushToast('Failed to rename session', { tone: 'danger' })
+    pushToast(t('shared.sidebar.renameSessionFailed'), { tone: 'danger' })
   } finally {
     await loadSessions()
     const { [key]: _dropped, ...rest } = renameOverrides.value
@@ -1542,8 +1654,20 @@ function handleLocalSessionsDeleted(event: Event) {
   if (!detail || detail.source === APP_SESSION_SYNC_SOURCE) return
   const deleted = new Set(detail.keys)
   removeLocalSessions(deleted)
+  forgetSessions(deleted)
   sessionTaskAttention.removeMany(deleted)
   appStore.removePendingApprovalsForSessions(deleted)
+  scheduleSessionRefresh()
+}
+
+// 另一个窗口清空了会话：本窗口没有派发该事件，但依附那个回合的审批与未读
+// 状态同样已经失效，且列表里的消息计数需要重新取一次。
+function handleLocalSessionReset(event: Event) {
+  const detail = localSessionResetDetail(event)
+  if (!detail || detail.source === APP_SESSION_SYNC_SOURCE) return
+  const reset = new Set(detail.keys)
+  sessionTaskAttention.removeMany(reset)
+  appStore.removePendingApprovalsForSessions(reset)
   scheduleSessionRefresh()
 }
 
@@ -1573,6 +1697,7 @@ async function onBulkDeleteSessions(keys: string[]) {
     return
   }
   removeLocalSessions(deleted)
+  forgetSessions(deleted)
   sessionTaskAttention.removeMany(deleted)
   appStore.removePendingApprovalsForSessions(deleted)
   dispatchLocalSessionsDeleted(deleted, APP_SESSION_SYNC_SOURCE)
@@ -1594,12 +1719,13 @@ async function onDeleteSession(key: string) {
   const result = await deleteSessions([key])
   if (!result?.deleted?.includes(key)) {
     console.warn('[App] sessions.delete reported failure:', result?.errors)
-    pushToast('Failed to delete session', { tone: 'danger' })
+    pushToast(t('shared.sidebar.deleteSessionFailed'), { tone: 'danger' })
     return
   }
-  pushToast('Session deleted', { tone: 'ok' })
+  pushToast(t('shared.sidebar.deleteSessionDone'), { tone: 'ok' })
   const deleted = new Set([key])
   removeLocalSessions(deleted)
+  forgetSessions(deleted)
   sessionTaskAttention.removeMany(deleted)
   appStore.removePendingApprovalsForSessions(deleted)
   dispatchLocalSessionsDeleted(deleted, APP_SESSION_SYNC_SOURCE)
@@ -1609,9 +1735,40 @@ async function onDeleteSession(key: string) {
   }
 }
 
+// 清空对话（≠ 删除）：消息与模型上下文一并清掉，会话壳、项目归属与产物台账
+// 保留。后端会先停掉运行中的回合，因此这里也要丢弃该会话的待裁决审批与未读
+// 标记 —— 它们依附的回合已经不存在了。
+async function onResetSession(key: string) {
+  if (!key) return
+  const item = sidebarSessionItems.value.find(entry => entry.key === key)
+  const title = item?.title || key
+  const count = Number(item?.messageCount ?? 0)
+  const ok = await confirm({
+    title: t('shared.sidebar.resetSessionTitle'),
+    body: count > 0
+      ? t('shared.sidebar.resetSessionBody', { title, count })
+      : t('shared.sidebar.resetSessionBodyNoCount', { title }),
+    primaryLabel: t('shared.sidebar.resetSessionConfirm'),
+  })
+  if (!ok) return
+  try {
+    const result = await rpcStore.call<{ ok?: boolean; error?: string }>('sessions.reset', { key })
+    if (!result?.ok) throw new Error(result?.error || 'sessions.reset failed')
+  } catch (err: unknown) {
+    console.warn('[App] sessions.reset error:', errorMessage(err))
+    pushToast(t('shared.sidebar.resetSessionFailed'), { tone: 'danger' })
+    return
+  }
+  pushToast(t('shared.sidebar.resetSessionDone'), { tone: 'ok' })
+  const touched = new Set([key])
+  sessionTaskAttention.removeMany(touched)
+  appStore.removePendingApprovalsForSessions(touched)
+  dispatchLocalSessionReset(touched, APP_SESSION_SYNC_SOURCE)
+  await loadSessions()
+}
+
 // Topbar approval pill: jump straight to the blocked session's chat so the
 // in-thread card can be answered. The live `pendingApprovals` list (kept fresh
-// by the push subscription + reconnect seed) is the source of truth — no
 // re-fetch — and the oldest pending session is the deterministic target. With
 // no routable session, fall back to the Sessions page.
 function openBlockedApprovalSession() {
@@ -1881,12 +2038,18 @@ async function seedPendingApprovals() {
   try {
     const res = await fetch('/api/approvals', { headers: approvalAuthHeaders() })
     if (!res.ok) throw new Error('HTTP ' + res.status)
-    const data = await res.json() as { pending?: ApprovalSnapshotItem[] }
+    const data = await res.json() as {
+      pending?: ApprovalSnapshotItem[]
+      pending_sidecar_offline?: number
+    }
     const items = (data.pending || [])
       .map(snapshotItemToPending)
       .filter((item): item is PendingApproval => item !== null)
     appStore.setPendingApprovals(items)
+    // P2-4：旧网关没有该字段 —— 缺省视为 0（不显示黄条），而不是猜一个数。
+    appStore.setSidecarOfflineApprovals(Number(data.pending_sidecar_offline) || 0)
   } catch (err) {
+    appStore.setSidecarOfflineApprovals(0)
     console.warn('[App] approvals seed failed:', errorMessage(err))
   }
 }
@@ -1912,6 +2075,7 @@ function onApprovalResolved(payload: ApprovalPushPayload) {
 function onApprovalConnectionState(state: unknown) {
   if (state !== 'connected') {
     appStore.setPendingApprovals([])
+    appStore.setSidecarOfflineApprovals(0)
     return
   }
   void seedPendingApprovals()
@@ -1989,6 +2153,7 @@ onMounted(() => {
   if (!isPetOverlayRoute.value) void restorePetOverlayPreference()
   window.visualViewport?.addEventListener('resize', syncMobileKeyboard)
   window.addEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
+  window.addEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
   window.addEventListener('focus', markCurrentSessionReadIfVisible)
   document.addEventListener('visibilitychange', markCurrentSessionReadIfVisible)
   sessionListSubscription.subscribe()
@@ -2017,6 +2182,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', syncLayoutViewport)
   sidebarRefreshPending = false
   window.removeEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
+  window.removeEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
   window.removeEventListener('focus', markCurrentSessionReadIfVisible)
   document.removeEventListener('visibilitychange', markCurrentSessionReadIfVisible)
   if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer)
@@ -2168,21 +2334,28 @@ onUnmounted(() => {
   border: 0;
 }
 
-/* S5 host-exit card: pinned bottom-center like an app-level alert, so it stays
-   visible regardless of which view is mounted underneath it. The component's
-   own root is `v-if`'d away when there is no evidence, so this box never
-   reserves space in the normal case. */
+/* S5 host-exit banner: **in flow** at the top of the content area. It used to be
+   a fixed bottom-right card and covered panels/primary buttons in every audited
+   screenshot; only the horizontal inset is kept so it aligns with view gutters. */
 .app-host-exit {
-  position: fixed;
-  right: var(--sp-4);
-  bottom: var(--sp-4);
-  z-index: 40;
-  width: min(32rem, calc(100vw - 2 * var(--sp-4)));
-  pointer-events: none;
+  flex: 0 0 auto;
+  /* `.content` 自带 sp-4 内边距：这里只补下间距，避免横向缩进叠加。 */
+  margin: 0 0 var(--sp-3);
+  max-width: 56rem;
 }
 
-.app-host-exit > * {
-  pointer-events: auto;
+/* 聊天路由例外：`.chat` 是 `height:100%` 的纵向 flex，任何 in-flow 兄弟都会把
+   输入框顶出可视区（`overflow:hidden` 直接裁掉）。这里改为浮在内容区顶部居中，
+   只压住聊天标题行的空白区，不进入 `.chat` 的布局高度。 */
+.content--chat > .app-host-exit {
+  position: absolute;
+  top: var(--sp-2);
+  left: 50%;
+  z-index: 5;
+  margin: 0;
+  width: max-content;
+  max-width: min(56rem, calc(100% - 2 * var(--sp-4)));
+  transform: translateX(-50%);
 }
 </style>
 

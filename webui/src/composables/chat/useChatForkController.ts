@@ -48,6 +48,13 @@ export interface ChatForkControllerDeps {
   retryLive: () => void
 }
 
+/** 与 `useChatMetaDraftRecovery` 同口径：内置 code 优先，文案兜底（旧网关只回 message）。 */
+function isMethodNotFound(error: unknown): boolean {
+  const candidate = error as { code?: unknown, message?: unknown } | null
+  return candidate?.code === 'METHOD_NOT_FOUND'
+    || /method not found/i.test(error instanceof Error ? error.message : String(candidate?.message || error))
+}
+
 export function useChatForkController(
   state: ChatViewState,
   deps: ChatForkControllerDeps,
@@ -225,6 +232,16 @@ export function useChatForkController(
       }
     } catch (err) {
       if (!isForkTransitionActive(generation)) return
+      // `sessions.fork` / `sessions.forkThroughTurn` 目前只由 Python 侧车实现
+      // （`pyengine/src/opensquilla/gateway/rpc_sessions.py`）。纯 Rust 部署拿到的是
+      // `METHOD_NOT_FOUND` —— 直接把这条错误抛给用户，看起来像软件坏了。
+      // 注意：**不能用 `supportsMethod` 前置门控**——Rust 侧没声明该方法，门控会让
+      // 侧车在线时入口也永远不显示（`check-rpc-contract` 会直接判红）。
+      if (isMethodNotFound(err) && !forkTransition.value?.childKey) {
+        clearForkTransition(generation)
+        pushToast(t('chat.toast.forkUnavailable'), { tone: 'warn' })
+        return
+      }
       const childCreated = Boolean(forkTransition.value?.childKey)
       if (childCreated) {
         failForkTransition(generation, 'navigation', err)

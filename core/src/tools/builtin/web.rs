@@ -4,6 +4,51 @@
 
 use super::*;
 
+/// 同一 (shell, 命令) 连续失败到这个次数就熔断，不再原样执行。
+///
+/// 真机事故：`chcp` 解析失败时 agent 对同一条 `python xxx.py` 重试了 16 次，
+/// 90 秒没完成一个「写斐波那契脚本」的简单请求——工具坏了，模型却把它当成
+/// 「再试一次」的理由。熔断必须发生在**工具层**：给模型一个明确的「别重试」信号。
+const SHELL_FAIL_LIMIT: u32 = 3;
+
+/// 最近一次失败签名（`shell|command`）与连续失败次数。进程级：换会话也不清零，
+/// 避免「新一次对话」把同一坏命令的失败历史洗掉。
+fn shell_fail_streak() -> &'static std::sync::Mutex<Option<(String, u32)>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Option<(String, u32)>>> = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn shell_streak_key(shell: ExecShell, cmd: &str) -> String {
+    format!("{}|{}", shell.id(), cmd.trim())
+}
+
+/// 熔断判定：命中返回给模型的错误文案，未命中返回 `None`。
+fn shell_circuit_open(key: &str) -> Option<String> {
+    let guard = shell_fail_streak().lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some((k, n)) if k == key && *n >= SHELL_FAIL_LIMIT => Some(format!(
+            "[工具熔断] 这条命令已连续 {n} 次以同一错误失败，本次不再执行。\
+             这不是「再试一次」能解决的问题：请先读上面的 stderr 定位根因，\
+             或换一条路径（例如改用 code_exec 直接跑语言运行时、用文件工具读写），\
+             也可以把环境问题如实报告给用户。禁止原样重试同一条命令。"
+        )),
+        _ => None,
+    }
+}
+
+/// 记录执行结果：成功清零；失败按签名累加。
+fn record_shell_outcome(key: String, exit_code: i32) {
+    let mut guard = shell_fail_streak().lock().unwrap_or_else(|e| e.into_inner());
+    if exit_code == 0 {
+        *guard = None;
+        return;
+    }
+    *guard = match guard.take() {
+        Some((k, n)) if k == key => Some((k, n.saturating_add(1))),
+        _ => Some((key, 1)),
+    };
+}
+
 /// 多根快照：逐根采集后按文件路径合并；任一根被截断即整体标记截断
 /// （截断快照不参与差分，避免把没扫到的文件误判为新增）。
 fn snapshot_all_roots(ws: &RootSet) -> crate::tools::file_change::WorkspaceSnapshot {
@@ -74,6 +119,12 @@ pub(crate) fn shell_exec_tool(
                     .and_then(|v| v.parse::<usize>().ok())
                     .map(|n| n.clamp(4096, 4 * 1024 * 1024))
                     .unwrap_or(DEFAULT_MAX_OUTPUT);
+                // 熔断在**执行前**：同一条命令连续失败到上限就不再跑，直接把「别再重试」
+                // 回给模型（见 `SHELL_FAIL_LIMIT` 的真机事故说明）。
+                let streak_key = shell_streak_key(shell, cmd);
+                if let Some(msg) = shell_circuit_open(&streak_key) {
+                    return err(msg, "TOOL_CIRCUIT_OPEN");
+                }
                 // cwd 限定工作区内：模型给的是相对路径（多根会话可命中任一登记根）；
                 // 越界按既有文案报告根目录。
                 let cwd = match args
@@ -107,6 +158,7 @@ pub(crate) fn shell_exec_tool(
                     .with_max_output(max_output);
                 match exec_with(&req, &guard).await {
                     Ok(o) => {
+                        record_shell_outcome(streak_key, o.exit_code);
                         let after = snapshot_all_roots(&ws);
                         let registered = crate::tools::file_change::register_workspace_diff(
                             &before,
@@ -138,7 +190,11 @@ pub(crate) fn shell_exec_tool(
                             o.stderr
                         ))
                     }
-                    Err(e) => err(e.to_string(), "EXEC_ERROR"),
+                    Err(e) => {
+                        // spawn 失败/超时也计入熔断：否则「命令根本跑不起来」会被无限重试。
+                        record_shell_outcome(streak_key, -1);
+                        err(e.to_string(), "EXEC_ERROR")
+                    }
                 }
             })
         }),

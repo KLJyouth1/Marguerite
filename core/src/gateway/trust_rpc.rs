@@ -15,7 +15,14 @@ pub fn trust_list() -> Value {
 }
 
 /// `trust.grant`：授予信任
-/// params: { level: "low"|"medium"|"high", tool: "<tool>|*", mode?: "<mode>", session: "..." }
+///
+/// params:
+/// - `level`: `"low"|"medium"|"high"`
+/// - `tool`: `"<tool>|*"`
+/// - `mode?`: 限定模式（缺省 = 全局）
+/// - `session`: 授予会话（Medium 会话信任据此生效）
+/// - `args?`: 参数级绑定 —— 给了就只对**这次参数形态**免确认（存指纹，不存原文）
+/// - `ttl_sec?`: 有效期秒数，到期自动失效（0 无意义，直接拒绝）
 pub fn trust_grant(params: &Value) -> Value {
     let level = match params
         .get("level")
@@ -34,8 +41,20 @@ pub fn trust_grant(params: &Value) -> Value {
         .get("session")
         .and_then(Value::as_str)
         .unwrap_or("default");
+    let args_fp = params
+        .get("args")
+        .filter(|v| !v.is_null())
+        .map(trust::args_fingerprint);
+    let ttl_sec = match params.get("ttl_sec") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(0) => return json!({ "error": "ttl_sec 必须大于 0（0 等于立即失效）" }),
+            Some(n) => Some(n),
+            None => return json!({ "error": "ttl_sec 必须是正整数秒" }),
+        },
+    };
     let mut g = trust::global().lock().unwrap_or_else(|e| e.into_inner());
-    let id = g.grant(level, tool, mode, session);
+    let id = g.grant_scoped(level, tool, mode, session, args_fp, ttl_sec);
     // Low/High 立即落盘（Medium 仅内存）
     if level.persists() {
         let _ = g.persist();

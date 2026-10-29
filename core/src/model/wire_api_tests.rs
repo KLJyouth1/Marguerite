@@ -9,6 +9,8 @@
 //! AC5 URL 归一化 / AC6 工具成对。
 
 use super::*;
+use crate::model::registry::{ModelProfile, ProfileKind};
+use crate::model::tier::{ModelTier, TierCaps};
 use crate::model::wire::{responses_url, validate, WireApi};
 
 fn cfg(wire: WireApi, base_url: &str) -> LLMConfig {
@@ -471,4 +473,219 @@ fn live_output_index_has_holes_and_holes_never_become_tool_calls() {
     assert_eq!(calls.len(), 1, "空洞不得变成工具调用");
     assert_eq!(calls[0].0, "read_file");
     assert_eq!(calls[0].1, "call_z");
+}
+
+// ── Anthropic Messages 家族：协议与鉴权头 ─────────────────────────────────
+//
+// 回归背景（2026-10-29 真机缺陷）：provider id → 协议映射此前在 6 处各写一份，
+// 每一份只认字面量 `"anthropic"`。于是 `custom_anthropic` 与整族 `*_anthropic`
+// 服务商全部落进 `LLMProvider::Custom` —— 请求打到 `/v1/chat/completions`、
+// 带 `Authorization: Bearer`，而它们要的是 `/v1/messages` + Anthropic 的
+// content blocks / tool_use。用户看到的是 404 或「模型没按我配的方式工作」，
+// 而不是「协议选错了」。
+//
+// 下面两条把「档案 id → 实际发出的 URL 与请求头」钉死：只测映射函数不够 ——
+// 映射对了但 `headers()` 仍旧发错头，同样是坏。
+
+fn profile_with_provider(provider: &str, base_url: &str) -> ModelProfile {
+    ModelProfile {
+        id: format!("{provider}-primary"),
+        label: format!("{provider}-primary"),
+        provider: provider.into(),
+        base_url: base_url.into(),
+        api_key: "sk-test-key".into(),
+        api_key_env: String::new(),
+        model: "m".into(),
+        kind: ProfileKind::Cloud,
+        builtin: false,
+        temperature: 0.5,
+        max_tokens: 2048,
+        tier: ModelTier::Balanced,
+        tier_caps: TierCaps::default(),
+        tier_caps_declared: false,
+        wire_api: WireApi::Chat,
+        capabilities: Default::default(),
+    }
+}
+
+#[test]
+fn custom_anthropic_profile_speaks_messages_protocol_with_bearer_auth() {
+    let profile = profile_with_provider("custom_anthropic", "https://gw.example.com/anthropic");
+    let client = LLMClient::new(profile.to_llm_config());
+
+    // 协议：必须是 Anthropic Messages，而不是 Chat Completions
+    assert_eq!(
+        client.chat_url(),
+        "https://gw.example.com/anthropic/v1/messages",
+        "custom_anthropic 必须打 /v1/messages"
+    );
+    assert!(!client.chat_url().contains("chat/completions"));
+
+    // 鉴权：兼容网关沿用 OpenAI 风格的 Bearer 头
+    let headers = client.headers();
+    assert_eq!(
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer sk-test-key"),
+        "兼容网关必须用 Authorization: Bearer"
+    );
+    assert!(
+        headers.get("x-api-key").is_none(),
+        "Bearer 形态不得再发 x-api-key（两套都发会让部分网关直接 401）"
+    );
+    assert_eq!(
+        headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok()),
+        Some("2023-06-01")
+    );
+}
+
+#[test]
+fn anthropic_profile_speaks_messages_protocol_with_x_api_key() {
+    let profile = profile_with_provider("anthropic", "https://api.anthropic.com");
+    let client = LLMClient::new(profile.to_llm_config());
+
+    assert_eq!(client.chat_url(), "https://api.anthropic.com/v1/messages");
+    let headers = client.headers();
+    assert_eq!(
+        headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+        Some("sk-test-key"),
+        "Anthropic 官方端点必须用 x-api-key"
+    );
+    assert!(headers.get("authorization").is_none());
+}
+
+#[test]
+fn every_anthropic_family_id_reaches_the_messages_endpoint() {
+    // 协议正确性的**下限**：整族 id 都必须落到 /v1/messages。
+    // 鉴权头按服务商分两种（官方 x-api-key / 兼容网关 Bearer），这里只钉 URL。
+    for id in [
+        "anthropic",
+        "custom_anthropic",
+        "qwen_token_plan_anthropic",
+        "kimi_coding_anthropic",
+        "minimax_coding_anthropic",
+        "mimo_anthropic",
+        "tencent_tokenhub_anthropic",
+        "tencent_token_plan_anthropic",
+        "volcengine_coding_plan_anthropic",
+        "byteplus_coding_plan_anthropic",
+    ] {
+        let profile = profile_with_provider(id, "https://gw.example.com");
+        let client = LLMClient::new(profile.to_llm_config());
+        assert_eq!(
+            client.chat_url(),
+            "https://gw.example.com/v1/messages",
+            "{id} 必须走 Anthropic Messages"
+        );
+    }
+}
+
+#[test]
+fn openai_compatible_ids_keep_the_chat_endpoint() {
+    // 反向自证：收口映射不得把普通服务商一起改成 Messages
+    for id in ["openai", "deepseek", "custom", "ollama"] {
+        let profile = profile_with_provider(id, "https://gw.example.com/v1");
+        let client = LLMClient::new(profile.to_llm_config());
+        assert_eq!(
+            client.chat_url(),
+            "https://gw.example.com/v1/chat/completions",
+            "{id} 必须保持 Chat Completions"
+        );
+        let headers = client.headers();
+        assert!(headers.get("x-api-key").is_none(), "{id} 不得发 x-api-key");
+        assert!(headers.get("anthropic-version").is_none(), "{id}");
+    }
+}
+
+// ── Anthropic Messages 协议完整性 ────────────────────────────────────────
+
+#[test]
+fn anthropic_stop_reason_is_normalized_to_the_openai_vocabulary() {
+    // 两个词表同义不同名：上游只认 stop / length / tool_calls，
+    // Anthropic 发的是 end_turn / max_tokens / tool_use / stop_sequence。
+    // 不归一的后果：`tool_use` 这种非标准值一路流到 StepFinish.reason，
+    // 按 `tool_calls` 判终态的调用方永远匹配不上。
+    for (raw, want) in [
+        ("end_turn", "stop"),
+        ("stop_sequence", "stop"),
+        ("max_tokens", "length"),
+        ("tool_use", "tool_calls"),
+    ] {
+        let data = format!(r#"{{"type":"message_delta","delta":{{"stop_reason":"{raw}"}}}}"#);
+        let chunk = parse_anthropic_stream_chunk(&data, "claude").unwrap();
+        assert_eq!(
+            chunk.finish_reason.as_deref(),
+            Some(want),
+            "stop_reason {raw} 应归一为 {want}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn anthropic_body_enables_thinking_for_supported_claude_models() {
+    // Anthropic 的扩展思考与 OpenAI 的 `reasoning_effort` 不是同一个字段：
+    // 请求体里是 `thinking: {type, budget_tokens}`，且
+    // ① budget_tokens 必须小于 max_tokens（否则 400）；
+    // ② 开启后 temperature 必须缺省（否则 400）。
+    let client = LLMClient::new(LLMConfig {
+        provider: LLMProvider::Anthropic,
+        model: "claude-sonnet-4-5".into(),
+        base_url: "https://api.anthropic.com".into(),
+        api_key: "sk-test-key".into(),
+        max_tokens: 8192,
+        temperature: 0.7,
+        ..Default::default()
+    });
+    let body = crate::model::thinking::TURN_EFFORT
+        .scope(Some(crate::model::thinking::ThinkingEffort::Deep), async {
+            client.build_body(&[user("hi")], false, None)
+        })
+        .await;
+    assert_eq!(
+        body["thinking"]["type"], "enabled",
+        "Claude 4 系在用户显式选择思考档位时应注入 thinking：{body}"
+    );
+    let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
+    assert!(budget > 0, "thinking 必须带 budget_tokens：{body}");
+    assert!(
+        body["max_tokens"].as_u64().unwrap_or(0) > budget,
+        "max_tokens 必须大于 budget_tokens：{body}"
+    );
+    assert!(
+        body.get("temperature").is_none(),
+        "开启思考后 Anthropic 要求 temperature 缺省或为 1：{body}"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_body_omits_thinking_for_claude_models_without_support() {
+    // 反向自证：Claude 3.5 / 3.0 收到 `thinking` 会直接 400，
+    // 所以注入必须按**已知支持**的型号收口，而不是见 claude 就发。
+    for model in ["claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"] {
+        let client = LLMClient::new(LLMConfig {
+            provider: LLMProvider::Anthropic,
+            model: model.into(),
+            base_url: "https://api.anthropic.com".into(),
+            api_key: "sk-test-key".into(),
+            max_tokens: 8192,
+            temperature: 0.7,
+            ..Default::default()
+        });
+        let body = crate::model::thinking::TURN_EFFORT
+            .scope(Some(crate::model::thinking::ThinkingEffort::Deep), async {
+                client.build_body(&[user("hi")], false, None)
+            })
+            .await;
+        assert!(
+            body.get("thinking").is_none(),
+            "{model} 不支持扩展思考，不得注入 thinking：{body}"
+        );
+        assert!(
+            body.get("temperature").is_some(),
+            "{model} 未开启思考时 temperature 必须保留：{body}"
+        );
+    }
 }

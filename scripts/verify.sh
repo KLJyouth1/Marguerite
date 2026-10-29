@@ -13,7 +13,7 @@
 # 用法：
 #   bash scripts/verify.sh                 # 等同 --all（不含耗时的 tauri 打包）
 #   bash scripts/verify.sh --clean --all   # 先 cargo clean -p marguerite-core 再全测，破除缓存遮蔽（完成声明用此档）
-#   bash scripts/verify.sh --release       # --all + cargo tauri build（发版门禁）
+#   bash scripts/verify.sh --release       # --all + cargo tauri build + 资源卫生 + 侧车启动冒烟（发版门禁）
 #   bash scripts/verify.sh --core          # 仅 Rust core 栈
 #   bash scripts/verify.sh --webui         # 仅 webui 栈（typecheck + 单测）
 #   bash scripts/verify.sh --gui           # 仅 gui（纯 Tauri 壳：无前端源码守卫 + 壳编译 + 壳 clippy）
@@ -31,10 +31,30 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT" || { echo "[FAIL] 无法进入项目根 $ROOT"; exit 1; }
 
 # --- 工具链 PATH（本机 cargo 在 /c/Users/Administrator/.cargo/bin） ---
+#
+# cargo 只被 Rust 层用到：`--workbench` / `--pyengine` / `--webui` 三个纯 Python/Node
+# 层不该因为「这台机器没装 Rust」而 exit 2 —— 那会让 CI 里只能跑 Python 的 job
+# 无法复用本脚本（只能把 pytest 命令行再抄一份，正是 AGENTS.md 反对的漂移来源）。
+# 判定刻意保守：只有**参数全部**落在下面这个白名单里才允许缺 cargo，其余
+# （无参数 = --all、--core、--gui、--e2e、--release、--fast、或任何未知旗标）一律按需要处理。
+cargo_optional=0
+if [ $# -gt 0 ]; then
+  cargo_optional=1
+  saw_pure_layer=0
+  for arg in "$@"; do
+    case "$arg" in
+      --workbench|--pyengine|--webui) saw_pure_layer=1 ;;
+      --clean) ;;
+      *) cargo_optional=0 ;;
+    esac
+  done
+  # 裸 `--clean` / `--clean --all` 之类仍要 cargo：必须先看见一个纯 Python/Node 层。
+  [ "$saw_pure_layer" -eq 0 ] && cargo_optional=0
+fi
 if ! command -v cargo >/dev/null 2>&1; then
   if [ -x "/c/Users/Administrator/.cargo/bin/cargo" ]; then
     export PATH="/c/Users/Administrator/.cargo/bin:$PATH"
-  else
+  elif [ "$cargo_optional" -eq 0 ]; then
     echo "[FAIL] 找不到 cargo：请将 ~/.cargo/bin 加入 PATH"; exit 2
   fi
 fi
@@ -379,6 +399,40 @@ check_readme_claims() {
     scripts/check-readme-claims.py
 }
 
+# cmd.exe 按**字节窗口**啃批处理文件：UTF-8 无 BOM + 中文时窗口会落在多字节字符
+# 中间，于是一行被切成两行假命令 —— 实测 package_full.cmd 因此吐出 71 行 stderr，
+# 而且被截断的那半边可能是一条真命令（不是单纯的乱码）。这类缺陷只在
+# Windows 上存在且只在运行 `cmd /c` 时才暴露，所以门禁也必须真跑一遍：
+# check-batch-parse.py 把每条命令换成 `echo`，把同编码副本交给 cmd，stderr 非空即红。
+check_batch_parse() {
+  if ! command -v cmd >/dev/null 2>&1; then
+    echo "${C_HEAD}[SKIP]${C_RST} 无 cmd.exe（非 Windows 主机），批处理解析无法验证"
+    SKIPPED+=("批处理解析健康度 (check-batch-parse.py) — 仅 Windows 可验证")
+    return 0
+  fi
+  require_python "批处理解析健康度 (check-batch-parse.py)" || return 0
+  if [ ! -f scripts/check-batch-parse.py ]; then
+    echo "${C_HEAD}[SKIP]${C_RST} check-batch-parse.py 不可用，跳过"
+    SKIPPED+=("批处理解析健康度 (check-batch-parse.py) — 脚本不可用")
+    return 0
+  fi
+  local listing
+  if ! listing="$(git ls-files '*.cmd' '*.bat' 2>/dev/null)"; then
+    echo "${C_HEAD}[SKIP]${C_RST} git ls-files 不可用，无法枚举受版本管理的批处理"
+    SKIPPED+=("批处理解析健康度 (check-batch-parse.py) — 无 git，目标集不可枚举")
+    return 0
+  fi
+  local files=()
+  while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$listing"
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "${C_HEAD}[SKIP]${C_RST} 本仓没有 .cmd/.bat 文件，跳过"
+    SKIPPED+=("批处理解析健康度 (check-batch-parse.py) — 无目标文件")
+    return 0
+  fi
+  run_check "批处理解析健康度 (check-batch-parse.py, ${#files[@]} 个脚本)" \
+    "$PY" scripts/check-batch-parse.py "${files[@]}"
+}
+
 check_tokens_sync() {
   if command -v node >/dev/null 2>&1 && [ -f scripts/check-tokens-sync.mjs ]; then
     # 标签于 2026-10-22 从「三端」改为「端点」：GUI（gui/src）已归档，
@@ -491,6 +545,7 @@ WEBUI_E2E_GREEN=(
   e2e/approval-card.spec.ts
   e2e/artifact-preview.spec.ts
   e2e/brand-keys.guard.spec.ts
+  e2e/chat-markdown-images.spec.ts
   e2e/chat-theme.spec.ts
   e2e/computer-use.spec.ts
   e2e/deliverables.spec.ts
@@ -504,18 +559,23 @@ WEBUI_E2E_GREEN=(
   e2e/theme.spec.ts
   e2e/user-message-newlines.spec.ts
 )
-# 上面的 15 个文件在隔离网关下的实测通过数（2026-09-25，--retries=0 --workers=4；
-# R47 岛屿档位 2 例、R48 桌宠悬停 1 例、R49 theme 14 例、R51 settings-modal 22 例、
+# 上面的 16 个文件在隔离网关下的实测通过数（2026-09-25，--retries=0；R47 岛屿档位 2 例、
+# R48 桌宠悬停 1 例、R49 theme 14 例、R51 settings-modal 22 例、
 # R52 meta-ribbon 8 例 + floating-composer 3 例、R53 preview-origin-csp 1 例、
-# R55 brand-keys.guard 2 例 —— 后者是纯文件系统 lint，不需要网关/浏览器）
+# R55 brand-keys.guard 2 例 —— 后者是纯文件系统 lint，不需要网关/浏览器；
+# 2026-10-27 增 chat-markdown-images 1 例：真实 Chromium 下的 markdown 图片放行/消毒契约，
+# 补 happy-dom 无法覆盖的 DOMPurify 属性级断言；
+# 2026-10-28 增 approval-card 1 例：用 routeWebSocket 把订阅响应压后 2s，钉住
+# 「已裁决的结果行不能被晚到的空闲快照抹掉」——正是下面那句「实时快照重置 turn」的真根因）
 # ⚠️ preview-origin-csp 依赖 `openssl` 在 PATH 上（自签 127.0.0.1 证书）；Git Bash 的
 # mingw64 自带，缺失时该例会在证书那步失败——是环境缺失，不是产品回归。
-WEBUI_E2E_BASELINE=95
+WEBUI_E2E_BASELINE=96
 WEBUI_E2E_BACKLOG=18
 WEBUI_E2E_PORT="${WEBUI_E2E_PORT:-18877}"
-# 并发度：4 worker 在 12 核机上仍会偶发「菜单点击时组件重渲染 → URL 未变」与
-# 「实时快照重置 turn → 审批卡消失」。棘轮要的是确定性，不是最快；默认 2，
-# 可用 WEBUI_E2E_WORKERS 覆盖（仅在确认更高并发稳定时）。
+# 并发度：4 worker 在 12 核机上仍会偶发「菜单点击时组件重渲染 → URL 未变」。
+# 棘轮要的是确定性，不是最快；默认 2，可用 WEBUI_E2E_WORKERS 覆盖（仅在确认更高并发稳定时）。
+# ⚠️ 另一半原因（「实时快照重置 turn → 审批卡消失」）已于 2026-10-28 修复并钉住
+# （applySubscriptionSnapshot 重置后重挂中断帧），但 4 worker 下的整体稳定性尚未重测。
 WEBUI_E2E_WORKERS="${WEBUI_E2E_WORKERS:-2}"
 
 check_webui_e2e() {
@@ -576,8 +636,12 @@ check_webui_e2e() {
   # `MARGUERITE_CONFIG_DIR` 是**必须**的：Windows 上 `dirs::home_dir()` 走 Known Folder
   # API，不认 USERPROFILE/HOME —— 只改 HOME 时隔离网关仍会读写真实 ~/.marguerite
   # （污染用户配置，并与常驻 daemon 争抢同一份 config.yaml，制造并发写丢更新）。
+  # `MARGUERITE_DATA_DIR` 同样必须显式给：config_dir() 只覆盖 config.yaml，
+  # sessions/audit/cache/gateway-token 全走 data_dir()，只依赖 LOCALAPPDATA 的隐式
+  # 回退会在任何策略改动的机器上重新穿透真实用户数据（P6-2）。
   USERPROFILE="$home" HOME="$home" LOCALAPPDATA="$home/AppData/Local" \
     MARGUERITE_CONFIG_DIR="$home/.marguerite" \
+    MARGUERITE_DATA_DIR="$home/AppData/Local/Marguerite" \
     "$bin" gateway --port "$WEBUI_E2E_PORT" >"$home/gw.log" 2>&1 &
   local gw_job=$!
 
@@ -829,6 +893,67 @@ check_release_build() {
     cargo tauri build
 }
 
+# 安装包资源卫生：查两次，构建前一次、构建后一次。
+#
+# 为什么**构建前那一次不够**：`gui/src-tauri/build.rs` 在 `cargo tauri build` 期间会
+# 重新铺 `resources/pyengine` 与内嵌控制台 `static/dist`（无条件 remove + 全量 copy），
+# 时机在 Step 5c 之后 —— 于是「构建前干净」并不等于「装进去的干净」。
+# 只有构建产物里的 `release/resources` 是安装包实际携带的那棵树（check_shipped_payload）。
+#
+# 产物根不能写死成 `target/`：`scripts/package_full.cmd` 用
+# `CARGO_TARGET_DIR=marguerite_build_target` 把产物挪开（规避被占用/被锁的 target/），
+# 打包机上真实物化树就在那里。写死会让后置检查报「树不存在」，把一次正常发版判成失败。
+CARGO_OUT_DIR="${CARGO_TARGET_DIR:-target}"
+CARGO_OUT_DIR="${CARGO_OUT_DIR%/}"
+#
+# rc=2（一棵树都扫不到）在这里是 **FAIL 而不是 SKIP**：`--release` 的语义是「我要产出
+# 安装包」，资源树不存在说明这次发布没有素材，不是「工具缺失所以放过」。
+#
+# 自测先行：一条永远不会触发的规则会让脏树看起来干净，所以先证明每条规则都咬得动
+# （--self-test 会构造一棵已知违规的树，逐条断言命中）。
+check_shipped_resources() {
+  require_python "安装包资源卫生 (构建前 staged 树)" || return 0
+  local out rc
+  out="$("$PY" scripts/check-shipped-resources.py --self-test 2>&1)"; rc=$?
+  printf '%s\n' "$out" | tail -n 3
+  if [ "$rc" -ne 0 ]; then
+    fail_check "安装包资源卫生 (构建前 staged 树)" \
+      "守卫自测未通过（rc=$rc）—— 有规则从不触发，它对真实资源树给出的「干净」不可信：$'\n'$(printf '%s\n' "$out" | tail -n 12)"
+    return 1
+  fi
+  run_check "安装包资源卫生 (构建前 staged 树)" \
+    "$PY" scripts/check-shipped-resources.py
+}
+
+# 构建后再扫一次**物化**的资源树：这是「安装包里到底有什么」的唯一直接证据。
+# 目录不存在即 FAIL —— 拿不到证据不能记成通过，也不能记成跳过。
+check_shipped_payload() {
+  require_python "安装包资源卫生 (构建后物化树)" || return 0
+  if [ ! -d "$CARGO_OUT_DIR/release/resources" ]; then
+    fail_check "安装包资源卫生 (构建后物化树)" \
+      "$CARGO_OUT_DIR/release/resources 不存在：构建没有产出可扫描的资源树，无法证明安装包携带了什么"
+    return 1
+  fi
+  run_check "安装包资源卫生 (构建后物化树)" \
+    "$PY" scripts/check-shipped-resources.py --root "$CARGO_OUT_DIR/release/resources"
+}
+
+# 物化树「干净」只证明文件对得上，**不证明它能跑**。Cython 编译后的函数不是
+# `types.FunctionType`，Starlette 的 `Route` 于是把它当 ASGI 类、以
+# `(scope, receive, send)` 调用 —— 导入验证、应用装配全部成功，一发请求就是
+# `health() takes exactly 1 positional argument (3 given)`（2026-10-29 实测）。
+# 所以发布层必须真的把侧车启动起来、打几个真实请求（含 /ws 握手）。
+check_shipped_sidecar_boot() {
+  require_python "安装包侧车启动冒烟 (check-sidecar-boot.py)" || return 0
+  if [ ! -d "$CARGO_OUT_DIR/release/resources/python" ]; then
+    fail_check "安装包侧车启动冒烟 (check-sidecar-boot.py)" \
+      "$CARGO_OUT_DIR/release/resources/python 不存在：安装包里没有可启动的 Python 运行时，侧车必死"
+    return 1
+  fi
+  run_check "安装包侧车启动冒烟 (check-sidecar-boot.py)" \
+    "$PY" scripts/check-sidecar-boot.py --root "$CARGO_OUT_DIR/release/resources"
+}
+
 # workbench/ 是**第五个入口**：Python 后端（engine · api · cli · llmlab · ttc ·
 # agentloop）+ 由 FastAPI 同源托管的 React SPA（:8011）+ 独立打包流水线。
 # 它的 README 把 `packaging/check_version_sync.py` 写成「CI 门禁」，但 R28 实测
@@ -1028,6 +1153,7 @@ if [ "$MODE_ALL" -eq 1 ]; then
   check_secrets
   check_doc_links
   check_readme_claims
+  check_batch_parse
   check_tokens_sync
   check_pyengine_tests
   check_pyengine_gateway_tests
@@ -1049,7 +1175,10 @@ if [ "$MODE_ALL" -eq 1 ]; then
 fi
 
 if [ "$MODE_RELEASE" -eq 1 ]; then
+  check_shipped_resources
   check_release_build
+  check_shipped_payload
+  check_shipped_sidecar_boot
 fi
 
 # ---------------------------------------------------------------------------

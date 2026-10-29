@@ -975,11 +975,25 @@ export function useChatApprovals(options: UseChatApprovalsOptions) {
 
   // Reconnect recovers approvals that arrived while the socket was down: a fresh
   // hydration re-surfaces still-pending items as frames (deduped by the fold).
+  //
+  // The status sweep is for recovery only. The first connect of a page is not a
+  // reconnect: `subscribe()` and the session watch already hydrated, so that
+  // snapshot is the fresher authority. Sweeping there also lets a queue that does
+  // not own the id answer for it — `exec.approval.` is proxied to the Python
+  // sidecar, whose queue knows nothing about Rust-raised approvals and answers
+  // `found: false`, which `applyApprovalStatus` turns into a terminal
+  // `unavailable`: the live card collapses and can no longer be approved.
+  let sawDisconnect = false
   function handleConnectionState(state: unknown) {
-    if (state !== 'connected') return
+    if (state !== 'connected') {
+      sawDisconnect = true
+      return
+    }
     const generation = ++statusGeneration
     void (async () => {
       await hydrateApprovals()
+      if (!sawDisconnect) return
+      sawDisconnect = false
       await reconcileLocalApprovalStatuses(generation)
     })()
   }

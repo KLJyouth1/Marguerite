@@ -64,8 +64,17 @@ __pycache__/
 venv/
 _tak*/
 
+# website/tools/verify-interactions.cjs 在仓库根落盘的截图草稿（每次运行都会重生成）
+/_*.png
+
+# 打包脚本的手工备份（`*.pre-gbk.bak`、`*.utf8-bak-20261029…` 等），不是源码
+/scripts/*.bak*
+/scripts/*-bak*
+
 # 本机打包输出目录（体积大，非源码）
-/marguerite_build_target
+# 带后缀的快照（`marguerite_build_target.keep/` 等）同样排除：曾出现 6.3 GB
+# 快照未被忽略、`git add -A` 直接撞 GitHub 100 MB 单文件上限的情况。
+/marguerite_build_target*
 
 # 桌面端打包资源（模型权重等二进制，体积大，非源码）
 /gui/src-tauri/resources
@@ -234,3 +243,8 @@ vitest-report.json
 # verify-dist 只允许 boot/boot.mp3（CC0）随包分发；splash-cyber.mp4 是历史遗留，
 # 没有任何页面引用它（SplashView 已改用 /boot/boot.mp3 + public/splash/bg-v2.*）
 /webui/public/boot/splash-cyber.mp4
+
+# 安装器 UI（installer/Marguerite.Setup）的构建产物
+/installer/**/bin/
+/installer/**/obj/
+/installer/**/.vs/

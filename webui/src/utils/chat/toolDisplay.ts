@@ -248,6 +248,8 @@ export function toolResultCount(raw: string, toolName: string): number | null {
 
 export function toolResultIsError(payload: unknown): boolean {
   const record = asRecord(payload)
+  // `ok` 是权威成败信号；显式 false 优先于任何「看起来有输出」的推断。
+  if (record?.ok === false) return true
   const status = asRecord(record?.execution_status ?? record?.executionStatus)
   if (typeof status?.status === 'string') {
     return ['error', 'timeout', 'cancelled'].includes(status.status)
@@ -262,7 +264,8 @@ export function toolStatusText(toolCall: ChatToolCall): string {
   const count = toolResultCount(toolCall.result, toolCall.name)
   if (count !== null) return t('chat.tool.results', { count })
   if (toolCall.status === 'success') return t('chat.tool.done')
-  return t('chat.tool.pending')
+  // 既无成败信号也无输出（旧数据 / 回合中断）：照实说「未确认」，不要谎报「待定」。
+  return t('chat.tool.unknown')
 }
 
 export function toolGroupStatusText(group: ChatToolCallGroup): string {
@@ -275,5 +278,5 @@ export function toolGroupStatusText(group: ChatToolCallGroup): string {
   if (counts.length && group.calls.length === 1) return t('chat.tool.results', { count: counts[0] })
   if (counts.length) return t('chat.tool.results', { count: counts.reduce((sum, count) => sum + count, 0) })
   if (group.status === 'success') return t('chat.tool.done')
-  return t('chat.tool.pending')
+  return t('chat.tool.unknown')
 }

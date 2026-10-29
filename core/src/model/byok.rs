@@ -118,17 +118,10 @@ pub fn is_encrypted(s: &str) -> bool {
 /// 文件权限收紧为 0600（仅属主读写）。
 /// Unix 直接 chmod；Windows 无等价 owner-only ACL，尽力保留文件存在态。
 pub fn chmod_0600(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perm = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perm)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
+    // 唯一实现放在 `persistence`：令牌 / `.env` / 凭据台账与之共用同一口径，
+    // 免得两处各自维护一份「什么算 0600」而在某个平台悄悄漂移。
+    crate::persistence::harden_private_file(path)
+        .map_err(|e| anyhow!("chmod 0600 {}: {}", path.display(), e))
 }
 
 /// 解析 API Key 的最终值（多 provider 并存）：

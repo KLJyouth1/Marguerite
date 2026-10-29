@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-4230%20passing-brightgreen.svg)](#-质量门禁)
+[![Tests](https://img.shields.io/badge/core%20tests-4341%20passing-brightgreen.svg)](#-质量门禁)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-安全模型)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-递归自我改进)
 
@@ -111,7 +111,7 @@ Marguerite 拒绝这个取舍 —— 一个 Rust 内核暴露四个界面，而�
 凌晨 0 点 3 次、2 点 1 次。一度 08:00 干到凌晨 03:30，后来进了几次医院，改成 05:00 起、
 23:30 收 —— 不是变自律了，是身体先投了反对票。出门吃饭、在外游玩，包里永远开着一台远程桌面。
 
-**这三年真正接进过这台工作台的 14 个模型入口**（以 `core/src/provider` 为准）：
+**这三年真正接进过这台工作台的 14 个模型入口**（以 `core/src` 为准）：
 DeepSeek · Ollama · OpenAI · Anthropic · Gemini · Qwen · Kimi · 豆包 · 混元 · 智谱 GLM ·
 Moonshot · Mistral · SiliconFlow · OpenRouter。不是广告位，也没有排除谁。
 
@@ -336,7 +336,7 @@ bash scripts/verify.sh --workbench    # 只跑 workbench 子项目（71 个离�
 bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 ```
 
-当前基线 —— 整道闸门调度 25 项检查，最近一次完整跑到 **25/25 全绿**是 2026-10-28；
+当前基线 —— 整道闸门调度 26 项检查，最近一次完整跑到 **26/26 全绿**是 2026-10-29；
 下表每一行数字都来自那次运行。其余每一层都在 CI
 （[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）里跑，**只有新增的 web e2e
 层暂时只在本机闸门里跑**：CI 需要把 Playwright 浏览器缓存与 Rust 构建出的网关放进
@@ -344,14 +344,14 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 4230 passed / 0 failed / 24 ignored |
+| `cargo test -p marguerite-core --lib` | 4341 passed / 0 failed / 25 ignored |
 | core 集成测试（`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`） | 离线且确定性；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过） |
-| `webui` 单测（Vitest） | 4898 passed / 0 failed（495 个文件） |
+| `webui` 单测（Vitest） | 4927 passed / 0 failed（500 个文件） |
 | `pyengine` 单测（pytest，`tests/unit`） | 823 passed / 0 failed / 7 skipped |
 | `pyengine` 网关契约（pytest，`tests/test_gateway`） | 2956 passed / 0 failed / 11 skipped |
-| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4445 passed / 0 failed / 390 skipped |
+| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4446 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 零告警 |
-| `npm run check:architecture` | 10 项架构守卫全绿 |
+| `npm run check:architecture` | 13 项架构守卫全绿 |
 | `scripts/check-doc-cli-drift.py` | 文档里的每个 CLI 记号都能解析到真实代码 |
 | `scripts/check-version-sync.py` | core / tui / gui / webui 版本号全部钉到 `core/Cargo.toml`（含两个 npm lockfile 的包自身条目） |
 | `npm ci --dry-run` | 控制台 lockfile 与 `package.json` 自洽（这条 `npm audit` 看不见） |
@@ -360,6 +360,8 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 | `scripts/check-secrets.py` | 将随提交落地的文件里没有真钥匙形态的字符串 —— 夹具必须自我标注（`sk-fake-…`），否则直接失败 |
 | `scripts/check-doc-links.py` | 本仓自己文档里的每条相对链接都能解析（vendored 技能包不在范围内） |
 | `scripts/check-readme-claims.py` | 中英两份 README 在所有硬事实上一致，且它们印出的闸门总数就是 `verify.sh --all` 真正调度的检查数 |
+| `scripts/check-batch-parse.py` | 每条受版本管理的 `.cmd`/`.bat` 都把命令替换成 `echo` 后交给 `cmd.exe` 干跑；UTF-8 无 BOM 的中文批处理会被按字节窗口切行，切出来的假命令（实测 `package_full.cmd` 吐过 71 行 stderr）就是缺陷，所以打包脚本按 GBK + CRLF 发布，这条检查证明解析器认可 |
+| `scripts/check-website-claims.py` | 官网印的 23 个数字（代码行数、架构守卫道数、RPC 声明、CLI 路由、测试基线、BPM）全部按「随仓库发布的那一份」重新测量，引用的每个路径必须存在，且不得链向源码仓库 —— 这条接在 CI 里而不是 `verify.sh`，所以上面的闸门总数仍等于真正调度的检查数 |
 | `workbench` 后端测试（pytest） | 71 个离线用例 —— 这个子项目会随仓库发布，所以和其他部分一样受门禁保护 |
 | `workbench` 版本一致 | 它自己的 `VERSION` 线与其 backend / frontend 声明一致 |
 | web e2e（Playwright） | 自起隔离网关（临时 HOME + `MARGUERITE_CONFIG_DIR` + 专用端口）跑确定性子集；通过数是只允许上升的棘轮，尚未稳定的用例列入待修复清单而不是当成绿 |
@@ -419,7 +421,7 @@ scripts/     verify.sh 与打包流水线
 Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 
 - 四个前端的版本号现已全部钉到 `core/Cargo.toml`，由 `scripts/check-version-sync.py`
-  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.17`）。
+  强制对齐。以引擎版本为准（`marguerite-core --version`，当前 `0.2.18`）。
 - 桌面端需要 Web 控制台产物在它旁边。请从安装包或从仓库目录运行 ——
   单独拷一个 `.exe` 出去，它没有控制台可托管。这种情况**不再静默失败**：
   网关对 `/control/` 返回 `503` 加一张自包含诊断页（列出它探测过的每一条路径），
@@ -429,7 +431,7 @@ Marguerite 处于 **pre-1.0 且迭代很快**。几句实话：
 - `workbench/` 是一个**独立子项目**，不是 Rust 引擎的第五个前端：它有自己的 Python 后端
   （`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`）、自己由 FastAPI 在 `:8011`
   同源托管的 React SPA、自己的打包流水线，以及**自己的版本线**
-  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.17` 相互独立）。它经 `core_bridge`
+  （`workbench/VERSION`，当前 `1.1.0`，与引擎的 `0.2.18` 相互独立）。它经 `core_bridge`
   桥接核心 store，思路与 `pyengine/` 一致；Rust 二进制并不 import 它。
   它的 71 个离线用例与版本门禁**此前没有任何门禁跑过**，而它是会随仓库发布的 ——
   现在由 `verify.sh --workbench` 覆盖。

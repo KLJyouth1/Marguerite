@@ -1,8 +1,9 @@
 <template>
   <template v-for="(message, index) in messages" :key="chatMessageKey(message, index)">
-    <!-- 单一阅读列：历史水合与实时气泡共用同一行容器。子组件不再各自用
-         `margin: 0 auto` 居中 —— 宽面板上 --chat-col 有上限，auto 外边距会把
-         整段对话缩到屏幕中间（任务结束后尤其明显）。 -->
+    <!-- 单一阅读列：历史水合与实时气泡共用同一行容器。行内容器（.msg-ai /
+         .msg-user / .chat-compaction-event）在自己的 scoped 规则里就是左对齐的
+         「上限宽度 + 左起点」，本组件不再叠加任何 `>` 覆盖（覆盖只在某一种 DOM
+         形状下命中，失配时回落到居中）。 -->
     <div
       class="chat-turn-row"
       :data-chat-turn-row="chatMessageKey(message, index)"
@@ -223,23 +224,17 @@ function turnStartTs(index: number): string | number | null {
 </script>
 
 <style>
-/* ── 会话阅读列（唯一定义）─────────────────────────────────────────────
-   历史水合（本组件包裹的 .chat-turn-row）与实时气泡（ChatView 直接渲染的
-   .msg-ai）必须共享同一个左对齐列：
-   · 宽度上限来自 `--chat-col`，但绝不再用 `margin: 0 auto` 居中；
-   · 左侧固定 24px 起排，宽屏多出来的空间留在右侧。
-   根因行是 AssistantMessage 的 `.msg-ai { width: var(--chat-col); margin: 0 auto }`
-   —— 宽面板上上限列被两侧 auto 外边距居中，整段历史看起来缩在屏幕中间。 */
-.chat .chat-thread > .msg-ai:not(.msg-ai--share-mode),
-.chat .chat-thread > .msg-user:not(.msg-user--share-mode),
-.chat .chat-turn-row > .msg-ai:not(.msg-ai--share-mode),
-.chat .chat-turn-row > .msg-user:not(.msg-user--share-mode) {
-  width: min(calc(100% - 48px), var(--chat-col, 980px));
-  max-width: calc(100% - 48px);
-  margin-inline: 24px auto;
-  text-align: start;
-}
-
+/* ── 会话阅读列：这里**不再**定义版式 ─────────────────────────────────────
+   以前这一层用 `.chat .chat-thread > .msg-ai` / `.chat .chat-turn-row > .msg-ai`
+   去覆盖居中，靠子组合器命中具体 DOM 形状：ChatView 的 scoped 样式跨不过组件边界
+   （历史行的 `.msg-ai` 带的是本组件/子组件的 scopeId），而包裹层一旦变化（水合、
+   回合行、分享态）覆盖就整条失配，回落到居中 —— 这正是「有时像修过、有时又居中」
+   的机制。现在根规则本身即左对齐，两种 DOM 形状都由各自的 scoped 规则确定性命中：
+   · 实时流式 / thinking 气泡 → styles/chat-view.css 的 `.msg-ai`
+   · 历史行 `.msg-ai` / `.msg-user` / `.chat-compaction-event`
+     → AssistantMessage.vue / UserMessage.vue / CompactionEvent.vue
+   口径：max-width = --chat-col-start，左起点 = --chat-gutter，text-align: start。
+   守卫：src/styles/chat-reading-column.contract.test.ts */
 .chat-turn-row {
   display: flex;
   flex-direction: column;

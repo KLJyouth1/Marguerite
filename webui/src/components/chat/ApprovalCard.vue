@@ -394,9 +394,15 @@ function emitDeny() {
 }
 
 .approval-card {
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  max-width: 780px;
-  margin: var(--sp-2) auto;
+  /* 会话阅读列（同 `.msg-ai` / `.plan-card` 口径）：--chat-col 只当上限，
+     起排固定在 --chat-gutter，多出来的宽度留在右侧。`780px` 是刻意比正文窄
+     一档的裁决卡读数宽度，所以写成 min(780px, --chat-col-start)。
+     嵌套进历史行时由 AssistantMessage 的 `.msg-ai-main > :deep(.approval-card)`
+     复位为整行宽；`--timeline` 变体自带 `max-width: none`。 */
+  width: 100%;
+  max-width: min(780px, var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px))));
+  margin-block: var(--sp-2);
+  margin-inline: var(--chat-gutter, 24px) auto;
   background: color-mix(in srgb, var(--bg-surface) 97%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: var(--radius-card);
@@ -738,8 +744,13 @@ function emitDeny() {
 }
 
 .approval-outcome {
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: var(--sp-1) auto;
+  /* 裁决后的折叠行也住在 `.chat-thread` 的弹性列里（foldLiveTurn=0 回滚分支），
+     所以它必须跟正文同一条阅读列；过去 `width: var(--chat-col)` + `margin: auto`
+     会把它推到屏幕中心。嵌套进活动时间线的行由 `--timeline` 变体复位。 */
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-block: var(--sp-1);
+  margin-inline: var(--chat-gutter, 24px) auto;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -780,6 +791,8 @@ function emitDeny() {
 
 .approval-outcome--timeline {
   width: 100%;
+  /* 折叠进活动时间线时铺满那一行，不吃阅读列的上限（否则嵌套行会被再收一档）。 */
+  max-width: none;
   margin: 0;
   padding: 7px 8px;
   border-radius: var(--radius-md);
@@ -794,10 +807,9 @@ function emitDeny() {
 }
 
 @media (max-width: 768px) {
-  .approval-card {
-    width: calc(100% - 24px);
-  }
-
+  /* 不再写 `.approval-card { width: calc(100% - 24px) }`：窄屏留边已经由
+     chat-view.css 的 `--chat-gutter` 媒体查询退回 24px，这里再减一次会让
+     右边缘贴到容器边界（24 + (100% − 24) = 100%）。 */
   .approval-card__head {
     padding: var(--sp-3) var(--sp-3) 0;
   }

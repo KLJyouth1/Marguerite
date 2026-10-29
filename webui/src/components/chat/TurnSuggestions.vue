@@ -57,16 +57,21 @@ const { t } = useI18n()
 </script>
 
 <style scoped>
-/* 与消息行共用同一条阅读列：左对齐、固定起排，不居中。 */
+/* 与消息行共用同一条阅读列：左对齐、固定起排，不居中。
+   起排值必须取 --chat-gutter（不是写死 24px），否则它会比正文更靠左，
+   在桌面宽度下正好落进左侧 minimap 轨道的让位区。 */
 .turn-suggestions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
-  width: min(calc(100% - 48px), var(--chat-col, 980px));
-  max-width: calc(100% - 48px);
-  margin-inline: 24px auto;
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.125rem 0 0.5rem;
+  text-align: start;
   color: var(--text-muted);
   font-size: var(--fs-xs);
 }

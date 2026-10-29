@@ -1669,3 +1669,76 @@ describe('useChatRenderedMessages ensemble metadata', () => {
     expect(ensemble?.requestCount).toBe(4)
   })
 })
+
+describe('useChatRenderedMessages persisted tool outcomes', () => {
+  // Rust 网关把 `tool_ok` 落盘后按 `ok` / `execution_status` 下发。前端若只按
+  // 「有没有输出」推断，会让失败工具刷新后显示成功、空输出的成功显示未完成、
+  // 中断回合的工具无休止地显示待定。
+  function persistedToolCalls(
+    calls: Array<Record<string, unknown>>,
+  ) {
+    return renderedMessagesFor([
+      {
+        role: 'assistant',
+        text: '',
+        ts: 0,
+        messageId: 'm-tool-outcomes',
+        tool_calls: calls as never,
+      } as ChatMessage,
+    ])
+  }
+
+  it('keeps an empty-output success as success when the gateway says ok', () => {
+    const api = persistedToolCalls([
+      {
+        type: 'tool_call',
+        tool_use_id: 'hist-tool-1',
+        name: 'write_file',
+        input: { path: 'a.txt' },
+        result: '',
+        ok: true,
+        execution_status: { status: 'success' },
+      },
+    ])
+    const call = api.renderedMessages.value[0].toolCalls?.[0]
+    expect(call?.status).toBe('success')
+    expect(call?.isError).toBe(false)
+    const part = api.renderedMessages.value[0].parts?.find(part => part.type === 'tool')
+    expect(part?.state).toBe('output-available')
+  })
+
+  it('renders a failed tool as failed even when it produced output', () => {
+    const api = persistedToolCalls([
+      {
+        type: 'tool_call',
+        tool_use_id: 'hist-tool-2',
+        name: 'shell',
+        input: '{"cmd":"false"}',
+        result: 'exit 1',
+        ok: false,
+        is_error: true,
+        execution_status: { status: 'error' },
+      },
+    ])
+    const call = api.renderedMessages.value[0].toolCalls?.[0]
+    expect(call?.status).toBe('error')
+    expect(call?.isError).toBe(true)
+  })
+
+  it('leaves an un-signalled tool unknown instead of claiming success', () => {
+    const api = persistedToolCalls([
+      {
+        type: 'tool_call',
+        tool_use_id: 'hist-tool-3',
+        name: 'read_file',
+        input: { path: 'b.txt' },
+        result: '',
+      },
+    ])
+    const call = api.renderedMessages.value[0].toolCalls?.[0]
+    expect(call?.status).toBe('')
+    expect(call?.isError).toBe(false)
+    const part = api.renderedMessages.value[0].parts?.find(part => part.type === 'tool')
+    expect(part?.state).toBe('input-streaming')
+  })
+})

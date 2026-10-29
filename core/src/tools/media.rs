@@ -24,7 +24,22 @@
 //!
 //! Blender 不在本模块：本机实测 `Program Files/Blender Foundation` 不存在、
 //! `which blender` 为空，**没有可验证的运行时**，写一个无法端到端验证的桥
-//! 违背「能跑通才算做完」。检测到 blender 后按同一模式加 `blender` 工具即可。
+//! 违背「能跑通才算做完」。检测到 blender 后按同一模式加 `blender` 工具即可
+//! （已做：见 `tools/blender.rs`）。
+//!
+//! # 素材源（material source）—— 本模块同时是它的**唯一权威实现**
+//!
+//! 用户口径的「素材从哪来」四选一（A 网络 / B 自动生成 / C 指定目录 / D 用户自填），
+//! 由 [`parse_material_source`] 在**工具边界**上解析：
+//! - 参数被**兑现**（真的据此取到字节 / 定位到文件）或**如实拒绝**（结构化 code + 原因），
+//!   绝不被静默忽略 —— 静默忽略就是「假装按素材生成」，属 R-10 禁止的伪成功；
+//! - 路径收口走 [`RootSet::resolve`]（越界即拒），网络收口走 [`SsrfGuard`]
+//!   （含逐跳重定向复检），单次素材体积走 [`MATERIAL_MAX_BYTES`]。
+//!
+//! 消费方：[`crate::tools::image_gen`]（A/C/D = 交付既有素材）与
+//! [`crate::tools::video_gen`]（A/C/D = 图生视频的首帧）。两者能兑现的**动作**不同，
+//! 因为各自的上游端点形状不同 —— 这一点在两个工具里各自写死并各自有测试，
+//! 不在这里做「看起来统一」的折中。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,11 +49,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde_json::json;
 
 use crate::agent::tool_cycle::ToolResult;
 use crate::mcp::registry::ToolExecutor;
 use crate::proc::SilentCommand;
+use crate::security::ssrf_guard::SsrfGuard;
 use crate::tools::fs_path::RootSet;
 
 /// 一次外部媒体命令的输出
@@ -97,8 +114,709 @@ impl MediaRunner for SystemMediaRunner {
     }
 }
 
+// ===========================================================================
+// 素材源（material source）：四选一语义的**后端权威实现**
+// ===========================================================================
+
+/// 素材源四态的**后端权威口径**。
+///
+/// 名字与顺序与 `webui/src/components/multimodal/materialSource.ts` 的
+/// `MATERIAL_SOURCE_KINDS` 逐字相同 —— 两侧由跨栈测试
+/// `material_source_kinds_match_the_frontend_surface` 咬合：面板能选的选项必须
+/// 与工具边界能兑现的选项一一对应，否则用户在 UI 里选得到、工具吃不下。
+pub const MATERIAL_SOURCE_KINDS: &[&str] = &["web", "generate", "directory", "custom"];
+
+/// 单个素材的体积上限（12 MiB）。
+///
+/// 为什么必须有：图生视频要把首帧**整段**塞进 JSON 请求体（data URI），
+/// 不设上限等于让一次工具调用打爆内存 / 换来上游 413。
+pub const MATERIAL_MAX_BYTES: u64 = 12 * 1024 * 1024;
+
+/// `data:` URI 的字符上限（base64 膨胀 ~1.37×，留 2× 余量）。
+const MATERIAL_DATA_URI_MAX_CHARS: usize = (MATERIAL_MAX_BYTES as usize) * 2;
+
+/// 图片扩展名白名单（小写；素材要能当首帧/被交付，必须先是一张图）。
+pub const MATERIAL_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+
+/// 视频扩展名白名单（`media` 的 concat / slideshow 输入）。
+pub const MATERIAL_VIDEO_EXTS: &[&str] = &["mp4", "mov", "webm", "mkv", "avi", "m4v"];
+
+/// 「既有素材被登记为产物」时台账里用的 kind。
+///
+/// ⚠️ 刻意**不用** `GENERATED_KIND`：C/D 这条路交付的是用户目录里本来就有的文件，
+/// 标成 `generated` 会让产物中心把「取来的图」显示成「AI 生成的图」—— 那是台账撒谎。
+pub const MATERIAL_ARTIFACT_KIND: &str = "material";
+
+/// 解析后的素材源（四个语义里的「可兑现形态」）。
+///
+/// `custom`（D 用户自填）不是一种独立形态：它在 [`parse_material_source`] 里被
+/// **判定**成 URL / 目录 / 文件三者之一（判不出来就结构化拒绝）。判据写在那里。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterialSource {
+    /// B 自动生成：不携带任何既有素材。
+    Generate,
+    /// A 网络：http(s) 已过 [`SsrfGuard`]，或 `data:` URI（不产生出站请求）。
+    Web { url: String },
+    /// C 指定目录：**已收口在工作区内**且真实存在的目录。
+    Directory { dir: PathBuf },
+    /// D 用户自填：判定为工作区内真实存在的单个文件。
+    File { path: PathBuf },
+}
+
+/// 素材源的**结构化拒绝**：code + 可直接给用户看的原因。
+///
+/// 与 `ToolResult::Error` 的转换只在这里做一次（[`MaterialError::into_tool_result`]），
+/// 保证两个生成工具报出来的 code 口径一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterialError {
+    pub code: String,
+    pub message: String,
+}
+
+impl MaterialError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn into_tool_result(self) -> ToolResult {
+        ToolResult::Error {
+            message: self.message,
+            code: self.code,
+        }
+    }
+}
+
+/// 素材源相关错误的统一出口（`Result<T, MaterialError>`）。
+pub type MaterialResult<T> = std::result::Result<T, MaterialError>;
+
+fn ref_arg(args: &HashMap<String, String>, key: &str) -> String {
+    args.get(key)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 校验并归类一个「网络」素材值：只接受 http(s)（过 SSRF 防护）与 `data:`。
+///
+/// 为什么 http(s) 必须过 [`SsrfGuard`]：素材 URL 是**用户/模型给的**，工具随后会
+/// 自己去 GET 它。不设防就等于把 `web_fetch` 挡住的那条线（内网 / 回环 /
+/// 云元数据 `169.254.169.254`）从这里重新打开。
+pub fn classify_web_material(url: &str) -> MaterialResult<String> {
+    let v = url.trim();
+    if v.is_empty() {
+        return Err(MaterialError::new(
+            "MATERIAL_REF_REQUIRED",
+            "material_source=web 必须给出 material_ref（http(s) URL 或 data: URI）。",
+        ));
+    }
+    if v.starts_with("data:") {
+        if v.len() > MATERIAL_DATA_URI_MAX_CHARS {
+            return Err(MaterialError::new(
+                "MATERIAL_TOO_LARGE",
+                format!(
+                    "data URI 体积超限：{} 字符 > {MATERIAL_DATA_URI_MAX_CHARS}。",
+                    v.len()
+                ),
+            ));
+        }
+        return Ok(v.to_string());
+    }
+    let parsed = reqwest::Url::parse(v)
+        .map_err(|e| MaterialError::new(
+            "MATERIAL_URL_INVALID",
+            format!("material_ref 不是合法 URL：{v}（{e}）"),
+        ))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(MaterialError::new(
+            "MATERIAL_URL_SCHEME",
+            format!(
+                "素材 URL 只接受 http/https（或 data: URI），实际协议 `{}` 被拒绝。",
+                parsed.scheme()
+            ),
+        ));
+    }
+    // 逐跳复检在 fetch_material_bytes 的 client 里；这里是**初始 URL** 的那一道。
+    SsrfGuard::new()
+        .check(v)
+        .map_err(|e| MaterialError::new(
+            "MATERIAL_URL_BLOCKED",
+            format!("素材 URL 被 SSRF 防护拒绝：{e}"),
+        ))?;
+    Ok(v.to_string())
+}
+
+/// 把用户给的路径收口到工作区（**绝对路径也必须在登记根内**）。
+fn contained_path(workspace: &RootSet, raw: &str) -> MaterialResult<PathBuf> {
+    workspace
+        .resolve(raw)
+        .map_err(|e| MaterialError::new(
+            "MATERIAL_PATH_ESCAPE",
+            format!("素材路径必须落在工作区（或会话附加根）内：{e}"),
+        ))
+}
+
+/// 解析工具参数里的素材源。
+///
+/// 真值表（每条都有单测）：
+/// | `material_source` | `material_ref` | 结果 |
+/// |---|---|---|
+/// | 缺省/空 | 缺省/空 | `Generate`（**与加参数之前的行为完全一致**，老调用方零风险）|
+/// | 缺省/空 | 非空 | 拒绝 `INVALID_PARAMS`：给了值却不给来源＝要么静默忽略要么瞎猜 |
+/// | `generate` | 非空 | 拒绝 `INVALID_PARAMS`：自相矛盾 |
+/// | 其它未知值 | — | 拒绝 `MATERIAL_SOURCE_UNKNOWN`（列出合法值）|
+/// | `web` | URL/data | `Web`（协议 + SSRF + 体积校验）|
+/// | `directory` | 工作区内目录 | `Directory`（不存在 `MATERIAL_DIR_MISSING`；不是目录 `MATERIAL_NOT_A_DIR`）|
+/// | `custom` | URL / 文件 / 目录 | 判定为对应形态；判不出 → `MATERIAL_NOT_ACTIONABLE` |
+pub fn parse_material_source(
+    args: &HashMap<String, String>,
+    workspace: &RootSet,
+) -> MaterialResult<MaterialSource> {
+    let kind = ref_arg(args, "material_source").to_ascii_lowercase();
+    let value = ref_arg(args, "material_ref");
+
+    if kind.is_empty() {
+        if !value.is_empty() {
+            return Err(MaterialError::new(
+                "INVALID_PARAMS",
+                format!(
+                    "给了 material_ref=\"{}\" 却没有 material_source。\
+                     本工具不猜来源、也不会静默丢掉它 —— 请显式声明：{}。",
+                    value,
+                    MATERIAL_SOURCE_KINDS.join(" / ")
+                ),
+            ));
+        }
+        return Ok(MaterialSource::Generate);
+    }
+    if !MATERIAL_SOURCE_KINDS.contains(&kind.as_str()) {
+        return Err(MaterialError::new(
+            "MATERIAL_SOURCE_UNKNOWN",
+            format!(
+                "不支持的 material_source「{kind}」；可用：{}。",
+                MATERIAL_SOURCE_KINDS.join(" / ")
+            ),
+        ));
+    }
+    match kind.as_str() {
+        "generate" => {
+            if !value.is_empty() {
+                return Err(MaterialError::new(
+                    "INVALID_PARAMS",
+                    format!(
+                        "material_source=generate 表示「凭空生成」，不能再给 material_ref（实际：\"{value}\"）。"
+                    ),
+                ));
+            }
+            Ok(MaterialSource::Generate)
+        }
+        "web" => Ok(MaterialSource::Web {
+            url: classify_web_material(&value)?,
+        }),
+        "directory" => {
+            if value.is_empty() {
+                return Err(MaterialError::new(
+                    "MATERIAL_REF_REQUIRED",
+                    "material_source=directory 必须给出目录路径（工作区内的相对路径或其中的绝对路径）。",
+                ));
+            }
+            let p = contained_path(workspace, &value)?;
+            if !p.exists() {
+                return Err(MaterialError::new(
+                    "MATERIAL_DIR_MISSING",
+                    format!("素材目录不存在：{}", p.display()),
+                ));
+            }
+            if !p.is_dir() {
+                return Err(MaterialError::new(
+                    "MATERIAL_NOT_A_DIR",
+                    format!("material_ref 指向的不是目录：{}（要用单个文件请改 material_source=custom）", p.display()),
+                ));
+            }
+            Ok(MaterialSource::Directory { dir: p })
+        }
+        // D「用户自填」= 形态未知的自由输入。判定顺序刻意是 URL → 目录 → 文件 → 拒绝：
+        // 三者都是「工具真能兑现」的形态；剩下的纯描述文字**不能**兑现，必须响。
+        "custom" => {
+            if value.is_empty() {
+                return Err(MaterialError::new(
+                    "MATERIAL_REF_REQUIRED",
+                    "material_source=custom 必须填写具体内容（URL、工作区内的文件或目录路径）。",
+                ));
+            }
+            let lower = value.to_ascii_lowercase();
+            if lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("data:")
+            {
+                return Ok(MaterialSource::Web {
+                    url: classify_web_material(&value)?,
+                });
+            }
+            let p = contained_path(workspace, &value)?;
+            if p.is_dir() {
+                return Ok(MaterialSource::Directory { dir: p });
+            }
+            if p.is_file() {
+                return Ok(MaterialSource::File { path: p });
+            }
+            Err(MaterialError::new(
+                "MATERIAL_NOT_ACTIONABLE",
+                format!(
+                    "material_ref=\"{value}\" 既不是 http(s)/data URL，也不指向工作区内真实存在的文件或目录。\
+                     素材来源必须是工具**能兑现**的东西；只是想描述素材请把它写进 prompt，并把 material_source 设为 generate。"
+                ),
+            ))
+        }
+        other => Err(MaterialError::new(
+            "MATERIAL_SOURCE_UNKNOWN",
+            format!("不支持的 material_source「{other}」。"),
+        )),
+    }
+}
+
+/// 扩展名是否属于图片白名单（大小写不敏感）。
+pub fn is_material_image_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| MATERIAL_IMAGE_EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        .unwrap_or(false)
+}
+
+/// 列出目录内**确定顺序**的素材文件（按小写文件名排序）。
+///
+/// 排序是刻意的：`read_dir` 的顺序在不同文件系统/平台上不稳定，
+/// 「同一次请求两次拿到不同素材」比报错更难查。
+pub fn list_material_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort_by(|a, b| {
+        a.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+            .cmp(&b.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default())
+    });
+    files
+}
+
+/// 从目录里按 `material_index`（0 起，缺省 0）取一个素材。
+pub fn pick_material_in_dir(
+    dir: &Path,
+    exts: &[&str],
+    index_arg: &str,
+) -> MaterialResult<PathBuf> {
+    let index: usize = if index_arg.is_empty() {
+        0
+    } else {
+        index_arg
+            .parse::<usize>()
+            .map_err(|_| MaterialError::new(
+                "INVALID_PARAMS",
+                format!("material_index 必须是非负整数（0 起），实际：{index_arg}"),
+            ))?
+    };
+    let files = list_material_files(dir, exts);
+    if files.is_empty() {
+        return Err(MaterialError::new(
+            "MATERIAL_DIR_EMPTY",
+            format!(
+                "目录里没有可用素材：{}（只认扩展名 {}）",
+                dir.display(),
+                exts.join(" / ")
+            ),
+        ));
+    }
+    if let Some(p) = files.get(index) {
+        return Ok(p.clone());
+    }
+    // 越界时把**真实数量与前几个文件名**报出来：让模型/用户一次就能改成对的 index，
+    // 而不是拿到一句「越界」再去猜目录里到底有什么。
+    let names: Vec<String> = files
+        .iter()
+        .take(5)
+        .map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    Err(MaterialError::new(
+        "MATERIAL_INDEX_OUT_OF_RANGE",
+        format!(
+            "material_index={index} 越界：{} 里只有 {} 个可用素材（前几个：{}）。",
+            dir.display(),
+            files.len(),
+            names.join(", ")
+        ),
+    ))
+}
+
+/// 按文件头判定图片格式（与 `image_gen` 的落盘嗅探同一套魔数）。
+pub fn sniff_image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG") {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        Some("jpg")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.starts_with(b"BM") {
+        Some("bmp")
+    } else {
+        None
+    }
+}
+
+/// 读取素材字节（先查体积再读，避免超限文件进内存）。
+pub fn read_material_bytes(path: &Path) -> MaterialResult<Vec<u8>> {
+    let len = std::fs::metadata(path)
+        .map(|m| m.len())
+        .map_err(|e| MaterialError::new(
+            "MATERIAL_READ_FAILED",
+            format!("读不到素材 {}：{e}", path.display()),
+        ))?;
+    if len > MATERIAL_MAX_BYTES {
+        return Err(MaterialError::new(
+            "MATERIAL_TOO_LARGE",
+            format!(
+                "素材体积超限：{} 字节 > {} 字节（{path_display}）。\
+                 请压缩或换用小图 —— 首帧素材要整段进请求体，放大文件只会让上游直接拒绝。",
+                len,
+                MATERIAL_MAX_BYTES,
+                path_display = path.display()
+            ),
+        ));
+    }
+    std::fs::read(path).map_err(|e| {
+        MaterialError::new(
+            "MATERIAL_READ_FAILED",
+            format!("读取素材失败 {}：{e}", path.display()),
+        )
+    })
+}
+
+/// 图片字节 → `data:image/<ext>;base64,…`（按**文件头**判定格式，不看扩展名）。
+///
+/// 为什么按头不按名：`photo.jpg` 实际是 PNG 的情况很常见，按扩展名拼出的
+/// `data:image/jpg` 前缀会让上游解码失败，而失败信息完全不指向真正的原因。
+pub fn image_bytes_to_data_uri(bytes: &[u8]) -> MaterialResult<String> {
+    let ext = sniff_image_ext(bytes).ok_or_else(|| MaterialError::new(
+        "MATERIAL_NOT_IMAGE",
+        "素材文件头不是可识别的图片格式（png / jpg / webp / gif / bmp）。\
+         图生视频的首帧只接受图片字节；若要按视频素材做剪辑，请改用 `media` 工具的 concat/slideshow。",
+    ))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:image/{ext};base64,{b64}"))
+}
+
+/// `data:` URI → 字节（带体积上限与解码错误如实上报）。
+pub fn data_uri_to_bytes(uri: &str) -> MaterialResult<Vec<u8>> {
+    let rest = uri
+        .split_once(',')
+        .map(|(_, r)| r)
+        .ok_or_else(|| MaterialError::new(
+            "MATERIAL_URL_INVALID",
+            "data URI 缺少 `,` 分隔的载荷部分。",
+        ))?;
+    if rest.len() > MATERIAL_DATA_URI_MAX_CHARS {
+        return Err(MaterialError::new(
+            "MATERIAL_TOO_LARGE",
+            format!("data URI 载荷超限：{} 字符。", rest.len()),
+        ));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(rest.trim())
+        .map_err(|e| MaterialError::new(
+            "MATERIAL_URL_INVALID",
+            format!("data URI 的 base64 载荷解码失败：{e}"),
+        ))
+}
+
+/// 网络素材的取回通道（可注入：单测不联网，生产用 reqwest）。
+#[async_trait]
+pub trait MaterialFetcher: Send + Sync {
+    /// 取回字节；超过 `max_bytes` 时**中止**并返回 `TOO_LARGE:` 前缀的错误。
+    async fn fetch(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String>;
+}
+
+/// 生产实现：带**逐跳 SSRF 复检**与硬超时的 reqwest。
+///
+/// 与 `tools/builtin/web.rs` 的 `guarded_http_client` 同一口径（那边是 `pub(crate)`
+/// 且模块私有，这里不能直接复用，于是按同一判据实现一份）：
+/// 只校验初始 URL 会被「公网 URL 302 → `169.254.169.254`」绕过。
+pub struct HttpMaterialFetcher;
+
+#[async_trait]
+impl MaterialFetcher for HttpMaterialFetcher {
+    async fn fetch(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let ssrf = Arc::new(SsrfGuard::new());
+        let redirect_ssrf = ssrf.clone();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("too many redirects");
+                }
+                if redirect_ssrf.check(attempt.url().as_str()).is_err() {
+                    return attempt.error("redirect to blocked address (ssrf)");
+                }
+                attempt.follow()
+            }))
+            .build()
+            .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
+        // 初始 URL 再判一次：调用方可能来自单测注入的假 fetcher，这道防线不能只靠上游。
+        ssrf.check(url).map_err(|e| format!("SSRF_BLOCKED: {e}"))?;
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("上游返回 {}", status.as_u16()));
+        }
+        // 逐块累加并**边下边查**体积：`resp.bytes()` 会把整条响应读进内存，
+        // 一个「Content-Length 谎报 / 无 Length」的大文件就能打爆引擎 ——
+        // 而素材上限是本模块对用户的承诺（MATERIAL_MAX_BYTES），承诺必须兑现。
+        let mut stream = Box::pin(resp.bytes_stream());
+        let mut acc: Vec<u8> = Vec::new();
+        while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+            let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
+            if acc.len() + chunk.len() > max_bytes {
+                return Err(format!("TOO_LARGE: 素材超过 {max_bytes} 字节上限"));
+            }
+            acc.extend_from_slice(&chunk);
+        }
+        Ok(acc)
+    }
+}
+
+/// 取回一个网络素材（http(s) 走 fetcher；`data:` 就地解码）。
+pub async fn fetch_material_bytes(
+    url: &str,
+    fetcher: &dyn MaterialFetcher,
+) -> MaterialResult<Vec<u8>> {
+    let checked = classify_web_material(url)?;
+    if checked.starts_with("data:") {
+        return data_uri_to_bytes(&checked);
+    }
+    fetcher
+        .fetch(&checked, MATERIAL_MAX_BYTES as usize)
+        .await
+        .map_err(|e| {
+            if e.starts_with("TOO_LARGE:") {
+                MaterialError::new(
+                    "MATERIAL_TOO_LARGE",
+                    format!("{e}（上限 {} 字节）", MATERIAL_MAX_BYTES),
+                )
+            } else {
+                MaterialError::new("MATERIAL_FETCH_FAILED", format!("素材下载失败：{e}"))
+            }
+        })
+}
+
+/// 素材源的**人话描述**（进工具返回值，让用户/模型看得见「这次到底用了哪份素材」）。
+pub fn describe_material_source(src: &MaterialSource) -> String {
+    match src {
+        MaterialSource::Generate => "generate（模型凭空生成，未使用既有素材）".to_string(),
+        MaterialSource::Web { url } => format!("web（网络素材：{}）", truncate(url, 120)),
+        MaterialSource::Directory { dir } => format!("directory（指定目录：{}）", dir.display()),
+        MaterialSource::File { path } => format!("custom（用户自填文件：{}）", path.display()),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(n).collect();
+        format!("{head}…")
+    }
+}
+
 /// 支持的动作（白名单，fail-closed）
-const ACTIONS: &[&str] = &["probe", "convert", "frames", "thumbnail"];
+const ACTIONS: &[&str] = &["probe", "convert", "frames", "thumbnail", "slideshow", "concat"];
+
+// ===========================================================================
+// 剪辑编排（slideshow / concat）：多素材 → 一个成片
+// ===========================================================================
+//
+// 用户口径里的「多图/视频剪切编排」此前完全不存在：`media` 只有**单输入**动作
+// （probe/convert/frames/thumbnail），多张图片拼成一段视频、几段视频接成一个片子，
+// 只能靠模型手写 `shell_exec` 命令行 —— 于是既没有路径收口，也没有产物校验。
+// 这里把它收成两个结构化动作：命令行由本模块拼，输入来自**素材源**（C/D 目录或
+// 显式 `inputs` 列表），产物必须真实落盘才算成功。
+
+// ⚠️ 以下五项属于**已写好但尚未接线**的「图片转视频 / 视频拼接」结构化动作：
+// 参数拼接与清单解析都已实现并有单测，缺的是把它们挂成工具 action 的那一步。
+// 因此 lib 构建里它们暂时是 dead_code —— 用 allow 显式记账，而不是删掉在办工作。
+/// 单次剪辑最多处理的输入数（上限刻意保守：清单过长意味着「把整个目录倒进来」，
+/// 那种请求既慢又几乎一定不是用户要的成片）。
+#[allow(dead_code)]
+const MAX_EDIT_INPUTS: usize = 120;
+
+/// 每张图片默认停留秒数（slideshow）。
+#[allow(dead_code)]
+const DEFAULT_FRAME_DURATION: f64 = 3.0;
+
+/// 清单里的一条：路径 + 可选停留时长。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestEntry {
+    pub path: PathBuf,
+    pub duration: Option<f64>,
+}
+
+/// 清单内的路径写法：统一正斜杠。
+///
+/// Windows 的反斜杠在 ffmpeg concat demuxer 里会被当转义符处理（不同版本行为不一），
+/// 而 `/` 在 Windows 与 Unix 上都被 ffmpeg 接受 —— 归一化比赌版本行为可靠。
+pub fn manifest_path_text(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// 清单文件名是否可安全写入（**fail-closed**：判不出来就拒）。
+///
+/// `file '<path>'` 的引号语法里，路径含 `'` 需要转义，含换行则直接破坏清单结构 ——
+/// 与其实现一套我们无法端到端验证的转义规则，不如拒绝并说清楚原因。
+fn manifest_name_ok(p: &Path) -> MaterialResult<()> {
+    let s = p.to_string_lossy();
+    if s.contains('\'') || s.contains('\n') || s.contains('\r') {
+        return Err(MaterialError::new(
+            "MEDIA_UNSAFE_NAME",
+            format!(
+                "素材路径含单引号或换行，无法安全写进 ffmpeg 拼接清单：{}",
+                truncate(&s.replace('\n', "\\n").replace('\r', "\\r"), 120)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 拼 concat demuxer 的清单内容（纯函数：不依赖 ffmpeg，单测直接断言文本）。
+///
+/// `repeat_last` 是 slideshow 必需的一行：ffmpeg 读到最后一条 `file` 若没有配对的
+/// `duration`，**不会**在它上面停留 —— 成片会「少最后一张」。不重复就没有这个停留，
+/// 而这是产物层面的静默错误（用户只会说「最后一张没出现」，没人能猜到原因）。
+pub fn concat_manifest(entries: &[ManifestEntry], repeat_last: bool) -> MaterialResult<String> {
+    let mut out = String::new();
+    for e in entries {
+        manifest_name_ok(&e.path)?;
+        out.push_str(&format!("file '{}'\n", manifest_path_text(&e.path)));
+        if let Some(d) = e.duration {
+            out.push_str(&format!("duration {d}\n"));
+        }
+    }
+    if let (true, Some(last)) = (repeat_last, entries.last()) {
+        // 只有按 duration 排片（slideshow）才需要补这一行；纯视频接片不需要。
+        if last.duration.is_some() {
+            out.push_str(&format!("file '{}'\n", manifest_path_text(&last.path)));
+        }
+    }
+    Ok(out)
+}
+
+/// slideshow 的 ffmpeg 参数（纯函数）。
+///
+/// 每张图先归一到同一画布（`force_original_aspect_ratio=decrease` + `pad` 居中补边），
+/// 否则 concat demuxer 会因为「相邻两帧分辨率不同」直接失败 —— 而它的报错完全不指向
+/// 「你的图片尺寸不一致」这个真实原因。滤镜表达式**由本函数写死**，不接受外部输入。
+#[allow(dead_code)]
+fn slideshow_args(
+    manifest: &Path,
+    output: &Path,
+    canvas: (u32, u32),
+    fps: f64,
+    crf: u32,
+) -> Vec<String> {
+    let (w, h) = canvas;
+    vec![
+        "-y".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        manifest_path_text(manifest),
+        "-vf".into(),
+        format!(
+            "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+        ),
+        "-r".into(),
+        format!("{fps}"),
+        "-c:v".into(),
+        "libx264".into(),
+        "-crf".into(),
+        format!("{crf}"),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        manifest_path_text(output),
+    ]
+}
+
+/// concat 的 ffmpeg 参数（纯函数）。
+///
+/// 默认 `-c copy`（快、无损，但要求各路素材编码一致）；`reencode=Some(crf)` 时
+/// 强制重编（慢，能容忍混源）—— 两种模式给模型显式选择，而不是让它猜失败原因。
+#[allow(dead_code)]
+fn video_concat_args(manifest: &Path, output: &Path, reencode: Option<u32>) -> Vec<String> {
+    let mut a: Vec<String> = vec![
+        "-y".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        manifest_path_text(manifest),
+    ];
+    match reencode {
+        None => {
+            a.push("-c".into());
+            a.push("copy".into());
+        }
+        Some(crf) => {
+            a.push("-c:v".into());
+            a.push("libx264".into());
+            a.push("-crf".into());
+            a.push(format!("{crf}"));
+            a.push("-pix_fmt".into());
+            a.push("yuv420p".into());
+            a.push("-c:a".into());
+            a.push("aac".into());
+        }
+    }
+    a.push("-movflags".into());
+    a.push("+faststart".into());
+    a.push(manifest_path_text(output));
+    a
+}
+
+/// 剪辑产物的**清单文件**路径：贴在输出旁边，命名一眼看出是辅助文件。
+#[allow(dead_code)]
+fn manifest_path_for(output: &Path) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "edit".to_string());
+    let dir = output.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!("{stem}.concat-list.txt"))
+}
 
 /// `media` 工具：`action` 驱动四种结构化操作。
 pub struct MediaTool {

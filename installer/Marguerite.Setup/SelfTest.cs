@@ -53,6 +53,18 @@ namespace MargueriteSetup
                 ok &= argsWithoutShortcuts == "/S /NS /D=D:\\Temp\\Marguerite";
                 lines.Add("estimatedInstalledBytes=" + InstallerRunner.EstimatedInstalledBytes);
 
+                // 哈希锚点的真值表。旧实现的漏洞是「拿不到哈希指针就放行」，
+                // 所以这里逐格证明：只有能拿到可信哈希的格子才返回非 null。
+                var matchingSidecar = InstallerRunner.ExpectedSha256 + "  Marguerite.Setup.exe";
+                var conflictingSidecar = new string('0', 64);
+                ok &= CheckHashAnchor(lines, "pinnedNoSidecar", InstallerRunner.ExpectedVersion, null, InstallerRunner.ExpectedSha256, null);
+                ok &= CheckHashAnchor(lines, "pinnedMatchingSidecar", InstallerRunner.ExpectedVersion, matchingSidecar, InstallerRunner.ExpectedSha256, null);
+                ok &= CheckHashAnchor(lines, "pinnedConflictingSidecar", InstallerRunner.ExpectedVersion, conflictingSidecar, null, "sidecar_conflicts_with_pin");
+                ok &= CheckHashAnchor(lines, "unpinnedSidecar", "9.9.9", conflictingSidecar, conflictingSidecar.Substring(0, 64), null);
+                ok &= CheckHashAnchor(lines, "unpinnedNoSidecar", "9.9.9", null, null, "unverifiable");
+                ok &= CheckHashAnchor(lines, "unpinnedBlankSidecar", "9.9.9", "   \r\n", null, "unverifiable");
+                ok &= CheckHashAnchor(lines, "pinnedBlankSidecar", InstallerRunner.ExpectedVersion, "  \r\n", InstallerRunner.ExpectedSha256, null);
+
                 using (var video = Assembly.GetExecutingAssembly().GetManifestResourceStream("MargueriteSetup.Assets.promo.mp4"))
                 {
                     var videoBytes = video == null ? 0 : video.Length;
@@ -82,6 +94,22 @@ namespace MargueriteSetup
             }
 
             return ok ? 0 : 1;
+        }
+
+        private static bool CheckHashAnchor(
+            List<string> lines,
+            string name,
+            string version,
+            string sidecarText,
+            string expectedHash,
+            string expectedProblem)
+        {
+            string problem;
+            var resolved = InstallerRunner.ResolveExpectedSha256(version, sidecarText, out problem);
+            var hashOk = string.Equals(resolved, expectedHash, StringComparison.OrdinalIgnoreCase);
+            var problemOk = string.Equals(problem, expectedProblem, StringComparison.Ordinal);
+            lines.Add("hashAnchor." + name + "=" + (resolved ?? "NULL") + " problem=" + (problem ?? "NULL"));
+            return hashOk && problemOk;
         }
 
         private static string ComputeSha256(string path)

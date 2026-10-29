@@ -561,6 +561,19 @@
     "available": "Marguerite {version} is available",
     "viewRelease": "View release",
     "dismiss": "Dismiss",
+    "dialog": {
+      "newVersion": "New version available",
+      "updateNow": "Update now",
+      "later": "Remind me later",
+      "skipVersion": "Skip this version",
+      "downloading": "Downloading update",
+      "downloadedTitle": "Update ready",
+      "downloadedDesc": "{version} has been downloaded. Restart to finish installation.",
+      "restartNow": "Restart now",
+      "restartLater": "Restart later",
+      "failedTitle": "Update failed",
+      "close": "Close"
+    },
     "desktop": {
       "indicatorAvailable": "Update {version}",
       "indicatorDownloaded": "Update ready",
@@ -985,6 +998,38 @@
     "localMode": "Local mode",
     "detached": "Detached HEAD"
   },
+  "cockpit": {
+    "title": "Browser Cockpit",
+    "subtitle": "Zero-dependency CDP control: navigation / JS console / screenshot click / a11y tree / Resource Timing network panel (browser.* RPC)",
+    "detect": "Detect",
+    "closeSession": "Close session",
+    "navigate": "Navigate",
+    "open": "Open",
+    "pageTitle": "Title: {title}",
+    "emptyCdp": "Enter a URL to open a page (real Chromium CDP; requires local Chrome/Edge)",
+    "emptyShot": "Click \"Refresh screenshot\" to view the page",
+    "shotOverlay": "Click anywhere on the screenshot = real mouse click",
+    "refreshShot": "Refresh screenshot",
+    "dumpDom": "DOM snapshot",
+    "consoleTitle": "JS console (evaluate)",
+    "run": "Run",
+    "consoleEmpty": "(empty)",
+    "a11yTitle": "Accessibility nodes (a11y)",
+    "a11yRead": "Read",
+    "networkTitle": "DevTools network panel (Resource Timing · approximate)",
+    "capture": "Capture",
+    "clear": "Clear",
+    "networkMeta": "{n} resources (last 100 · newest first)",
+    "networkEmpty": "Nothing captured yet (open a page, then click \"Capture\"; data comes from the Resource Timing API and excludes request headers/response bodies)",
+    "thResource": "Resource",
+    "thType": "Type",
+    "thDuration": "Duration",
+    "thSize": "Size",
+    "iframeTitle": "Built-in browser (iframe · lightweight preview)",
+    "load": "Load",
+    "iframeEmpty": "Enter a URL to load. Cross-origin sites that refuse embedding (X-Frame-Options / CSP) leave the iframe blank — use the CDP cockpit above (real Chromium) instead.",
+    "iframeNote": "The iframe preview carries none of your session credentials; use a CDP session for sign-in sites. If a site refuses embedding, that is its own security policy, not a defect of this tool."
+  },
   "chrome": {
     "settings": "Settings",
     "theme": "Theme",
@@ -998,7 +1043,10 @@
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar",
     "toggleSidebar": "Toggle sidebar",
+    "iconRail": "Icon rail",
     "zenMode": "Zen mode",
+    "focusMode": "Focus mode",
+    "focusModeOff": "Exit focus mode",
     "resizeSidebar": "Resize sidebar",
     "sidebarWidthValue": "Sidebar width: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Sidebar width: {width}px, {preset}; limited by this window (preferred {preference}px)",
@@ -1006,6 +1054,8 @@
     "sidebarCollapseCanceled": "Sidebar collapse canceled",
     "openBlockedSession": "Open the blocked session",
     "approvalRequired": "Approval required",
+    "sidecarOfflineApprovals": "Sidecar offline · {count} approvals awaiting sync",
+    "sidecarOfflineApprovalsTitle": "The Python sidecar is offline. These approvals are still queued on its side and will appear once it reconnects. Click to inspect the connection.",
     "manageConnection": "Manage gateway connection",
     "connectionTitle": "Connection: {state} — manage in Settings",
     "connectionState": {
@@ -1543,6 +1593,7 @@
       "discardAll": "Discard all ({count})",
       "moreOptionsIn": "More options live in",
       "copyConfigPath": "Copy config path",
+      "configPathIsolated": "User config directory (isolated mode)",
       "applyLiveNote": "Most changes apply live; some need a gateway restart",
       "discardTitle": "Discard unsaved changes?",
       "discardBody": "You have unsaved edits. Closing now will lose them.",
@@ -3353,6 +3404,8 @@
     },
     "ledger": {
       "fork": "Fork",
+      "forkedFrom": "Forked from {title}",
+      "forkTooltip": "Forked from an earlier task; the messages before that point were copied here.",
       "subagent": "Subagent",
       "subagentWithParent": "Subagent · {parent}",
       "session": "session",
@@ -4737,6 +4790,10 @@
       "customBaseUrl": "Endpoint, e.g. https://api.example.com/v1",
       "customModel": "Model, e.g. gpt-4o-mini",
       "customApiKey": "API key (optional, can be set later)",
+      "customProtocol": "Protocol",
+      "customProtocolChat": "OpenAI-compatible · /v1/chat/completions",
+      "customProtocolResponses": "OpenAI Responses · /v1/responses",
+      "customProtocolAnthropic": "Anthropic Messages · /v1/messages",
       "customSubmit": "Save and use",
       "customCancel": "Collapse",
       "customRequired": "Endpoint and model are required.",
@@ -4756,7 +4813,7 @@
       "ttft": "First token {ms} (measured client-side)",
       "sessionTokens": "Session tokens {n}",
       "rounds": "Turns {n}",
-      "cacheHitRate": "Cache hit rate {pct}%"
+      "cacheHitRate": "Provider cache hits {pct}%"
     },
     "artifactEditorAria": "Artifact editing and preview",
     "recoveringGeneration": "Detected an unfinished generation — recovering…",
@@ -4850,6 +4907,17 @@
     "deliverablesCount": "Deliverables ({count})",
     "contextPressure": "Context {pct}%",
     "contextPressureTitle": "Context window {used}k / {window}k tokens — nearing compaction",
+    "contextMeter": {
+      "tool": "tools {k}k",
+      "windowApprox": "window est.",
+      "aria": "Context usage: {used}k / {window}k ({pct}%), {tier}",
+      "tier": {
+        "normal": "normal",
+        "watch": "watch",
+        "advise": "near limit",
+        "compact": "compaction due"
+      }
+    },
     "sessionDeliverables": "Session deliverables",
     "noDeliverables": "No deliverables yet.",
     "openArtifact": "Open {title}, {subtitle}",
@@ -5305,6 +5373,16 @@
     "slashCommands": {
       "unknown": "Unknown command {command}. Keep editing, or use // to send it as text."
     },
+    "handoff": {
+      "commandDescription": "Write a workspace handoff note (artifact list + your note) so the next model/session can continue from the workspace without re-passing files",
+      "usage": "/handoff [note for the next model/session]",
+      "toastOk": "Handoff note written to workspace: {path}",
+      "toastFail": "Handoff note failed: {error}",
+      "noticeTitle": "Workspace handoff note found",
+      "noticeUse": "Reference in composer",
+      "noticeOpen": "Open in editor",
+      "insertText": "Please first read the workspace handoff note `handoff/{file}` and continue the task following its guide. Do not redo completed steps; keep outputs landing in the workspace and registered as artifacts."
+    },
     "codingMode": {
       "enabled": "Coding mode enabled for all chats.",
       "disabled": "Coding mode disabled.",
@@ -5354,6 +5432,10 @@
       "modelRoutingOmniDesc": "One orchestrated agent coordinates the best available models on every turn.",
       "modelRoutingOmni": "Extreme orchestration",
       "runModePanel": "Run mode & routing",
+      "approvalBypass": "Approval checks",
+      "approvalBypassOn": "Bypassed",
+      "approvalBypassOff": "Ask each time",
+      "approvalBypassDesc": "When on, high-risk tool calls in this session no longer show a confirmation card. Mode blocklists, Plan read-only, and sandbox policy still apply; each skip is still recorded as an audit event.",
       "thinking": "Deep thinking",
       "modeShort": {
         "safe": "Safe",
@@ -5477,6 +5559,7 @@
       "failed": "Failed",
       "done": "Done",
       "pending": "Pending",
+      "unknown": "Unknown",
       "results": "{count} results",
       "countRunning": "{count} running",
       "countDone": "{count} done",
@@ -5518,6 +5601,7 @@
       "downloadFailedHttp": "Download failed — HTTP {status}",
       "downloadFailed": "Download failed",
       "forkFailed": "Fork failed",
+      "forkUnavailable": "Forking a conversation needs the Python sidecar (currently running in pure-Rust mode). Start the sidecar and retry, or use “Copy conversation”.",
       "forkOpenFailed": "The branch was created but couldn't be opened. You can open it from Sessions.",
       "copyFailed": "Copy failed",
       "shareSaveFailed": "Couldn't save the image. Try again.",
@@ -5554,6 +5638,7 @@
       "planningNextStep": "Planning next step",
       "readingContext": "Reading context",
       "waitingForModel": "Waiting for model",
+      "waitingSerialHint": "Waiting {s}s · model calls are serialised in Agent mode; switch to Bloom to run in parallel",
       "preparingOutput": "Preparing output",
       "generatingCandidates": "Generating candidates",
       "synthesizingCandidates": "Synthesizing candidates",
@@ -5809,7 +5894,12 @@
       "restartUnavailable": "This build cannot restart the host process. Retry from the desktop app, or reopen the application.",
       "restartFailed": "Could not restart the host process: {error}",
       "restarted": "Host process restarted. Reconnecting…",
-      "alreadyRunning": "The host process is already running. Refreshing…"
+      "alreadyRunning": "The host process is already running. Refreshing…",
+      "bannerTitle": "Python helper engine is not running — some diagnostics are unavailable.",
+      "details": "Details",
+      "hideDetails": "Hide details",
+      "dismiss": "Dismiss",
+      "restart": "Restart helper engine"
     },
     "errorActions": {
       "viewLogs": "View logs",
@@ -6040,6 +6130,13 @@
       "bulkDeleteFailed": "Failed to delete selected tasks",
       "deleteSessionDone": "Session deleted",
       "deleteSessionFailed": "Failed to delete session",
+      "resetConversation": "Clear conversation",
+      "resetSessionTitle": "Clear conversation",
+      "resetSessionBody": "Clear the conversation of task \"{title}\"? This deletes {count} messages. Session settings and generated files are kept. This cannot be undone.",
+      "resetSessionBodyNoCount": "Clear the conversation of task \"{title}\"? This deletes this task's messages. Session settings and generated files are kept. This cannot be undone.",
+      "resetSessionConfirm": "Clear",
+      "resetSessionDone": "Conversation cleared",
+      "resetSessionFailed": "Failed to clear conversation",
       "renameSessionDone": "Session renamed",
       "renameSessionFailed": "Failed to rename session",
       "showMore": "Show {count} more",
@@ -6356,6 +6453,15 @@
     "elapsed": "Elapsed",
     "artifacts": {
       "empty": "No deliverables yet. Generated files appear here as soon as they are written."
+    },
+    "review": {
+    "pending": "Needs review",
+    "approved": "Approved",
+    "flagged": "Sent back",
+    "approve": "Approve",
+    "flag": "Send back",
+    "openArtifact": "Open artifact",
+    "hint": "Review verdicts are given by you and stored locally; they do not pause the backend pipeline yet."
     },
     "runStatus": {
       "idle": "Idle",
@@ -6733,6 +6839,11 @@
     }
   },
   "engineHealth": {
+    "sidecarDegradedTitle": "Sidecar capability degraded",
+    "sidecarMissing": "Missing dependencies: {modules}",
+    "sidecarNumpyImpact": "Local ML routing is disabled (falling back to default tier); chat still works",
+    "sidecarGenericImpact": "Related gateway capabilities will fall back or be unavailable",
+    "sidecarInterpreter": "Interpreter: {path}",
     "title": "Engine health · Models · Modes",
     "subtitle": "Capability transparency: capability health / Rust model profiles / heavy runtimes / runtime modes",
     "refresh": "Refresh",
@@ -7112,6 +7223,9 @@
       "refresh": "Refresh",
       "toolCalls": "tool calls",
       "lastActivity": "Last activity",
+      "viewGrid": "Grid view",
+      "viewKanban": "Kanban view",
+      "colEmpty": "No members",
       "status": {
         "running": "Running",
         "waiting": "Waiting",
@@ -7128,7 +7242,7 @@
       "coverageSkipped": "{count} skipped",
       "coverageMerged": "{count} merged",
       "coveragePlugins": "Plugin refs: {refs} (resolved {resolved}, unresolved {unresolved})",
-      "coverageUnavailable": "Skill coverage unavailable",
+      "coverageUnavailable": "Statistics unavailable",
       "tabSkills": "Skills",
       "tabTools": "Tools & MCP",
       "tabProposals": "Proposals",

@@ -169,11 +169,11 @@ function buildBridge() {
       return result.ok ? { ok: true } : { ok: false, error: result.error ?? result.reason }
     },
     chooseProjectDirectory,
-    // 本壳**没有**原生更新器（tauri-plugin-updater 未启用）。这两个值必须如实为
-    // false：否则 UpdateBanner 会以为"桌面壳托管更新"而永久隐藏更新提示，
-    // 用户就再也看不到任何版本通知了。
-    isAutoUpdateEnabled: async (): Promise<boolean> => false,
-    isDesktopUpdateManaged: async (): Promise<boolean> => false,
+    // 本壳自 2026-10-29 起启用 tauri-plugin-updater：桌面端更新由 UpdateDialog.vue
+    // 接管（启动后自动检查 + 下载进度 + 重启引导）。这两个能力位必须返回 true，
+    // 否则 UpdateBanner 会以为"壳不托管更新"而在桌面端再叠一层被动横幅。
+    isAutoUpdateEnabled: async (): Promise<boolean> => true,
+    isDesktopUpdateManaged: async (): Promise<boolean> => true,
     // 桌面桌宠悬浮窗：壳里真实存在 pet_overlay_show/hide/toggle（lib.rs:587/633/643）。
     // 以前桥没暴露这三条命令，UI 也就无法打开悬浮窗 —— 用户只能从托盘菜单找，
     // 「桌宠不显示」的根因之一。这里只做透传，不伪造成功。

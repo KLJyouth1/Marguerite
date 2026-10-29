@@ -109,6 +109,51 @@ const SYSTEM_PREFIXES: &[&str] = &[
 /// 直接拒绝的凭证目录（按路径组件名判定，兼容绝对/相对路径）
 const CREDENTIAL_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg"];
 
+/// 引擎自身的凭证文件（按文件名，大小写不敏感）。
+///
+/// **为什么必须按文件名而不是路径前缀**：未绑定项目时工作区根回落到数据目录
+/// `~/.marguerite`（见 `workspace::fallback`），于是这些文件与源码同处一个根内 ——
+/// 只做「越界」判定的话它们全部算「根内合法目标」。
+const ENGINE_CREDENTIAL_FILES: &[&str] = &[
+    "gateway-token",
+    "credentials.json",
+    "vault.json",
+    "model.key",
+    "desktop-credential.json",
+];
+
+/// 不含密钥的环境变量模板（脚手架场景要读，放行）。
+const ENV_TEMPLATES: &[&str] = &["example", "sample", "template", "dist"];
+
+/// 是否为 `.env` 家族文件（`.env` / `.env.local` …；模板除外）。
+fn is_env_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()) else {
+        return false;
+    };
+    if name == ".env" {
+        return true;
+    }
+    match name.strip_prefix(".env.") {
+        Some(rest) => !ENV_TEMPLATES.contains(&rest),
+        None => false,
+    }
+}
+
+/// 是否为引擎自身的凭证文件。
+fn is_engine_credential_file(path: &Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|n| ENGINE_CREDENTIAL_FILES.contains(&n.as_str()))
+}
+
+/// 该路径是否承载凭据（`.env` 家族或引擎凭证文件）。
+///
+/// 供**批量扫描**类工具（grep / codebase_search）逐文件过滤：它们不按单个目标
+/// 做裁决，但同样不能把 `.env` 的内容带进结果。
+pub fn is_credential_file(path: &Path) -> bool {
+    is_engine_credential_file(path) || is_env_file(path)
+}
+
 /// L3 操作护栏扫描器
 #[derive(Debug, Clone, Default)]
 pub struct GuardrailScanner {
@@ -145,7 +190,25 @@ impl GuardrailScanner {
 
         let writing = matches!(op, OpKind::WriteFile | OpKind::Delete | OpKind::Move);
 
-        // 2) 凭证目录（按组件名）：.ssh/.aws/.gnupg 直接拒绝；.git 需审批
+        // 2a) 读取凭证文件：读进上下文 = 密钥随下一次请求发往模型服务商，
+        //     与写入同等不可接受，且在「默认工作区 = 数据目录」下极易发生。
+        if op == OpKind::Read && is_credential_file(target) {
+            return GuardrailVerdict::deny(&format!(
+                "credential file must not be read by tools: {}",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+
+        // 2b) 引擎凭证文件：写/删/移一律拒绝（防篡改 token 或凭据台账）。
+        //     `.env` 的写入刻意放行 —— 脚手架/配置场景需要，且写入不泄露既有密钥。
+        if writing && is_engine_credential_file(target) {
+            return GuardrailVerdict::deny(&format!(
+                "engine credential file is read-only to tools: {}",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+
+        // 3) 凭证目录（按组件名）：.ssh/.aws/.gnupg 直接拒绝；.git 需审批
         if writing {
             for comp in target.components() {
                 let name = comp.as_os_str().to_string_lossy();
@@ -163,7 +226,7 @@ impl GuardrailScanner {
             }
         }
 
-        // 3) 绝对系统目录保护
+        // 4) 绝对系统目录保护
         if writing {
             for pfx in &self.system_prefixes {
                 if target.starts_with(pfx) {
@@ -175,7 +238,7 @@ impl GuardrailScanner {
             }
         }
 
-        // 4) 跨工作区 / 路径穿越 越界（仅对绝对目标做严格判定）
+        // 5) 跨工作区 / 路径穿越 越界（仅对绝对目标做严格判定）
         if target.has_root() {
             if target
                 .components()
@@ -358,6 +421,66 @@ mod tests {
     fn read_is_permissive_in_workspace() {
         let v = g().check(OpKind::Read, p("/home/u/proj/README.md"), p("/home/u/proj"));
         assert!(v.allowed);
+    }
+
+    /// 未绑定项目时工作区根就是数据目录，`.env` 与源码同级 —— 读取必须按文件名拦下，
+    /// 否则密钥会直接进入模型上下文并随下一次请求发往服务商。
+    #[test]
+    fn denies_reading_env_file_even_inside_workspace() {
+        let root = p("/home/u/.marguerite");
+        for target in [
+            "/home/u/.marguerite/.env",
+            "/home/u/proj/.env.local",
+            "/home/u/proj/.env.production",
+        ] {
+            let v = g().check(OpKind::Read, p(target), root);
+            assert_eq!(v.severity, GuardrailSeverity::Deny, "应拒绝读取 {target}");
+        }
+    }
+
+    /// 模板文件不含密钥，脚手架场景要读 —— 不能一并误杀。
+    #[test]
+    fn allows_reading_env_templates() {
+        let root = p("/home/u/proj");
+        for target in [
+            "/home/u/proj/.env.example",
+            "/home/u/proj/.env.sample",
+            "/home/u/proj/.env.template",
+            "/home/u/proj/.env.dist",
+        ] {
+            let v = g().check(OpKind::Read, p(target), root);
+            assert!(v.allowed, "模板应放行: {target} -> {:?}", v.reason);
+        }
+    }
+
+    /// 引擎凭证文件：读与写都不允许（防泄露 + 防篡改）。
+    #[test]
+    fn denies_engine_credential_files_for_read_and_write() {
+        let root = p("/home/u/.marguerite");
+        for name in [
+            "gateway-token",
+            "credentials.json",
+            "vault.json",
+            "model.key",
+            "desktop-credential.json",
+        ] {
+            let target = PathBuf::from("/home/u/.marguerite").join(name);
+            for op in [OpKind::Read, OpKind::WriteFile, OpKind::Delete] {
+                let v = g().check(op, &target, root);
+                assert_eq!(
+                    v.severity,
+                    GuardrailSeverity::Deny,
+                    "{op:?} 应拒绝引擎凭证 {name}"
+                );
+            }
+        }
+    }
+
+    /// `.env` 的**写入**刻意放行（脚手架要生成它），只拦读取。
+    #[test]
+    fn writing_env_file_stays_allowed_for_scaffolding() {
+        let v = g().check(OpKind::WriteFile, p("/home/u/proj/.env"), p("/home/u/proj"));
+        assert!(v.allowed, "写 .env 属正常脚手架: {:?}", v.reason);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sessionAgentIdentity, sessionStatusBadge, workspaceBadge } from './sessionDisplay'
+import { forkSourceTitle, sessionAgentIdentity, sessionStatusBadge, workspaceBadge } from './sessionDisplay'
 import type { SessionItem } from '@/composables/useSessions'
 
 function sessionItem(overrides: Partial<SessionItem>): SessionItem {
@@ -108,5 +108,27 @@ describe('workspaceBadge', () => {
       expect(label.trim()).not.toBe('')
       expect(label).not.toContain('sessions.inspect')
     }
+  })
+})
+
+describe('forkSourceTitle', () => {
+  const parent = sessionItem({ key: 'agent:main:webchat:parent', title: 'Original task' })
+
+  it('resolves the parent title from the loaded rows', () => {
+    const forked = sessionItem({ forkedFromParent: true, parentSessionKey: parent.key })
+
+    expect(forkSourceTitle(forked, key => (key === parent.key ? parent : undefined)))
+      .toBe('Original task')
+  })
+
+  it('stays empty when the parent is not in the loaded page', () => {
+    const forked = sessionItem({ forkedFromParent: true, parentSessionKey: 'agent:main:webchat:elsewhere' })
+
+    expect(forkSourceTitle(forked, () => undefined)).toBe('')
+  })
+
+  it('stays empty for rows without parent provenance', () => {
+    expect(forkSourceTitle(sessionItem({}), () => parent)).toBe('')
+    expect(forkSourceTitle(sessionItem({ parentSessionKey: '  ' }), () => parent)).toBe('')
   })
 })

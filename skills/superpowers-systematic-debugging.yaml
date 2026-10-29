@@ -35,3 +35,11 @@ prompt_template: |
   - 在未定位根因前随机改代码试错
   - 同时修改多处导致无法定位有效修复
   - 忽略警告信息或错误码
+
+# 供给面声明（2026-10-29 补）：安装前要展示「它要什么」。
+# 由 scripts/stamp-skill-requires.mjs 从上面的 tools 推导，规则见该脚本头部注释。
+requires:
+  network: false
+  fs_write: false
+  credentials: false
+  shell: false

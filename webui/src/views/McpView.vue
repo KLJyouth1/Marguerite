@@ -101,17 +101,24 @@
           </tr>
         </tbody>
       </table>
-      <div v-else-if="servers.length" class="mcp-empty">
-        <Icon name="search" :size="28" />
-        <p class="mcp-empty__title">{{ t('mcp.page.filterEmptyTitle') }}</p>
-        <p class="mcp-empty__hint">{{ t('mcp.page.filterEmptyHint') }}</p>
-      </div>
-      <div v-else class="mcp-empty">
-        <Icon name="plugin" :size="28" />
-        <p class="mcp-empty__title">{{ t('mcp.page.emptyTitle') }}</p>
-        <p class="mcp-empty__hint">{{ t('mcp.page.emptyHint') }}</p>
-        <button class="btn btn--sm btn--primary" @click="openAdd">{{ t('mcp.page.addServer') }}</button>
-      </div>
+      <EmptyState
+        v-else-if="servers.length"
+        icon="search"
+        :icon-size="28"
+        :title="t('mcp.page.filterEmptyTitle')"
+        :description="t('mcp.page.filterEmptyHint')"
+        test-id="mcp-empty-filter"
+      />
+      <EmptyState
+        v-else
+        icon="plugin"
+        :icon-size="28"
+        :title="t('mcp.page.emptyTitle')"
+        :description="t('mcp.page.emptyHint')"
+        :action-label="t('mcp.page.addServer')"
+        test-id="mcp-empty"
+        @action="openAdd"
+      />
       <div v-if="deleteNotice" class="mcp-note" :class="{ 'mcp-note--err': !deleteOk }">{{ deleteNotice }}</div>
     </section>
 
@@ -252,6 +259,7 @@
 import { onMounted, reactive, ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import ControlSwitch from '@/components/ControlSwitch.vue'
 import { useRpcStore } from '@/stores/rpc'
 import { useConfirm } from '@/composables/useConfirm'
@@ -787,20 +795,6 @@ onMounted(() => {
 }
 .mcp-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .mcp-danger { color: var(--danger); }
-.mcp-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 28px 16px;
-  margin-top: 10px;
-  border: 1px dashed var(--hairline);
-  border-radius: var(--radius-md);
-  color: var(--text-dim);
-  text-align: center;
-}
-.mcp-empty__title { margin: 0; font-size: 13px; font-weight: 650; color: var(--text); }
-.mcp-empty__hint { margin: 0; max-width: 640px; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
 .mcp-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
 .mcp-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
 .mcp-field--full { grid-column: 1 / -1; }

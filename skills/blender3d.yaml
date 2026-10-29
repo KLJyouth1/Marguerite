@@ -93,3 +93,11 @@ prompt_template: |
   {{text}}
 
   {{#files}}
+
+# 供给面声明（2026-10-29 补）：安装前要展示「它要什么」。
+# 由 scripts/stamp-skill-requires.mjs 从上面的 tools 推导，规则见该脚本头部注释。
+requires:
+  network: true
+  fs_write: true
+  credentials: false
+  shell: true

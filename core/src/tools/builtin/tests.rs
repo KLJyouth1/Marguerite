@@ -45,8 +45,47 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
             "todo_write",
             // R14：媒体域必须真的注册进注册表（否则工具存在但模型永远看不到它）
             "media",
+            // M1-T3：截流留底的取回入口（承诺「原文可取回」的那个工具）
+            "tool_output_retrieve",
         ] {
             assert!(reg.has_tool(name), "missing tool: {}", name);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // M1-T3：入口截流的取回工具（假承诺 → 真兑现）
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// 取不到必须是**明确的失败**：回 `ok("")` 会被模型读成「原文就是空的」。
+    #[tokio::test]
+    async fn tool_output_retrieve_fails_loudly_instead_of_returning_empty() {
+        let (reg, dir) = setup();
+        let mut args = HashMap::new();
+        put(&mut args, "fingerprint", &"0".repeat(32));
+        let r = reg
+            .execute_local_tool("tool_output_retrieve", &args)
+            .await
+            .expect("工具本身应正常返回");
+        assert!(matches!(r, ToolResult::Error { .. }), "取不到必须是失败：{r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端正向：留底 → 工具取回，逐字节等于原文。
+    #[tokio::test]
+    async fn tool_output_retrieve_returns_the_exact_spooled_text() {
+        let (reg, dir) = setup();
+        let raw = format!("原文起\n{}\n原文止", "q".repeat(50_000));
+        let fp = crate::context::spool::spool(&raw).expect("留底应成功");
+        let mut args = HashMap::new();
+        put(&mut args, "fingerprint", &fp);
+        let r = reg
+            .execute_local_tool("tool_output_retrieve", &args)
+            .await
+            .expect("工具本身应正常返回");
+        match r {
+            ToolResult::Success { data, .. } => assert_eq!(data, raw),
+            other => panic!("应取回原文：{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

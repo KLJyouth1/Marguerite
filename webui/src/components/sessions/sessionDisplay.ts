@@ -105,6 +105,19 @@ export const sessionRelTime = formatRelativeTime
  * parent title is known, otherwise a plain "↳ Subagent" so we never surface a
  * raw key. The arrow + label conveys lineage without rendering UUIDs.
  */
+/**
+ * 「fork 自」的父会话标题。父会话不在当前加载页里时返回空串 —— 调用方退回到
+ * 不带名字的说明，而不是把原始会话键丢给用户看。
+ */
+export function forkSourceTitle(
+  item: SessionItem,
+  lookup: (key: string) => SessionItem | undefined,
+): string {
+  const key = String(item.parentSessionKey || '').trim()
+  if (!key) return ''
+  return String(lookup(key)?.title || '').trim()
+}
+
 export function subagentRowTitle(parentTitle: string | null | undefined): string {
   const t = i18n.global.t
   const parent = (parentTitle || '').trim()

@@ -186,10 +186,10 @@ describe('RunModePanel', () => {
     // 内联形态不再重复渲染自己的标题/关闭按钮（父面板已有段标题）
     expect(runMode.querySelector('.composer-run-mode__head')).toBeNull()
     expect(routing.querySelector('.composer-model-routing__head')).toBeNull()
-    // 三段都在同一个滚动容器里，顺序为 执行模式 → PLAN → 模型路由
+    // 四段都在同一个滚动容器里，顺序为 执行模式 → PLAN → 审批旁路 → 模型路由
     const sections = Array.from(popover.querySelectorAll('.run-mode-panel__section'))
-    expect(sections).toHaveLength(3)
-    expect(sections[2].querySelectorAll('.composer-model-routing__option')).toHaveLength(5)
+    expect(sections).toHaveLength(4)
+    expect(sections[3].querySelectorAll('.composer-model-routing__option')).toHaveLength(5)
     app.unmount()
     el.remove()
   })

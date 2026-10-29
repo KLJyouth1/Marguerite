@@ -177,6 +177,20 @@ const BUILTIN_SURFACES: &[(&str, &str)] = &[
     ),
 ];
 
+/// 内置表面的紧凑行（子代理 / 团队用）：`(名称, 一句话, 对应工具名)`。
+///
+/// 名称必须与 [`BUILTIN_SURFACES`] 逐项一致（有回归测试咬合），只是把长段描述压成
+/// 一句话 + 工具名，让紧凑目录不牺牲「有哪些面」这条核心信息。无直接工具的面留空串。
+const BUILTIN_SURFACES_COMPACT: &[(&str, &str, &str)] = &[
+    ("内置浏览器（浏览器驾驶舱）", "真实 Chromium 会话：导航/点击/输入/截图", "browser"),
+    ("终端（真 PTY）", "pwsh/cmd/bash 交互会话；短命令用 shell_exec", "terminal、shell_exec"),
+    ("编辑器工作台", "用户可实时查看与手改的面板", "write_file、edit_file、apply_patch"),
+    ("产物中心", "交付产物自动登记并校验落盘", ""),
+    ("团队看板", "子代理/成员进度实时状态", ""),
+    ("TUI 与 CLI", "同引擎命令行形态，工具面相同", ""),
+    ("桌面窗口（GUI）", "Tauri 窗口；优先 RPC/工具，坐标点击兜底", "computer_use"),
+];
+
 /// 能力快照：会话级稳定的那部分（技能索引）。
 #[derive(Debug, Clone, Default)]
 pub struct CapabilitySnapshot {
@@ -380,10 +394,21 @@ pub fn catalog_text(tools: &[ToolDef], snap: &CapabilitySnapshot) -> String {
 /// 紧凑能力目录（子代理 / 专家 / 团队成员 / 蜂群 worker 用）。
 ///
 /// 这些智能体的上下文预算更紧（要放子任务描述与中间结果），所以只给：
+/// 内置面每名一行（名称 + 一句话 + 工具名，不复制主面长文本）+
 /// 组名 + 每组代表工具（≤5）+ 技能名的前缀列表 + 三句决策规则。
 pub fn compact_catalog_text(tools: &[ToolDef], snap: &CapabilitySnapshot) -> String {
     let mut out = String::with_capacity(768);
     out.push_str("## 你的可用能力（与会话内其它智能体同一套工具面）\n");
+    // 内置面缺失时子代理会退化成「写脚本盲控电脑」，所以这一段不能省；
+    // 省的是描述长度（每名一句话），不是覆盖面。
+    out.push_str("- 内置应用表面（真实存在、可被驱动）：\n");
+    for (name, brief, surface_tools) in BUILTIN_SURFACES_COMPACT {
+        if surface_tools.is_empty() {
+            out.push_str(&format!("  - {name}｜{brief}\n"));
+        } else {
+            out.push_str(&format!("  - {name}｜{brief}（工具：{surface_tools}）\n"));
+        }
+    }
     let groups = grouped(tools);
     if groups.is_empty() {
         out.push_str("- 本轮没有工具：直接基于已知信息完成子任务，不要声称调用过工具。\n");
@@ -490,6 +515,38 @@ mod tests {
         );
         assert!(compact.contains("内置浏览器"), "紧凑版也要说明内置表面是真实能力");
         assert!(compact.contains("use_skill"));
+    }
+
+    #[test]
+    fn compact_catalog_carries_builtin_surfaces_without_long_text() {
+        let text = compact_catalog_text(&[], &CapabilitySnapshot::default());
+        // 七个面一个都不能少：子代理此前只知道有工具、不知道有这些表面。
+        for needle in [
+            "内置浏览器（浏览器驾驶舱）",
+            "终端（真 PTY）",
+            "编辑器工作台",
+            "产物中心",
+            "团队看板",
+            "TUI 与 CLI",
+            "桌面窗口（GUI）",
+        ] {
+            assert!(text.contains(needle), "紧凑目录缺少内置面「{needle}」：\n{text}");
+        }
+        // 每名要带对应工具名（compact 的本意：一句话 + 工具名）。
+        assert!(text.contains("（工具：browser）"), "{text}");
+        assert!(text.contains("terminal、shell_exec"), "{text}");
+        // 但不能把主面长文本复制过来。
+        assert!(
+            !text.contains("复现用户描述的前端问题"),
+            "紧凑版不得复制主面长描述"
+        );
+    }
+
+    #[test]
+    fn compact_surface_table_names_match_full_surface_table() {
+        let full: Vec<&str> = BUILTIN_SURFACES.iter().map(|(n, _)| *n).collect();
+        let compact: Vec<&str> = BUILTIN_SURFACES_COMPACT.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(full, compact, "两张表面表的名称与顺序必须逐项一致");
     }
 
     #[test]

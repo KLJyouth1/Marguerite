@@ -561,6 +561,19 @@
     "available": "Marguerite {version} ya está disponible",
     "viewRelease": "Ver versión",
     "dismiss": "Descartar",
+    "dialog": {
+      "newVersion": "Nueva versión disponible",
+      "updateNow": "Actualizar ahora",
+      "later": "Recordármelo después",
+      "skipVersion": "Omitir esta versión",
+      "downloading": "Descargando actualización",
+      "downloadedTitle": "Actualización lista",
+      "downloadedDesc": "{version} se ha descargado. Reinicia para completar la instalación.",
+      "restartNow": "Reiniciar ahora",
+      "restartLater": "Reiniciar después",
+      "failedTitle": "Error en la actualización",
+      "close": "Cerrar"
+    },
     "desktop": {
       "indicatorAvailable": "Actualizar {version}",
       "indicatorDownloaded": "Actualización lista",
@@ -985,6 +998,38 @@
     "localMode": "Modo local",
     "detached": "HEAD separado"
   },
+  "cockpit": {
+    "title": "Cockpit de navegador",
+    "subtitle": "Control CDP sin dependencias: navegación / consola JS / clic en captura / árbol de accesibilidad / panel de red Resource Timing (RPC browser.*)",
+    "detect": "Detectar",
+    "closeSession": "Cerrar sesión",
+    "navigate": "Navegar",
+    "open": "Abrir",
+    "pageTitle": "Título: {title}",
+    "emptyCdp": "Introduce una URL para abrir una página (CDP Chromium real; requiere Chrome/Edge local)",
+    "emptyShot": "Haz clic en «Actualizar captura» para ver la página",
+    "shotOverlay": "Hacer clic en cualquier punto de la captura = clic real del ratón",
+    "refreshShot": "Actualizar captura",
+    "dumpDom": "Instantánea DOM",
+    "consoleTitle": "Consola JS (evaluate)",
+    "run": "Ejecutar",
+    "consoleEmpty": "(vacío)",
+    "a11yTitle": "Nodos de accesibilidad (a11y)",
+    "a11yRead": "Leer",
+    "networkTitle": "Panel de red DevTools (Resource Timing · aproximado)",
+    "capture": "Capturar",
+    "clear": "Limpiar",
+    "networkMeta": "{n} recursos (últimos 100 · más recientes primero)",
+    "networkEmpty": "Nada capturado (abre una página y pulsa «Capturar»; los datos provienen de la API Resource Timing y excluyen cabeceras de petición/cuerpos de respuesta)",
+    "thResource": "Recurso",
+    "thType": "Tipo",
+    "thDuration": "Duración",
+    "thSize": "Tamaño",
+    "iframeTitle": "Navegador integrado (iframe · vista previa ligera)",
+    "load": "Cargar",
+    "iframeEmpty": "Introduce una URL para cargar. Los sitios cross-origin que rechazan el embebido (X-Frame-Options / CSP) dejan el iframe en blanco — usa el cockpit CDP de arriba (Chromium real).",
+    "iframeNote": "La vista previa iframe no transporta tus credenciales de sesión; usa una sesión CDP para sitios con inicio de sesión. Un rechazo de embebido es política de seguridad del propio sitio, no un defecto de esta herramienta."
+  },
   "chrome": {
     "settings": "Ajustes",
     "theme": "Tema",
@@ -998,7 +1043,10 @@
     "expandSidebar": "Expandir barra lateral",
     "collapseSidebar": "Contraer barra lateral",
     "toggleSidebar": "Alternar barra lateral",
+    "iconRail": "Barra de iconos",
     "zenMode": "Modo zen",
+    "focusMode": "Modo de enfoque",
+    "focusModeOff": "Salir del modo de enfoque",
     "resizeSidebar": "Cambiar el ancho de la barra lateral",
     "sidebarWidthValue": "Ancho de la barra lateral: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Ancho de la barra lateral: {width}px, {preset}; limitado por esta ventana (preferencia: {preference}px)",
@@ -1006,6 +1054,8 @@
     "sidebarCollapseCanceled": "Se canceló la contracción de la barra lateral",
     "openBlockedSession": "Abrir la sesión bloqueada",
     "approvalRequired": "Aprobación requerida",
+    "sidecarOfflineApprovals": "Sidecar sin conexión · {count} aprobaciones pendientes de sincronizar",
+    "sidecarOfflineApprovalsTitle": "El sidecar de Python está sin conexión. Estas aprobaciones siguen en su cola y reaparecerán al reconectarse. Haz clic para revisar la conexión.",
     "manageConnection": "Gestionar conexión de la puerta de enlace",
     "connectionTitle": "Conexión: {state} — gestionar en Ajustes",
     "connectionState": {
@@ -1543,6 +1593,7 @@
       "discardAll": "Descartar todo ({count})",
       "moreOptionsIn": "Hay más opciones en",
       "copyConfigPath": "Copiar ruta de configuración",
+      "configPathIsolated": "Directorio de configuración del usuario (modo aislado)",
       "applyLiveNote": "La mayoría de los cambios se aplican en vivo; algunos requieren reiniciar la puerta de enlace",
       "discardTitle": "¿Descartar los cambios sin guardar?",
       "discardBody": "Tienes ediciones sin guardar. Si cierras ahora se perderán.",
@@ -3353,6 +3404,8 @@
     },
     "ledger": {
       "fork": "Bifurcación",
+      "forkedFrom": "Bifurcado de «{title}»",
+      "forkTooltip": "Bifurcado de una tarea anterior; los mensajes previos se copiaron aquí.",
       "subagent": "Subagente",
       "subagentWithParent": "Subagente · {parent}",
       "session": "sesión",
@@ -4737,6 +4790,10 @@
       "customBaseUrl": "Endpoint, p. ej. https://api.example.com/v1",
       "customModel": "Modelo, p. ej. gpt-4o-mini",
       "customApiKey": "Clave API (opcional, se puede añadir después)",
+      "customProtocol": "Protocolo de petición",
+      "customProtocolChat": "Compatible con OpenAI · /v1/chat/completions",
+      "customProtocolResponses": "OpenAI Responses · /v1/responses",
+      "customProtocolAnthropic": "Anthropic Messages · /v1/messages",
       "customSubmit": "Guardar y usar",
       "customCancel": "Contraer",
       "customRequired": "El endpoint y el modelo son obligatorios.",
@@ -4756,7 +4813,7 @@
       "ttft": "Primer token {ms} (medido en el cliente)",
       "sessionTokens": "Tokens de la sesión {n}",
       "rounds": "Turnos {n}",
-      "cacheHitRate": "Tasa de aciertos de caché {pct} %"
+      "cacheHitRate": "Aciertos de caché del proveedor {pct} %"
     },
     "artifactEditorAria": "Edición y vista previa del entregable",
     "recoveringGeneration": "Se detectó una generación sin terminar — recuperando…",
@@ -4850,6 +4907,17 @@
     "deliverablesCount": "Entregables ({count})",
     "contextPressure": "Contexto {pct} %",
     "contextPressureTitle": "Ventana de contexto {used}k / {window}k tokens — cerca del umbral de compactación",
+    "contextMeter": {
+      "tool": "herramientas {k}k",
+      "windowApprox": "ventana estimada",
+      "aria": "Uso del contexto: {used}k / {window}k ({pct}%), {tier}",
+      "tier": {
+        "normal": "normal",
+        "watch": "vigilar",
+        "advise": "cerca del límite",
+        "compact": "compresión inminente"
+      }
+    },
     "sessionDeliverables": "Entregables de la sesión",
     "noDeliverables": "Aún no hay entregables.",
     "openArtifact": "Abrir {title}, {subtitle}",
@@ -5305,6 +5373,16 @@
     "slashCommands": {
       "unknown": "Comando desconocido {command}. Sigue editándolo o usa // para enviarlo como texto."
     },
+    "handoff": {
+      "commandDescription": "Escribe una nota de traspaso en el workspace (lista de artefactos + tu nota) para que el siguiente modelo/sesión continúe desde el workspace sin reenviar archivos",
+      "usage": "/handoff [nota para el relevo]",
+      "toastOk": "Nota de traspaso escrita en el workspace: {path}",
+      "toastFail": "Fallo de la nota de traspaso: {error}",
+      "noticeTitle": "Nota de traspaso encontrada en el workspace",
+      "noticeUse": "Referenciar en el composer",
+      "noticeOpen": "Abrir en el editor",
+      "insertText": "Lee primero la nota de traspaso del workspace handoff/{file} y continúa la tarea según su guía. No repitas pasos completados; los productos siguen quedando en el workspace y registrándose."
+    },
     "codingMode": {
       "enabled": "Coding mode activado para todos los chats.",
       "disabled": "Coding mode desactivado.",
@@ -5354,6 +5432,10 @@
       "modelRoutingOmniDesc": "Un agente orquestador coordina los mejores modelos disponibles en cada turno.",
       "modelRoutingOmni": "Agente omni",
       "runModePanel": "Modo de ejecución y enrutado",
+      "approvalBypass": "Comprobaciones de aprobación",
+      "approvalBypassOn": "Confirmaciones omitidas",
+      "approvalBypassOff": "Preguntar cada vez",
+      "approvalBypassDesc": "Cuando está activado, las llamadas a herramientas de alto riesgo de esta sesión ya no muestran una tarjeta de confirmación. Las listas de bloqueo de modo, el modo Plan de solo lectura y la política del sandbox siguen aplicándose; cada omisión se sigue registrando como evento de auditoría.",
       "thinking": "Razonamiento profundo",
       "modeShort": {
         "safe": "Seguro",
@@ -5477,6 +5559,7 @@
       "failed": "Falló",
       "done": "Hecho",
       "pending": "Pendiente",
+      "unknown": "Desconocido",
       "results": "{count} resultados",
       "countRunning": "{count} en ejecución",
       "countDone": "{count} hechos",
@@ -5518,6 +5601,7 @@
       "downloadFailedHttp": "Error al descargar — HTTP {status}",
       "downloadFailed": "Error al descargar",
       "forkFailed": "Error al crear la rama",
+      "forkUnavailable": "Bifurcar una conversación requiere el sidecar de Python (modo Rust puro ahora). Inicia el sidecar y reintenta, o usa «Copiar conversación».",
       "forkOpenFailed": "La rama se creó, pero no se pudo abrir. Puedes abrirla desde Sesiones.",
       "copyFailed": "Error al copiar",
       "shareSaveFailed": "No se pudo guardar la imagen. Inténtalo de nuevo.",
@@ -5554,6 +5638,7 @@
       "planningNextStep": "Planificando el siguiente paso",
       "readingContext": "Leyendo el contexto",
       "waitingForModel": "Esperando al modelo",
+      "waitingSerialHint": "Esperando {s}s · en modo Agent las llamadas al modelo son secuenciales; cambia a Bloom para paralelizar",
       "preparingOutput": "Preparando la salida",
       "generatingCandidates": "Generando candidatos",
       "synthesizingCandidates": "Sintetizando candidatos",
@@ -5809,7 +5894,12 @@
       "restartUnavailable": "Esta variante no puede reiniciar el proceso anfitrión. Reinténtalo desde la aplicación de escritorio o vuelve a abrir la aplicación.",
       "restartFailed": "No se pudo reiniciar el proceso anfitrión: {error}",
       "restarted": "Proceso anfitrión reiniciado. Reconectando…",
-      "alreadyRunning": "El proceso anfitrión ya está en ejecución. Actualizando…"
+      "alreadyRunning": "El proceso anfitrión ya está en ejecución. Actualizando…",
+      "bannerTitle": "El motor auxiliar de Python no está iniciado: algunos diagnósticos no están disponibles.",
+      "details": "Detalles",
+      "hideDetails": "Ocultar detalles",
+      "dismiss": "Cerrar",
+      "restart": "Reiniciar el motor auxiliar"
     },
     "errorActions": {
       "viewLogs": "Ver registros",
@@ -6040,6 +6130,13 @@
       "bulkDeleteFailed": "No se pudieron eliminar las sesiones seleccionadas",
       "deleteSessionDone": "Sesión eliminada",
       "deleteSessionFailed": "No se pudo eliminar la sesión",
+      "resetConversation": "Borrar conversación",
+      "resetSessionTitle": "Borrar conversación",
+      "resetSessionBody": "¿Borrar la conversación de la sesión «{title}»? Se eliminarán {count} mensajes. La configuración de la sesión y los archivos generados se conservan. Esta acción no se puede deshacer.",
+      "resetSessionBodyNoCount": "¿Borrar la conversación de la sesión «{title}»? Se eliminarán los mensajes de esta sesión. La configuración de la sesión y los archivos generados se conservan. Esta acción no se puede deshacer.",
+      "resetSessionConfirm": "Borrar",
+      "resetSessionDone": "Conversación borrada",
+      "resetSessionFailed": "No se pudo borrar la conversación",
       "renameSessionDone": "Sesión renombrada",
       "renameSessionFailed": "No se pudo renombrar la sesión",
       "showMore": "Mostrar {count} más",
@@ -6356,6 +6453,15 @@
     "elapsed": "Duración",
     "artifacts": {
       "empty": "Aún no hay entregables. Los archivos generados aparecen aquí en cuanto se escriben."
+    },
+    "review": {
+    "pending": "Por revisar",
+    "approved": "Aprobado",
+    "flagged": "Devuelto",
+    "approve": "Aprobar",
+    "flag": "Devolver",
+    "openArtifact": "Abrir artefacto",
+    "hint": "Los veredictos de revisión se dan manualmente y se guardan localmente; todavía no pausan el pipeline del backend."
     },
     "runStatus": {
       "idle": "Inactivo",
@@ -6733,6 +6839,11 @@
     }
   },
   "engineHealth": {
+    "sidecarDegradedTitle": "Capacidades del sidecar degradadas",
+    "sidecarMissing": "Dependencias faltantes: {modules}",
+    "sidecarNumpyImpact": "El enrutado ML local está desactivado (vuelve a default-tier); el chat sigue funcionando",
+    "sidecarGenericImpact": "Las capacidades relacionadas de la puerta de enlace se degradarán o no estarán disponibles",
+    "sidecarInterpreter": "Intérprete: {path}",
     "title": "Salud del motor · Modelos · Modos",
     "subtitle": "Transparencia de capacidades: salud de capacidades / perfiles de modelo Rust / runtimes pesados / modos de ejecución",
     "refresh": "Actualizar",
@@ -7112,6 +7223,9 @@
       "refresh": "Actualizar",
       "toolCalls": "llamadas de herramientas",
       "lastActivity": "Última actividad",
+      "viewGrid": "Vista cuadrícula",
+      "viewKanban": "Vista tablero",
+      "colEmpty": "Sin miembros",
       "status": {
         "running": "En curso",
         "waiting": "En espera",
@@ -7128,7 +7242,7 @@
       "coverageSkipped": "{count} omitidas",
       "coverageMerged": "{count} combinadas",
       "coveragePlugins": "Refs. de plugins: {refs} (resueltas {resolved}, sin resolver {unresolved})",
-      "coverageUnavailable": "Cobertura de habilidades no disponible",
+      "coverageUnavailable": "Estadísticas no disponibles",
       "tabSkills": "Habilidades",
       "tabTools": "Herramientas y MCP",
       "tabProposals": "Propuestas",

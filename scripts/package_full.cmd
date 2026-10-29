@@ -1,8 +1,7 @@
 @echo off
-chcp 65001 >nul
 REM ============================================================
-REM  Marguerite å…¨é‡æ‰“åŒ… (Release v0.1.4) - æœ€æ–°ç‰ˆå®‰è£…åŒ…
-REM  æ‰“åŒ…å†…å®¹ï¼šwebui / å…¨ skills / å…¨å·¥å…· / å…¨é…ç½® / ç½‘å…³ / pyengine / btpanel-mcp / mode YAML / scripts
+REM  Marguerite È«Á¿´ò°ü (Release v0.1.4) - ×îĞÂ°æ°²×°°ü
+REM  ´ò°üÄÚÈİ£ºwebui / È« skills / È«¹¤¾ß / È«ÅäÖÃ / Íø¹Ø / pyengine / btpanel-mcp / mode YAML / scripts
 REM ============================================================
 setlocal EnableExtensions EnableDelayedExpansion
 
@@ -17,117 +16,176 @@ set "WEBUI_DST=%TAURI_DIR%\webui\dist"
 set "TARGET_DIR=%CD%\marguerite_build_target"
 
 echo ============================================================
-echo  Marguerite å…¨é‡æ‰“åŒ…ï¼ˆRelease v0.1.4ï¼‰
-echo  ä»“åº“ : %REPO_ROOT%
+echo  Marguerite È«Á¿´ò°ü£¨Release v0.1.4£©
+echo  ²Ö¿â : %REPO_ROOT%
 echo  Tauri: %TAURI_DIR%
-echo  æ„å»º : %TARGET_DIR%
+echo  ¹¹½¨ : %TARGET_DIR%
 echo ============================================================
 
-REM --------- Step 1. éš”ç¦»æ„å»ºç›®å½• ---------
+REM --------- Step 1. ¸ôÀë¹¹½¨Ä¿Â¼ ---------
 if exist "%TARGET_DIR%" (
-    echo [1/7] æ¸…ç†æ„å»ºç›®å½•: %TARGET_DIR%
+    echo [1/7] ÇåÀí¹¹½¨Ä¿Â¼: %TARGET_DIR%
     rmdir /s /q "%TARGET_DIR%" 2>nul
 )
 mkdir "%TARGET_DIR%" 2>nul
 
-REM --------- Step 2. æ¸…ç†æ—§æ„å»ºæ®‹ç•™ ---------
-echo [2/7] æ¸…ç† webui/dist.old* æ—§ç›®å½• ...
+REM --------- Step 2. ÇåÀí¾É¹¹½¨²ĞÁô ---------
+echo [2/7] ÇåÀí webui/dist.old* ¾ÉÄ¿Â¼ ...
 for /d %%D in ("%REPO_ROOT%\webui\dist.old*") do (
     if exist "%%D" rmdir /s /q "%%D" 2>nul && echo   removed %%~nxD
 )
 
-REM --------- Step 3. webui/dist æ‹·è´ï¼ˆè¦†ç›–ï¼‰ ---------
-echo [2/7] åµŒå…¥ Web UIï¼ˆwebui/dist -^> gui/src-tauri/webui/distï¼‰
+REM --------- Step 3. webui/dist ¿½±´£¨¸²¸Ç£© ---------
+echo [2/7] Ç¶Èë Web UI£¨webui/dist -^> gui/src-tauri/webui/dist£©
 if not exist "%WEBUI_SRC%" (
-    echo [ERROR] æœªæ‰¾åˆ° webui/distï¼è¯·å…ˆåœ¨ webui ä¸‹æ‰§è¡Œ: npm run build
+    echo [ERROR] Î´ÕÒµ½ webui/dist£¡ÇëÏÈÔÚ webui ÏÂÖ´ĞĞ: npm run build
     exit /b 1
 )
-REM ã€2026-10-23ã€‘åŸã€Œæ¡Œå® å›¾ç‰‡çš®è‚¤å®Œæ•´æ€§æ£€æŸ¥ã€å·²ç§»é™¤ï¼š
-REM   æ¡Œå® çš®è‚¤æ”¹ä¸ºçº¯æœ¬åœ°çŸ¢é‡ / å‚æ•°åŒ– 3D æ¸²æŸ“ï¼ˆwebui/src/components/pet/petSpec.ts æ•°æ®é©±åŠ¨ï¼‰ï¼Œ
-REM   `webui/public/pets/*.jpg` å› å¸¦ç¬¬ä¸‰æ–¹æ°´å°ä¸”æœªå†è¢«å¼•ç”¨ï¼Œå·²éšã€Œæ— æ•æ„Ÿæ— æ°´å°ç´ æã€è¦æ±‚ä¸‹çº¿ã€‚
-REM   è¿™é‡Œåªä¿ç•™äº§ç‰©å…¥å£æ£€æŸ¥ â€”â€” ç¼º index.html æ‰æ˜¯çœŸçš„æ‰“ä¸å‡ºå¯ç”¨æ§åˆ¶å°ã€‚
+REM ¡¾2026-10-23¡¿Ô­¡¸×À³èÍ¼Æ¬Æ¤·ôÍêÕûĞÔ¼ì²é¡¹ÒÑÒÆ³ı£º
+REM   ×À³èÆ¤·ô¸ÄÎª´¿±¾µØÊ¸Á¿ / ²ÎÊı»¯ 3D äÖÈ¾£¨webui/src/components/pet/petSpec.ts Êı¾İÇı¶¯£©£¬
+REM   `webui/public/pets/*.jpg` Òò´øµÚÈı·½Ë®Ó¡ÇÒÎ´ÔÙ±»ÒıÓÃ£¬ÒÑËæ¡¸ÎŞÃô¸ĞÎŞË®Ó¡ËØ²Ä¡¹ÒªÇóÏÂÏß¡£
+REM   ÕâÀïÖ»±£Áô²úÎïÈë¿Ú¼ì²é ¡ª¡ª È± index.html ²ÅÊÇÕæµÄ´ò²»³ö¿ÉÓÃ¿ØÖÆÌ¨¡£
 if not exist "%WEBUI_SRC%\index.html" (
-    echo [ERROR] webui/dist ç¼ºå°‘ index.htmlï¼ˆå‰ç«¯äº§ç‰©ä¸å®Œæ•´ï¼‰ã€‚
-    echo         è¯·ç¡®è®¤ webui ä¸‹ npm run build æˆåŠŸã€‚
+    echo [ERROR] webui/dist È±ÉÙ index.html£¨Ç°¶Ë²úÎï²»ÍêÕû£©¡£
+    echo         ÇëÈ·ÈÏ webui ÏÂ npm run build ³É¹¦¡£
     exit /b 1
 )
-echo       å‰ç«¯äº§ç‰©å…¥å£æ£€æŸ¥é€šè¿‡ï¼ˆindex.html å­˜åœ¨ï¼‰ã€‚
+echo       Ç°¶Ë²úÎïÈë¿Ú¼ì²éÍ¨¹ı£¨index.html ´æÔÚ£©¡£
 if exist "%WEBUI_DST%" rmdir /s /q "%WEBUI_DST%" 2>nul
 xcopy /E /I /Y /Q "%WEBUI_SRC%" "%WEBUI_DST%" >nul
-echo       å®Œæˆã€‚
+echo       Íê³É¡£
 
-REM --------- Step 3. Skillsï¼ˆå…¨é‡åŒæ­¥ï¼‰ ---------
-echo [3/7] åŒæ­¥å…¨é‡ skills åˆ° gui/src-tauri/skills
+REM --------- Step 3. Skills£¨È«Á¿Í¬²½£© ---------
+echo [3/7] Í¬²½È«Á¿ skills µ½ gui/src-tauri/skills
 set "SKILL_SRC=%REPO_ROOT%\skills"
 set "SKILL_DST=%TAURI_DIR%\skills"
 if exist "%SKILL_SRC%" (
     xcopy /E /I /Y /Q "%SKILL_SRC%\*" "%SKILL_DST%\" >nul
 )
-echo       å®Œæˆã€‚
+echo       Íê³É¡£
 
-REM --------- Step 4. å…¨é‡èµ„æºï¼ˆé…ç½® / pyengine / btpanel-mcp / mode / scriptsï¼‰ ---------
-echo [4/7] æ”¶é›†å…¨é‡èµ„æºåˆ° gui/src-tauri/resources/
+REM --------- Step 4. È«Á¿×ÊÔ´£¨ÅäÖÃ / pyengine / btpanel-mcp / mode / scripts£© ---------
+echo [4/7] ÊÕ¼¯È«Á¿×ÊÔ´µ½ gui/src-tauri/resources/
 set "RES=%TAURI_DIR%\resources"
-if exist "%RES%" rmdir /s /q "%RES%" 2>nul
+REM ¡¾2026-10-28¡¿Ô­À´ÕâÀïÊÇ `if exist "%RES%" rmdir /s /q "%RES%"` ¡ª¡ª ÕûÄ¿Â¼Çå¿Õ¡£
+REM ¶ø resources\python ÊÇ 315 MB ¿ÉÒÆÖ² CPython£¬**²»ÔÚ git Àï**£¬Ö»ÓÉ
+REM scripts\fetch_python_runtime.ps1 Îï»¯¡£ÓÚÊÇÃ¿´ò°üÒ»´Î¾Í°ÑËüÉ¾Ò»´Î£ºÏÂÒ»°æ°²×°°ü
+REM Ã»ÓĞÄÚÖÃ½âÊÍÆ÷£¬²à³µÊ×Ñ¡Ëü£¨core/src/pyengine/sidecar.rs:
+REM <install>\resources\python\python.exe£©£¬É¾ÁË²»±¨´í ¡ª¡ª Ö»ÊÇÃ¿Ì¨×°ÁËÕâ°æµÄ»úÆ÷¶¼
+REM ¾²Ä¬ÍË»¯³É´¿ Rust ÄÜÁ¦×Ó¼¯¡£Êµ²â±¾ÂÖ¾ÍÊÇÕâÑù¶ªÁËÄÚÖÃ½âÊÍÆ÷£¬¿¿ÖØÅÜ fetch ½Å±¾²ÅÕÒ»ØÀ´¡£
+REM ËùÒÔ¸Ä³ÉÖ»ÇåÀí¡¸±¾ÂÖÈ·ÊµÒªÖØÖÆ¡¹µÄ×ÓÊ÷£»resources\python Óë build.rs ¸ºÔğµÄ
+REM resources\plugins ¶¼²»ÔÚÕâÀï¶¯£¨plugins ÓÉ build.rs ÎŞÌõ¼şÖØ¿½£©¡£
+for %%D in (modes pyengine btpanel-mcp docs scripts) do (
+    if exist "%RES%\%%D" rmdir /s /q "%RES%\%%D" 2>nul
+)
+if exist "%RES%" (
+    del /q "%RES%\*.md" 2>nul
+    del /q "%RES%\config.yaml" 2>nul
+    del /q "%RES%\Cargo.lock" 2>nul
+    del /q "%RES%\rust-toolchain.toml" 2>nul
+)
 mkdir "%RES%" 2>nul
 
-REM 4a. æ ¹é…ç½®æ–‡ä»¶
-if exist "%REPO_ROOT%\config.yaml"  copy /Y "%REPO_ROOT%\config.yaml" "%RES%\" >nul
-if exist "%REPO_ROOT%\AGENTS.md"    copy /Y "%REPO_ROOT%\AGENTS.md" "%RES%\" >nul
+REM 4a-pre. ÄÚÖÃ Python ÔËĞĞÊ±£¨È±Ê§Ôò¾ÍµØÎï»¯£¬¶ø²»ÊÇ´òÍê²Å·¢ÏÖ£©
+REM     ÓĞÁËÕâÒ»¶Î£¬¡¸Ò»ÌõÃüÁî²ú³öË«ÒıÇæ°²×°°ü¡¹²Å³ÉÁ¢£ºfetch ½Å±¾ÊÇÃİµÈµÄ£¬
+REM     ÒÑ¾ÍĞ÷Ê±Ëü×Ô¼º´òÓ¡¡¸ÒÑ¾ÍĞ÷¡¹²¢ exit 0¡£
+if not exist "%RES%\python\python.exe" (
+    echo       Î´ÕÒµ½ÄÚÖÃÔËĞĞÊ±£¬Ö´ĞĞ scripts\fetch_python_runtime.ps1 ...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\fetch_python_runtime.ps1"
+    if errorlevel 1 (
+        echo [ERROR] ÄÚÖÃÔËĞĞÊ±Îï»¯Ê§°Ü£¬´ò°üÖĞÖ¹¡£
+        exit /b 1
+    )
+)
+if not exist "%RES%\python\python.exe" (
+    echo [ERROR] ÈÔÈ»Ã»ÓĞ %RES%\python\python.exe ¡ª¡ª ²à³µ»á¾²Ä¬½µ¼¶Îª´¿ Rust£¬²»²ú³ö°²×°°ü¡£
+    exit /b 1
+)
+
+REM 4a. ÓÃ»§¿É¼ûµÄ¸ùÎÄµµ¡£
+REM     [WARN] ÕâÀïÔø¾­»¹¸´ÖÆ config.yaml / AGENTS.md / rust-toolchain.toml£¬Êµ²â¶¼½øÁË
+REM     0.2.17 °²×°°ü£ºAGENTS.md 134 KB µÄÖÇÄÜÌåÖ¸Áî£¨ÄÚº¬±»ÒıÓÃµÄÒÑĞ¹Â¶ÃÜÔ¿Ç°×ºÓë
+REM     ÄÚ²¿ÃÅ½ûÏ¸½Ú£©¾ÍÕâÑù·¢µ½Ã¿¸öÓÃ»§»úÆ÷ÉÏ¡£config.yaml ÊÇ¿ª·¢ÓÃÅäÖÃÄ£°å£¬
+REM     ÓÃ»§Êµ¼Ê¶ÁĞ´µÄÊÇ %LOCALAPPDATA%\Marguerite\config.yaml ¡ª¡ª ×°Ò»·İÔÚ³ÌĞòÄ¿Â¼Ö»»áÎóµ¼¡£
 if exist "%REPO_ROOT%\CHANGELOG.md" copy /Y "%REPO_ROOT%\CHANGELOG.md" "%RES%\" >nul
 if exist "%REPO_ROOT%\README.md"    copy /Y "%REPO_ROOT%\README.md" "%RES%\" >nul
-if exist "%REPO_ROOT%\rust-toolchain.toml" copy /Y "%REPO_ROOT%\rust-toolchain.toml" "%RES%\" >nul
 
-REM 4b. mode/*.yamlï¼ˆanchoring / bloom é…ç½®ï¼‰
+REM 4b. mode/*.yaml£¨anchoring / bloom ÅäÖÃ£©
 if exist "%REPO_ROOT%\core\src\mode\modes" (
     xcopy /E /I /Y /Q "%REPO_ROOT%\core\src\mode\modes" "%RES%\modes\" >nul
 )
 
-REM 4c. pyengineï¼ˆè½»é‡ï¼šä»… src + migrations + pyproject + ç‰ˆæœ¬å£°æ˜ï¼‰
-REM     âš ï¸ `migrations/` **å¿…é¡»**ä¸€èµ·æ‰“è¿›å»ï¼š`resolve_migrations_dir()` çš„ä»“åº“å€™é€‰æ˜¯
-REM     `Path(__file__).parents[3]/"migrations"` â€”â€” å®‰è£…åå³
-REM     `<install>/resources/pyengine/migrations`ã€‚ç¼ºå®ƒæ—¶å¼•æ“å¯åŠ¨ç›´æ¥
-REM     `RuntimeError: opensquilla migrations directory not found`ï¼ˆå®æµ‹ï¼‰ï¼Œ
-REM     æ¡Œé¢ç«¯äºæ˜¯åªå‰©çº¯ Rust èƒ½åŠ›å­é›†ã€‚
+REM 4c. pyengine£¨ÇáÁ¿£º½ö src + migrations + pyproject + °æ±¾ÉùÃ÷£©
+REM     [WARN] `migrations/` **±ØĞë**Ò»Æğ´ò½øÈ¥£º`resolve_migrations_dir()` µÄ²Ö¿âºòÑ¡ÊÇ
+REM     `Path(__file__).parents[3]/"migrations"` ¡ª¡ª °²×°ºó¼´
+REM     `<install>/resources/pyengine/migrations`¡£È±ËüÊ±ÒıÇæÆô¶¯Ö±½Ó
+REM     `RuntimeError: opensquilla migrations directory not found`£¨Êµ²â£©£¬
+REM     ×ÀÃæ¶ËÓÚÊÇÖ»Ê£´¿ Rust ÄÜÁ¦×Ó¼¯¡£
 if exist "%REPO_ROOT%\pyengine" (
-    xcopy /E /I /Y /Q "%REPO_ROOT%\pyengine\src" "%RES%\pyengine\src\" >nul
+    REM /XD __pycache__ /XF *.pyc ¡ª¡ª Ö±½Ó xcopy »á°Ñ±¾»úÅÜ¹ı²âÊÔÁôÏÂµÄ×Ö½ÚÂëÒ»Æğ´ò°ü
+    REM £¨Êµ²âÔİ´æÊ÷Àï 599 ¸ö __pycache__ Ä¿Â¼£©¡£ÄÇÊÇ»úÆ÷×´Ì¬£¬²»ÊÇ·¢²¼ÄÚÈİ¡£
+    robocopy "%REPO_ROOT%\pyengine\src" "%RES%\pyengine\src" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 /XD __pycache__ .pytest_cache /XF *.pyc *.pyo >nul
+    if errorlevel 8 (
+        echo [ERROR] pyengine\src ¸´ÖÆÊ§°Ü£¨robocopy£©
+        exit /b 1
+    )
     if exist "%REPO_ROOT%\pyengine\migrations" (
-        xcopy /E /I /Y /Q "%REPO_ROOT%\pyengine\migrations" "%RES%\pyengine\migrations\" >nul
+        robocopy "%REPO_ROOT%\pyengine\migrations" "%RES%\pyengine\migrations" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 /XD __pycache__ /XF *.pyc *.pyo >nul
+        if errorlevel 8 (
+            echo [ERROR] pyengine\migrations ¸´ÖÆÊ§°Ü£¨robocopy£©
+            exit /b 1
+        )
     ) else (
-        echo [ERROR] æœªæ‰¾åˆ° pyengine\migrations â€”â€” æ‰“åŒ…åçš„å¼•æ“æ— æ³•å¯åŠ¨ï¼ˆmigrations ç¼ºå¤±ï¼‰ã€‚
+        echo [ERROR] Î´ÕÒµ½ pyengine\migrations ¡ª¡ª ´ò°üºóµÄÒıÇæÎŞ·¨Æô¶¯£¨migrations È±Ê§£©¡£
         exit /b 1
     )
     if exist "%REPO_ROOT%\pyengine\pyproject.toml" copy /Y "%REPO_ROOT%\pyengine\pyproject.toml" "%RES%\pyengine\" >nul
     if exist "%REPO_ROOT%\pyengine\.python-version" copy /Y "%REPO_ROOT%\pyengine\.python-version" "%RES%\pyengine\" >nul
 )
 
-REM 4c-bis. Control UI å¿…é¡»åŒæ—¶è½åˆ° pyengine çš„ static/dist
-REM     Control UI ç”±å†…åµŒç½‘å…³æä¾›ï¼Œå®ƒåªåœ¨
-REM     resources/pyengine/src/opensquilla/gateway/static/dist æ‰¾å·²æ„å»ºçš„ Vue æ§åˆ¶å°
-REM     ï¼ˆTauri å¦è£…ä¸€ä»½åˆ° <install>/webui/distï¼Œcontrol_ui._resolve_dist_dir ä¼šå›é€€å‘½ä¸­ï¼‰ã€‚
-REM     ç¼ºå¤±æ—¶æ¡Œé¢ç«¯åªæ˜¾ç¤ºã€Œèµ„æºä¸å¯ç”¨ã€å‘Šè­¦ â€”â€” 2026-10-12 å®æµ‹ç¼ºé™·ï¼Œæ•…æ­¤å¤„å¼ºåˆ¶æ ¡éªŒã€‚
-echo [4c-bis] å¤åˆ¶ webui/dist -^> resources/pyengine/src/opensquilla/gateway/static/dist
+REM 4c-bis. Control UI ±ØĞëÍ¬Ê±Âäµ½ pyengine µÄ static/dist
+REM     Control UI ÓÉÄÚÇ¶Íø¹ØÌá¹©£¬ËüÖ»ÔÚ
+REM     resources/pyengine/src/opensquilla/gateway/static/dist ÕÒÒÑ¹¹½¨µÄ Vue ¿ØÖÆÌ¨
+REM     £¨Tauri Áí×°Ò»·İµ½ <install>/webui/dist£¬control_ui._resolve_dist_dir »á»ØÍËÃüÖĞ£©¡£
+REM     È±Ê§Ê±×ÀÃæ¶ËÖ»ÏÔÊ¾¡¸×ÊÔ´²»¿ÉÓÃ¡¹¸æ¾¯ ¡ª¡ª 2026-10-12 Êµ²âÈ±Ïİ£¬¹Ê´Ë´¦Ç¿ÖÆĞ£Ñé¡£
+echo [4c-bis] ¸´ÖÆ webui/dist -^> resources/pyengine/src/opensquilla/gateway/static/dist
 set "GW_STATIC_DIST=%RES%\pyengine\src\opensquilla\gateway\static\dist"
 if exist "%GW_STATIC_DIST%" rmdir /s /q "%GW_STATIC_DIST%" 2>nul
 xcopy /E /I /Y /Q "%WEBUI_SRC%\*" "%GW_STATIC_DIST%\" >nul
 if not exist "%GW_STATIC_DIST%\index.html" (
-    echo [ERROR] æ§åˆ¶å°æœªè½å…¥ resources/pyengine/.../gateway/static/dist â€”â€” Control UI å°†ä¸å¯ç”¨
+    echo [ERROR] ¿ØÖÆÌ¨Î´ÂäÈë resources/pyengine/.../gateway/static/dist ¡ª¡ª Control UI ½«²»¿ÉÓÃ
     exit /b 1
 )
-echo       æ¡Œé¢æ§åˆ¶å°å°±ä½ï¼ˆindex.html + assets + pets/ï¼‰.
+echo       ×ÀÃæ¿ØÖÆÌ¨¾ÍÎ»£¨index.html + assets + pets/£©.
 
-REM 4d. btpanel-mcpï¼ˆå®å¡” MCP æœåŠ¡ç«¯ï¼‰
+REM 4d. btpanel-mcp£¨±¦Ëş MCP ·şÎñ¶Ë£©
 if exist "%REPO_ROOT%\btpanel-mcp" (
-    xcopy /E /I /Y /Q "%REPO_ROOT%\btpanel-mcp\btpanel_mcp" "%RES%\btpanel-mcp\btpanel_mcp\" >nul
+    robocopy "%REPO_ROOT%\btpanel-mcp\btpanel_mcp" "%RES%\btpanel-mcp\btpanel_mcp" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 /XD __pycache__ .pytest_cache /XF *.pyc *.pyo >nul
+    if errorlevel 8 (
+        echo [ERROR] btpanel-mcp ¸´ÖÆÊ§°Ü£¨robocopy£©
+        exit /b 1
+    )
     if exist "%REPO_ROOT%\btpanel-mcp\pyproject.toml" copy /Y "%REPO_ROOT%\btpanel-mcp\pyproject.toml" "%RES%\btpanel-mcp\" >nul
 )
 
-REM 4e. docsï¼ˆç”¨æˆ·æ‰‹å†Œå­é›†ï¼‰
-if exist "%REPO_ROOT%\docs" (
-    xcopy /E /I /Y /Q "%REPO_ROOT%\docs" "%RES%\docs\" >nul
+REM 4e. docs ¡ª¡ª Ö»´ò¡¸ÓÃ»§ÊÖ²á¡¹°×Ãûµ¥£¬²»ÔÙÕû¿ÃÊ÷´ò°ü¡£
+REM     Êµ²â 0.2.17 °ÑÕû¿Ã docs/£¨24 MB / 313 ¸öÎÄ¼ş£©×°ÁË½øÈ¥£ºPhase ½ø¶È¡¢
+REM     M2~M4 ÑéÊÕ±¨¸æ¡¢Security_Audit_L3¡¢¾ºÆ·µ÷ÑĞ¡¢20 MB µÄ qa-shots ½ØÍ¼¡£
+REM     [WARN] Ä¿Â¼±¾Éí**±ØĞë´æÔÚ**£ºcore/src/doctor/appliance.rs µÄ¡¸Ç¶Èë×ÊÔ´ÍêÕûĞÔ¡¹
+REM     ¼ì²éÒªÇó docs ¿É¶¨Î»£¬È±ÁË»áÈÃ doctor ±¨¡¸È±Ê§×ÊÔ´: docs¡¹²¢×èÈû¾ÍĞ÷£¨Êµ²â 2026-10-21£©¡£
+REM     °×Ãûµ¥ÀïµÄ 9 ·İÊÖ²á»¥²»ÒıÓÃ£¨grep Êµ²â 0 ÌõÏà¶Ô .md Á´½Ó£©£¬Òò´Ë²»»áÔÚ
+REM     °²×°°üÀïÁôÏÂËÀÁ´£»docs/README.md ·´¶øÁ´½Ó ../AGENTS.md µÈÎ´·¢²¼ÎÄ¼ş£¬¹ÊÒâ²»´ò¡£
+set "USER_DOCS=overview.md cli-reference.md commands-and-modes-reference.md mcp.md skills.md memory.md goal.md heavy-runtime-guide.md ollama-local-models-e2e.md"
+mkdir "%RES%\docs" 2>nul
+for %%f in (%USER_DOCS%) do (
+    if exist "%REPO_ROOT%\docs\%%f" copy /Y "%REPO_ROOT%\docs\%%f" "%RES%\docs\" >nul
+)
+if not exist "%RES%\docs\cli-reference.md" (
+    echo [ERROR] docs\cli-reference.md È±Ê§ ¡ª¡ª °²×°°ü½«Ã»ÓĞÓÃ»§ÊÖ²á£¬doctor Ò²»áÅĞ¡¸È±Ê§×ÊÔ´: docs¡¹
+    exit /b 1
 )
 
-REM 4f. scriptsï¼ˆå†’çƒŸ / æ ¡éªŒå­é›†ï¼‰
+REM 4f. scripts£¨Ã°ÑÌ / Ğ£Ñé×Ó¼¯£©
 if exist "%REPO_ROOT%\scripts" (
     mkdir "%RES%\scripts" 2>nul
     for %%f in (check-doc-cli-drift.py ws_full_health.py package_app.cmd) do (
@@ -135,13 +193,13 @@ if exist "%REPO_ROOT%\scripts" (
     )
 )
 
-REM 4g. Cargo.lockï¼ˆä¾¿äºä¾èµ–å®¡è®¡ï¼‰
-if exist "%REPO_ROOT%\Cargo.lock" copy /Y "%REPO_ROOT%\Cargo.lock" "%RES%\" >nul
+REM 4g. ²»ÔÙ´ò°ü Cargo.lock ¡ª¡ª ÄÇÊÇÍêÕûµÄÄÚ²¿ÒÀÀµÇåµ¥£¨º¬Î´·¢²¼ crate ÃûÓëÀ´Ô´£©£¬
+REM     ¶ÔÓÃ»§Ã»ÓĞÓÃÍ¾£¬È´ÊÇÒ»ÕÅ¡¸ÄÚ²¿¼¼ÊõÕ»µØÍ¼¡¹¡£ÒÀÀµÉó¼ÆÔÚ²Ö¿â²à×ö¡£
 
-echo       å®Œæˆã€‚
+echo       Íê³É¡£
 
-REM --------- Step 5. æ›´æ–° tauri.conf.jsonï¼ˆè¿½åŠ  resources è·¯å¾„ & å¯ç”¨ nsisï¼‰ ---------
-echo [5/7] å†™å› tauri.conf.jsonï¼ˆresources = webui/dist + skills + resources/*, targets = [msi,nsis]ï¼‰
+REM --------- Step 5. ¸üĞÂ tauri.conf.json£¨×·¼Ó resources Â·¾¶ & ÆôÓÃ nsis£© ---------
+echo [5/7] Ğ´»Ø tauri.conf.json£¨resources = webui/dist + skills + resources/*, targets = [msi,nsis]£©
 set "TCONF=%TAURI_DIR%\tauri.conf.json"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$c=Get-Content '%TCONF%' -Raw | ConvertFrom-Json;" ^
@@ -155,47 +213,101 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$c | ConvertTo-Json -Depth 100 | Out-String | Set-Content -LiteralPath '%TCONF%' -Encoding UTF8;" ^
   "$t=[System.IO.File]::ReadAllText('%TCONF%').TrimStart([char]0xFEFF);" ^
   "[System.IO.File]::WriteAllText('%TCONF%', $t, (New-Object System.Text.UTF8Encoding($false)))"
-echo       å®Œæˆã€‚
+echo       Íê³É¡£
 
-REM --------- Step 5b. Git LFS æŒ‡é’ˆå®ˆå«ï¼ˆfail-closedï¼‰ ----------
-REM 2026-10-12 å®æµ‹ç¼ºé™·ï¼šsquilla_router çš„ .onnx/.pkl åœ¨ä»“åº“é‡Œæ˜¯ ~133 å­—èŠ‚çš„ LFS æŒ‡é’ˆ
-REM ï¼ˆæœª `git lfs pull`ï¼‰ï¼Œè¢«æ‰“è¿›å®‰è£…åŒ…å V4 router **é™é»˜é™çº§**ä¸º fallbackï¼Œæœ¬åœ° ML è·¯ç”±å¤±æ•ˆ
-REM â€”â€” å®‰è£…åŒ…çœ‹èµ·æ¥æ­£å¸¸ã€åŠŸèƒ½å´æ‚„æ‚„å°‘ä¸€å—ã€‚æ­¤å¤„ fail-closedï¼šæ£€å‡ºæŒ‡é’ˆå³ä¸­æ­¢ã€‚
-echo [5b] Git LFS æŒ‡é’ˆå®ˆå«ï¼ˆæ¨¡å‹èµ„æºå¿…é¡»æ˜¯çœŸå®äºŒè¿›åˆ¶ï¼‰...
+REM --------- Step 5b. Git LFS Ö¸ÕëÊØÎÀ£¨fail-closed£© ----------
+REM 2026-10-12 Êµ²âÈ±Ïİ£ºsquilla_router µÄ .onnx/.pkl ÔÚ²Ö¿âÀïÊÇ ~133 ×Ö½ÚµÄ LFS Ö¸Õë
+REM £¨Î´ `git lfs pull`£©£¬±»´ò½ø°²×°°üºó V4 router **¾²Ä¬½µ¼¶**Îª fallback£¬±¾µØ ML Â·ÓÉÊ§Ğ§
+REM ¡ª¡ª °²×°°ü¿´ÆğÀ´Õı³£¡¢¹¦ÄÜÈ´ÇÄÇÄÉÙÒ»¿é¡£´Ë´¦ fail-closed£º¼ì³öÖ¸Õë¼´ÖĞÖ¹¡£
+echo [5b] Git LFS Ö¸ÕëÊØÎÀ£¨Ä£ĞÍ×ÊÔ´±ØĞëÊÇÕæÊµ¶ş½øÖÆ£©...
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] æœªæ‰¾åˆ° pythonï¼Œæ— æ³•æ‰§è¡Œ scripts\check-lfs-models.py å®ˆå«
+    echo [ERROR] Î´ÕÒµ½ python£¬ÎŞ·¨Ö´ĞĞ scripts\check-lfs-models.py ÊØÎÀ
     exit /b 1
 )
 python "scripts\check-lfs-models.py"
 if errorlevel 1 (
-    echo [ERROR] Git LFS æŒ‡é’ˆå®ˆå«æœªé€šè¿‡ï¼Œæ‰“åŒ…ä¸­æ­¢ï¼ˆè¯¦è§ä¸Šæ–¹ï¼‰
+    echo [ERROR] Git LFS Ö¸ÕëÊØÎÀÎ´Í¨¹ı£¬´ò°üÖĞÖ¹£¨Ïê¼ûÉÏ·½£©
+    exit /b 1
+)
+
+REM --------- Step 5c. ±àÒë Python ²à³µÎªÔ­ÉúÂë£¨·À·´±àÒë£¬fail-closed£©----------
+REM ÒÑ·¢²¼µÄ 0.2.17 MSI ÀïÌÉ×Å 1017 ¸ö .py / 17.1 MB Ã÷ÎÄÒıÇæÔ´Âë£º·´±àÒëµÈÓÚÁã³É±¾¡£
+REM ±¾²½ÔÚ**Ôİ´æÊ÷**ÉÏ°Ñ²à³µ±à³É .pyd£¨Cython -> MSVC -> ÄÚÖÃ 3.12 ABI£©£¬²¢Ğ´
+REM resources/pyengine/NATIVE.json ÖğÄ£¿éÇåµ¥£»Step 5d ÊØÎÀ°´Õâ·İÇåµ¥ÖğÎÄ¼ş¶ÔÕË£¬
+REM Step 6 ÓÃ MARGUERITE_NATIVE_BUILD=1 ÈÃ build.rs ²»ÔÙÎŞÌõ¼şÖØ¿½Ã÷ÎÄ£¨·ñÔò¼Ó¹Ì°××ö£¬
+REM ÇÒËüµÄ verify_pyengine_sync »áÒò¡¸Ô´ÓĞÄ¿±êÎŞ¡¹Ö±½Ó panic£©¡£
+REM rc=2 = Ç°ÖÃÈ±Ê§£¨ÄÚÖÃ½âÊÍÆ÷ / include / libs / MSVC£©£¬rc=1 = ±à³öÀ´µÄÄ£¿é import ²»»ØÀ´¡£
+REM Á½ÖÖ¶¼±ØĞëÖĞÖ¹¹¹½¨£ºÄş¿É²»³ö°ü£¬Ò²²»³ö¡¸ÕÕ·¢Ô´Âë¡¹»ò¡¸×°µÃÉÏµ«ÒıÇæÆğ²»À´¡¹µÄ°ü¡£
+echo [5c] ±àÒë Python ²à³µÎªÔ­ÉúÂë£¨scripts\compile_pyengine_native.py£©...
+where python >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Î´ÕÒµ½ python£¬ÎŞ·¨Ö´ĞĞ scripts\compile_pyengine_native.py ¡ª¡ª ¹¹½¨ÖĞÖ¹
+    exit /b 1
+)
+python "scripts\compile_pyengine_native.py"
+if errorlevel 1 (
+    echo [ERROR] ²à³µÔ­Éú±àÒëÎ´Í¨¹ı£¨rc=2 ÎªÇ°ÖÃÈ±Ê§£¬rc=1 ÎªÔ­ÉúÄ£¿é import »Ø¹é£©¡ª¡ª ¹¹½¨ÖĞÖ¹
+    exit /b 1
+)
+
+REM --------- Step 5d. Ôİ´æ×ÊÔ´ÎÀÉúÊØÎÀ£¨fail-closed£© ----------
+REM bundle.resources ÊÇÈıÌõ xcopy ³öÀ´µÄÊ÷£¬webui ×Ô¼ºµÄ verify-dist ¿´²»¼ûÁíÍâÁ½Ìõ
+REM £¨`resources/` Óë `gui/src-tauri/webui/dist` µÄÔİ´æ¸±±¾£©¡£0.2.17 Êµ²â£ºÁ½´¦¸÷
+REM 103 ¸ö .map¡¢304 ¸öÄÚ²¿ÎÄµµ¡¢AGENTS.md/Cargo.lock/config.yaml¡¢2 ¸ö __pycache__¡£
+REM ´Ë´¦²»Í¨¹ı¾Í²»¹¹½¨ ¡ª¡ª Äş¿É´ò°üÊ§°Ü£¬Ò²²»Òª²ú³öÒ»¸ö¡¸×°×ÅÔ´ÂëµÄ°²×°°ü¡¹¡£
+echo [5d] Ôİ´æ×ÊÔ´ÎÀÉúÊØÎÀ£¨Ô´ÂëÓ³Éä / ÄÚ²¿ÎÄµµ / »úÆ÷×´Ì¬£©...
+python "scripts\check-shipped-resources.py"
+if errorlevel 1 (
+    echo [ERROR] Ôİ´æ×ÊÔ´ÎÀÉúÊØÎÀÎ´Í¨¹ı£¬´ò°üÖĞÖ¹£¨Ïê¼ûÉÏ·½£©
     exit /b 1
 )
 
 REM --------- Step 6. cargo tauri build ---------
 where cargo >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] æœªæ‰¾åˆ° cargoï¼è¯·å…ˆå®‰è£… Rustï¼ˆrustup.rsï¼‰å¹¶åŠ å…¥ PATHã€‚
+    echo [ERROR] Î´ÕÒµ½ cargo£¡ÇëÏÈ°²×° Rust£¨rustup.rs£©²¢¼ÓÈë PATH¡£
     exit /b 1
 )
 
-echo [6/7] æ‰§è¡Œ cargo tauri buildï¼ˆMSI + NSISï¼ŒWebView2 offlineInstaller é™é»˜å†…ç½®ï¼‰
+echo [6/7] Ö´ĞĞ cargo tauri build£¨MSI + NSIS£¬WebView2 offlineInstaller ¾²Ä¬ÄÚÖÃ£©
 cd /d "%TAURI_DIR%"
 set "CARGO_TARGET_DIR=%TARGET_DIR%"
 set "RUST_BACKTRACE=1"
+REM Step 5c ÒÑ°Ñ resources\pyengine »»³É .pyd Ê÷¡£build.rs Ä¬ÈÏ»á remove_dir_all ºó
+REM È«Á¿ÖØ¿½£¬°Ñ²Ö¿âÀïµÄÃ÷ÎÄ .py Ô­Ñù¸´ÖÆ»ØÀ´£¨¼Ó¹Ì°××ö£©£¬²¢ÇÒ verify_pyengine_sync
+REM »áÒòÎª¡¸Ô´ÓĞÄ¿±êÎŞ¡¹Ö±½Ó panic¡£Õâ¸ö¿ª¹ØÈÃËüÈÃÂ·£¬×ÊÔ´¾ÍÎ»¸ÄÓÉ Step 5c ¸ºÔğ¡£
+set "MARGUERITE_NATIVE_BUILD=1"
 cargo tauri build --verbose
 if errorlevel 1 (
     echo.
-    echo [ERROR] Tauri æ‰“åŒ…å¤±è´¥ï¼è§ä¸Šæ–¹æ—¥å¿—ã€‚
+    echo [ERROR] Tauri ´ò°üÊ§°Ü£¡¼ûÉÏ·½ÈÕÖ¾¡£
     exit /b 1
 )
 
-REM --------- Step 7. äº§ç‰©è¾“å‡º ---------
+REM --------- Step 6b. Îï»¯×ÊÔ´¸´É¨£¨¹¹½¨ºóÔÙ²éÒ»´Î£© ---------
+REM gui\src-tauri\build.rs ÔÚ¹¹½¨**ÆÚ¼ä**»áÎŞÌõ¼şÖØ¿½ resources\pyengine Óë
+REM ÄÚÇ¶Íø¹ØµÄ static/dist ¡ª¡ª Ò²¾ÍÊÇËµ Step 5d ²é¹ıµÄÄÇ¿ÃÊ÷£¬Ëæºó»á±»¸²¸ÇÖØ×ö¡£
+REM Ö»²éÔİ´æÊ÷Òò´Ë¿ÉÄÜ¡¸ÊØÎÀÂÌ¡¢°üÀïºì¡¹¡£Êµ²âÉÏÒ»°æ¹¹½¨ÁôÏÂµÄ
+REM %TARGET_DIR%\release\resources ¿ìÕÕÀï£º425 ¸ö .map¡¢4900 ·İ¿É»¹Ô­Ô´Âë¡¢
+REM 134 KB µÄ AGENTS.md¡¢22.3 MB / 313 ¸öÄÚ²¿ÎÄµµ¡£ËùÒÔÕâÒ»²½²»ÄÜÊ¡¡£
+cd /d "%REPO_ROOT%"
+echo [6b] ¸´É¨¹¹½¨Êµ¼ÊĞ¯´øµÄ×ÊÔ´Ê÷ ...
+if not exist "%TARGET_DIR%\release\resources" (
+    echo [ERROR] Î´ÕÒµ½ %TARGET_DIR%\release\resources ¡ª¡ª ÎŞ·¨ÑéÖ¤°²×°°üÕæÊµĞ¯´øÄÚÈİ
+    exit /b 1
+)
+python "scripts\check-shipped-resources.py" --root "%TARGET_DIR%\release\resources"
+if errorlevel 1 (
+    echo [ERROR] ¹¹½¨²úÎï×ÊÔ´ÎÀÉúÊØÎÀÎ´Í¨¹ı£¬±¾´Î°²×°°ü²»¿É·¢²¼£¨Ïê¼ûÉÏ·½£©
+    exit /b 1
+)
+
+REM --------- Step 7. ²úÎïÊä³ö ---------
 echo.
 echo ============================================================
-echo  [7/7] æ‰“åŒ…å®Œæˆï¼
-echo  äº§ç‰©ç›®å½•: %TARGET_DIR%\release\bundle\
+echo  [7/7] ´ò°üÍê³É£¡
+echo  ²úÎïÄ¿Â¼: %TARGET_DIR%\release\bundle\
 echo ============================================================
 dir /s /b "%TARGET_DIR%\release\bundle\*.msi" "%TARGET_DIR%\release\bundle\*.exe" 2>nul
 endlocal

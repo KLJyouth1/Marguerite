@@ -9,6 +9,7 @@
 pub mod approval_registry;
 pub mod contract;
 pub mod device_perms;
+pub mod elevated;
 pub mod escalation;
 pub mod escalation_registry;
 pub mod fact;

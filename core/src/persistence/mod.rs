@@ -77,6 +77,30 @@ pub fn write_json_atomic(path: &std::path::Path, raw: &str) -> std::io::Result<(
     }
 }
 
+/// 把凭证类文件收紧为「仅属主可读写」（POSIX 0600）。
+///
+/// 这是**落盘侧**的最后一道：`.env`（明文密钥）、`gateway-token`（本地网关 bearer
+/// 凭据）、`credentials.json`（加密密钥 + 明文 Grant 载荷）此前都是默认 umask
+/// 落盘（多用户机器上同组/其他用户可读），只有 `vault.json` 做了 0600。
+///
+/// Windows 上是有意为之的 no-op：`std::fs::set_permissions` 只有只读位，无法表达
+/// 「仅属主」，属主隔离由用户目录继承的 NTFS ACL 负责 —— 这是平台边界，不是遗漏。
+///
+/// 失败按 best-effort 处理（调用方 `let _ =`）：权限收紧失败不应阻断主流程，
+/// 但也不能静默假装成功 —— 返回 `Result` 让需要判定的地方（测试/诊断）能看见。
+pub fn harden_private_file(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +159,37 @@ mod tests {
         assert!(
             !std::path::Path::new(&dir.join("agents.json.tmp")).exists(),
             "覆写后也不得有临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `.env` / `gateway-token` / `credentials.json` 都走这个助手收紧权限：
+    /// 这里直接钉住「收紧后同进程读回 mode == 0600」这个可观测事实。
+    #[cfg(unix)]
+    #[test]
+    fn harden_private_file_makes_it_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "marg_harden_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let target = dir.join(".env");
+        std::fs::write(&target, "MARGUERITE_API_KEY=sk-test").expect("写测试文件");
+        // 前置：默认 umask 下不是 0600（否则本用例什么都没证明）
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_ne!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        harden_private_file(&target).expect("收紧权限应成功");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "凭证文件必须只有属主可读写"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

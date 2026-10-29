@@ -327,6 +327,11 @@ async fn run_tool_loop_for_strategy(
             // 本路径不发 ToolCall/ToolResult 事件（网关事件桥看不到），只能在入历史处
             // 自记：按「入参 + 完整输出」计入上下文台账。正因不发事件，不存在与事件桥
             // 重复计数的可能。
+            // 入口截流（M1-T3）：模型历史与上下文台账共用这一份。
+            // `overhead_tokens` 的口径是「真正进入模型上下文的文本」；按原文计
+            // 会让用量表与压缩阈值一起偏小。
+            let context_output =
+                crate::context::middle_truncate::truncate_for_context(&tc.name, &output);
             let ledger_session = crate::usage::SESSION
                 .try_with(|s| s.clone())
                 .ok()
@@ -336,15 +341,20 @@ async fn run_tool_loop_for_strategy(
                     sess,
                     tc.id.as_deref(),
                     &tc.name,
-                    &output,
+                    &context_output,
                 );
                 crate::context::session::record_tool_output(sess, &tc.name, &tc.arguments);
             }
             // P2-10/T14：该路径未按单工具计时（多策略聚合），诚实置 None。
+            // 间接注入防线（P0）：与 runtime / stream_loop 同口径，外部内容进上下文前包裹。
             messages.push(Message::Tool {
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
-                output,
+                // D11：进上下文前中间截断（与 runtime / multi_strategy 同一入口）。
+                output: crate::security::spotlight::wrap_if_untrusted(
+                    &tc.name,
+                    &context_output,
+                ),
                 timestamp: Utc::now(),
                 elapsed_ms: None,
             });

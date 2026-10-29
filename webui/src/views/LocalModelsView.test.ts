@@ -194,7 +194,13 @@ describe('LocalModelsView Ollama live models', () => {
   it('列出本机 Ollama 在线模型（含 omnipilot 双模型）与在线徽标、大小', async () => {
     installMocks({})
     const el = await setup()
-    expect(h.call).toHaveBeenCalledWith('models.local.ollama', {})
+    // 探测必须带**有界超时**：没有上限时 RPC 会永远 pending，界面就永远停在
+    // 「正在扫描…」（真机审计 2026-10-29 P2-3）。断言选项本身，别只断言被调用过。
+    expect(h.call).toHaveBeenCalledWith(
+      'models.local.ollama',
+      {},
+      { timeoutMs: 6000 },
+    )
     expect(el.textContent).toContain('Installed · running')
     expect(el.textContent).toContain('omnipilot17:latest')
     expect(el.textContent).toContain('omnipilot16c:latest')
@@ -229,6 +235,39 @@ describe('LocalModelsView Ollama live models', () => {
     expect(el.textContent).toContain('localhost:11434')
     expect(el.textContent).not.toContain('Load failed')
     expect(el.textContent).not.toContain('omnipilot17')
+  })
+
+  // 真机审计 2026-10-29 P2-3：本机没装 Ollama 时页面永远停在「正在扫描…」——
+  // 探测没有超时上限，RPC 一直 pending，用户看到的是无限转圈而不是"没装"。
+  // 超时后必须① 停止 loading；② 给出「起服务再刷新」的可执行指引；③ 不抛裸错。
+  it('探测超时后停止转圈并给出可执行指引（不无限 loading）', async () => {
+    h.state.value = 'connected'
+    h.wait.mockResolvedValue(undefined)
+    h.call.mockImplementation(async (method: string) => {
+      switch (method) {
+        case 'models.local.system':
+          return { os: 'windows', ram_gb: 32, cores: 16, gpu: true, gpu_name: 'RTX' }
+        case 'models.local.catalog':
+          return { items: [] }
+        case 'models.local.status':
+          return { ollama_present: false, managed: [], local_profiles: [] }
+        case 'usage.cost':
+          return {}
+        case 'models.local.finetune.list':
+          return { jobs: [] }
+        case 'models.local.recommend':
+          return { tier: 'T1', max_billions: 7, reason: '', picks: [] }
+        case 'models.local.ollama':
+          throw new Error('RPC timeout after 6000ms: models.local.ollama')
+        default:
+          return {}
+      }
+    })
+    const el = await setup()
+    expect(el.textContent).not.toContain('Scanning local Ollama')
+    expect(el.textContent).toContain('Ollama is unreachable')
+    expect(el.textContent).toContain('localhost:11434')
+    expect(el.textContent).not.toContain('timeout after 6000ms')
   })
 
   it('点击「Add to routing & enable」→ 以 activate:true 调 deploy，成功后提示并刷新', async () => {

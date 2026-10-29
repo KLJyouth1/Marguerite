@@ -53,6 +53,17 @@ export interface ContextStatus {
   pressure?: number
   warningRatio?: number
   warning_ratio?: number
+  // M1 Task 1/2/4 的附加键（纯 Rust 部署才有；侧车缺省，前端按可选处理）。
+  chatTokens?: number
+  chat_tokens?: number
+  toolTokens?: number
+  tool_tokens?: number
+  tier?: string
+  ladder?: number[]
+  windowSource?: string
+  window_source?: string
+  compactionCount?: number
+  compaction_count?: number
 }
 
 export interface ContextWarning {
@@ -178,14 +189,19 @@ export function useChatUsageWidget(options: UseChatUsageWidgetOptions) {
         const backendCached = Number(current.cache_read_tokens || current.cacheReadTokens || 0)
         const backendWrite = Number(current.cache_write_tokens || current.cacheWriteTokens || 0)
         // usage.status 的 Rust 台账按 usage_events.session 过滤，而多数历史行
-        // session 是空串，按会话查回来常是 0。只有当后端**真的有数**、或本地还
-        // 什么都没累计时才覆盖；否则重连会把实时累计到的真实 token 清零。
-        if (backendInput + backendOutput + backendCached > 0
-          || (usageAccum.value.input === 0 && usageAccum.value.output === 0)) {
-          usageAccum.value.input = backendInput
-          usageAccum.value.output = backendOutput
-          usageAccum.value.cacheRead = backendCached
-          usageAccum.value.cacheWrite = backendWrite
+        // session 是空串，按会话查回来常是 0。只有当后端**真的有数**时才合并；
+        // 否则重连会把实时累计到的真实 token 清零。
+        //
+        // 合并方式是**逐字段取大**，不是直接赋值：两个来源（实时 `session.event.usage`
+        // 累加 与 台账聚合）都是「本会话累计量」，累计量必须单调不减。直接赋值会让
+        // 页脚在轮询之间来回跳（真机审计 2026-10-29 P2-5 实测 27→49226→102→111552：
+        // 实时累加涨上去、一次轮询把台账里的旧值盖回来，用户看到数字倒流）。
+        const hasBackend = backendInput + backendOutput + backendCached > 0
+        if (hasBackend) {
+          usageAccum.value.input = Math.max(usageAccum.value.input, backendInput)
+          usageAccum.value.output = Math.max(usageAccum.value.output, backendOutput)
+          usageAccum.value.cacheRead = Math.max(usageAccum.value.cacheRead, backendCached)
+          usageAccum.value.cacheWrite = Math.max(usageAccum.value.cacheWrite, backendWrite)
         }
         // Refresh (or clear) the context-pressure chip for this session. Clearing
         // when absent stops a previous session's warning from sticking after a
@@ -206,6 +222,7 @@ export function useChatUsageWidget(options: UseChatUsageWidgetOptions) {
   return {
     usageAccum,
     usageModel,
+    contextStatus,
     contextWarning,
     resetSavingsPopupCooldown,
     saveWidgetState,

@@ -14,6 +14,7 @@ pub mod expertise;
 pub mod multi_strategy;
 pub mod prefix_scope;
 pub mod profile;
+pub mod role_context;
 pub mod runtime;
 pub mod store;
 pub mod stream_loop;

@@ -314,7 +314,8 @@ namespace MargueriteSetup
                 return Fail("payload_hash", check.Expected, check.Actual, 0);
             }
 
-            Log(check.Verified ? "sha256 verified" : "sha256 skipped (payload version has no pinned hash)");
+            // VerifyPayloadAsync 现在只有一条成功路径（比对通过），不存在「跳过」分支。
+            Log("sha256 verified");
 
             try
             {
@@ -530,30 +531,75 @@ namespace MargueriteSetup
             }
         }
 
+        /// <summary>
+        /// 决定这次安装该拿什么哈希去比对。返回 null = **无法验证**，调用方必须拒绝安装
+        /// （以前的实现把「没有指针」当成「不需要验证」，于是空/损坏的 `.sha256`
+        /// 会让安装器一路绿灯装下去）。
+        ///
+        /// 优先级：固定版本以内置 pin 为准，sidecar 只能**确认**、不能改写它 ——
+        /// 否则能替换载荷的人顺手改一份 sidecar 就能绕过校验。
+        /// </summary>
+        internal static string ResolveExpectedSha256(string version, string sidecarText, out string problem)
+        {
+            problem = null;
+            var pinned = string.Equals(version, ExpectedVersion, StringComparison.OrdinalIgnoreCase)
+                ? ExpectedSha256
+                : null;
+
+            string sidecar = null;
+            if (!string.IsNullOrWhiteSpace(sidecarText))
+            {
+                var token = sidecarText.Trim()
+                    .Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    sidecar = token.Trim();
+                }
+            }
+
+            if (pinned != null && sidecar != null
+                && !string.Equals(pinned, sidecar, StringComparison.OrdinalIgnoreCase))
+            {
+                problem = "sidecar_conflicts_with_pin";
+                return null;
+            }
+
+            var expected = pinned ?? sidecar;
+            if (expected == null)
+            {
+                problem = "unverifiable";
+            }
+
+            return expected;
+        }
+
         private async Task<HashCheck> VerifyPayloadAsync(
             PayloadInfo payload,
             IProgress<InstallProgress> progress,
             CancellationToken cancellationToken)
         {
-            string expected = null;
-            var sidecar = payload.Path + ".sha256";
-            if (File.Exists(sidecar))
+            var sidecarPath = payload.Path + ".sha256";
+            string sidecarText = null;
+            if (File.Exists(sidecarPath))
             {
-                var line = File.ReadAllText(sidecar).Trim();
-                var token = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                if (!string.IsNullOrWhiteSpace(token))
+                try
                 {
-                    expected = token;
+                    sidecarText = File.ReadAllText(sidecarPath);
+                }
+                catch (Exception ex)
+                {
+                    Log("sidecar unreadable: " + ex.Message);
+                    return new HashCheck { Ok = false, Expected = "sidecar_unreadable", Actual = ex.Message };
                 }
             }
-            else if (string.Equals(payload.Version, ExpectedVersion, StringComparison.OrdinalIgnoreCase))
-            {
-                expected = ExpectedSha256;
-            }
 
+            string problem;
+            var expected = ResolveExpectedSha256(payload.Version, sidecarText, out problem);
             if (expected == null)
             {
-                return new HashCheck { Ok = true, Verified = false };
+                Log("refusing to install: " + problem);
+                return new HashCheck { Ok = false, Expected = problem, Actual = null };
             }
 
             Log("hashing with expected=" + expected);
@@ -574,7 +620,7 @@ namespace MargueriteSetup
             }
 
             Report(progress, 4, InstallStage.Verifying);
-            return new HashCheck { Ok = true, Verified = true };
+            return new HashCheck { Ok = true };
         }
 
         private static Task<string> ComputeSha256Async(
@@ -667,8 +713,6 @@ namespace MargueriteSetup
         private sealed class HashCheck
         {
             public bool Ok { get; set; }
-
-            public bool Verified { get; set; }
 
             public string Expected { get; set; }
 

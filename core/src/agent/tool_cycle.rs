@@ -258,6 +258,9 @@ pub struct ToolCycle {
     default_timeout: Duration,
     /// 工具注册表
     registry: Arc<ToolRegistry>,
+    /// 所属会话 key（P2-3）：会话级提权按它查台账；`None` = 无会话上下文
+    /// （CLI / 子智能体），此时提权一律不生效（fail-closed）。
+    session_key: Option<String>,
     /// 幂等工具结果缓存：默认构造即注入（W-3，接 P-12 `ToolCache`）。注入后每次
     /// 工具调用同 (tool,args) 命中即返回缓存、不再重跑底层工具；非幂等（写/发/删/建）
     /// 与失败结果不入缓存（诚实，不掩盖瞬时失败）。跨轮/跨会话共享需显式 `with_tool_cache`
@@ -283,12 +286,19 @@ impl ToolCycle {
             max_concurrent: 5,
             default_timeout: Duration::from_secs(30),
             registry,
+            session_key: None,
             tool_cache: Some(Arc::new(ToolCache::with_default_policy(
                 DEFAULT_TOOL_CACHE_CAP,
                 None,
             ))),
             tool_compressor: Some(Arc::new(ToolCompressor::default())),
         }
+    }
+
+    /// 绑定会话 key（P2-3）：审批旁路按会话生效，必须先知道自己在哪个会话里。
+    pub fn with_session(mut self, session: Option<String>) -> Self {
+        self.session_key = session;
+        self
     }
 
     /// 注入共享幂等工具结果缓存（覆盖默认实例，用于跨轮/跨会话复用同一缓存）。
@@ -327,6 +337,7 @@ impl ToolCycle {
                 self.tool_cache.clone(),
                 self.tool_compressor.clone(),
                 self.registry.clone(),
+                self.session_key.as_deref(),
                 &call.name,
                 &call.arguments,
                 call.timeout,
@@ -360,11 +371,21 @@ impl ToolCycle {
             let timeout = call.timeout;
             let registry = self.registry.clone();
             let cache = self.tool_cache.clone();
+            let session_key = self.session_key.clone();
 
             let comp = self.tool_compressor.clone();
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await;
-                dispatch_cached(cache, comp, registry, &name, &args, timeout).await
+                dispatch_cached(
+                    cache,
+                    comp,
+                    registry,
+                    session_key.as_deref(),
+                    &name,
+                    &args,
+                    timeout,
+                )
+                .await
             });
 
             handles.push(handle);
@@ -395,6 +416,7 @@ impl ToolCycle {
             self.tool_cache.clone(),
             self.tool_compressor.clone(),
             self.registry.clone(),
+            self.session_key.as_deref(),
             name,
             args,
             timeout,
@@ -488,6 +510,7 @@ async fn dispatch_cached(
     cache: Option<Arc<ToolCache>>,
     compressor: Option<Arc<ToolCompressor>>,
     registry: Arc<ToolRegistry>,
+    session_key: Option<&str>,
     name: &str,
     args: &HashMap<String, String>,
     timeout: Duration,
@@ -503,7 +526,7 @@ async fn dispatch_cached(
     if !crate::mode::runtime_denies_tool(name) {
         let gate = crate::guard::gateway::agent_gate();
         let host_present = crate::guard::gateway::agent_approval_host_present();
-        if let Some(blocked) = suspend_for_high_risk(gate, host_present, name, args).await {
+        if let Some(blocked) = suspend_for_high_risk(gate, host_present, session_key, name, args).await {
             return blocked;
         }
     }
@@ -611,10 +634,11 @@ fn approval_required(
 async fn suspend_for_high_risk(
     gate: Arc<crate::guard::gateway::ApprovalGate>,
     host_present: bool,
+    session_key: Option<&str>,
     name: &str,
     args: &HashMap<String, String>,
 ) -> Option<ToolResult> {
-    suspend_with_risk(gate, host_present, name, args, false).await
+    suspend_with_risk(gate, host_present, session_key, name, args, false).await
 }
 
 /// W3.1：远程命令（`collab.ssh.exec`）的审批入口。
@@ -625,16 +649,18 @@ async fn suspend_for_high_risk(
 pub(crate) async fn suspend_for_remote_command(
     gate: Arc<crate::guard::gateway::ApprovalGate>,
     host_present: bool,
+    session_key: Option<&str>,
     name: &str,
     args: &HashMap<String, String>,
 ) -> Option<ToolResult> {
-    suspend_with_risk(gate, host_present, name, args, true).await
+    suspend_with_risk(gate, host_present, session_key, name, args, true).await
 }
 
 /// `force_high = true` 时跳过「是否需要审批」的启发式判定，一律按高危挂起。
 async fn suspend_with_risk(
     gate: Arc<crate::guard::gateway::ApprovalGate>,
     host_present: bool,
+    session_key: Option<&str>,
     name: &str,
     args: &HashMap<String, String>,
     force_high: bool,
@@ -660,6 +686,30 @@ async fn suspend_with_risk(
         crate::guard::gateway::RiskLevel::Medium => "medium",
         crate::guard::gateway::RiskLevel::High => "high",
     };
+    // P2-3：该会话已开启「审批旁路 / 完全提权」→ 跳过人工确认这一步，
+    // 但仍发 Approval 事件（`elevated_skip: true`）留审计轨迹。
+    // 边界：只跳过 Confirm；模式黑名单 / Plan 只读 / 沙箱策略在别处判定，不在此放宽。
+    if let Some(session) = session_key {
+        if crate::guard::elevated::global().skips_approval_for(Some(session)) {
+            if let Some(bus) = crate::events::global_bus() {
+                bus.publish(crate::events::Envelope::new(
+                    crate::events::EventType::Approval,
+                    serde_json::json!({
+                        "elevated_skip": true,
+                        "tool": name,
+                        "tool_name": name,
+                        "risk": risk_str,
+                        "intent": serde_json::to_value(&intent).unwrap_or_default(),
+                        "session_key": session,
+                        "source": "agent.tool_cycle",
+                        "reason": "会话已开启审批旁路，跳过人工确认",
+                    }),
+                    session,
+                ));
+            }
+            return None;
+        }
+    }
     let pending = gate.request(name, args_json_of(args).to_string(), risk);
     let Some(pending) = pending else {
         return Some(ToolResult::Error {
@@ -1471,6 +1521,7 @@ mod approval_gate_tests {
         let blocked = suspend_for_high_risk(
             gate,
             false,
+            None,
             "shell_exec",
             &args_of(&[("command", "rm -rf build")]),
         )
@@ -1504,6 +1555,7 @@ mod approval_gate_tests {
         let out = suspend_for_high_risk(
             gate,
             true,
+            None,
             "shell_exec",
             &args_of(&[("command", "rm -rf build")]),
         )
@@ -1530,6 +1582,7 @@ mod approval_gate_tests {
         let out = suspend_for_high_risk(
             gate,
             true,
+            None,
             "delete_file_permanent",
             &args_of(&[("path", "D:/x/report.txt")]),
         )
@@ -1554,6 +1607,7 @@ mod approval_gate_tests {
         let out = suspend_for_high_risk(
             gate.clone(),
             true,
+            None,
             "shell_exec",
             &args_of(&[("command", "rm -rf build")]),
         )
@@ -1565,6 +1619,46 @@ mod approval_gate_tests {
             other => panic!("应是 Error，实际 {other:?}"),
         }
         assert_eq!(gate.outcome(&held.id), ApprovalOutcome::Pending);
+    }
+
+    /// P2-3：会话开启 bypass 后，高危工具**不再弹审批**；其它会话不受影响。
+    ///
+    /// 无宿主 + 60s 门是刻意的最坏场景：没跳过就会 fail-closed（或白等超时），
+    /// 因此「立即返回 None 且没有挂起项」同时证明「真的跳过了」与「没有放宽别的门」。
+    #[tokio::test]
+    async fn elevated_bypass_skips_high_risk_confirmation_only_for_its_session() {
+        let session = "agent:p2-3-bypass-test";
+        let elevated = crate::guard::elevated::global();
+        elevated.set(session, Some("bypass"));
+
+        let gate = Arc::new(ApprovalGate::new(Duration::from_secs(60)));
+        let started = std::time::Instant::now();
+        let out = suspend_for_high_risk(
+            gate.clone(),
+            false,
+            Some(session),
+            "shell_exec",
+            &args_of(&[("command", "rm -rf build")]),
+        )
+        .await;
+        assert!(out.is_none(), "已提权会话应跳过人工确认: {out:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "跳过必须立即生效，不得白等审批超时"
+        );
+        assert!(gate.pending().is_none(), "跳过后不得产生挂起项");
+
+        let other = suspend_for_high_risk(
+            gate.clone(),
+            false,
+            Some("agent:p2-3-unrelated"),
+            "shell_exec",
+            &args_of(&[("command", "rm -rf build")]),
+        )
+        .await;
+        assert!(other.is_some(), "未提权会话仍必须 fail-closed");
+
+        elevated.set(session, None);
     }
 
     /// **接线守卫**：闸门必须真的接在 `dispatch_cached` 上，而不是个没人调用的辅助函数。

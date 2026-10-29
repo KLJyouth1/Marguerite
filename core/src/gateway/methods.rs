@@ -1009,6 +1009,31 @@ pub async fn dispatch(
         }
         _ => {}
     }
+    // 澄清问卷由 Rust 网关自己服务（见 gateway/clarify.rs）：必须在下方
+    // is_python_method 代理之前拦截，否则纯 Rust 模式整条澄清链只剩 NOT_IMPLEMENTED。
+    // `PY_ENGINE_PREFIXES` 的 "chat.clarify" 保留 —— 本地无队列时 clarify.rs 仍转发侧车
+    // （approvals 同款 forward-on-miss），且同步路径（dispatch_sync）口径不变。
+    if method == "chat.clarify" || method == "chat.clarify_submit" {
+        return crate::gateway::clarify::dispatch(ctx, method, &params).await;
+    }
+    // 审批状态查询：`exec.approval.` 在 PY_ENGINE_PREFIXES 里，但两侧是**两套队列**
+    // （见 gateway/approvals.rs 模块头）。Rust 抬起的审批只存在于本进程注册表，直接
+    // 代理会让侧车答 `found:false` —— 前端把缺省结果判成终态 `unavailable`，重连恢复时
+    // 仍挂起的卡片自己折叠成「审批已不可用」，用户再也点不了「允许」。故先问本进程，
+    // 未命中再按 forward-on-miss 转发侧车（与上方 clarify 同款顺序），两侧都无则如实回缺省。
+    if method == "exec.approval.status" || method == "plugin.approval.status" {
+        if let Some(status) = crate::gateway::approvals::registry_status(
+            crate::guard::approval_registry::global_registry(),
+            method,
+            &params,
+        ) {
+            return Ok(status);
+        }
+        if let Some(c) = server::py_client() {
+            return py_call_timeout(c, method.to_string(), params.clone()).await;
+        }
+        return Ok(crate::gateway::approvals::missing_status(method, &params));
+    }
     // Python 优先（读写对称）：config.* 全量读写由 Python 侧车提供完整字段。
     // 侧车在线时先代理，保证 config.patch.safe（写）与 config.get（读）同源，
     // 修复设置页开关保存后自动回弹；离线时回退下方 Rust 精简实现 / NOT_IMPLEMENTED。
@@ -2386,7 +2411,15 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
                 .or_else(|| params.get("session"))
                 .and_then(Value::as_str)
                 .unwrap_or("default");
-            crate::context::session::context_status(key)
+            let mut view = crate::context::session::context_status(key);
+            // 档位与芯片同一个分母、同一份实现（见 pressure::attach_tier）。
+            // 阶梯在这里取一次：这条 RPC 只产一个视图，但口径必须与
+            // usage.status 行内的那份一致，否则同一个会话在面板上显示两档。
+            crate::context::pressure::attach_tier(
+                &mut view,
+                crate::context::pressure::configured_ladder(),
+            );
+            view
         }
         "context.rollback" => {
             let key = params
@@ -2877,6 +2910,93 @@ mod local_hub_contract_tests {
         assert!(res.is_err());
         let cfg = Config::load().expect("config.yaml 应可读");
         assert!(cfg.naming.enabled, "Python 失败时不得镜像: {cfg:?}");
+    }
+
+    /// 路线级：`usage.status` 挂在 `dispatch_rust` 上的那一条臂，**必须**指向产出行形状的那个函数。
+    ///
+    /// 为什么要单独一条：`usage::status()` 的函数级用例证明不了路由。把这条臂改回
+    /// `Ledger::status`（那个键还是会话计数 —— 数字）时，函数级测试一字不动全绿，
+    /// 而前端 `usage?.sessions || []` 对数字调 `.find()` ⇒ TypeError 被空 `catch {}` 吞掉 ⇒
+    /// 芯片与脚注仍然全黑。这正是 R54/R56/R61 那一族的形状：**契约在两处不一致**。
+    #[test]
+    fn dispatch_rust_usage_status_answers_with_rows_the_console_can_find() {
+        let c = ctx();
+        crate::usage::init();
+        let session = format!("mgt-route-{}", std::process::id());
+        // 只给上下文、不记用量：这一路必须走「补行」分支 —— 纯 Rust 部署里
+        // usage::record 尚未接通的会话正是这种形状，而它恰是芯片最该亮的时刻。
+        let _ = crate::context::session::set_budget(&session, 12_000);
+        crate::context::session::record_turn(&session, "user", &"话".repeat(500));
+        let v = dispatch_rust(&c, "usage.status", &json!({ "sessionKey": session.clone() }));
+        let rows = v["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("路由必须回行数组（前端只会 .find()）: {v}"));
+        let row = rows
+            .iter()
+            .find(|r| r["session"].as_str() == Some(session.as_str()))
+            .unwrap_or_else(|| panic!("按 sessionKey 必须带回这一行: {v}"));
+        assert_eq!(row["totalTokens"], 0, "没有用量事件就回 0，不编数字");
+        assert!(
+            row["contextStatus"].is_object(),
+            "行内必须带 contextStatus: {row}"
+        );
+        assert_eq!(
+            row["contextStatus"]["contextWindowTokens"].as_u64(),
+            Some(12_000),
+            "窗口必须是台账里的真值，不是 clamp 之后的预算"
+        );
+    }
+
+    /// 路线级：`context.status` 那一条臂**必须**自己挂上 `tier` / `ladder`。
+    ///
+    /// 与上一条同一个理由（Task 1 的教训：键集合测试证明不了挂载位置）：摘掉
+    /// `context.status` 臂里的 `attach_tier`，`pressure.rs` 的载荷测试一字不动全绿，
+    /// 而运行态面板读不到档位。
+    ///
+    /// 第二条断言（两条 RPC 的档位必须相等）钉的是**分母**：`context.status` 的
+    /// `ratio` 是预算口径，芯片的 `pressure` 是窗口口径，`budget_for_window` 的
+    /// `clamp(32_000, …)` 下限会让两者在小窗口上系统性分家。哪一侧改用另一个分母，
+    /// 这里就会红。
+    #[test]
+    fn dispatch_rust_context_status_carries_the_same_tier_the_chip_reads() {
+        let c = ctx();
+        crate::usage::init();
+        let session = format!("mgt-tier-{}", std::process::id());
+        let _ = crate::context::session::set_budget(&session, 12_000);
+        crate::context::session::record_turn(&session, "user", &"话".repeat(500));
+
+        let v = dispatch_rust(&c, "context.status", &json!({ "session": session.clone() }));
+        let tier = v["tier"]
+            .as_str()
+            .unwrap_or_else(|| panic!("档位必须挂在 RPC 边界上: {v}"));
+        assert!(
+            matches!(tier, "normal" | "watch" | "advise" | "compact"),
+            "档位必须是四档之一: {v}"
+        );
+        assert_eq!(
+            v["ladder"].as_array().map(Vec::len),
+            Some(3),
+            "载荷要回显**生效**阶梯，否则前端只能自备一份阈值表: {v}"
+        );
+
+        let usage = dispatch_rust(&c, "usage.status", &json!({ "sessionKey": session.clone() }));
+        let rows = usage["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("usage.status 必须回行数组: {usage}"));
+        let chip = rows
+            .iter()
+            .find(|r| r["session"].as_str() == Some(session.as_str()))
+            .map(|r| r["contextStatus"].clone())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| panic!("同一会话在行内必须带 contextStatus: {usage}"));
+        assert_eq!(
+            v["tier"], chip["tier"],
+            "同一个会话在两条 RPC 上必须是同一个档位"
+        );
+        assert_eq!(
+            v["ladder"], chip["ladder"],
+            "两条 RPC 必须引用同一份生效阶梯"
+        );
     }
 }
 

@@ -27,7 +27,9 @@ const message = ref<string | null>(null)
 
 // 授予表单
 const grantLevel = ref<'low' | 'medium' | 'high'>('low')
-const grantTool = ref('*')
+// 留空而不是预填 `*`：`*` 是「全部工具」的等价写法，预填会让一次点击就把
+// 永久信任发给所有工具。按钮已按空值禁用，用户必须显式写出目标（含 `*`）。
+const grantTool = ref('')
 const grantMode = ref('')
 
 const levelHints = computed<Record<string, string>>(() => ({
@@ -60,7 +62,7 @@ async function grant() {
       tool: grantTool.value.trim(),
       mode: grantMode.value.trim() || undefined,
     })
-    grantTool.value = '*'
+    grantTool.value = ''
     grantMode.value = ''
     message.value = t('settings.trust.granted')
     await refresh()

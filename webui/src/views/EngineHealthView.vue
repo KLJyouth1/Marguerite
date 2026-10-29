@@ -14,6 +14,15 @@
 
     <section v-if="error" class="engine-error">{{ error }}</section>
 
+    <!-- 侧车能力降级：用户唯一会看的地方，必须具体到「丢了哪个能力」 -->
+    <section v-if="sidecar?.degraded" class="engine-card engine-card--warn">
+      <div class="engine-card__title">{{ t('engineHealth.sidecarDegradedTitle') }}</div>
+      <div class="engine-note">{{ sidecarDegraded }}</div>
+      <div v-if="sidecar.python" class="engine-note">
+        {{ t('engineHealth.sidecarInterpreter', { path: sidecar.python }) }}
+      </div>
+    </section>
+
     <!-- 能力健康度 -->
     <section v-if="stats" class="engine-card">
       <div class="engine-card__title">{{ t('engineHealth.capabilitiesTitle') }}</div>
@@ -203,6 +212,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { sidecarDegradedText, type SidecarHealth } from '@/utils/engine/sidecarHealth'
 import Icon from '@/components/Icon.vue'
 import GateReport from '@/components/model/GateReport.vue'
 import type { GateReport as GateReportData } from '@/components/model/gateTypes'
@@ -315,6 +325,17 @@ async function safe<T>(fn: () => Promise<T>, label?: string): Promise<T | null> 
   }
 }
 
+// 侧车能力预检结论（`health.sidecar`）。字段全部可选：旧网关不带这个键。
+const sidecar = ref<SidecarHealth | null>(null)
+
+// 文案逻辑抽到 `utils/engine/sidecarHealth`（纯函数、有单测）：
+// 视图只负责"要不要渲染"，不负责"怎么说清影响"。
+// `params` 转 `never`：vue-i18n 的 `t` 是按 messages schema 推导的重载签名，
+// 这里传的是运行时拼出来的参数对象，类型层无法静态验证 —— 断言在这里，
+// 而不是把整个 util 的类型放宽（那会让 6 处调用点都失去检查）。
+const sidecarTranslate = (key: string, params?: Record<string, unknown>) => t(key, params as never)
+const sidecarDegraded = computed(() => sidecarDegradedText(sidecar.value, sidecarTranslate))
+
 async function loadAll() {
   error.value = ''
   busy.value = true
@@ -322,12 +343,14 @@ async function loadAll() {
     // 冷加载竞态守卫：WS 仍处于 connecting 时先等连接就绪，避免把「未就绪」
     // 当成加载失败，把 `not connected (state: connecting)` 裸串渲染给用户。
     if (!rpc.isConnected) await rpc.waitForConnection(10_000)
-    const [rt, mp, caps, mc, lr] = await Promise.all([
+    const [rt, mp, caps, mc, lr, hl] = await Promise.all([
       safe(() => rpc.call<RuntimeItem[]>('runtime.status', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<ModelsPayload>('models.profiles.list', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<CapabilitiesPayload>('plans.capabilities', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<McpPayload>('mcp.servers.list', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<LongTasksPayload>('long_running.list', {}), t('engineHealth.loadFailed')),
+      // 侧车能力预检（缺依赖时 degraded=true）：不属于"加载失败"，取不到就保持 null。
+      safe(() => rpc.call<{ sidecar?: SidecarHealth | null }>('health', {}), ''),
     ])
     if (rt) runtimes.value = Array.isArray(rt) ? rt : []
     if (mp) models.value = mp
@@ -337,6 +360,7 @@ async function loadAll() {
     if (caps) { stats.value = caps.stats ?? null; narrative.value = caps.narrativeIds ?? [] }
     if (mc) mcp.value = mc
     if (lr) longTasks.value = Array.isArray(lr.tasks) ? lr.tasks : []
+    if (hl) sidecar.value = hl.sidecar ?? null
   } catch (e) {
     error.value = `${t('engineHealth.loadFailed')}: ${e instanceof Error ? e.message : String(e)}`
   } finally {
@@ -475,6 +499,12 @@ onMounted(loadAll)
 .engine-stage { padding: 24px 28px; max-width: 1100px; margin: 0 auto; }
 .engine-error { margin: 16px 0; padding: 10px 14px; background: color-mix(in srgb, var(--danger) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; }
 .engine-card { margin-top: 16px; padding: 14px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); }
+/* 降级不是错误：用 warn 色描边而不是 danger 底色，避免与真正的加载失败混淆。 */
+.engine-card--warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--hairline));
+  background: color-mix(in srgb, var(--warn) 6%, var(--card));
+}
+.engine-card--warn .engine-card__title { color: var(--warn); }
 .engine-card__title { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
 .engine-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .engine-pill { padding: 4px 10px; border-radius: 999px; background: color-mix(in srgb, var(--text) 8%, var(--card)); font-size: 12px; }

@@ -318,9 +318,202 @@ pub fn current_turn_effort() -> Option<ThinkingEffort> {
     TURN_EFFORT.try_with(|e| *e).ok().flatten()
 }
 
+// ── 角色级档位/模型覆盖（P1-1：把解析点从「模式级」扩到「角色级」）────────────
+//
+// 历史缺陷（2026-10-27 路线 §5.2 的四个 ❌）：思考档位与记忆召回只在**主对话回合**
+// 生效；多策略 / 专家 / 团队 / 调用链这四条执行路径静默忽略它们。根因有两层：
+// 1. `TURN_EFFORT` 是 task-local，**不跨 `tokio::spawn` 继承** —— 后台/蜂群路径
+//    一旦 spawn，档位就退回「自适应」，用户拖到 max 也没有任何请求体变化；
+// 2. 角色（专家档案 / 人设 / 策略）**没有承载位**，即使解析出档位也无处传下去。
+//
+// 这里只补两件最小的东西：一个**可选**承载位 [`RoleOverrides`]，和**唯一一处**
+// 优先级定义 [`resolve_effort_for_role`]。`None` = 完全继承会话/模式档位，
+// 因此对所有既有调用点与既有测试，行为逐字节不变。
+
+/// 角色级可选覆盖位（专家档案 / 人设 / 策略 / 链步骤共用同一个承载位）。
+///
+/// 语义铁律：
+/// - `None` 不是「关闭」，而是「**没有声明**」→ 继承会话/模式档位；
+/// - `Some(Off)` 才是「显式要求不思考」→ 请求体不注入 `reasoning_effort`；
+///   两者混淆过一次就是真实事故（清除会话档位 = 删文件返回 `None`，
+///   见 `session::thinking_prefs::clear` 的同源注释）。
+///
+/// 可 `const` 构造（[`RoleOverrides::NONE`]）是因为 `ExpertProfile` 的两张内置表
+/// 是 `static`：静态表里的每条档案都要能在 const 上下文里声明「无覆盖」。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleOverrides {
+    /// 角色声明的思考档位（`None` = 继承会话/模式档位）
+    #[serde(default)]
+    pub effort: Option<ThinkingEffort>,
+    /// 角色声明的模型（`None` = 继承会话/路由决策的模型）
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl RoleOverrides {
+    /// 「无覆盖」常量：可在 `const`/`static` 上下文里使用（内置专家库表用）。
+    pub const NONE: Self = Self {
+        effort: None,
+        model: None,
+    };
+
+    /// 同 [`Self::NONE`]（运行时构造点用它表达「本角色不覆盖任何东西」）。
+    pub fn none() -> Self {
+        Self::NONE
+    }
+
+    /// 只覆盖思考档位（最常用的一种声明）。
+    pub fn with_effort(effort: ThinkingEffort) -> Self {
+        Self {
+            effort: Some(effort),
+            model: None,
+        }
+    }
+
+    /// 是否两个覆盖位都没声明（= 完全继承，行为与今日一致）。
+    pub fn is_empty(&self) -> bool {
+        self.effort.is_none() && self.model.is_none()
+    }
+}
+
+/// **唯一**一处档位优先级定义：角色覆盖 > 会话/本轮显式档位 > 上游回落（自适应）。
+///
+/// 四条执行路径（多策略 / 专家 / 团队 / 调用链）都必须经它，不得各自再写一遍
+/// `or` / `unwrap_or` —— 一旦有两处定义，「谁赢」就变成读代码才能猜的问题，
+/// 而这正是本缺陷最难排查的部分（同一档位在主对话生效、在团队不生效）。
+///
+/// 返回 `Option` 是刻意的：`None` 表示「这两层都没有声明」，调用方**继续**用它
+/// 自己的默认（模型配置档 / 任务自适应档），而不是在这里臆造一个档位。
+pub fn resolve_effort_for_role(
+    session_effort: Option<ThinkingEffort>,
+    role_override: Option<ThinkingEffort>,
+) -> Option<ThinkingEffort> {
+    role_override.or(session_effort)
+}
+
+/// 本轮/会话档位：task-local 显式档位优先，其次会话持久档位。
+///
+/// `persisted` 必须由调用方**在 spawn 之前**读好传进来
+/// （`session::thinking_prefs::load` 落到 `Config::data_dir()`，而配置目录覆盖是
+/// 线程局部的 —— 在 spawned 任务里读会读到错误的目录）。
+pub fn session_effort_or_persisted(persisted: Option<ThinkingEffort>) -> Option<ThinkingEffort> {
+    // 参数顺序不能反：`resolve_effort_for_role(session_effort, role_override)` 是**后者赢**。
+    // 这里「更具体的一层」是本轮显式档位（TURN_EFFORT task-local），持久档位才是兜底。
+    // 此前写成 `(current_turn_effort(), persisted)`，等价于让持久档位压过本轮显式档位，
+    // 与函数文档「本轮显式档位优先」相反。
+    resolve_effort_for_role(persisted, current_turn_effort())
+}
+
+/// 模型名的角色级优先级（与 [`resolve_effort_for_role`] 同构，口径也只定义一次）。
+///
+/// 注意：这里只做**解析**，不改路由。真正把角色模型写进请求体需要
+/// `model::router` 的入口改造（本模块外），见交付报告的「未做事项」。
+pub fn resolve_model_for_role<'a>(
+    session_model: &'a str,
+    role_override: Option<&'a str>,
+) -> &'a str {
+    match role_override {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => session_model,
+    }
+}
+
+/// 在给定档位作用域内运行 future；`None` = 原样运行（不覆盖已有作用域）。
+///
+/// 存在意义：跨 `tokio::spawn` 的显式传递在每条路径上都是同一个 `match`，
+/// 各处手写就会有人漏掉 `Some(Off)` 之外的分支。集中到这里后，
+/// 「传档位」这件事只有一个实现可漏。
+pub async fn scoped_effort<T, F>(effort: Option<ThinkingEffort>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    match effort {
+        Some(e) => TURN_EFFORT.scope(Some(e), fut).await,
+        None => fut.await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 优先级真值表（角色覆盖 > 会话/本轮 > 上游回落）──────────────────────
+    //
+    // 每条都对应一次真实用户操作：滑块选档（会话/本轮）、角色声明覆盖（role）、
+    // 什么都没选（两者皆 None → 不得臆造档位）。`Off` 单列一行，因为它必须
+    // 被当作「显式不思考」而不是「没声明」。
+
+    #[test]
+    fn resolve_effort_for_role_truth_table() {
+        use ThinkingEffort as E;
+        // 1) 双方都有声明：角色覆盖赢（这是「专家比通用成员多想一层」的入口）
+        assert_eq!(resolve_effort_for_role(Some(E::Normal), Some(E::Max)), Some(E::Max));
+        assert_eq!(resolve_effort_for_role(Some(E::Max), Some(E::Normal)), Some(E::Normal));
+        // 2) 只有会话/本轮档位：原样继承（现状行为，必须逐字节不变）
+        assert_eq!(resolve_effort_for_role(Some(E::Deep), None), Some(E::Deep));
+        // 3) 只有角色声明：用它
+        assert_eq!(resolve_effort_for_role(None, Some(E::Deep)), Some(E::Deep));
+        // 4) 双方都没声明：None —— 绝不臆造档位（调用方继续走自适应）
+        assert_eq!(resolve_effort_for_role(None, None), None);
+        // 5) 显式 Off 是「声明」，不是「没声明」：它必须赢过会话档位
+        assert_eq!(resolve_effort_for_role(Some(E::Max), Some(E::Off)), Some(E::Off));
+        assert_eq!(resolve_effort_for_role(Some(E::Off), None), Some(E::Off));
+    }
+
+    #[test]
+    fn role_overrides_none_is_empty_and_inherits() {
+        // 内置角色表的每一行都是 NONE：因此「加了承载位」不等于「改了行为」。
+        assert!(RoleOverrides::NONE.is_empty());
+        assert_eq!(RoleOverrides::NONE, RoleOverrides::default());
+        assert_eq!(
+            resolve_effort_for_role(Some(ThinkingEffort::Normal), RoleOverrides::NONE.effort),
+            Some(ThinkingEffort::Normal),
+            "None 覆盖位必须原样继承会话档位"
+        );
+        // 显式档位不是「空」：Some(Off) 也算声明。
+        assert!(!RoleOverrides::with_effort(ThinkingEffort::Off).is_empty());
+    }
+
+    #[test]
+    fn resolve_model_for_role_ignores_blank_override() {
+        // 空白模型名（用户填了个空格）不得把请求打到空模型上 —— 回落会话模型。
+        assert_eq!(resolve_model_for_role("deepseek-v4-pro", Some("  ")), "deepseek-v4-pro");
+        assert_eq!(resolve_model_for_role("deepseek-v4-pro", None), "deepseek-v4-pro");
+        assert_eq!(
+            resolve_model_for_role("deepseek-v4-pro", Some("deepseek-reasoner")),
+            "deepseek-reasoner"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_effort_or_persisted_prefers_scoped_turn() {
+        use ThinkingEffort as E;
+        // 无 scope：回落持久档位（这就是团队/蜂群路径缺的那一层）。
+        assert_eq!(session_effort_or_persisted(Some(E::Max)), Some(E::Max));
+        assert_eq!(session_effort_or_persisted(None), None);
+        // 有本轮显式档位：本轮赢（请求级 > 会话级，与 thinking_prefs 同口径）。
+        let inside = TURN_EFFORT
+            .scope(Some(E::Normal), async move { session_effort_or_persisted(Some(E::Max)) })
+            .await;
+        assert_eq!(inside, Some(E::Normal));
+    }
+
+    #[tokio::test]
+    async fn scoped_effort_does_not_leak_outside_the_future() {
+        use ThinkingEffort as E;
+        let inner = scoped_effort(Some(E::Max), async { current_turn_effort() }).await;
+        assert_eq!(inner, Some(E::Max));
+        // 作用域只覆盖被包裹的 future：出来必须回到「无档位」。
+        assert_eq!(current_turn_effort(), None);
+        // `None` = 不覆盖，也不会把已有作用域清掉。
+        let nested = TURN_EFFORT
+            .scope(
+                Some(E::Deep),
+                scoped_effort(None, async { current_turn_effort() }),
+            )
+            .await;
+        assert_eq!(nested, Some(E::Deep));
+    }
 
     /// 四档必须给出**不同**的思考指令，而不是一个通用常量。
     ///

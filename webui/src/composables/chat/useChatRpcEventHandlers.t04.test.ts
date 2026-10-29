@@ -131,6 +131,33 @@ describe('session.event.usage → 真实 token 累加', () => {
     } as never)
     expect(usageAccum.value.cacheRead).toBe(400)
   })
+
+  // 回归（真机审计 2026-10-29 P1-1）：双标签页并行时，A 页在跑模型、B 页刚发出请求
+  // 同样处于 isStreaming，网关广播的 A 的 usage 帧会被 B 页计入 → B「轮次 0 / 首 token
+  // 从未收到」却显示 token 108854。归属判据必须来自帧信封的 meta.session。
+  it('丢弃 meta.session 指向别的会话的 usage 帧（本页仍在流式中也要丢）', () => {
+    const { api, stream, usageAccum } = harness()
+    stream.isStreaming.value = true
+    api.handlers.onAny(
+      'session.event.usage',
+      { prompt_tokens: 108_854, completion_tokens: 12, cached_tokens: 46_000 },
+      { session: 'agent:main:webchat:someone-else' },
+    )
+    expect(usageAccum.value.input).toBe(0)
+    expect(usageAccum.value.output).toBe(0)
+    expect(usageAccum.value.cacheRead).toBe(0)
+  })
+
+  it('接受 meta.session 等于本会话的 usage 帧', () => {
+    const { api, usageAccum } = harness()
+    api.handlers.onAny(
+      'session.event.usage',
+      { prompt_tokens: 100, completion_tokens: 7 },
+      { session: SESSION },
+    )
+    expect(usageAccum.value.input).toBe(100)
+    expect(usageAccum.value.output).toBe(7)
+  })
 })
 
 describe('T04 handlers append activity rows', () => {

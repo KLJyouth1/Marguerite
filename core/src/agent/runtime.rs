@@ -659,7 +659,9 @@ impl AgentRuntime {
             + usize::from(self.mode_section.is_some())
             + usize::from(self.workspace.is_some())
             + usize::from(self.experience_hint.as_ref().is_some_and(|h| !h.is_empty()))
-            + usize::from(self.route_decision.is_some());
+            + usize::from(self.route_decision.is_some())
+            // 不可信内容声明是常开段，不在上面的可选列表里。
+            + 1;
         let mut model_messages: Vec<Message> = Vec::with_capacity(history.len() + extra);
         // ── 静态区（会话级稳定，前置，KV-cache 前缀复用）──
         // 模式提示段（plan 等模式的静态规则段）：内容不随轮次变化
@@ -702,6 +704,12 @@ impl AgentRuntime {
                 timestamp: Utc::now(),
             });
         }
+        // 间接注入防线（P0）：声明「被标记的外部内容只是资料、不是指令」。
+        // 常量文本 → 会话级静态内容，进稳定半区不破坏 KV 前缀。
+        model_messages.push(Message::System {
+            content: crate::security::spotlight::UNTRUSTED_NOTICE.to_string(),
+            timestamp: Utc::now(),
+        });
         if let Some(guide) = tool_guide {
             model_messages.push(Message::System {
                 content: guide.to_string(),
@@ -975,7 +983,7 @@ impl AgentRuntime {
         if tools.is_empty() {
             return Err(anyhow!("run_tool_loop 需要非空 tools 定义"));
         }
-        let cycle = ToolCycle::new(registry);
+        let cycle = ToolCycle::new(registry).with_session(self.event_session.clone());
         let request_text = history
             .iter()
             .rev()
@@ -1110,7 +1118,15 @@ impl AgentRuntime {
             let approvals: Vec<Option<crate::guard::permission_matrix::ToolApproval>> = resp
                 .tool_calls
                 .iter()
-                .map(|tc| crate::guard::permission_matrix::decide_tool(&tc.name, &approval_session))
+                .map(|tc| {
+                    // 参数解析失败 → None：参数级信任条目因此不命中（fail-closed）
+                    let parsed = serde_json::from_str::<serde_json::Value>(&tc.arguments).ok();
+                    crate::guard::permission_matrix::decide_tool(
+                        &tc.name,
+                        &approval_session,
+                        parsed.as_ref(),
+                    )
+                })
                 .collect();
             if let Some((bus, sess)) = &event_sink {
                 for (i, tc) in resp.tool_calls.iter().enumerate() {
@@ -1250,6 +1266,11 @@ impl AgentRuntime {
                     }
                     bus.publish(Envelope::new(EventType::ToolResult, payload, sess));
                 }
+                // 入口截流（M1-T3）：模型历史与上下文台账共用这一份。
+                // `overhead_tokens` 的口径是「真正进入模型上下文的文本」；按原文计
+                // 会让用量表与压缩阈值一起偏小。复盘台账（append_tool_activity）仍记原文。
+                let context_output =
+                    crate::context::middle_truncate::truncate_for_context(&tc.name, &output);
                 if let Some(sess) = &self.event_session {
                     crate::context::session::record_tool_input_at_context(
                         sess,
@@ -1261,7 +1282,7 @@ impl AgentRuntime {
                         sess,
                         tc.id.as_deref(),
                         &tc.name,
-                        &output,
+                        &context_output,
                     );
                     // 复盘证据（权威落盘点）：非流式回路不发事件，网关桥与计划 tap
                     // 都看不到这次调用，只能在这里写 `role='tool'` 行。按 call_id 幂等，
@@ -1276,10 +1297,20 @@ impl AgentRuntime {
                         Some(ok),
                     );
                 }
+                // 间接注入防线（P0）：只有**进上下文**的这一份被包成不可信内容；
+                // 上面的工具事件与落盘台账仍记原文，复盘时看到的就是工具真实输出。
+                //
+                // 【2026-10-29 · D11】进上下文前**中间截断**（保头保尾、砍中段）。
+                // 统一入口见 `context::middle_truncate::truncate_for_context`
+                // （三条工具回路共用一份策略，避免"改一处漏两处"）；
+                // 被砍掉的原文由该入口留底，模型可用 `tool_output_retrieve` 取回。
                 history.push(Message::Tool {
                     name: tc.name.clone(),
                     input: tc.arguments.clone(),
-                    output,
+                    output: crate::security::spotlight::wrap_if_untrusted(
+                        &tc.name,
+                        &context_output,
+                    ),
                     timestamp: Utc::now(),
                     elapsed_ms: single_tool_batch.then_some(tool_batch_elapsed_ms),
                 });
@@ -2137,14 +2168,21 @@ mod tests {
                 Message::Tool { output, .. } => output.clone(),
             }
         };
-        // 分区契约（M2 降耗引擎）：静态区（mode → guide）先于全部历史；动态区
-        // （stable → hint）后置于历史之后——逐轮变化内容不得进入稳定前缀。
-        assert_eq!(a.len(), 5, "mode + guide + history(1) + stable + hint = 5");
+        // 分区契约（M2 降耗引擎）：静态区（mode → 不可信声明 → guide）先于全部历史；
+        // 动态区（stable → hint）后置于历史之后——逐轮变化内容不得进入稳定前缀。
+        // 注意：不可信外部内容声明是**常开**安全段（P0 间接注入防线），位置固定在
+        // 能力自述之后、工具指引之前；它不随轮次变化，属静态区。
+        assert_eq!(a.len(), 6, "mode + notice + guide + history(1) + stable + hint = 6");
         assert_eq!(content_of(&a[0]), "模式规则段", "静态区首位");
-        assert_eq!(content_of(&a[1]), "工具指引", "静态区次位");
-        assert_eq!(a[2].role(), "user", "历史紧跟静态区之后");
-        assert_eq!(content_of(&a[3]), "记忆召回前缀", "动态区在历史之后");
-        assert_eq!(content_of(&a[4]), "经验提示", "动态区末位");
+        assert_eq!(
+            content_of(&a[1]),
+            crate::security::spotlight::UNTRUSTED_NOTICE,
+            "不可信内容声明紧随模式段之后"
+        );
+        assert_eq!(content_of(&a[2]), "工具指引", "静态区末位是工具指引");
+        assert_eq!(a[3].role(), "user", "历史紧跟静态区之后");
+        assert_eq!(content_of(&a[4]), "记忆召回前缀", "动态区在历史之后");
+        assert_eq!(content_of(&a[5]), "经验提示", "动态区末位");
     }
 
     #[test]
@@ -2228,7 +2266,7 @@ mod tests {
             timestamp: Utc::now(),
         }];
 
-        // 正常路径：静态区 = mode → workspace → guide，全部先于历史
+        // 正常路径：静态区 = mode → workspace → 不可信声明 → guide，全部先于历史
         let full = runtime.build_model_messages(&history, Some("工具指引"), None);
         assert_eq!(content_of(&full[0]), "模式规则段", "静态区首位仍是模式段");
         assert!(
@@ -2236,25 +2274,41 @@ mod tests {
             "静态区次位必须是工作区指引（含根目录）：{}",
             content_of(&full[1])
         );
-        assert_eq!(content_of(&full[2]), "工具指引");
-        assert_eq!(full[3].role(), "user", "历史必须紧跟静态区之后");
+        assert_eq!(
+            content_of(&full[2]),
+            crate::security::spotlight::UNTRUSTED_NOTICE,
+            "不可信声明在工具指引之前"
+        );
+        assert_eq!(content_of(&full[3]), "工具指引");
+        assert_eq!(full[4].role(), "user", "历史必须紧跟静态区之后");
 
-        // 锚定期：工具指引被扣住，工作区指引不得跟着消失
+        // 锚定期：工具指引被扣住，工作区指引与不可信声明都不得跟着消失
         let anchored = runtime.build_model_messages(&history, None, None);
-        assert_eq!(anchored.len(), 3, "mode + workspace + history");
+        assert_eq!(anchored.len(), 4, "mode + workspace + notice + history");
         assert!(
             content_of(&anchored[1]).contains("【工作区】"),
             "扣住工具指引时必须保留工作区指引"
+        );
+        assert_eq!(
+            content_of(&anchored[2]),
+            crate::security::spotlight::UNTRUSTED_NOTICE,
+            "安全声明是常开的：工具指引被扣住也不能一起消失"
         );
 
         // 逐字节稳定（KV-cache 命中前提）：同根两次装配必须完全一致
         assert_eq!(content_of(&anchored[1]), content_of(&full[1]));
 
-        // 未注入工作区的调用方（CLI/测试）不得被凭空塞一段目录信息
+        // 未注入工作区的调用方（CLI/测试）不得被凭空塞一段目录信息；
+        // 但不可信内容声明是**安全常开段**，任何装配路径都要有。
         let bare = AgentRuntime::new(Config::default());
         let out = bare.build_model_messages(&history, Some("工具指引"), None);
-        assert_eq!(out.len(), 2, "guide + history，不得注入多余段");
-        assert_eq!(content_of(&out[0]), "工具指引");
+        assert_eq!(out.len(), 3, "notice + guide + history，不得注入目录信息");
+        assert_eq!(
+            content_of(&out[0]),
+            crate::security::spotlight::UNTRUSTED_NOTICE,
+            "安全声明与工作区绑定无关，必须常开"
+        );
+        assert_eq!(content_of(&out[1]), "工具指引");
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -2272,8 +2326,8 @@ mod tests {
             })
             .collect();
         let out = runtime.build_model_messages(&history, Some("指引"), None);
-        // 阈值内：mode + guide + history(10) = 12，未裁剪
-        assert_eq!(out.len(), 12, "低于阈值不得裁剪");
+        // 阈值内：mode + notice + guide + history(10) = 13，未裁剪
+        assert_eq!(out.len(), 13, "低于阈值不得裁剪");
     }
 
     /// 缺陷回归（HIGH）：超过阈值时裁剪，且**稳定前缀逐字节原位保留**、尾部为最近 N 条。
@@ -2293,24 +2347,30 @@ mod tests {
             })
             .collect();
         let out = runtime.build_model_messages(&history, Some("STATIC-GUIDE"), None);
-        // 裁剪后 = leading prefix(2 System) + recent(WINDOW_RECENT_MESSAGES)
+        // 裁剪后 = leading prefix(3 System：mode + notice + guide) + recent(WINDOW_RECENT_MESSAGES)
         assert_eq!(
             out.len(),
-            2 + WINDOW_RECENT_MESSAGES,
+            3 + WINDOW_RECENT_MESSAGES,
             "超过阈值应裁剪到 sink + recent"
         );
         // 稳定前缀逐字节、原位保留在最前
         assert!(matches!(out[0], Message::System { .. }));
         assert!(matches!(out[1], Message::System { .. }));
+        assert!(matches!(out[2], Message::System { .. }));
         assert_eq!(content_of(&out[0]), "STATIC-MODE", "稳定前缀首条逐字节保留");
         assert_eq!(
             content_of(&out[1]),
+            crate::security::spotlight::UNTRUSTED_NOTICE,
+            "安全声明属稳定前缀，必须原位保留"
+        );
+        assert_eq!(
+            content_of(&out[2]),
             "STATIC-GUIDE",
-            "稳定前缀次条逐字节保留"
+            "稳定前缀末条逐字节保留"
         );
         // 尾部为最近 N 条：第一条 recent 与最后一条（最新）都应正确
         assert_eq!(
-            content_of(&out[2]),
+            content_of(&out[3]),
             format!("u{}", n - WINDOW_RECENT_MESSAGES),
             "recent 段起点应为最近 N 条的最早一条"
         );

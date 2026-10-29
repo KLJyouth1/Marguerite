@@ -34,6 +34,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::memory::behavior::BehaviorEvent;
+use super::trust::{budget_gate, trust_gate, ChangeProposal, EditBudget};
+
+/// 计划闸：裁决通过、登记快照之前运行；返回 `Err` 表示拒绝合并。
+///
+/// 抽成别名是为了让 `run_cycle_gated` 的签名可读（否则 clippy 会判定
+/// `Option<&dyn Fn(..) -> Result<..>>` 为 `type_complexity`），语义完全不变。
+type PlanGate<'a> = &'a dyn Fn(&ImprovementPlan) -> Result<(), String>;
 
 /// 元台账文件名（落在 `data_dir/meta/`）
 const LEDGER_FILE: &str = "meta_evolution.jsonl";
@@ -954,6 +961,80 @@ impl MetaAgent {
         baseline_tasks: &[TaskOutcome],
         candidate_tasks: &[TaskOutcome],
     ) -> MetaCycleReport {
+        self.run_cycle_gated(signals, baseline, candidate, baseline_tasks, candidate_tasks, None)
+    }
+
+    /// 带 Trust 锁的循环 —— 合并前强制链的推荐入口（路线图 §5.3 机制 1 + 3）。
+    ///
+    /// 与 [`Self::run_cycle_with_tasks`] 的唯一区别：当裁决**走向合并**
+    /// （[`PromotionVerdict::Promote`]）时，还必须过 [`trust_gate`]（提案 →
+    /// 变更集 → 回滚点 → 外生验证，缺一不可）与 [`budget_gate`]（改动半径上限）。
+    /// 被拒的候选**不登记快照**（`version` 恒 0）—— 台账里绝不出现
+    /// 「没有证据却已灰度」的版本。
+    ///
+    /// 其余阶段（等回放、被沙箱拒绝）不需要证据：不在错误阶段强要证据，
+    /// 但凡要合并，一环都不能少。
+    ///
+    /// 参数确实偏多：这是对外暴露的完整合并入口（信号 + 前后评估 + 前后任务 +
+    /// 提案 + 预算）。拆结构体会让所有现有调用方一起改签名，收益不抵风险，
+    /// 因此在这里显式放行 `too_many_arguments`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_cycle_with_trust(
+        &mut self,
+        signals: &[FailureSignal],
+        baseline: Option<EvalOutcome>,
+        candidate: Option<EvalOutcome>,
+        baseline_tasks: &[TaskOutcome],
+        candidate_tasks: &[TaskOutcome],
+        proposal: Option<&ChangeProposal>,
+        budget: &EditBudget,
+    ) -> MetaCycleReport {
+        let gate = move |plan: &ImprovementPlan| -> Result<(), String> {
+            let Some(p) = proposal else {
+                return Err(
+                    "聚合裁决通过但未提交变更集提案：无 diff 留痕、无回滚点、无外生验证 —— 不允许进入合并（Trust 锁）"
+                        .to_string(),
+                );
+            };
+            let bv = budget_gate(std::slice::from_ref(p), budget);
+            if !bv.is_within() {
+                return Err(format!(
+                    "编辑预算超限（{}）：max_files={}，max_proposals={}",
+                    bv.code(),
+                    budget.max_files,
+                    budget.max_proposals
+                ));
+            }
+            let tv = trust_gate(plan, p);
+            if !tv.is_merge() {
+                return Err(format!(
+                    "Trust 锁未通过（{}）：提案 → 变更集 → 回滚点 → 外生验证，缺一不可",
+                    tv.code()
+                ));
+            }
+            Ok(())
+        };
+        self.run_cycle_gated(
+            signals,
+            baseline,
+            candidate,
+            baseline_tasks,
+            candidate_tasks,
+            Some(&gate),
+        )
+    }
+
+    /// 循环主体；`gate` 在「裁决通过、快照登记之前」运行，返回 `Err` 则
+    /// 以 [`RolloutStage::Rejected`] 收束且**不登记**。
+    fn run_cycle_gated(
+        &mut self,
+        signals: &[FailureSignal],
+        baseline: Option<EvalOutcome>,
+        candidate: Option<EvalOutcome>,
+        baseline_tasks: &[TaskOutcome],
+        candidate_tasks: &[TaskOutcome],
+        gate: Option<PlanGate<'_>>,
+    ) -> MetaCycleReport {
         // 第 2 层：诊断
         let Some(diag) = diagnose(signals) else {
             return MetaCycleReport {
@@ -1021,6 +1102,25 @@ impl MetaAgent {
         };
 
         // 第 5 层：登记版本快照
+        // Trust 锁只拦「走向合并」的裁决（Promote 之后、登记之前）：
+        // 等回放的提案、被沙箱拒绝的候选照常登记归档 —— 但凡是 Promote，
+        // 没有走完「提案 → 变更集 → 回滚点 → 外生验证」就**不留快照**，
+        // 否则台账会出现一个没有证据却处于灰度/待审的版本。
+        if verdict.as_ref().is_some_and(PromotionVerdict::is_promote) {
+            if let Some(gate) = gate {
+                if let Err(reason) = gate(&plan) {
+                    return MetaCycleReport {
+                        stage: RolloutStage::Rejected,
+                        signals: diag.signals,
+                        diagnosis: Some(diag),
+                        plan: Some(plan),
+                        verdict,
+                        version: 0,
+                        message: reason,
+                    };
+                }
+            }
+        }
         let version = self.ledger.latest_version() + 1;
         let snap = VersionSnapshot {
             version,
@@ -1735,6 +1835,164 @@ mod tests {
             "无任务级数据时应按聚合指标采纳，实际：{:?}",
             r2.verdict
         );
+    }
+
+    // ── Trust 锁接线（run_cycle_with_trust，§5.3 机制 1 + 3）────────────────
+
+    use crate::harness::trust::{ChangeKind, ChangeProposal, ChangeRecord, EditBudget, VerificationRecord};
+
+    /// 与 `plan_improvement` 对 PlanLogicWeak 产出的提案**逐字一致** ——
+    /// trust_gate 的身份检查按全字段比较，差一个字就是 RejectPlanMismatch。
+    fn matching_proposal() -> ChangeProposal {
+        ChangeProposal {
+            plan: ImprovementPlan {
+                target: ChangeTarget::SystemPrompt,
+                cause: RootCause::PlanLogicWeak,
+                risk: RiskLevel::Low,
+                mutation: "在系统提示词中补入失败驱动的拆解与校验规则（固定小节 + 结果自检）".to_string(),
+                rationale: "信号集中在规划/产出侧，未指向具体工具参数或脚本".to_string(),
+            },
+            changes: vec![ChangeRecord {
+                path: "skills/prompt/playbook.md".to_string(),
+                kind: ChangeKind::Modified,
+                diff: "- 旧规则：直接产出\n+ 新规则：先拆解再自检".to_string(),
+            }],
+            rollback: Some("ckpt-test".to_string()),
+            verification: Some(VerificationRecord {
+                command: "cargo test -p marguerite-core --lib harness::".to_string(),
+                exit_code: 0,
+                evidence: "test result: ok".to_string(),
+            }),
+        }
+    }
+
+    fn eval(passed: usize) -> EvalOutcome {
+        EvalOutcome {
+            passed,
+            total: 10,
+            tokens: 1000,
+            ms: 5000,
+        }
+    }
+
+    #[test]
+    fn cycle_with_trust_rejects_promotion_without_proposal() {
+        // 聚合裁决通过，但没带变更集提案 → 拒，且**不登记快照**。
+        let mut agent = MetaAgent::new(tmp_dir("trust_no_proposal"), MetaPolicy::default());
+        let r = agent.run_cycle_with_trust(
+            &failing_signals(),
+            Some(eval(5)),
+            Some(eval(9)),
+            &[],
+            &[],
+            None,
+            &EditBudget::default(),
+        );
+        assert_eq!(r.stage, RolloutStage::Rejected);
+        assert!(
+            r.message.contains("变更集提案"),
+            "拒绝原因必须说明缺什么：{}",
+            r.message
+        );
+        assert_eq!(r.version, 0, "被 Trust 锁拒绝的候选不得登记快照");
+        assert_eq!(
+            agent.ledger().latest_version(),
+            0,
+            "台账里也不得出现「无证据却已待审/灰度」的版本"
+        );
+    }
+
+    #[test]
+    fn cycle_with_trust_rejects_promotion_without_verification() {
+        let mut agent = MetaAgent::new(tmp_dir("trust_no_verify"), MetaPolicy::default());
+        let mut p = matching_proposal();
+        p.verification = None;
+        let r = agent.run_cycle_with_trust(
+            &failing_signals(),
+            Some(eval(5)),
+            Some(eval(9)),
+            &[],
+            &[],
+            Some(&p),
+            &EditBudget::default(),
+        );
+        assert_eq!(r.stage, RolloutStage::Rejected);
+        assert!(
+            r.message.contains("Trust 锁未通过"),
+            "message: {}",
+            r.message
+        );
+        assert_eq!(agent.ledger().latest_version(), 0);
+    }
+
+    #[test]
+    fn cycle_with_trust_allows_full_chain() {
+        let mut agent = MetaAgent::new(tmp_dir("trust_full"), MetaPolicy::default());
+        let p = matching_proposal();
+        let r = agent.run_cycle_with_trust(
+            &failing_signals(),
+            Some(eval(5)),
+            Some(eval(9)),
+            &[],
+            &[],
+            Some(&p),
+            &EditBudget::default(),
+        );
+        assert_eq!(
+            r.stage,
+            RolloutStage::Proposed,
+            "auto_apply=false：证据齐全也只进待审，不自动灰度"
+        );
+        assert!(r.verdict.as_ref().is_some_and(|v| v.is_promote()));
+        assert_eq!(r.version, 1, "完整链路正常登记");
+        assert_eq!(agent.ledger().latest_version(), 1);
+    }
+
+    #[test]
+    fn cycle_with_trust_does_not_demand_evidence_before_replay() {
+        // candidate=None（还没回放）阶段不许要变更集 —— 否则「提案 → 准备 →
+        // 回放」的增量流程第一步就走不下去。Trust 锁只在 Promote 时介入。
+        let mut agent = MetaAgent::new(tmp_dir("trust_wait"), MetaPolicy::default());
+        let r = agent.run_cycle_with_trust(
+            &failing_signals(),
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &EditBudget::default(),
+        );
+        assert_eq!(r.stage, RolloutStage::Proposed);
+        assert!(r.verdict.is_none(), "等回放阶段没有裁决");
+    }
+
+    #[test]
+    fn cycle_with_trust_budget_rejects_oversized_changeset() {
+        let mut agent = MetaAgent::new(tmp_dir("trust_budget"), MetaPolicy::default());
+        let mut p = matching_proposal();
+        p.changes = (0..11)
+            .map(|i| ChangeRecord {
+                path: format!("skills/item-{i}.md"),
+                kind: ChangeKind::Added,
+                diff: "+ x".to_string(),
+            })
+            .collect();
+        let r = agent.run_cycle_with_trust(
+            &failing_signals(),
+            Some(eval(5)),
+            Some(eval(9)),
+            &[],
+            &[],
+            Some(&p),
+            &EditBudget::default(),
+        );
+        assert_eq!(r.stage, RolloutStage::Rejected);
+        assert!(
+            r.message.contains("编辑预算超限"),
+            "改动半径超限必须被拦：{}",
+            r.message
+        );
+        assert_eq!(agent.ledger().latest_version(), 0);
     }
 
     #[test]

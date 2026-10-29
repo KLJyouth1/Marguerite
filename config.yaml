@@ -26,6 +26,7 @@ mcp:
 memory:
   sensory_path: "memory/sensory"
   short_term_path: "memory/short_term"
+  short_term_max_sessions: 2000
 
 skills:
   skills_dir: "skills"

@@ -171,10 +171,17 @@ onBeforeUnmount(disconnect)
   color: var(--text-muted);
   display: flex;
   font-size: var(--fs-xs);
+  /* 块本身走会话阅读列（它是 `.chat-thread` 弹性列的直接子元素）：过去
+     `width: var(--chat-col)` + `margin: 0 auto` 会把整条加载带推到屏幕几何中心。
+     **内容**仍按 justify-content 居中——那是转圈/重试药丸的短暂指示器语义，
+     不是正文排版。在 SessionInspectDrawer 里两个自定义属性都未定义，
+     回落后等价于原来的左右各 24px，视觉不变。 */
   justify-content: center;
-  margin: 0 auto var(--sp-2);
+  margin-block: 0 var(--sp-2);
+  margin-inline: var(--chat-gutter, 24px) auto;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
   min-height: 32px;
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  width: 100%;
 }
 
 .history-load-sentinel--idle {

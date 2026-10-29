@@ -18,6 +18,25 @@ describe('useChatTextRendering math', () => {
   })
 })
 
+describe('useChatTextRendering images', () => {
+  // Attribute-level assertions (javascript: sources, onerror, loading=lazy) are
+  // deliberately NOT made here: DOMPurify 3.4 traverses only the root node under
+  // happy-dom (verified — the afterSanitizeAttributes hook fires for BODY and
+  // nothing else), so any such assertion would report the environment, not the
+  // product. The real-browser contract lives in e2e/chat-markdown-images.spec.ts.
+  it('keeps remote markdown images instead of stripping them', () => {
+    const { renderMarkdown } = useChatTextRendering()
+
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown('![diagram](https://example.com/a.png)')
+
+    const img = host.querySelector('img')
+    expect(img).not.toBeNull()
+    expect(img?.getAttribute('src')).toBe('https://example.com/a.png')
+    expect(img?.getAttribute('alt')).toBe('diagram')
+  })
+})
+
 describe('useChatTextRendering protocol-shaped literals', () => {
   const cases = [
     {

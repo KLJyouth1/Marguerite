@@ -57,17 +57,33 @@ beforeAll(() => {
   // 组件用 RouterLink 跳设置页：给一个最小 router 即可
 })
 
+const stub = { template: '<div/>' }
+
+function createTestRouter() {
+  return createRouter({
+    // 与真机同底：网关把控制台挂在 `/control/` 下（见 router/index.ts 的 basePath），
+    // 路由表里的 path 因此**都是**不带前缀的（`/settings/...`）。
+    history: createMemoryHistory('/control/'),
+    routes: [
+      { path: '/settings', name: 'settings', component: stub },
+      { path: '/settings/:section', name: 'settings-section', component: stub },
+      { path: '/:pathMatch(.*)*', component: stub },
+    ],
+  })
+}
+
+let lastRouter: ReturnType<typeof createTestRouter> | null = null
+
 async function mount() {
   const el = document.createElement('div')
   document.body.appendChild(el)
-  const router = createRouter({
-    history: createMemoryHistory(),
-    routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div/>' } }],
-  })
+  const router = createTestRouter()
+  lastRouter = router
   app = createApp(ChatModelIndicator)
   app.use(i18n)
   app.use(router)
   app.mount(el)
+  await router.isReady()
   await nextTick()
   await nextTick()
   return el
@@ -176,6 +192,25 @@ describe('ChatModelIndicator', () => {
     const el = await mount()
     expect(el.querySelector('.model-indicator')).not.toBeNull()
     expect(el.querySelector('.model-indicator__count')).toBeNull()
+  })
+
+  it('links to the provider section under the router base, not a doubled /control path', async () => {
+    // 回归：此前的 `to="/control/settings"` 会解析成 `/control/control/settings`
+    // （base 已是 `/control/`），落到 catch-all 的 NotFound —— 用户点模型胶囊
+    // 什么也打不开，正是「模型设置点了没弹出来」。
+    rpcCall.mockReturnValue(
+      cfg({ provider: 'deepseek', model: 'deepseek-v4-flash', base_url: 'https://api.deepseek.com' }),
+    )
+    const el = await mount()
+    const link = el.querySelector('.model-indicator') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('/control/settings/provider')
+
+    link.click()
+    // RouterLink 的点击走 router.push（异步导航），等它落地再断言。
+    await new Promise((r) => setTimeout(r, 20))
+    const route = lastRouter!.currentRoute.value
+    expect(route.name).toBe('settings-section')
+    expect(route.params.section).toBe('provider')
   })
 
   it('exposes a full tooltip for accessibility', async () => {

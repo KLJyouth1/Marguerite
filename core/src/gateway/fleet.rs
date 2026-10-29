@@ -8,16 +8,9 @@ use crate::persistence::config::{Config, ModelConfig};
 
 /// ModelConfig → LLMConfig 转换（与 GUI Tauri 命令同源）。
 fn model_config_to_llm(m: &ModelConfig) -> crate::model::llm::LLMConfig {
-    use crate::model::llm::{LLMConfig, LLMProvider};
+    use crate::model::llm::LLMConfig;
     use crate::model::thinking::{ThinkingEffort, CONTEXT_WINDOW_DEFAULT};
-    let provider = match m.provider.to_lowercase().as_str() {
-        "openai" => LLMProvider::OpenAI,
-        "deepseek" => LLMProvider::DeepSeek,
-        "anthropic" => LLMProvider::Anthropic,
-        _ => LLMProvider::Custom {
-            base_url: m.base_url.clone(),
-        },
-    };
+    let provider = crate::model::provider_protocol::provider_for_id(&m.provider, &m.base_url);
     LLMConfig {
         provider,
         model: m.model_name.clone(),

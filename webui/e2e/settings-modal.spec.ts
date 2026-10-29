@@ -13,8 +13,11 @@ const CONTROL_URL = '/control/'
 const BACKEND_SECTIONS = ['Connection', 'Model Service', 'Model Routing', 'Capabilities', 'Behavior', 'Privacy']
 const CLIENT_SECTIONS = ['Sandbox', 'Memory & Profile', 'Appearance', 'Keyboard', 'Advanced', 'Doctor', 'Plugins', 'Agent Presets']
 
+// 侧栏底栏现在有两个按钮（图标栏切换 + 设置），必须按 data-icon 精确取设置行：
+// `.sidebar-foot button` 会命中 2 个元素（strict mode violation），
+// 与 SettingsDialog.vue 里既有选择器同源。
 const settingsRow = (page: import('@playwright/test').Page) =>
-  page.locator('.sidebar-foot button')
+  page.locator('.sidebar-foot button[data-icon="settings"]')
 
 const dialog = (page: import('@playwright/test').Page) =>
   page.getByRole('dialog', { name: 'Settings' })
@@ -91,7 +94,17 @@ test.describe('Settings modal', () => {
     await expect(foot).toContainText('Most changes apply live; some need a gateway restart')
     // The old blanket "always restart" leak is gone.
     await expect(foot).not.toContainText('Restart the gateway after manual edits')
-    await expect(foot.locator('.settings-foot__path')).toContainText(/config\.(yaml|toml)$/)
+    // 隔离网关（MARGUERITE_CONFIG_DIR 指向临时目录）下，页脚**刻意**不展示
+    // E:\temp\... 这类路径，改显示「User config directory (isolated mode)」；
+    // 真路径放在 title 上，且必须仍指向 **config 文件**（不是目录）。
+    const footPath = foot.locator('.settings-foot__path')
+    const footText = (await footPath.textContent()) || ''
+    const footTitle = (await footPath.getAttribute('title')) || ''
+    if (/isolated mode/i.test(footText)) {
+      expect(footTitle).toMatch(/config\.(yaml|toml)$/)
+    } else {
+      expect(footText).toMatch(/config\.(yaml|toml)$/)
+    }
     // 反向自检：正则必须真的能区分「文件」与「目录」
     expect(/config\.(yaml|toml)$/.test('C:\\Users\\me\\AppData\\Local\\Marguerite')).toBe(false)
     await foot.getByRole('button', { name: 'Copy config path' }).click()

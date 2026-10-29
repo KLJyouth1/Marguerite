@@ -18,6 +18,16 @@ const props = withDefaults(defineProps<{
   suspendLabel?: string
   /** 是否展示秒数（默认开）。 */
   showSeconds?: boolean
+  /**
+   * 补充说明（第二行，弱化样式）。用于回答「为什么慢 / 我能做什么」——
+   * 真机审计 2026-10-29 P1-3：并行会话里第二页干等 27s，屏幕上只有一个转圈，
+   * 用户分不清"卡死"和"在排队"。
+   *
+   * ⚠️ 它**不进**上面那个 `role="status" aria-live="polite"` 的句子：那行里的秒数
+   * 每秒变化，把「已等 Ns」的说明也塞进 live region，读屏会每秒重播一次。
+   * 所以这里用 `role="note"`（可被读到，但不主动播报）。
+   */
+  hint?: string
 }>(), {
   visible: false,
   phaseLabel: '',
@@ -25,6 +35,7 @@ const props = withDefaults(defineProps<{
   suspended: false,
   suspendLabel: '',
   showSeconds: true,
+  hint: '',
 })
 
 const { t } = useI18n()
@@ -52,6 +63,12 @@ const secondsText = computed(() => `${Math.max(0, Math.floor(props.seconds || 0)
       · {{ secondsText }}
     </span>
   </p>
+  <p
+    v-if="visible && hint"
+    class="chat-wait-indicator__hint"
+    role="note"
+    data-testid="chat-wait-indicator-hint"
+  >{{ hint }}</p>
 </template>
 
 <style scoped>
@@ -79,6 +96,15 @@ const secondsText = computed(() => `${Math.max(0, Math.floor(props.seconds || 0)
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
   opacity: 0.8;
+}
+/* 第二行说明：比主行更弱，且限宽换行 —— 一行 60+ 字的长句在窄侧栏里会撑破布局。 */
+.chat-wait-indicator__hint {
+  margin: -2px 0 6px 13px;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  opacity: 0.85;
 }
 @keyframes chat-wait-pulse {
   0%, 100% { opacity: 0.35; transform: scale(0.85); }

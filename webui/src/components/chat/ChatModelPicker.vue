@@ -110,6 +110,17 @@
                 autocomplete="off"
                 :placeholder="t('chat.modelPicker.customApiKey')"
               >
+              <!-- 协议必须在这里可选：自建端点既有 OpenAI /chat/completions，
+                   也有只提供 Responses 的网关，还有 Anthropic Messages 兼容端点。
+                   缺了这一项，Anthropic 端点在执行侧会被当成 OpenAI 协议发请求。 -->
+              <label class="model-picker__field">
+                <span class="model-picker__field-label">{{ t('chat.modelPicker.customProtocol') }}</span>
+                <select v-model="customDraft.protocol" class="model-picker__input">
+                  <option value="chat">{{ t('chat.modelPicker.customProtocolChat') }}</option>
+                  <option value="responses">{{ t('chat.modelPicker.customProtocolResponses') }}</option>
+                  <option value="anthropic">{{ t('chat.modelPicker.customProtocolAnthropic') }}</option>
+                </select>
+              </label>
               <button type="submit" class="model-picker__submit" :disabled="Boolean(busy)">
                 {{ busy === 'custom' ? t('chat.modelPicker.activating') : t('chat.modelPicker.customSubmit') }}
               </button>
@@ -204,7 +215,8 @@ const panelRef = ref<HTMLElement | null>(null)
 const localLoading = ref(false)
 const localLive = ref<OllamaLiveModel[]>([])
 const addingCustom = ref(false)
-const customDraft = ref({ label: '', baseUrl: '', model: '', apiKey: '' })
+type CustomProtocol = 'chat' | 'responses' | 'anthropic'
+const customDraft = ref({ label: '', baseUrl: '', model: '', apiKey: '', protocol: 'chat' as CustomProtocol })
 
 const groupOrder: Group[] = ['cloud', 'custom', 'local']
 
@@ -310,7 +322,14 @@ async function submitCustom() {
   busy.value = 'custom'
   errorMessage.value = ''
   try {
-    const providerId = providerSlug(label, model)
+    const protocol = customDraft.value.protocol
+    const slug = providerSlug(label, model)
+    // 协议与 provider id 必须一起决定：执行侧只按 id 判定 Anthropic 家族
+    // （`provider_protocol::is_anthropic_family` 认 `_anthropic` 后缀），
+    // 只填 baseUrl 而 id 不带后缀，Anthropic 端点会被按 OpenAI 协议调用。
+    const providerId = protocol === 'anthropic' && !slug.endsWith('_anthropic')
+      ? `${slug}_anthropic`
+      : slug
     const apiKey = customDraft.value.apiKey.trim()
     const saved = await rpc.call<{ ok?: boolean; error?: string }>('onboarding.llmProfile.upsert', {
       providerId,
@@ -318,6 +337,9 @@ async function submitCustom() {
       baseUrl,
       label: label || model,
       kind: 'custom',
+      // Anthropic Messages 只有一种线格式；responses 仅对 OpenAI 家族有意义，
+      // 后端 `wire::validate` 会明确拒绝 Anthropic + responses。
+      ...(protocol === 'responses' ? { wireApi: 'responses' } : {}),
       ...(apiKey ? { apiKey } : {}),
     })
     if (saved && saved.ok === false) {
@@ -326,7 +348,7 @@ async function submitCustom() {
     }
     // 保存即启用：用户点「保存并启用」后不该还要再点一次档案行。
     await rpc.call('onboarding.llmProfile.activate', { providerId, model })
-    customDraft.value = { label: '', baseUrl: '', model: '', apiKey: '' }
+    customDraft.value = { label: '', baseUrl: '', model: '', apiKey: '', protocol: 'chat' }
     addingCustom.value = false
     await load()
     open.value = false
@@ -655,6 +677,18 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDo
 .model-picker__input:focus {
   outline: none;
   border-color: var(--border-strong);
+}
+
+/* 下拉与输入框同宽同高：grid 里 label 自带两行（标签 + 控件），
+   单独用 field 容器把它们合成一个网格单元。 */
+.model-picker__field {
+  display: grid;
+  gap: 2px;
+}
+
+.model-picker__field-label {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
 }
 
 .model-picker__submit {

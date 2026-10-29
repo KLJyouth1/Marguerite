@@ -50,6 +50,8 @@ export interface UseChatSessionSubscriptionOptions {
   loadHistory: () => void | Promise<unknown>
   resetStreamIdleTimer: () => void
   resetStreamLiveTurnState: () => void
+  /** 重置 live turn 后重新挂上审批/澄清帧（它们不是流事件，不会随重放回来）。 */
+  reappendInterruptFrames?: () => void
   onLiveSnapshot?: (snapshot: SessionMessagesSnapshotResponse) => void
   onAuthoritativeIdle?: () => void
   onRunModeLock?: (
@@ -242,6 +244,11 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
       && !liveTaskSnapshot
     ) {
       options.resetStreamLiveTurnState()
+      // 审批/澄清帧不是流事件，重置后不会随重放回来。缺了这一步，用户在点击
+      // 「允许」之后（hasActiveInterrupt 立刻变 false）只要订阅快照晚一步落地，
+      // 已裁决的结果行会连同整条 live turn 一起消失 —— 界面回到「暂无消息」，
+      // 而角标仍显示有待审项。与 onLiveSnapshot 的重挂同一理由（fold 按 id 去重）。
+      options.reappendInterruptFrames?.()
     }
     if (options.isStreaming.value) options.resetStreamIdleTimer()
     const taskOrInterruptLive = liveTaskSnapshot || options.hasActiveInterrupt.value

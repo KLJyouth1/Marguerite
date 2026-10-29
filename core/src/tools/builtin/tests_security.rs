@@ -219,6 +219,61 @@ use super::tests::{setup, put};
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// L3 读取边界：工作区**内**的凭证文件不得进模型上下文。
+    ///
+    /// 前提是最要命的那种：未绑定项目时工作区根就是数据目录 `~/.marguerite`，
+    /// `.env` / `gateway-token` 与源码同级 —— L1（safe_resolve）认为完全合法，
+    /// 只有 L3 的**文件名**判定能拦。grep / codebase_search 泄露的是同一份密钥
+    /// （命中的原文行），所以它们也必须过滤。
+    #[tokio::test]
+    async fn guard_denies_credential_file_reads_and_searches() {
+        const SECRET: &str = "sk-SECRET-VALUE-9f3a";
+        let (reg, dir) = setup();
+        let creds: [(&str, String); 5] = [
+            (".env", format!("MARGUERITE_API_KEY={SECRET}\n")),
+            ("gateway-token", format!("{SECRET}\n")),
+            ("credentials.json", format!("{{\"k\":\"{SECRET}\"}}\n")),
+            ("vault.json", format!("{{\"k\":\"{SECRET}\"}}\n")),
+            ("model.key", format!("{SECRET}\n")),
+        ];
+        for (name, body) in &creds {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+
+        // read_file：逐文件被拒，且拒绝结果里也不得回显密钥
+        for (name, _) in &creds {
+            let mut a = HashMap::new();
+            put(&mut a, "path", name);
+            let r = reg.execute_local_tool("read_file", &a).await.unwrap();
+            assert!(r.is_error(), "读取凭证文件必须被拒: {name}");
+            assert!(
+                !format!("{r:?}").contains(SECRET),
+                "拒绝信息不得回显密钥原文: {name}"
+            );
+        }
+
+        // grep / codebase_search：命中行同样不得带出（gateway-token 非隐藏文件，
+        // 未被 walk_files 的目录黑名单排除，只有凭证过滤能挡住它）
+        for (tool, key) in [("grep", "pattern"), ("codebase_search", "query")] {
+            let mut a = HashMap::new();
+            put(&mut a, key, SECRET);
+            let r = reg.execute_local_tool(tool, &a).await.unwrap();
+            assert!(
+                !format!("{r:?}").contains(SECRET),
+                "{tool} 不得把凭证文件内容带进结果"
+            );
+        }
+
+        // 防误杀：模板文件不含密钥，脚手架场景必须可读
+        std::fs::write(dir.join(".env.example"), "MARGUERITE_API_KEY=\n").unwrap();
+        let mut a = HashMap::new();
+        put(&mut a, "path", ".env.example");
+        let r = reg.execute_local_tool("read_file", &a).await.unwrap();
+        assert!(!r.is_error(), "`.env.example` 必须可读: {r:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn shell_exec_runs_and_is_guarded() {
         let (reg, dir) = setup();

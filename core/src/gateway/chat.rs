@@ -859,6 +859,24 @@ pub fn running_sessions() -> Vec<String> {
         .map(|g| g.keys().cloned().collect())
         .unwrap_or_default()
 }
+
+/// 停止本进程内该会话的运行句柄（**不发任何事件**，事件语义由调用方决定）。
+///
+/// `sessions.delete` 用它避免「删完还在跑、跑完又写回 DB/台账」的复活路径。
+pub fn stop_running_task(session_key: &str) -> bool {
+    let removed = runtimes()
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_key);
+    match removed {
+        Some(handle) => {
+            handle.abort();
+            true
+        }
+        None => false,
+    }
+}
 /// 判断指定会话是否正在运行
 pub fn is_session_running(session_key: &str) -> bool {
     runtimes()
@@ -881,6 +899,7 @@ pub async fn abort(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErr
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(session_key);
+    let had_running_task = removed.is_some();
     if let Some(handle) = removed {
         handle.abort();
     }
@@ -899,6 +918,11 @@ pub async fn abort(ctx: &GatewayContext, params: &Value) -> Result<Value, RpcErr
         }),
         session_key,
     ));
+    // 运行态收据：被 abort 的任务不会走到 run_turn 的 turn_end 分支，
+    // 少这一帧 `sessions.changed` 时列表/运行页会永远停在 running。
+    if had_running_task || cancelled_runs > 0 {
+        ctx.bus.publish(Envelope::sessions_changed(session_key, "idle", "turn_end"));
+    }
     // B3 行为捕获：中止观察（observation）
     crate::memory::behavior::record_behavior(session_key, "aborted", "chat.abort");
     Ok(json!({
@@ -1110,7 +1134,10 @@ fn memory_stack() -> Option<Arc<Mutex<HierarchicalMemory>>> {
             else {
                 return None;
             };
-            let mut short_term = ShortTermMemory::new(&data_dir.join("marguerite_short_term.db"));
+            let mut short_term =
+                ShortTermMemory::new(&data_dir.join("marguerite_short_term.db")).with_max_sessions(
+                    crate::memory::short_term::max_sessions_from_config(),
+                );
             if short_term.init().is_err() {
                 return None;
             }
@@ -1250,17 +1277,60 @@ fn agent_persona_section(session: &str, model: &str, cwd: &str) -> String {
 /// 拿它当判据会在有画像缓存时把 viky 对**所有**会话静默关掉（默认人格失效）。
 /// 非智能体会话（CLI/TUI 直连等）行为不变。
 fn merged_turn_hint(text: &str, session: &str, model: &str, cwd: &str) -> String {
+    // 【2026-10-29 · D9 第一步：先能归因，再谈优化】
+    //
+    // 真机审计实测首 token **11–14s**，但没人知道这十几秒里「本机准备」占多少、
+    // 「模型首包」占多少 —— 于是所有优化都只能靠猜。这里给四段本机准备各打一个
+    // 毫秒数：跨项目召回（SQLite 检索）/ 人设 / viky 默认人格 / 许愿契约。
+    //
+    // 只在**慢**（>50ms）时 info 上报：常态是几毫秒，天天刷日志等于噪音；
+    // debug 档则每次都记，排障时开 `RUST_LOG=debug` 即可拿到全量。
+    // 这条日志是 D9 判断"该不该并行化召回"的唯一依据 —— 没有它就不要动编排。
+    let t0 = std::time::Instant::now();
     let cp = cross_project_hint(text, session);
+    let t_recall = t0.elapsed();
+
+    let t1 = std::time::Instant::now();
     let agent = agent_personality_hint(session, model, cwd);
+    let t_persona = t1.elapsed();
+
+    let t2 = std::time::Instant::now();
     let viky = if agent_persona_section(session, model, cwd).is_empty() {
         viky_persona_hint()
     } else {
         String::new()
     };
+    let t_viky = t2.elapsed();
+
     // 一句话许愿 → 执行契约（六要素 + 硬约束 + 任务分解）。
     // 这是「人说愿望 → Agent 自己翻译成指令」那一层：没有它，模型各自理解口语，
     // 于是出现漏条目/占位符/方向跑偏。非任务型输入（闲聊、提问）返回空串，零影响。
+    let t3 = std::time::Instant::now();
     let wish = wish_contract_hint(text);
+    let t_wish = t3.elapsed();
+
+    if t0.elapsed() > std::time::Duration::from_millis(50) {
+        tracing::info!(
+            recall_ms = t_recall.as_millis() as u64,
+            persona_ms = t_persona.as_millis() as u64,
+            viky_ms = t_viky.as_millis() as u64,
+            wish_ms = t_wish.as_millis() as u64,
+            total_ms = t0.elapsed().as_millis() as u64,
+            recall_chars = cp.chars().count(),
+            session = %session,
+            "回合前置准备偏慢（首 token 归因用；只有慢时才记）"
+        );
+    } else {
+        tracing::debug!(
+            recall_ms = t_recall.as_millis() as u64,
+            persona_ms = t_persona.as_millis() as u64,
+            viky_ms = t_viky.as_millis() as u64,
+            wish_ms = t_wish.as_millis() as u64,
+            total_ms = t0.elapsed().as_millis() as u64,
+            "回合前置准备耗时"
+        );
+    }
+
     [cp, agent, viky, wish]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -4398,5 +4468,35 @@ mod r72_send_fixes_tests {
         // 有钥放行
         cfg.model.api_key = "sk-test".into();
         assert!(api_key_gate(&cfg, &ctx).is_ok());
+    }
+
+    /// `chat.abort` 必须同时发运行态收据：被 abort 的任务不会走到
+    /// `run_turn` 的 turn_end 分支，少这一帧会话列表/运行页会永远停在 running。
+    #[tokio::test]
+    async fn abort_publishes_idle_run_status_so_the_run_page_settles() {
+        let bus = Arc::new(crate::events::EventBus::default());
+        let ctx = GatewayContext {
+            config: crate::persistence::config::Config::default(),
+            token: "t".into(),
+            started_at: std::time::Instant::now(),
+            bus: bus.clone(),
+        };
+        let key = format!("ws.abort-{}", uuid::Uuid::new_v4());
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        register_running_task(&key, handle).expect("登记运行句柄");
+        let mut rx = bus.subscribe(&format!("{key}.sessions_changed"));
+
+        let resp = abort(&ctx, &json!({ "sessionKey": key }))
+            .await
+            .expect("abort 应成功");
+        assert_eq!(resp["accepted"], true);
+        assert!(!is_session_running(&key), "abort 后不得留下运行句柄");
+
+        let env = rx.try_recv().expect("abort 必须补发 sessions.changed");
+        assert_eq!(env.payload["run_status"], "idle");
+        assert_eq!(env.payload["occasion"], "turn_end");
+        assert_eq!(env.payload["session_key"], key.as_str());
     }
 }

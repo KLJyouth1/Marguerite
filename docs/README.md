@@ -31,6 +31,7 @@
 | [Contributing](../CONTRIBUTING.md) | How to propose a change, and the gates a change must pass. |
 | [Security policy](../SECURITY.md) | How to report a vulnerability privately, and the security model (loopback-only, four guardrail layers, secrets handling). |
 | [Agent guide](../AGENTS.md) | The architectural invariants that reviews check against — the fastest way to understand *why* the code is shaped this way. |
+| [Agent handbooks](agents/) | The long-form half of the agent guide: build/test commands, invariants, gotchas, drift gate, third-party layer. Split out of `AGENTS.md` on 2026-10-29 because a single 159 KB file gets truncated on injection — the verification rules used to sit past the cut. |
 | [Changelog](../CHANGELOG.md) | Released changes, newest first. |
 
 ## Verifying a change

@@ -187,6 +187,14 @@ impl Preflight {
         self.check_content(content)
     }
 
+    /// 读取类多根裁决：凭证文件与越界路径一律拒绝。
+    ///
+    /// 不做内容扫描 —— 读取不产生落盘，L2 的「恶意内容」判据在这里没有意义；
+    /// 但 L3 的凭证文件名判定必须生效（见 `scanner_l3::is_credential_file`）。
+    pub fn check_read_multi(&self, target: &Path, roots: &[PathBuf]) -> PreflightDecision {
+        self.check_path_multi(OpKind::Read, target, roots)
+    }
+
     /// 执行类多根裁决：命令逃逸意图过任一登记根 + 命令文本扫描
     pub fn check_exec_multi(&self, command: &str, roots: &[PathBuf]) -> PreflightDecision {
         let p = self.check_path_multi(OpKind::Exec, Path::new(command), roots);

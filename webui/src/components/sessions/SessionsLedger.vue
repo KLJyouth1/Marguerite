@@ -28,7 +28,11 @@
           <span class="hub-row__title">{{ rowTitle(entry) }}</span>
           <span v-if="entry.item.subtitle" class="hub-row__subtitle">{{ entry.item.subtitle }}</span>
         </span>
-        <span v-if="entry.item.forkedFromParent" class="hub-row__fork-badge">{{ t('sessions.ledger.fork') }}</span>
+        <span
+          v-if="entry.item.forkedFromParent"
+          class="hub-row__fork-badge"
+          :title="forkTooltip(entry.item)"
+        >{{ t('sessions.ledger.fork') }}</span>
         <span class="hub-row__agent">{{ agentName(entry.item) }}</span>
         <span
           v-if="statusBadge(entry.item)"
@@ -74,11 +78,18 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { IconName } from '@/utils/icons'
 import type { SessionItem, SessionLedgerEntry } from '@/composables/useSessions'
-import { formatRelativeTime, sessionAgentIdentity, sessionStatusBadge, subagentRowTitle } from './sessionDisplay'
+import {
+  forkSourceTitle,
+  formatRelativeTime,
+  sessionAgentIdentity,
+  sessionStatusBadge,
+  subagentRowTitle,
+} from './sessionDisplay'
 
 const { t } = useI18n()
 
@@ -149,6 +160,17 @@ function rowTitle(entry: SessionLedgerEntry): string {
   if (entry.depth <= 0) return entry.item.title
   if (entry.item.forkedFromParent) return `↳ ${entry.item.title}`
   return subagentRowTitle(entry.parentTitle)
+}
+
+const itemsByKey = computed(() => new Map(props.entries.map(entry => [entry.item.key, entry.item])))
+
+// 徽标本身只写「分叉」；来源会话名放在 tooltip 里。父会话不在当前页时退回
+// 不带名字的说明 —— 直接展示会话键对用户没有意义。
+function forkTooltip(item: SessionItem): string {
+  const title = forkSourceTitle(item, key => itemsByKey.value.get(key))
+  return title
+    ? t('sessions.ledger.forkedFrom', { title })
+    : t('sessions.ledger.forkTooltip')
 }
 
 // Screen readers announce "↳" as "right-pointing arrow" noise; the accessible

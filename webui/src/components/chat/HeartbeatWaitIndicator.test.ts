@@ -62,4 +62,27 @@ describe('HeartbeatWaitIndicator (F-09)', () => {
     expect(node.textContent).toContain('仍在运行')
     expect(node.textContent).not.toContain('30s')
   })
+
+  // 真机审计 2026-10-29 P1-3：并行会话里第二页干等 27s，屏幕上只有一个转圈，
+  // 用户分不清"卡死"和"在排队"。补的这行说明必须渲染出来，但**不能**塞进
+  // 那个 aria-live 的句子 —— 否则读屏每秒重播一次（秒数每秒都在变）。
+  it('renders the hint as a separate note, outside the aria-live status line', async () => {
+    const el = await mount({
+      visible: true,
+      phaseLabel: '等待模型',
+      seconds: 27,
+      hint: '已等 27s · 模型调用为串行（默认 Agent 模式），切换 Bloom 可并行',
+    })
+    const status = el.querySelector('[data-testid="chat-wait-indicator"]')!
+    const hint = el.querySelector('[data-testid="chat-wait-indicator-hint"]')!
+    expect(hint.textContent).toContain('切换 Bloom 可并行')
+    expect(hint.getAttribute('role')).toBe('note')
+    // 关键断言：live region 里不含这句长文案
+    expect(status.textContent).not.toContain('切换 Bloom')
+  })
+
+  it('renders no hint node when hint is empty', async () => {
+    const el = await mount({ visible: true, phaseLabel: '等待模型', seconds: 5 })
+    expect(el.querySelector('[data-testid="chat-wait-indicator-hint"]')).toBeNull()
+  })
 })

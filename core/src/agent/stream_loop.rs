@@ -351,7 +351,7 @@ where
     F: FnMut(Vec<Message>, Vec<ToolDef>) -> Fut,
     Fut: Future<Output = Result<StreamReceiver>>,
 {
-    let cycle = ToolCycle::new(registry);
+    let cycle = ToolCycle::new(registry).with_session(session.clone());
     // 按时序累积的 `(工具名, 入参)`，仅用于 doom-loop 判定
     let mut call_log: Vec<(String, String)> = Vec::new();
     // P2-9：单 turn 预算硬熔断。
@@ -522,7 +522,15 @@ where
         let approval_session = session.as_deref().unwrap_or("");
         let approvals: Vec<Option<crate::guard::permission_matrix::ToolApproval>> = tool_calls
             .iter()
-            .map(|tc| crate::guard::permission_matrix::decide_tool(&tc.name, approval_session))
+            .map(|tc| {
+                // 参数解析失败 → None：参数级信任条目因此不命中（fail-closed）
+                let parsed = serde_json::from_str::<serde_json::Value>(&tc.arguments).ok();
+                crate::guard::permission_matrix::decide_tool(
+                    &tc.name,
+                    approval_session,
+                    parsed.as_ref(),
+                )
+            })
             .collect();
         for (i, tc) in tool_calls.iter().enumerate() {
             let approval = approvals
@@ -672,12 +680,17 @@ where
             // 在此按完整文本记一次账：`call_id` 与事件桥 payload 的 `id` 同源，
             // 网关桥随后收到同一条 `ToolResult` 时会按该键认领失败并跳过 —— 只记一次。
             // 注意必须在 `events.send` **之前**记账：桥上后到的那条一定能看到已登记的键。
+            // 入口截流（M1-T3）：**模型历史与上下文台账共用这一份**。
+            // 台账口径是「真正进入模型上下文的东西」（`overhead_tokens`），按原文计
+            // 会让用量表与压缩阈值一起骗人；事件流与复盘台账仍记原文（审计要全文）。
+            let context_output =
+                crate::context::middle_truncate::truncate_for_context(&tc.name, &output);
             if let Some(sess) = session.as_deref() {
                 crate::context::session::record_tool_output_at_context(
                     sess,
                     tc.id.as_deref(),
                     &tc.name,
-                    &output,
+                    &context_output,
                 );
                 // 复盘证据：与网关桥/计划 tap 共用同一幂等键（call_id），
                 // 谁先看到谁落盘，不会重复写行。
@@ -703,11 +716,17 @@ where
                         .map(|a| a.status.to_string()),
                 })
                 .await;
-            // 工具结果回灌历史，供下一轮模型观测（observe）
+            // 工具结果回灌历史，供下一轮模型观测（observe）。
+            // 间接注入防线（P0）：浏览器/网页/OCR 这类外部可写内容在**进上下文**时
+            // 包上不可信标记；事件与台账仍用原文（见上方 event_bus 调用）。
             history.push(Message::Tool {
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
-                output,
+                // D11：进上下文前中间截断（与 runtime / multi_strategy 同一入口）。
+                output: crate::security::spotlight::wrap_if_untrusted(
+                    &tc.name,
+                    &context_output,
+                ),
                 timestamp: Utc::now(),
                 // 单轮单工具 → 该批耗时即该工具耗时；多工具批无法拆分 → None（诚实）。
                 elapsed_ms: (tool_calls.len() == 1).then_some(tool_batch_elapsed_ms),
@@ -1295,12 +1314,19 @@ mod tests {
         }
     }
 
-    /// E12 回归：流式回路把工具输出写进模型上下文的同时，按**完整文本**记入台账。
+    /// E12 回归（M1 Task 3 改写）：工具输出的三个去向**各有各的正确口径**。
     ///
-    /// 修复前：本回路自身不记账，只靠网关事件桥（异步、且部分事件只有摘要）→
-    /// 此处 `overhead_tokens` 恒为 0，压缩阈值因此永远晚到。
+    /// 旧断言只有一条「历史里就是全文 40 000 字符」，它把三个本应不同的口径压成
+    /// 同一个；入口截流（D11）接上后那条断言既不再成立、也不该削弱成「随便截一点」：
+    /// - **事件流**：给前端与审计看，必须全文（截了用户就看不到日志）；
+    /// - **模型历史**：受入口截流约束，只带头尾 + **真能取回**的指纹；
+    /// - **台账 `overhead_tokens`**：按「真正进入模型上下文的文本」计量 ——
+    ///   截流后必须按截断后计，否则用量表与压缩阈值会一起偏小。
+    ///
+    /// 另：修复前本回路自身不记账，只靠网关事件桥（异步、且部分事件只有摘要）→
+    /// `overhead_tokens` 恒为 0、压缩阈值永远晚到。这条也一并钉在这里。
     #[tokio::test]
-    async fn stream_loop_records_full_tool_output_to_context_ledger() {
+    async fn stream_loop_splits_tool_output_across_events_history_and_ledger() {
         let mut reg = ToolRegistry::new();
         reg.register_local(Box::new(BigOutputTool));
         let registry = Arc::new(reg);
@@ -1331,7 +1357,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "回路应正常收敛：{result:?}");
-        // 历史里确实保存了完整输出
+        // ① 历史：短于原文，且**如实标注**被截 + 给出真能取回的指纹
         let tool_out = history
             .iter()
             .find_map(|m| match m {
@@ -1339,18 +1365,25 @@ mod tests {
                 _ => None,
             })
             .expect("回路应追加 Message::Tool");
-        assert_eq!(tool_out.len(), 40_000);
-
-        let expected = crate::context::session::estimate_tokens(&tool_out);
-        assert!(expected > 5_000, "40k 字符应估算出上万 token：{expected}");
-        let status = crate::context::session::context_status(&session);
-        assert_eq!(
-            status["overhead_tokens"].as_u64(),
-            Some(expected),
-            "完整工具输出必须计入台账（而不是摘要那点）：{status}"
+        assert!(tool_out.len() < 40_000, "入口截流应生效：{}", tool_out.len());
+        assert!(
+            tool_out.contains("中间省略"),
+            "不得静默丢弃：{}",
+            &tool_out[..tool_out.len().min(200)]
         );
+        let fp = tool_out
+            .split("tool_output_retrieve(\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("截断标注必须给出取回指纹")
+            .to_string();
 
-        // 事件里同样是完整输出（前端与台账同源，未截断）
+        // ② 取回：逐字节等于原文 —— 假承诺 → 真兑现的唯一证明
+        let full = crate::context::spool::retrieve(&fp).expect("指纹必须取得回");
+        assert_eq!(full.len(), 40_000, "取回必须逐字节等于原文");
+        assert_eq!(full, "x".repeat(40_000));
+
+        // ③ 事件流：仍是全文（前端与审计不因截流而瞎）
         let events = drain(rx).await;
         assert!(
             events.iter().any(|e| matches!(
@@ -1358,6 +1391,20 @@ mod tests {
                 AgentEvent::ToolResult { output, .. } if output.len() == 40_000
             )),
             "ToolResult 事件应携带完整输出"
+        );
+
+        // ④ 台账：按**进入模型的截断后文本**计量，而不是按原文
+        let expected = crate::context::session::estimate_tokens(&tool_out);
+        assert!(expected > 5_000, "截断后仍应是上万 token 量级：{expected}");
+        let status = crate::context::session::context_status(&session);
+        assert_eq!(
+            status["overhead_tokens"].as_u64(),
+            Some(expected),
+            "台账要等于模型实际看到的：{status}"
+        );
+        assert!(
+            crate::context::session::estimate_tokens(&full) > expected,
+            "自证：原文口径确实更大，否则上面那条断言是空断言"
         );
 
         let _ = std::fs::remove_file(

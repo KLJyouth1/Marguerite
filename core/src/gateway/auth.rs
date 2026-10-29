@@ -31,6 +31,8 @@ pub fn load_or_create_token(data_dir: &std::path::Path) -> Result<String> {
     if let Ok(raw) = fs::read_to_string(&path) {
         let t = raw.trim();
         if !t.is_empty() {
+            // 旧版本用默认 umask 落盘（同机其他用户可读）；这里对既有安装补一次收紧。
+            let _ = crate::persistence::harden_private_file(&path);
             return Ok(t.to_string());
         }
     }
@@ -39,6 +41,8 @@ pub fn load_or_create_token(data_dir: &std::path::Path) -> Result<String> {
     // 崩溃，下次启动读到空 token 会**重新生成**，所有已连接的客户端 token 集体失效
     // （用户看到的是「刚打开就要求重新配对」）。
     crate::persistence::write_json_atomic(&path, &token)?;
+    // 这个 token 等于本机网关的 bearer 凭据（拿到即可驱动引擎），必须属主独占。
+    let _ = crate::persistence::harden_private_file(&path);
     Ok(token)
 }
 
@@ -126,6 +130,22 @@ mod tests {
         assert!(!verify("abc", "abd"));
         assert!(!verify("abc", "abcd"));
         assert!(!verify("", "x"));
+    }
+
+    /// token 等价于本地网关的 bearer 凭据：落盘必须是 0600（不是默认 umask）。
+    #[cfg(unix)]
+    #[test]
+    fn token_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("marguerite-gw-mode-{}", uuid::Uuid::new_v4()));
+        let _ = load_or_create_token(&dir).unwrap();
+        let mode = fs::metadata(dir.join(TOKEN_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "gateway-token 必须只有属主可读写");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

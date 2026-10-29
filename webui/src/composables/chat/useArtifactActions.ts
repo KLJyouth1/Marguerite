@@ -123,6 +123,10 @@ export function useArtifactActions(options: UseArtifactActionsOptions) {
     } catch { sameOrigin = false }
     const token = readToken()
     if (sameOrigin && token) headers.Authorization = `Bearer ${token}`
+    // 产物按会话归属：网关（Rust 与侧车同契约）在缺键/错键时一律 404。
+    // 与 artifactAccessHeaders 保持同一个头名。
+    const sessionKey = options.sessionKey?.() || ''
+    if (sameOrigin && sessionKey) headers['x-Marguerite-session-key'] = sessionKey
     return headers
   }
 

@@ -153,8 +153,8 @@ pub async fn exec_with(req: &ExecRequest<'_>, guard: &CommandGuard) -> Result<Ex
             let (stdout, out_trunc) = out_task.await.unwrap_or_default();
             let (stderr, err_trunc) = err_task.await.unwrap_or_default();
             Ok(ExecOutput {
-                stdout: String::from_utf8_lossy(&stdout).to_string(),
-                stderr: String::from_utf8_lossy(&stderr).to_string(),
+                stdout: decode_console(&stdout),
+                stderr: decode_console(&stderr),
                 exit_code: status.code().unwrap_or(-1),
                 truncated: out_trunc || err_trunc,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -280,10 +280,7 @@ fn build_shell_command(req: &ExecRequest<'_>) -> Result<Command> {
     let mut command = match req.shell {
         ExecShell::Default => {
             if cfg!(windows) {
-                let mut c = Command::new("cmd");
-                // 先切 UTF-8 代码页，避免中文路径/输出乱码
-                c.arg("/C").arg(format!("chcp 65001 >nul && {}", cmd));
-                c
+                cmd_command(cmd)
             } else {
                 let mut c = Command::new("sh");
                 c.arg("-c").arg(cmd);
@@ -294,9 +291,7 @@ fn build_shell_command(req: &ExecRequest<'_>) -> Result<Command> {
             if !cfg!(windows) {
                 return Err(anyhow!("cmd 仅在 Windows 上可用"));
             }
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(format!("chcp 65001 >nul && {}", cmd));
-            c
+            cmd_command(cmd)
         }
         ExecShell::PowerShell => {
             if !cfg!(windows) {
@@ -330,6 +325,115 @@ fn build_shell_command(req: &ExecRequest<'_>) -> Result<Command> {
         command.process_group(0);
     }
     Ok(command)
+}
+
+/// 构造 `cmd /C` 调用（含 UTF-8 代码页前置与命令解析环境兜底）。
+///
+/// 两个真机教训：
+/// 1. 旧实现写 `chcp 65001 >nul && <cmd>`。`&&` 是**条件**串联：一旦 chcp 失败
+///    （精简/受限环境里 `chcp.com` 不可解析，cmd 报「'chcp' 不是内部或外部命令」），
+///    整条用户命令根本不会执行，agent 只看到 exit 1 然后原样重试十几次。
+///    改为 `&`（无条件串联）+ `2>&1` 吞掉 chcp 自身的错误输出：代码页切不成不影响
+///    用户命令，输出再由 [`decode_console`] 兜底解码。
+/// 2. 子进程若继承到被裁剪的 `PATH` / `PATHEXT`，cmd 连内建以外的命令都解析不了。
+///    这里只做**补全**（缺才加），不覆盖用户环境。
+#[cfg(windows)]
+fn cmd_command(cmd: &str) -> Command {
+    let mut c = Command::new("cmd");
+    let mut line = String::from("chcp 65001 >nul 2>&1 & ");
+    line.push_str(cmd);
+    c.arg("/C").arg(line);
+    ensure_cmd_environment(&mut c);
+    c
+}
+
+#[cfg(not(windows))]
+fn cmd_command(cmd: &str) -> Command {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(cmd);
+    c
+}
+
+/// 补全 cmd 解析命令所需的环境变量（缺才补，已有的不动）。
+#[cfg(windows)]
+fn ensure_cmd_environment(command: &mut Command) {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let system32 = format!("{system_root}\\System32");
+    let path = std::env::var("PATH").unwrap_or_default();
+    if !path
+        .split(';')
+        .any(|p| p.trim().trim_end_matches('\\').eq_ignore_ascii_case(&system32))
+    {
+        let merged = if path.is_empty() {
+            system32.clone()
+        } else {
+            format!("{system32};{path}")
+        };
+        command.env("PATH", merged);
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    if !pathext.to_ascii_uppercase().contains(".COM") {
+        // chcp 是 `chcp.com`：PATHEXT 少了 .COM 就会被 cmd 判成「不是内部或外部命令」。
+        let merged = if pathext.is_empty() {
+            ".COM;.EXE;.BAT;.CMD".to_string()
+        } else {
+            format!(".COM;{pathext}")
+        };
+        command.env("PATHEXT", merged);
+    }
+}
+
+/// 控制台输出解码。
+///
+/// 先按 UTF-8 严格解码（chcp 生效时的正常路径）；失败再按 Windows **OEM 代码页**
+/// （简中 = CP936/GBK）转换。旧实现一律 `from_utf8_lossy`，GBK 中文错误信息会被
+/// 整段替换成 U+FFFD —— 用户和 agent 都读不出「'chcp' 不是内部或外部命令」，
+/// 于是 agent 把同一个失败命令重试了十几次。
+fn decode_console(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(windows)]
+    if let Some(s) = decode_oem_codepage(bytes) {
+        return s;
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+/// 按 OEM 代码页把字节串转成 UTF-8（Windows 专属；解码失败返回 `None`）。
+#[cfg(windows)]
+fn decode_oem_codepage(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{GetOEMCP, MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let cp = unsafe { GetOEMCP() };
+    // 先问所需宽度，再按该宽度解码；两次调用之间不改变源缓冲区。
+    let len = unsafe {
+        MultiByteToWideChar(
+            cp,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            None,
+        )
+    };
+    if len <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; len as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            cp,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            Some(&mut buf),
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    buf.truncate(written as usize);
+    Some(String::from_utf16_lossy(&buf))
 }
 
 /// 有界读取：超过 `cap` 后继续把管道读空（否则子进程会阻塞在写端），但不再累积。

@@ -53,7 +53,13 @@ export type ChatRpcSubscriptionHandlers = {
   onMemoryRecall: (payload: MemoryRecallPayload) => void
   onStepStart: (payload: StepLoopPayload) => void
   onStepFinish: (payload: StepLoopPayload) => void
-  onAny: (rawEvent: string, rawPayload: unknown) => void
+  /**
+   * 通配处理器。第三个参数是 WS 帧的 `meta`（`envelope_to_frame` 组装，携带
+   * `session` / `ts` / `trace_id`）——**必须透传**：`session.event.usage` 这类帧的
+   * payload 里没有会话标识，会话归属只存在于 meta 里。丢掉 meta 就只能靠
+   * 「本页是否在流式中」猜归属，多标签页并行时会把别的会话的用量算进自己。
+   */
+  onAny: (rawEvent: string, rawPayload: unknown, meta?: Record<string, unknown>) => void
   onConnectionState: (state: string) => void
 }
 

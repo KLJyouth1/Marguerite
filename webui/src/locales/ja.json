@@ -561,6 +561,19 @@
     "available": "Marguerite {version} が利用可能です",
     "viewRelease": "リリースを表示",
     "dismiss": "閉じる",
+    "dialog": {
+      "newVersion": "新しいバージョンがあります",
+      "updateNow": "今すぐ更新",
+      "later": "後で通知",
+      "skipVersion": "このバージョンをスキップ",
+      "downloading": "更新をダウンロード中",
+      "downloadedTitle": "更新の準備ができました",
+      "downloadedDesc": "{version} をダウンロードしました。再起動してインストールしてください。",
+      "restartNow": "今すぐ再起動",
+      "restartLater": "後で再起動",
+      "failedTitle": "更新に失敗しました",
+      "close": "閉じる"
+    },
     "desktop": {
       "indicatorAvailable": "更新 {version}",
       "indicatorDownloaded": "更新準備完了",
@@ -985,6 +998,38 @@
     "localMode": "ローカルモード",
     "detached": "デタッチ HEAD"
   },
+  "cockpit": {
+    "title": "ブラウザコックピット",
+    "subtitle": "依存ゼロの CDP 操作：ナビゲーション / JS コンソール / スクリーンショットクリック / アクセシビリティツリー / Resource Timing ネットワークパネル（browser.* RPC）",
+    "detect": "検出",
+    "closeSession": "セッションを閉じる",
+    "navigate": "移動",
+    "open": "開く",
+    "pageTitle": "タイトル：{title}",
+    "emptyCdp": "URL を入力してページを開きます（実際の Chromium CDP。ローカルの Chrome/Edge が必要）",
+    "emptyShot": "「スクリーンショット更新」をクリックしてページを表示",
+    "shotOverlay": "スクリーンショットの任意の位置をクリック = 実際のマウスクリック",
+    "refreshShot": "スクリーンショット更新",
+    "dumpDom": "DOM スナップショット",
+    "consoleTitle": "JS コンソール（evaluate）",
+    "run": "実行",
+    "consoleEmpty": "（空）",
+    "a11yTitle": "アクセシビリティノード（a11y）",
+    "a11yRead": "読み取り",
+    "networkTitle": "DevTools ネットワークパネル（Resource Timing · 近似）",
+    "capture": "キャプチャ",
+    "clear": "クリア",
+    "networkMeta": "{n} 件のリソース（直近 100 件 · 新しい順）",
+    "networkEmpty": "キャプチャなし（ページを開いて「キャプチャ」をクリック。データは Resource Timing API 由来で、リクエストヘッダー/レスポンスボディは含みません）",
+    "thResource": "リソース",
+    "thType": "タイプ",
+    "thDuration": "時間",
+    "thSize": "サイズ",
+    "iframeTitle": "内蔵ブラウザ（iframe · 軽量プレビュー）",
+    "load": "読み込み",
+    "iframeEmpty": "URL を入力して読み込みます。埋め込みを拒否するクロスオリジンサイト（X-Frame-Options / CSP）では iframe が空白になります —— その場合は上の CDP コックピット（実際の Chromium）を使用してください。",
+    "iframeNote": "iframe プレビューはセッション資格情報を送りません。ログインが必要なサイトは CDP セッションをご利用ください。埋め込み拒否はサイト自身のセキュリティポリシーであり、本ツールの欠陥ではありません。"
+  },
   "chrome": {
     "settings": "設定",
     "theme": "テーマ",
@@ -998,7 +1043,10 @@
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ",
     "toggleSidebar": "サイドバーを切り替え",
+    "iconRail": "アイコンバー",
     "zenMode": "禅モード",
+    "focusMode": "集中モード",
+    "focusModeOff": "集中モードを終了",
     "resizeSidebar": "サイドバーの幅を変更",
     "sidebarWidthValue": "サイドバーの幅: {width}px、{preset}",
     "sidebarWidthLimitedValue": "サイドバーの幅: {width}px、{preset}（このウィンドウでは上限あり、設定値 {preference}px）",
@@ -1006,6 +1054,8 @@
     "sidebarCollapseCanceled": "サイドバーの折りたたみをキャンセルしました",
     "openBlockedSession": "ブロックされたセッションを開く",
     "approvalRequired": "承認が必要です",
+    "sidecarOfflineApprovals": "サイドカーがオフライン · {count} 件の承認が同期待ち",
+    "sidecarOfflineApprovalsTitle": "Python サイドカーがオフラインです。これらの承認はサイドカーのキューに残っており、再接続すると再表示されます。クリックで接続状態を確認します。",
     "manageConnection": "ゲートウェイ接続を管理",
     "connectionTitle": "接続: {state} — 設定で管理",
     "connectionState": {
@@ -1543,6 +1593,7 @@
       "discardAll": "すべて破棄（{count}）",
       "moreOptionsIn": "その他のオプションは次の場所にあります",
       "copyConfigPath": "設定パスをコピー",
+      "configPathIsolated": "ユーザー設定ディレクトリ（分離モード）",
       "applyLiveNote": "ほとんどの変更は即時に反映されます。一部はゲートウェイの再起動が必要です",
       "discardTitle": "未保存の変更を破棄しますか？",
       "discardBody": "未保存の編集があります。今閉じると失われます。",
@@ -3353,6 +3404,8 @@
     },
     "ledger": {
       "fork": "フォーク",
+      "forkedFrom": "「{title}」から分岐",
+      "forkTooltip": "以前のタスクから分岐しました。それまでのメッセージはここにコピーされています。",
       "subagent": "サブエージェント",
       "subagentWithParent": "サブエージェント · {parent}",
       "session": "セッション",
@@ -4737,6 +4790,10 @@
       "customBaseUrl": "エンドポイント（例：https://api.example.com/v1）",
       "customModel": "モデル名（例：gpt-4o-mini）",
       "customApiKey": "API キー（任意。後で設定できます）",
+      "customProtocol": "リクエストプロトコル",
+      "customProtocolChat": "OpenAI 互換 · /v1/chat/completions",
+      "customProtocolResponses": "OpenAI Responses · /v1/responses",
+      "customProtocolAnthropic": "Anthropic Messages · /v1/messages",
       "customSubmit": "保存して使用",
       "customCancel": "閉じる",
       "customRequired": "エンドポイントとモデル名は必須です。",
@@ -4756,7 +4813,7 @@
       "ttft": "初回トークン {ms}（クライアント実測）",
       "sessionTokens": "本セッションのトークン {n}",
       "rounds": "ターン数 {n}",
-      "cacheHitRate": "キャッシュ命中率 {pct}%"
+      "cacheHitRate": "プロバイダーキャッシュ命中 {pct}%"
     },
     "artifactEditorAria": "成果物の編集とプレビュー",
     "recoveringGeneration": "未完了の生成を検出しました。復元しています…",
@@ -4850,6 +4907,17 @@
     "deliverablesCount": "成果物 ({count})",
     "contextPressure": "コンテキスト {pct}%",
     "contextPressureTitle": "コンテキストウィンドウ {used}k / {window}k トークン — 圧縮しきい値に接近",
+    "contextMeter": {
+      "tool": "ツール {k}k",
+      "windowApprox": "ウィンドウは推定値",
+      "aria": "コンテキスト使用量: {used}k / {window}k（{pct}%）、{tier}",
+      "tier": {
+        "normal": "正常",
+        "watch": "注意",
+        "advise": "高め",
+        "compact": "まもなく圧縮"
+      }
+    },
     "sessionDeliverables": "セッションの成果物",
     "noDeliverables": "成果物はまだありません。",
     "openArtifact": "{title}、{subtitle} を開く",
@@ -5305,6 +5373,16 @@
     "slashCommands": {
       "unknown": "不明なコマンド {command} です。編集を続けるか、// を使用してテキストとして送信してください。"
     },
+    "handoff": {
+      "commandDescription": "ワークスペース引き継ぎメモ（成果物リスト＋メモ）を書き出し、次のモデル/セッションがファイルを再送せずにワークスペースから引き継げるようにします",
+      "usage": "/handoff [引き継ぎ先へのメモ]",
+      "toastOk": "引き継ぎメモをワークスペースに書き込みました：{path}",
+      "toastFail": "引き継ぎメモの書き込みに失敗：{error}",
+      "noticeTitle": "ワークスペース引き継ぎメモが見つかりました",
+      "noticeUse": "入力欄に引用",
+      "noticeOpen": "エディタで開く",
+      "insertText": "まずワークスペースの引き継ぎメモ handoff/{file} を読み、その案内に従ってタスクを続けてください。完了済みの手順をやり直さず、成果物はワークスペースに落として台帳に登録してください。"
+    },
     "codingMode": {
       "enabled": "すべてのチャットで Coding mode を有効にしました。",
       "disabled": "Coding mode を無効にしました。",
@@ -5354,6 +5432,10 @@
       "modelRoutingOmniDesc": "単一のオーケストレーションエージェントが毎ターン最適なモデルを調整します。",
       "modelRoutingOmni": "オムニエージェント",
       "runModePanel": "実行モードとルーティング",
+      "approvalBypass": "承認確認",
+      "approvalBypassOn": "確認をスキップ",
+      "approvalBypassOff": "毎回確認",
+      "approvalBypassDesc": "オンにすると、このセッションの高リスクなツール呼び出しで確認カードが表示されません。モードの禁止リスト、Plan の読み取り専用、サンドボックス ポリシーは引き続き適用され、スキップはすべて監査イベントに記録されます。",
       "thinking": "ディープシンキング",
       "modeShort": {
         "safe": "セーフ",
@@ -5477,6 +5559,7 @@
       "failed": "失敗",
       "done": "完了",
       "pending": "保留中",
+      "unknown": "未確認",
       "results": "{count} 件の結果",
       "countRunning": "{count} 件実行中",
       "countDone": "{count} 件完了",
@@ -5518,6 +5601,7 @@
       "downloadFailedHttp": "ダウンロードに失敗しました — HTTP {status}",
       "downloadFailed": "ダウンロードに失敗しました",
       "forkFailed": "ブランチの作成に失敗しました",
+      "forkUnavailable": "会話の分岐には Python サイドカーが必要です（現在は純 Rust モード）。サイドカーを起動して再試行するか、「会話をコピー」をご利用ください。",
       "forkOpenFailed": "ブランチは作成されましたが、開けませんでした。セッション一覧から開けます。",
       "copyFailed": "コピーに失敗しました",
       "shareSaveFailed": "画像を保存できませんでした。もう一度お試しください。",
@@ -5554,6 +5638,7 @@
       "planningNextStep": "次のステップを計画中",
       "readingContext": "コンテキストを読み込み中",
       "waitingForModel": "モデルを待機中",
+      "waitingSerialHint": "{s}秒待機中 · Agent モードではモデル呼び出しが直列です。Bloom に切り替えると並列になります",
       "preparingOutput": "出力を準備中",
       "generatingCandidates": "候補を生成中",
       "synthesizingCandidates": "候補を統合中",
@@ -5809,7 +5894,12 @@
       "restartUnavailable": "この形態ではホストプロセスを再起動できません。デスクトップアプリから再試行するか、アプリを開き直してください。",
       "restartFailed": "ホストプロセスの再起動に失敗しました：{error}",
       "restarted": "ホストプロセスを再起動しました。再接続中…",
-      "alreadyRunning": "ホストプロセスは既に実行中です。状態を更新しています…"
+      "alreadyRunning": "ホストプロセスは既に実行中です。状態を更新しています…",
+      "bannerTitle": "Python 補助エンジンが起動していません。一部の診断は利用できません。",
+      "details": "詳細",
+      "hideDetails": "詳細を閉じる",
+      "dismiss": "閉じる",
+      "restart": "補助エンジンを再起動"
     },
     "errorActions": {
       "viewLogs": "ログを表示",
@@ -6040,6 +6130,13 @@
       "bulkDeleteFailed": "選択したセッションを削除できませんでした",
       "deleteSessionDone": "セッションを削除しました",
       "deleteSessionFailed": "セッションを削除できませんでした",
+      "resetConversation": "会話をクリア",
+      "resetSessionTitle": "会話をクリア",
+      "resetSessionBody": "セッション「{title}」の会話をクリアしますか？{count} 件のメッセージを削除します。セッション設定と生成されたファイルは保持されます。この操作は取り消せません。",
+      "resetSessionBodyNoCount": "セッション「{title}」の会話をクリアしますか？このセッションのメッセージを削除します。セッション設定と生成されたファイルは保持されます。この操作は取り消せません。",
+      "resetSessionConfirm": "クリア",
+      "resetSessionDone": "会話をクリアしました",
+      "resetSessionFailed": "会話をクリアできませんでした",
       "renameSessionDone": "セッション名を変更しました",
       "renameSessionFailed": "セッション名を変更できませんでした",
       "showMore": "さらに {count} 件を表示",
@@ -6356,6 +6453,15 @@
     "elapsed": "経過時間",
     "artifacts": {
       "empty": "成果物はまだありません。ファイルが作成されるとすぐにここに表示されます。"
+    },
+    "review": {
+    "pending": "要レビュー",
+    "approved": "承認済み",
+    "flagged": "差し戻し済み",
+    "approve": "承認",
+    "flag": "差し戻す",
+    "openArtifact": "成果物を開く",
+    "hint": "レビュー判定は手動で行われローカルに保存されます。現時点ではバックエンドのパイプラインは停止しません。"
     },
     "runStatus": {
       "idle": "待機",
@@ -6733,6 +6839,11 @@
     }
   },
   "engineHealth": {
+    "sidecarDegradedTitle": "サイドカーの機能低下",
+    "sidecarMissing": "不足している依存関係: {modules}",
+    "sidecarNumpyImpact": "ローカル ML ルーティングは無効です（default-tier にフォールバック）。チャットは利用できます",
+    "sidecarGenericImpact": "関連するゲートウェイ機能は縮退または利用不可になります",
+    "sidecarInterpreter": "インタープリター: {path}",
     "title": "エンジン健全性 · モデル · モード",
     "subtitle": "能力の可視化：能力健全性 / Rust モデルプロファイル / 重量ランタイム / ランタイムモード",
     "refresh": "更新",
@@ -7112,6 +7223,9 @@
       "refresh": "更新",
       "toolCalls": "回のツール呼び出し",
       "lastActivity": "最終アクティビティ",
+      "viewGrid": "グリッド表示",
+      "viewKanban": "看板表示",
+      "colEmpty": "メンバーなし",
       "status": {
         "running": "実行中",
         "waiting": "待機中",
@@ -7128,7 +7242,7 @@
       "coverageSkipped": "スキップ {count}",
       "coverageMerged": "統合 {count}",
       "coveragePlugins": "プラグイン参照 {refs}（解決 {resolved}、未解決 {unresolved}）",
-      "coverageUnavailable": "スキルカバレッジを取得できません",
+      "coverageUnavailable": "統計を取得できません",
       "tabSkills": "スキル",
       "tabTools": "ツールと MCP",
       "tabProposals": "提案",

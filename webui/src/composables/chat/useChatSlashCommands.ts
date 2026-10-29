@@ -5,6 +5,7 @@ import type { HiddenControlDispatchResult } from '@/types/chat'
 import type { MetaSetupReadiness } from '@/types/metaSetup'
 import type { MetaLaunchDraftPayload } from '@/types/rpc'
 import { createClientRequestId } from '@/utils/chat/messageIdentity'
+import { composeHandoffMarkdown } from '@/utils/chat/handoff'
 import {
   waitForSessionRpcConnection,
 } from '@/composables/chat/sessionBootstrapAdmission'
@@ -419,15 +420,29 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
         && (options.planModeAvailable?.() ?? true)
         && !slashCmds.value.some(command => slashCommandKeys(command).includes('/plan'))
       ) {
-        slashCmds.value.push({
-          name: '/plan',
-          cmd: '/plan',
-          label: '/plan',
-          desc: i18n.global.t('chat.planMode.commandDescription'),
-          aliases: [],
-          execution: { action: 'plans.setMode' },
-        })
-      }
+      slashCmds.value.push({
+        name: '/plan',
+        cmd: '/plan',
+        label: '/plan',
+        desc: i18n.global.t('chat.planMode.commandDescription'),
+        aliases: [],
+        execution: { action: 'plans.setMode' },
+      })
+    }
+    // 工作区交接单（docs/plans/2026-10-27-final-remediation-plan.md A1）：会话
+    // 只做调度，产物与交接上下文落盘共享。前端兜底注册，网关 catalog 有同名
+    // 命令时以 catalog 为准。
+    if (!slashCmds.value.some(command => slashCommandKeys(command).includes('/handoff'))) {
+      slashCmds.value.push({
+        name: '/handoff',
+        cmd: '/handoff',
+        label: '/handoff',
+        desc: i18n.global.t('chat.handoff.commandDescription'),
+        aliases: [],
+        usage: i18n.global.t('chat.handoff.usage'),
+        execution: { action: 'handoff.write' },
+      })
+    }
       slashCatalogLoaded.value = true
       if (options.inputText.value.startsWith('/') && !options.inputText.value.startsWith('//')) {
         handleSlashInput()
@@ -624,6 +639,56 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
           })
           .catch((err: unknown) => console.warn('Reset failed:', err instanceof Error ? err.message : String(err)))
         break
+      case 'handoff.write':
+      case '/handoff': {
+        // 工作区交接单：产物清单 + 交接说明落盘为 handoff/<时间戳>.md，并登记
+        // 产物台账。接手方（任何模型/会话/角色）直接读工作区承接，不经对话传
+        // 文件；人保决策权——"交接说明"来自用户输入，AI 不代写审核结论。
+        const handoffKey = options.sessionKey.value
+        const handoffNote = args.trim()
+        const run = async (): Promise<void> => {
+          try {
+            const listed = await options.rpc.call<{ artifacts?: Array<Record<string, unknown>> }>(
+              'artifacts.list',
+              { sessionKey: handoffKey, limit: 50 },
+            )
+            const artifacts = Array.isArray(listed?.artifacts) ? listed.artifacts : []
+            const md = composeHandoffMarkdown(
+              handoffKey,
+              handoffNote,
+              artifacts as Array<{ path?: string; kind?: string; mime?: string }>,
+              new Date().toISOString(),
+            )
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            const relPath = `handoff/${stamp}.md`
+            const written = await options.rpc.call<{ ok?: boolean; path?: string; error?: string }>(
+              'workspace.file.write',
+              { path: relPath, content: md },
+            )
+            if (!written?.ok) {
+              options.notify(i18n.global.t('chat.handoff.toastFail', { error: written?.error || 'unknown' }))
+              return
+            }
+            // 登记进产物台账（尽力而为）：登记失败不影响交接单已落盘。
+            if (written.path) {
+              try {
+                await options.rpc.call('artifacts.register', {
+                  session_key: handoffKey,
+                  path: written.path,
+                  kind: 'handoff',
+                })
+              } catch { /* 台账登记失败仅跳过 */ }
+            }
+            options.notify(i18n.global.t('chat.handoff.toastOk', { path: relPath }))
+          } catch (err: unknown) {
+            options.notify(i18n.global.t('chat.handoff.toastFail', {
+              error: err instanceof Error ? err.message : String(err),
+            }))
+          }
+        }
+        void run()
+        break
+      }
       case 'compact_context':
       case 'sessions.contextCompact':
       case '/compact': {

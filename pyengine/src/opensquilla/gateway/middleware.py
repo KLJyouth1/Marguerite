@@ -263,9 +263,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)  # type: ignore[no-any-return]
 
     def _get_client_ip(self, request: Request) -> str:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
+        # 限流键必须来自传输层，不能来自调用方随手编的头。无条件采信
+        # `X-Forwarded-For` 等于把桶的钥匙交出去：每次换个值就是一个新桶，
+        # 限流变成摆设。只有 trusted-proxy 模式才存在「值得相信的代理」，
+        # 与 origin guard 同一口径 —— 代理元数据不能替浏览器可控的标识背书。
+        if self._config.auth.mode == "trusted-proxy":
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
         if request.client:
             return request.client.host
         return "unknown"

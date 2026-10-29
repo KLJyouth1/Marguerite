@@ -15,9 +15,10 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::{json, Value};
 
 use crate::context::session::SessionContext;
+use crate::memory::lexical::{content_words, shared_content_words};
 use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::{KbBackedMemory, MemoryBackend, MemoryCategory};
-use crate::memory::short_term::ShortTermMemory;
+use crate::memory::short_term::{max_sessions_from_config, ShortTermMemory};
 use crate::persistence::config::Config;
 
 fn memory_dir() -> PathBuf {
@@ -33,7 +34,8 @@ fn memory_dir() -> PathBuf {
 fn short_term() -> &'static Mutex<ShortTermMemory> {
     static ST: OnceLock<Mutex<ShortTermMemory>> = OnceLock::new();
     ST.get_or_init(|| {
-        let mut m = ShortTermMemory::new(&Config::data_dir().join("marguerite_short_term.db"));
+        let mut m = ShortTermMemory::new(&Config::data_dir().join("marguerite_short_term.db"))
+            .with_max_sessions(max_sessions_from_config());
         let _ = m.init();
         Mutex::new(m)
     })
@@ -68,16 +70,13 @@ fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 fn read_sensory_context(session_key: &str) -> Option<SessionContext> {
-    let path = Config::data_dir()
-        .join("context")
-        .join(format!("{session_key}.json"));
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<SessionContext>(&raw).ok()
+    // 文件名编码统一由台账模块负责（键含 `:` 时旧口径 `{key}.json` 对不上盘上文件）。
+    crate::context::session::read_session_context(session_key)
 }
 
 /// context 台账目录下的会话文件数（sensory 层的「会话数」统计）。
 fn context_file_count() -> usize {
-    let dir = Config::data_dir().join("context");
+    let dir = crate::context::session::context_dir();
     match std::fs::read_dir(&dir) {
         Ok(rd) => rd
             .flatten()
@@ -87,7 +86,18 @@ fn context_file_count() -> usize {
     }
 }
 
-/// `memory.sensory.search`：感知记忆检索（读当前会话上下文，子串匹配）。
+/// `memory.sensory.search` 的相关性判据：查询与条目的**实词重合数**（0 = 不相关）。
+///
+/// 抽成纯函数是为了让离线回归（`memory::recall_probe`）能直接对夹具求测 ——
+/// 感知层的数据在盘上会话台账里，伪造一份台账来做测量既慢又脆。
+///
+/// ⚠️ 这里从来不该是「整条查询当子串」。实测 15 族 60 条查询命中率 **0.0%**：
+/// 真实提问几乎不可能逐字复现台账里的原句，于是这一层看起来"接上了"其实永远返回空。
+pub(crate) fn sensory_overlap(query: &str, text: &str) -> usize {
+    shared_content_words(&content_words(query), &content_words(text))
+}
+
+/// `memory.sensory.search`：感知记忆检索（读当前会话上下文，按实词重合排序）。
 pub fn sensory_search(params: &Value) -> Value {
     let session_key = params
         .get("sessionKey")
@@ -101,13 +111,20 @@ pub fn sensory_search(params: &Value) -> Value {
     let Some(ctx) = read_sensory_context(session_key) else {
         return json!({ "items": [] });
     };
-    let q = query.to_lowercase();
-    let items: Vec<Value> = ctx
+    // 重合数 > 0 才可能相关；同分时**台账靠后的（更新的）在前** —— 感官层的定义
+    // 就是「最近说过的话」，让旧条目抢位会把它做成一个过期的全文搜索。
+    let mut scored: Vec<(usize, usize, &crate::context::session::ContextEntry)> = ctx
         .entries
         .iter()
-        .filter(|e| e.text.to_lowercase().contains(&q))
+        .enumerate()
+        .map(|(pos, e)| (sensory_overlap(query, &e.text), pos, e))
+        .filter(|(overlap, _, _)| *overlap > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let items: Vec<Value> = scored
+        .into_iter()
         .take(limit.max(1))
-        .map(|e| json!({ "text": truncate_chars(&e.text, 400) }))
+        .map(|(overlap, _, e)| json!({ "text": truncate_chars(&e.text, 400), "overlap": overlap }))
         .collect();
     json!({ "items": items, "total": ctx.entries.len() })
 }
@@ -235,7 +252,9 @@ pub fn synapse_status(_params: &Value) -> Value {
 /// 2. **计数**：三层条目数 + flyhash 索引条目数；
 /// 3. **健全性**：`indexConsistent` = 索引条目数 == 长时池条目数
 ///    （两者只由 `insert`/`promote`/`trim_pool` 同时改动，不等即漏建/漏删）；
-/// 4. **参数**：每层容量上限、门控阈值、FLY_DIM/WTA_ROUNDS（决定粗排分辨率）。
+/// 4. **参数**：每层容量上限、弱证据标注线、截断规则 `(保留比例, 零重合可否单独成立)`、
+///    FLY_DIM/WTA_ROUNDS（`memory.tiered_enabled` 打开后，flyhash 只作索引健全性观测与
+///    写入侧聚类，**不参与打分**，见 `tiered` 模块头）。
 ///
 /// 隐私红线：**只返回计数与参数**，不含任何记忆正文。
 pub fn tiered_status(_params: &Value) -> Value {
@@ -244,7 +263,8 @@ pub fn tiered_status(_params: &Value) -> Value {
         Err(_) => false,
     };
     let (sensory, short, long, fly) = crate::memory::inject::tier_counts();
-    let (max_per_tier, sim_threshold) = crate::memory::inject::tier_limits();
+    let (max_per_tier, weak_evidence) = crate::memory::inject::tier_limits();
+    let (cutoff_ratio, semantic_alone) = crate::memory::inject::tier_cutoff_rule();
     json!({
         "ok": true,
         "enabled": enabled,
@@ -260,9 +280,16 @@ pub fn tiered_status(_params: &Value) -> Value {
             "wtaRounds": crate::memory::flyhash::WTA_ROUNDS,
             // 索引与长时池必须一一对应；不相等就是漏建/漏删（trim/promote 是唯一改动点）
             "indexConsistent": fly == long,
+            // 诚实上报：检索打分已不含 flyhash（实测 6/6 档全量兜底触发、候选覆盖 0–89%）
+            "usedForScoring": false,
         },
         "maxPerTier": max_per_tier,
-        "simThreshold": sim_threshold,
+        "simThreshold": weak_evidence,
+        "weakEvidence": weak_evidence,
+        "cutoffRatio": cutoff_ratio,
+        // 「共享 0 个实词的候选能不能只靠余弦进上下文」——默认后端为 false，
+        // 实测依据见 memory::scoring 模块头与 memory::recall_probe 的常驻测量。
+        "semanticAloneAllowed": semantic_alone,
     })
 }
 

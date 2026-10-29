@@ -19,8 +19,9 @@
 
 <div class="scrollbar" aria-hidden="true"><span data-scrollbar></span></div>
 
+<!-- 发版时硬编码版本号：下次发版把下面两处 0.2.18 改成新版本号，changelog section 同步追加。 -->
 <div class="notice" data-notice>
-  <p class="notice__text"><span class="notice__tag">0.2.17</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
+  <p class="notice__text"><span class="notice__tag">0.2.18</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
   <button class="notice__close" type="button" data-notice-close aria-label="关闭公告">
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6 18 18M18 6 6 18"/></svg>
   </button>
@@ -47,6 +48,7 @@
       <a href="#compare">差异</a>
       <a href="#trust">承诺</a>
       <a href="#faq">常见问题</a>
+      <a href="#changelog">更新日志</a>
       <a href="#download">下载</a>
     </nav>
     <button class="sound" id="soundToggle" type="button" aria-pressed="false" aria-label="开启背景音乐 focus-pulse">
@@ -70,6 +72,7 @@
     <a href="#compare">差异</a>
     <a href="#trust">承诺</a>
     <a href="#faq">常见问题</a>
+    <a href="#changelog">更新日志</a>
     <a href="#download">下载</a>
   </nav>
 </header>
@@ -79,7 +82,7 @@
   <!-- ================= HERO ================= -->
   <section class="hero" aria-labelledby="heroTitle">
     <div class="hero__inner">
-      <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.17"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.17">本地优先 · 桌面 AI Agent 工作台 · 0.2.17</span><span class="hero__cmd-caret"></span></span></p>
+      <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.18"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.18">本地优先 · 桌面 AI Agent 工作台 · 0.2.18</span><span class="hero__cmd-caret"></span></span></p>
 
       <h1 class="hero__title" id="heroTitle">
         <span class="ln"><span class="ln__in">让思考</span></span>
@@ -160,7 +163,7 @@
             <div class="hook__mark">
               <img src="assets/brand/logo-mark.svg" alt="" width="76" height="76" loading="lazy" decoding="async">
             </div>
-            <p class="act__eyebrow">MARGUERITE · 0.2.17</p>
+            <p class="act__eyebrow">MARGUERITE · 0.2.18</p>
             <h3 class="act__big">A DESK THAT<br>THINKS WITH YOU</h3>
             <p class="act__sub">本地优先的桌面 Agent 工作台</p>
           </div>
@@ -966,8 +969,8 @@ webui/e2e/approval-card.spec.ts</pre>
         <article class="trust__card reveal-up">
           <p class="trust__k">03 · 可复核</p>
           <h3 class="trust__t">每个数字都对应一条命令</h3>
-          <p class="trust__d">版本号 13 处同步、安装包 SHA256、25 项发版门禁——下面证据区的每个数字，都能在仓库里跑同一条命令复核。</p>
-          <p class="trust__how">验证：<code>bash scripts/verify.sh --clean --all</code>，全绿才算数。</p>
+          <p class="trust__d">版本号 13 处同步、安装包 SHA256、26 项发版门禁——下面证据区的每个数字，都能在仓库里跑同一条命令复核。</p>
+          <p class="trust__how">验证：<code>bash scripts/verify.sh --clean --all</code>，全绿才算数；<br>本页 23 个代码台账数字另有 <code>python scripts/check-website-claims.py</code> 逐条重测，漂一处就红；本地模型那一节的数字对的是 v0.17-C 发布物与模型仓库 README，不在这份台账里。</p>
         </article>
       </div>
     </div>
@@ -1180,9 +1183,9 @@ webui/e2e/approval-card.spec.ts</pre>
       </div>
 
       <div class="ledger reveal-up">
-        <div class="ledger__i"><b class="ledger__n">276,649<em> 行</em></b><span class="ledger__l">Rust · 559 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">339,170<em> 行</em></b><span class="ledger__l">前端 · 1,221 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">463,508<em> 行</em></b><span class="ledger__l">Python · 1,015 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">284,069<em> 行</em></b><span class="ledger__l">Rust · 570 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">341,111<em> 行</em></b><span class="ledger__l">前端 · 1,231 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">463,684<em> 行</em></b><span class="ledger__l">Python · 1,016 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
         <div class="ledger__i"><b class="ledger__n">31<em> 个</em></b><span class="ledger__l">工具模块</span></div>
         <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
@@ -1194,7 +1197,8 @@ webui/e2e/approval-card.spec.ts</pre>
       </blockquote>
 
       <p class="story__meta reveal-up">
-        数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-28）；三年、3 万美元、就医与作息为作者自述；
+        数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-29），只数<strong>随仓库发布</strong>的那一份（被 <code>.gitignore</code> 的目录不计）；
+        这些数字由 <code>python scripts/check-website-claims.py</code> 逐条重跑对账，漂一处就红。三年、3 万美元、就医与作息为作者自述；
         token 数为按混合单价反推的估算，不是账单。故事板块不写没发生过的事。
       </p>
     </div>
@@ -1233,7 +1237,7 @@ webui/e2e/approval-card.spec.ts</pre>
           <div class="lm__row"><span class="lm__k">TUNING</span><span class="lm__v">4-bit QLoRA · r=16 / α=32 · 可训练 <b>4,358,144</b>（0.2815%）</span></div>
           <div class="lm__row"><span class="lm__k">DATA</span><span class="lm__v">15 个任务族 · <b>4,327</b> 训练 + 227 验证 · 2 epochs · seed 20261017</span></div>
           <div class="lm__row"><span class="lm__k">TRAIN</span><span class="lm__v">1,082 步 · 1h47m37s · loss <b>0.0424</b></span></div>
-          <div class="lm__row"><span class="lm__k">SIZE</span><span class="lm__v">q4_K_M <b>940.4 MiB</b> · 适配器 16.7 MB · f16 分两卷</span></div>
+          <div class="lm__row"><span class="lm__k">SIZE</span><span class="lm__v">q4_K_M <b>940.4 MiB</b> · 适配器 16.7 MiB · f16 分两卷</span></div>
           <div class="lm__row"><span class="lm__k">EVAL</span><span class="lm__v">宏平均 <b>0.3936</b>（未微调基座 0.3060）· 字母合规率 1.0000</span></div>
         </aside>
       </div>
@@ -1265,7 +1269,7 @@ webui/e2e/approval-card.spec.ts</pre>
           <a class="lm__dlc" href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/download/v0.17-C/KLJyouth-office-V0.17-C-adapter.safetensors" rel="noopener">
             <span class="lm__dlk">最轻量</span>
             <b>LoRA 适配器</b>
-            <span class="lm__dls">16.7 MB</span>
+            <span class="lm__dls">16.7 MiB</span>
             <span class="lm__dln">配公开基座自己合并，适合复现与二次训练</span>
           </a>
           <a class="lm__dlc" href="https://github.com/KLJyouth1/KLJyouth-office-Modle/releases/tag/v0.17-C" rel="noopener">
@@ -1322,24 +1326,24 @@ ollama run  KLJyouth-office-V0.17-C
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4230">4230</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4898">4898</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="25">25</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4341">4341</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="4927">4927</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up"><b class="stat__n"><span data-count="26">26</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
         <div class="stat reveal-up"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
       </div>
 
       <div class="gate reveal-up">
         <div class="term term--gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4230 passed / 0 failed</p>
-          <p class="term__line term__ok">[PASS] webui tests · 4898 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4259 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 4902 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
           <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
           <p class="term__line term__ok">================ 25/25 全绿 · exit 0 ================</p>
         </div>
         <p class="gate__note">
-          基线为 0.2.17 安装包打包复测（2026-10-27）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+          基线为 2026-10-29 的全量闸门复测（<code>verify.sh --clean --all</code>，25/25 全绿、exit 0、汇总里没有 [SKIP]）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
           源码树在发布之后持续演进（以上游仓库实际提交为准），收口口径始终是同一句话：<code>verify.sh</code> 全绿才算数。
         </p>
       </div>
@@ -1389,6 +1393,82 @@ ollama run  KLJyouth-office-V0.17-C
         <details class="faq__item reveal-up">
           <summary>可以自己从源码构建吗？<span class="faq__mark" aria-hidden="true"></span></summary>
           <div class="faq__body"><p>仓库还没对外开放构建。内核是 Rust（<code>cargo build --release -p marguerite-core</code>），桌面壳在仓库的 <code>gui/</code> 目录下，与内核共用同一个引擎；开放之后这条就是标准流程，现在先留个位置。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CHANGELOG ================= -->
+  <section class="band" id="changelog" aria-labelledby="changelogTitle">
+    <div class="wrap">
+      <div class="cta">
+        <h2 class="cta__title reveal-up" id="changelogTitle">更新日志</h2>
+        <p class="cta__dek reveal-up">每次发版写了什么，按版本列。不堆形容词，只记改动。</p>
+      </div>
+
+      <div class="chg">
+        <!-- 当前版本 -->
+        <article class="chg__current reveal-up">
+          <p class="chg__k">当前版本</p>
+          <h3 class="chg__ver" data-current-version>0.2.18</h3>
+          <p class="chg__date">2026-10-29</p>
+          <ul class="chg__notes">
+            <li><b>上下文层 M1 落地</b>：压力芯片在<b>纯 Rust 部署</b>（没装 Python 侧车）下也能亮起来；60/75/85 三档压力阶梯；工具输出进上下文前<b>中间截断</b>（保头 20k + 尾 4k 字符），被砍掉的原文按指纹落盘，模型可用 <code>tool_output_retrieve</code> 逐字节取回。</li>
+            <li>压缩后会生成一份<b>结构化交接状态</b>（分支/提交/脏文件/测试结论），导不出的字段如实写「未知 + 原因」，不拿 0 或空值冒充答案。</li>
+            <li>输入框上方新增<b>上下文用量表</b>：已用 / 窗口 / 百分比 / 工具占比 / 压力档位；拿不到窗口时整块不显示，不编一个百分比。</li>
+            <li>桌面端：<b>关窗不再退出</b>——窗口收进托盘，正在跑的任务继续（托盘菜单才是真退出）；首次关窗会弹一次说明，不至于让人以为「关不掉」。</li>
+            <li>桌面端：Ollama 探测加了 6 秒上限（不再无限转圈）；长等待时明确告诉你「模型调用是串行的、切 Bloom 可并行」；缓存命中率改名为「服务商缓存命中」，与智能中枢的本地三层缓存不再被误读成同一个数。</li>
+            <li>桌面端：侧车启动前做<b>依赖预检</b>，缺 numpy 时在「引擎健康」页直接写清「本地 ML 路由已停用、聊天仍可用」，而不是日志刷 22 条而界面一片正常。</li>
+            <li>启动动画改为 <b>6–30 秒随机</b>（品牌素材展示优先，这是有意为之）。</li>
+            <li>会话分支在纯 Rust 模式下给出可行动提示，不再抛 RPC 裸错。</li>
+          </ul>
+          <div class="chg__actions">
+            <a class="btn btn--solid"
+               href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
+               rel="noopener">
+              下载最新版
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+            </a>
+            <a class="btn btn--ghost"
+               href="https://github.com/KLJyouth1/Marguerite-Releases/releases"
+               target="_blank" rel="noopener noreferrer">
+              查看全部发布历史
+            </a>
+          </div>
+        </article>
+
+        <!-- 历史版本折叠 -->
+        <details class="chg__history reveal-up">
+          <summary>更早版本</summary>
+          <div class="chg__history-body">
+            <article class="chg__item">
+              <h4 class="chg__ver chg__ver--sm">0.2.17</h4>
+              <p class="chg__date">2026-10-22</p>
+              <ul class="chg__notes">
+                <li>修了终端首屏在 Windows ConPTY 下偶发的 <code>□[6n</code> 乱码——光栅状态序列被当成数据吐到了 UI。</li>
+                <li>Python 侧车 migration 在首次启动失败时不再导致概览页空白：错误被捕获并回退到只读模式，侧车日志入口可用。</li>
+                <li>双会话并行时指标计数器串台的问题：EngineRunner 的 Arc 引用计数在第二个会话 spawn 时被误共享，已改为每会话独立实例。</li>
+                <li>桌面壳新增 tauri-plugin-updater：启动后自动检查新版本，下载进度条 + 重启引导，不再靠手动去 Releases 页面下。</li>
+                <li>官网加了这个更新日志板块，以后每次发版直接在下面追加。</li>
+              </ul>
+            </article>
+            <article class="chg__item">
+              <h4 class="chg__ver chg__ver--sm">0.2.16</h4>
+              <p class="chg__date">2026-10-22</p>
+              <ul class="chg__notes">
+                <li>修了托盘菜单在 Windows 11 上点击后不消失的问题。</li>
+                <li>幻觉护栏对 Python 代码的 tree-sitter 解析加了超时保护，避免超长文件卡死。</li>
+              </ul>
+            </article>
+            <article class="chg__item">
+              <h4 class="chg__ver chg__ver--sm">0.2.15</h4>
+              <p class="chg__date">2026-10-15</p>
+              <ul class="chg__notes">
+                <li>WebUI 控制台从 opensquilla-webui 全量迁入并品牌化为 Marguerite。</li>
+                <li>egui 桌面入口删除，前端统一由 webui/ Vue3 控制台承担。</li>
+              </ul>
+            </article>
+          </div>
         </details>
       </div>
     </div>
@@ -1649,7 +1729,7 @@ ollama run  KLJyouth-office-V0.17-C
     <div class="foot__col">
       <h2 class="foot__h">运行信息</h2>
       <ul class="foot__plain">
-        <li>版本 <code>0.2.17</code></li>
+        <li>版本 <code>0.2.18</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
         <li>RPC 方法 451 条 · 内置工具 74 个</li>
@@ -1664,7 +1744,7 @@ ollama run  KLJyouth-office-V0.17-C
 <!-- 窄屏常驻下载条：过了首屏才出现，到下载区自动收起 -->
 <div class="dock" data-dock>
   <div class="dock__meta">
-    <b>Marguerite 0.2.17</b>
+    <b>Marguerite 0.2.18</b>
     <span>Windows x64 · 约 411 MB</span>
   </div>
   <a class="btn btn--solid"
@@ -1678,5 +1758,18 @@ ollama run  KLJyouth-office-V0.17-C
 <script src="main.js" defer></script>
 <script src="beat-map.js" defer></script>
 <script src="cine.js" defer></script>
+<script>
+// 拉 GitHub 最新 release 版本号，更新 changelog 标题。API 失败就保留硬编码 0.2.18。
+(function(){
+  var el=document.querySelector('[data-current-version]');
+  if(!el)return;
+  fetch('https://api.github.com/repos/KLJyouth1/Marguerite-Releases/releases/latest')
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){
+      if(d&&d.tag_name){el.textContent=d.tag_name.replace(/^v/,'');}
+    })
+    .catch(function(){});
+})();
+</script>
 </body>
 </html>

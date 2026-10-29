@@ -19,7 +19,9 @@ const platform = getPlatform()
 const isDesktop = platform.id === 'desktop'
 
 const DISMISS_KEY = 'Marguerite-update-dismissed'
-const RELEASES_FALLBACK = 'https://github.com/Marguerite/Marguerite/releases'
+// 真实发布仓是 KLJyouth1/Marguerite-Releases（官网与下载器同一口径），
+// 此前的 Marguerite/Marguerite 是占位名，点击直接 404。
+const RELEASES_FALLBACK = 'https://github.com/KLJyouth1/Marguerite-Releases/releases/latest'
 const UPDATE_STATUS_URL = '/api/system/update'
 const POLL_INTERVAL_MS = 15 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 5 * 1000

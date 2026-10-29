@@ -13,6 +13,7 @@ environment-backed credentials, the environment-variable *name*.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -69,6 +70,26 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+# 每个 (provider, reason) 只记一次 debug：就绪/状态面板按请求轮询解析器，
+# 逐次打点在 DEBUG 级别下会刷出成百上千条同一行（真机日志里
+# openrouter / missing_credential 的「爆发」就是这么来的），把有用事件挤出视窗。
+_LOGGED_UNREADY: set[tuple[str, str]] = set()
+_LOGGED_UNREADY_LOCK = threading.Lock()
+_UNREADY_LOG_LIMIT = 64
+
+
+def _log_unready_once(provider: str, reason: str) -> None:
+    key = (provider, reason)
+    with _LOGGED_UNREADY_LOCK:
+        if key in _LOGGED_UNREADY:
+            return
+        # 有界：清理后允许重新记录，避免长期进程里集合无上限增长。
+        if len(_LOGGED_UNREADY) >= _UNREADY_LOG_LIMIT:
+            _LOGGED_UNREADY.clear()
+        _LOGGED_UNREADY.add(key)
+    log.debug("provider_deployment.unresolved", provider=provider, reason=reason)
+
+
 def _unready(
     provider: str,
     model: str,
@@ -83,7 +104,7 @@ def _unready(
     # Readiness/status surfaces call this resolver frequently; execution
     # boundaries add their own contextual warnings when they act on a failed
     # resolution, so the pure resolver remains quiet at normal log levels.
-    log.debug("provider_deployment.unresolved", provider=provider, reason=reason)
+    _log_unready_once(provider, reason)
     return ProviderDeploymentResolution(
         provider=provider,
         model=model,

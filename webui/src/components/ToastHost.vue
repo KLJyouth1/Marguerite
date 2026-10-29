@@ -37,9 +37,11 @@ const { toasts, dismissToast } = useToasts()
 
 <style scoped>
 .toast-host {
+  /* 右上角通知栈：右下角是桌宠（Viky）与底部状态栏的地盘，通知放那里必然遮挡
+     （视觉审计 18/18 截图）。top 64px 让开 36px 高的顶栏（inset 12px）+ 间距。 */
   position: fixed;
   right: var(--sp-4);
-  bottom: var(--sp-4);
+  top: 64px;
   z-index: 1001; /* Layer: view-toast */
   display: flex;
   flex-direction: column;
@@ -152,7 +154,7 @@ const { toasts, dismissToast } = useToasts()
 
 .toast-stack-enter-from {
   opacity: 0;
-  transform: translateY(8px) scale(0.97);
+  transform: translateY(-8px) scale(0.97);
 }
 
 .toast-stack-leave-to {

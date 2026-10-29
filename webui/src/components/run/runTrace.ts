@@ -84,6 +84,8 @@ export function nodeStepsFromHistoryMessage(msg: ChatHistoryMessage): NodeStep[]
     input: string
     output: string
     isError: boolean
+    /** 网关落盘的权威成败信号（`tool_ok`）。缺省 = 未知（旧数据 / 回合中断）。 */
+    okTrue: boolean
   }
   const byId = new Map<string, Pending>()
   const order: string[] = []
@@ -93,7 +95,9 @@ export function nodeStepsFromHistoryMessage(msg: ChatHistoryMessage): NodeStep[]
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
     const record = entry as Record<string, unknown>
     const type = String(record.type || '')
-    if (type && type !== 'tool_use' && type !== 'tool_result') continue
+    // `tool_call` 是 Rust 网关持久化行的形状（一个条目同时带 input 与 result）；
+    // 只认 tool_use/tool_result 会把刷新后的整段工具历史读丢。
+    if (type && type !== 'tool_use' && type !== 'tool_result' && type !== 'tool_call') continue
 
     const id = String(record.tool_use_id || record.toolId || record.id || '') || `anon-${anonymous++}`
     const input = normalizeToolInputText(record)
@@ -102,14 +106,17 @@ export function nodeStepsFromHistoryMessage(msg: ChatHistoryMessage): NodeStep[]
     const executionStatus = String(
       ((record.execution_status as Record<string, unknown> | undefined)?.status) ?? '',
     )
+    const okFlag = typeof record.ok === 'boolean' ? record.ok : undefined
     const isError = !!(
       record.is_error || record.isError || record.error
+      || okFlag === false
       || ['error', 'timeout', 'cancelled'].includes(executionStatus)
     )
+    const okTrue = okFlag === true || executionStatus === 'success'
 
     let pending = byId.get(id)
     if (!pending) {
-      pending = { id, name: '', input: '', output: '', isError: false }
+      pending = { id, name: '', input: '', output: '', isError: false, okTrue: false }
       byId.set(id, pending)
       order.push(id)
     }
@@ -118,6 +125,7 @@ export function nodeStepsFromHistoryMessage(msg: ChatHistoryMessage): NodeStep[]
     if (input) pending.input = input
     if (output) pending.output = output
     if (isError) pending.isError = true
+    if (okTrue) pending.okTrue = true
   }
 
   const steps: NodeStep[] = []
@@ -128,9 +136,11 @@ export function nodeStepsFromHistoryMessage(msg: ChatHistoryMessage): NodeStep[]
     if (!name || isInternalToolName(name)) continue
     const output = pending.output
     const isError = pending.isError
+    // 成败优先用落盘信号：空输出的成功（如静默写入）曾经只能按「没有输出」
+    // 推断成未完成；有 ok 就照实呈现，没有就保持未知而不是猜成功。
     const status: '' | 'success' | 'error' = isError
       ? 'error'
-      : (output ? 'success' : '')
+      : (pending.okTrue || output ? 'success' : '')
     steps.push({
       id: pending.id,
       parentId: null,

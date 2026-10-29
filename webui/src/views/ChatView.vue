@@ -135,6 +135,13 @@
               @pick="applyLandingSuggestion"
             />
           </div>
+          <!-- A2 承接提示：工作区有交接单时，新会话落地页给出一键承接入口。
+               人保决策权——"引用"只是把承接指令填入输入框，发送与否由人决定。 -->
+          <HandoffNoticeCard
+            :base-path="activeWorkspace?.path || ''"
+            @use="applyHandoffNotice"
+            @open="openHandoffInEditor"
+          />
         </template>
         <ChatSessionRecoveryStatus
           v-if="!forkTransition && visibleHistoryRecoveryState"
@@ -338,6 +345,7 @@
                 :seconds="streamTurnElapsedSeconds"
                 :suspended="stallSuspendReason !== null"
                 :suspend-label="waitSuspendLabel"
+                :hint="waitingSerialHintText"
               />
               <!-- Reasoning remains available as a flat, secondary disclosure,
                    rendered by the same part component settled turns use so the
@@ -635,6 +643,7 @@
       :run-mode-lock-message="t('chat.composer.runModeLocked')"
       :model-routing-mode="modelRoutingMode"
       :model-routing-settings-busy="modelRoutingSettingsBusy"
+      :context-status="contextStatus"
       :effort="composerEffort"
       :effort-wire-hint="effortWireHint"
       :orchestration="orchestration"
@@ -658,6 +667,7 @@
       :plan-mode-busy="planModeBusy"
       :plan-mode-disabled="planActionPending !== null"
       :plan-mode-applies-next-turn="planModeAppliesNextTurn"
+      :approval-bypass="approvalBypassActive"
       :replan-active="replanActive"
       :prompt-cache-keepalive-available="promptCacheKeepaliveAvailable"
       :prompt-cache-keepalive-session-ready="promptCacheKeepaliveSessionReady"
@@ -680,6 +690,7 @@
       @update-orchestration="applyOrchestrationPatch"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
+      @set-approval-bypass="setApprovalBypass"
       @cancel-replan="cancelPlanRevision"
       @voice-input="onVoiceInput"
       @voice-setup="onVoiceSetup"
@@ -894,6 +905,7 @@ import ChatStallNotice from '@/components/chat/ChatStallNotice.vue'
 import ClarifyCard from '@/components/chat/ClarifyCard.vue'
 import ConversationMinimap from '@/components/chat/ConversationMinimap.vue'
 import EmptyStateChips from '@/components/chat/EmptyStateChips.vue'
+import HandoffNoticeCard from '@/components/chat/HandoffNoticeCard.vue'
 import LandingHero from '@/components/chat/LandingHero.vue'
 import ChatModelPicker from '@/components/chat/ChatModelPicker.vue'
 import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
@@ -919,7 +931,7 @@ import { useChatAttachments } from '@/composables/chat/useChatAttachments'
 import { useChatCompaction } from '@/composables/chat/useChatCompaction'
 import { useChatComposerShortcuts } from '@/composables/chat/useChatComposerShortcuts'
 import { useChatDraftPersistence } from '@/composables/chat/useChatDraftPersistence'
-import { useChatElevatedMode } from '@/composables/chat/useChatElevatedMode'
+import { useChatElevatedMode, isApprovalBypassMode } from '@/composables/chat/useChatElevatedMode'
 import { useChatFeatureToggles } from '@/composables/chat/useChatFeatureToggles'
 import { useChatHistory } from '@/composables/chat/useChatHistory'
 import { useChatMarkdownExport } from '@/composables/chat/useChatMarkdownExport'
@@ -1093,6 +1105,8 @@ import {
   isCurrentSessionPayload as payloadIsCurrentSession,
 } from '@/utils/chat/streamEvents'
 import { copyTextWithFallback, shareCopyImageSupported } from '@/utils/browser'
+import { waitingSerialHint } from '@/utils/chat/waitingHint'
+import { localSessionResetDetail, LOCAL_SESSION_RESET_EVENT } from '@/utils/sessionSync'
 import { useCopyFeedback } from '@/composables/chat/useCopyFeedback'
 import { recordSessionNavigationDiag } from '@/utils/chat/sessionNavigationDiag'
 import {
@@ -1384,10 +1398,21 @@ const chatElevatedMode = useChatElevatedMode({
 useChatDraftPersistence({ sessionKey, inputText })
 const {
   elevatedMode,
+  effectiveElevatedMode,
   loadElevatedMode,
+  setElevatedMode,
   setGlobalElevatedMode,
   normalizeElevatedMode,
 } = chatElevatedMode
+
+// P2-3：RunModePanel 的审批旁路开关 → 会话级提权（bypass / 关闭）。
+// 与 localStorage 持久化、REST 同步一起走 setElevatedMode；网关按 sessionKey 落台账，
+// 聊天工具回路据此跳过人工确认（core/src/agent/tool_cycle.rs）。
+const approvalBypassActive = computed(() => isApprovalBypassMode(effectiveElevatedMode.value))
+function setApprovalBypass(enabled: boolean) {
+  // 关闭时写显式 'off' 哨兵：否则会落回 config 的全局默认（可能是 bypass）。
+  setElevatedMode(enabled ? 'bypass' : 'off', { sync: true })
+}
 
 const {
   runMode: globalRunMode,
@@ -1590,6 +1615,14 @@ watch(streamHasVisibleOutput, (visible) => {
     ttftStartMs.value = 0
   }
 })
+// 长时间等待时补一句「为什么慢 / 我能做什么」。秒数复用回合时钟（单一事实源），
+// 不另起计时器 —— 两个计时器迟早会互相矛盾（本仓在阶段耗时上已经踩过）。
+const waitingSerialHintText = computed(() => waitingSerialHint({
+  streaming: isStreaming.value,
+  hasVisibleOutput: streamHasVisibleOutput.value,
+  elapsedSec: streamTurnElapsedSeconds.value,
+  translate: (key, params) => t(key, params),
+}))
 // 实时轮工具耗时：把共享流格式化器绑定到 liveToolElapsedText（归一化整秒），
 // 供活动时间线 / 折叠时间线的 tool-elapsed-text 使用。
 const liveToolElapsed = (call: { toolId: string }): string =>
@@ -1735,6 +1768,21 @@ const {
   isStreaming,
 })
 
+// ── 工作区交接单承接（A2）────────────────────────────────────────────────
+// "引用"只把承接指令追加进输入框草稿并聚焦：发送与否仍由人决定（人保决策权）。
+function applyHandoffNotice(fileName: string): void {
+  const file = String(fileName || '').trim()
+  if (!file) return
+  appendComposerText(t('chat.handoff.insertText', { file: `handoff/${file}` }))
+}
+
+function openHandoffInEditor(fullPath: string): void {
+  const path = String(fullPath || '').trim()
+  if (!path) return
+  const root = activeWorkspace.value?.path || ''
+  void router.push({ path: '/editor', query: root ? { path, root } : { path } })
+}
+
 function restoreMetaLaunchDraft(launchText: string, targetSessionKey: string): void {
   const restored = String(launchText || '').trim()
   const target = String(targetSessionKey || '').trim()
@@ -1851,6 +1899,7 @@ const chatUsageWidget = useChatUsageWidget({
 const {
   usageAccum,
   usageModel,
+  contextStatus,
   contextWarning,
   resetSavingsPopupCooldown,
   saveWidgetState,
@@ -1881,6 +1930,12 @@ const sessionUsage = computed(() => {
     turns,
     total: input + output,
     // 与用量页同口径：cache_read / (prompt_tokens + cache_read)，避免两处显示不同命中率。
+    //
+    // ⚠️【2026-10-29】这个百分比是**服务商侧前缀缓存**的命中率（usage 帧里 provider 回报的
+    // cache_read）。智能中枢那张「三层语义缓存」卡片走的是 `cache.status`，量的是**本地**
+    // T0/T1/T2 命中 —— 两套完全不同的东西。真机审计把两者当成"同一指标两个数字"报了
+    // 一条口径不一致，其实不是 bug。处置是**把文案改名**（页脚 →「服务商缓存命中」），
+    // 而不是把数字对齐：强行统一等于伪造一个两个子系统都没有的值。
     cacheHitPct: cached > 0 && input + cached > 0
       ? Math.round(Math.min(1, cached / (input + cached)) * 100)
       : null,
@@ -2194,6 +2249,8 @@ const {
 } = chatMessageActions
 
 let applyPendingUserInputSnapshot: typeof chatPlans.applyBootstrap = () => {}
+// `chatApprovals` 在下方才创建，订阅选项里只能先挂一个转发壳。
+let reappendLiveInterrupts: () => void = () => {}
 const chatSessionSubscription = useChatSessionSubscription({
   rpc,
   sessionKey,
@@ -2209,6 +2266,7 @@ const chatSessionSubscription = useChatSessionSubscription({
   loadHistory,
   resetStreamIdleTimer,
   resetStreamLiveTurnState,
+  reappendInterruptFrames: () => reappendLiveInterrupts(),
   onLiveSnapshot: snapshot => restoreLiveTurnSnapshot(snapshot),
   onAuthoritativeIdle: () => {
     if (pendingQueueOwnerContext.value?.sessionKey !== sessionKey.value) {
@@ -2598,6 +2656,14 @@ const { openMetaSetupProviderSettings } = useChatMetaController(viewState, {
   route,
 })
 
+// 清空对话的唯一前端收敛点：斜杠命令与侧栏菜单（经 LOCAL_SESSION_RESET_EVENT）
+// 走同一条路径，否则两条入口清出来的界面会不一致。
+function resetSessionView() {
+  resetCurrentSessionAfterSlash()
+  resetSessionArtifacts()
+  chatPlans.reset()
+}
+
 const chatSlashCommands = useChatSlashCommands({
   rpc,
   catalogCallOptions: optionalSessionRpcCallOptions,
@@ -2608,11 +2674,7 @@ const chatSlashCommands = useChatSlashCommands({
     freshTaskDraft.requestFreshTask('main')
     goToDraft({ agentId: 'main' })
   },
-  resetCurrentSession: () => {
-    resetCurrentSessionAfterSlash()
-    resetSessionArtifacts()
-    chatPlans.reset()
-  },
+  resetCurrentSession: resetSessionView,
   setCompactInFlight,
   showCompactStatus,
   showCompactionToast,
@@ -3221,6 +3283,7 @@ const {
   applyUserInputBootstrap,
 } = chatApprovals
 applyPendingUserInputSnapshot = applyUserInputBootstrap
+reappendLiveInterrupts = chatApprovals.appendPendingInterrupts
 
 const dockedPlanQuestionnaire = computed(() => (
   pendingClarify.value?.presentation === 'plan_questionnaire_v1'
@@ -3488,12 +3551,14 @@ const chatRpcSubscriptions = useChatRpcSubscriptions(rpc, {
   // The wildcard handler is the one funnel that sees every gateway event with
   // its name; feed the active session's events to the watchdog before the
   // regular handler consumes them (same session filter as existing handlers).
-  onAny: (rawEvent, rawPayload) => {
+  // `meta` 必须继续往下一层传：session.event.usage 的会话归属只在 meta.session 里
+  // （payload 没有会话字段），丢了它并行会话的用量就会串到本页页脚。
+  onAny: (rawEvent, rawPayload, meta) => {
     const payloadObj = (rawPayload && typeof rawPayload === 'object' ? rawPayload : {}) as SessionEventPayload
     if (payloadIsCurrentSession(payloadObj, sessionKey.value)) {
       stallWatchdog.noteEvent(rawEvent, payloadObj)
     }
-    rpcEventHandlers.handlers.onAny(rawEvent, rawPayload)
+    rpcEventHandlers.handlers.onAny(rawEvent, rawPayload, meta)
   },
 })
 
@@ -4605,6 +4670,16 @@ onMounted(async () => {
     // 长会话里 chip 会一直停在旧压力值（等于不告警）。
     void loadCurrentSessionUsage()
   }))
+
+  // 侧栏「清空对话」：App.vue 调完 `sessions.reset` 后派发本窗口事件。只有
+  // 当前会话要清视图 —— 别的会话没有渲染在这里，下次进入时历史本来就是空的。
+  const onLocalSessionReset = (event: Event) => {
+    const detail = localSessionResetDetail(event)
+    if (!detail || !detail.keys.includes(sessionKey.value)) return
+    resetSessionView()
+  }
+  window.addEventListener(LOCAL_SESSION_RESET_EVENT, onLocalSessionReset)
+  unsubs.push(() => window.removeEventListener(LOCAL_SESSION_RESET_EVENT, onLocalSessionReset))
 
   // Register event handlers before sessions.messages.subscribe can replay
   // buffered events, then start the two critical phases before any optional

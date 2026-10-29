@@ -159,7 +159,33 @@ fn main() {
     // 同一判据 —— 用它做守卫可保证「构建期认得的源」与「运行期认得的源」一致。
     let pyengine_src = std::path::Path::new("../../pyengine");
     let pyengine_dst = std::path::Path::new("resources/pyengine");
-    if is_pyengine_source_root(pyengine_src) {
+    // 【原生加固构建的让路开关】`MARGUERITE_NATIVE_BUILD=1` 时整段**不**重拷 pyengine。
+    // 此时 `resources/pyengine` 已由 scripts/compile_pyengine_native.py 换成 .pyd 树
+    // （对应 .py 已删除），而下面的同步是**无条件** remove_dir_all + 全量重拷：
+    // 它会把整套明文源码原样复制回来，让加固白做，且 verify_pyengine_sync 会以
+    // 「源有目标无」为由 panic（.py 在源树里、在目标树里被刻意删掉了）。
+    // 让路的代价是「引擎源码不再由构建期自动就位」——改由打包顺序负责
+    // （scripts/package_full.cmd：staging → 原生编译 → check-shipped-resources → 构建），
+    // 由 NATIVE.json 逐文件对账兜底，所以这里显式留一条 warning 而不是静默跳过。
+    //
+    // 【2026-10-28 实测：只看环境变量会被 IDE 白吃一次】`MARGUERITE_NATIVE_BUILD` 只有
+    // package_full.cmd 会设；而 rust-analyzer 的周期性 `cargo check` 用自己的环境跑同一个
+    // build.rs，于是它照样执行「无条件 remove_dir_all + 全量重拷」。现场：编译脚本 23:26:21
+    // 落地 855 个 .pyd + NATIVE.json，23:26:44（23 秒后）IDE 的一次 check 把整棵树换回明文，
+    // 加固成果与对账清单一起消失，而构建本身仍然「成功」。所以让路判据加一条**自描述**的：
+    // 目标树里存在 NATIVE.json 就是「这棵树被刻意换成了原生码」的证据，与调用者是谁无关。
+    // 该标记随明文重拷一起被 `reset_target_dir` 删除，因此不会把树永久冻结在原生状态——
+    // 下一次 package_full.cmd 重新 staging 时它自然消失。
+    let native_build = std::env::var("MARGUERITE_NATIVE_BUILD").as_deref() == Ok("1")
+        || pyengine_dst.join("NATIVE.json").is_file();
+    if native_build {
+        println!(
+            "cargo:warning=原生加固树已就位（env MARGUERITE_NATIVE_BUILD=1 或 \
+             resources/pyengine/NATIVE.json 存在）—— 跳过 pyengine 明文重拷：\
+             resources/pyengine 必须是 scripts/compile_pyengine_native.py 产出的原生树，\
+             且 scripts/check-shipped-resources.py 已在其后校验"
+        );
+    } else if is_pyengine_source_root(pyengine_src) {
         // 重试同步（环境韧性，与 skills 块同思路）：本机存在对 `pyengine/` 的并发写入者
         // （自动重启的 marguerite-gui / 宿主热同步），会在 `remove_dir_all` + 全量复制
         // 的瞬间竞争 `resources/pyengine`，偶发源目录条目瞬时不可见 ⇒ 该文件被静默漏拷，

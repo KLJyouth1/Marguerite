@@ -2805,6 +2805,30 @@ impl Orchestrator {
         )
     }
 
+    /// 把完成门禁的裁决写进**用户可见的正文**；通过时原样返回。
+    ///
+    /// 为什么不内联进 `finish_dispatch`：这是「虚假完成」的唯一可见通道，
+    /// 必须能被单测直接钉住。埋在私有方法尾部，就只能靠端到端碰运气。
+    fn annotate_reply_with_verdict(reply: String, verdict: &CompletionVerdict) -> String {
+        if verdict.allowed {
+            return reply;
+        }
+        let reasons = if verdict.warnings.is_empty() {
+            verdict
+                .blocked_by
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        } else {
+            verdict.warnings.join("；")
+        };
+        format!(
+            "{reply}\n\n> ⚠️ **完成核验未通过**（{} 项）：{reasons}。以上产出可能未经验证，请人工复核后再采信。",
+            verdict.blocked_by.len()
+        )
+    }
+
     /// 收尾：跑完成门禁，若拦截则 emit 提示，并返回最终编排结果。
     fn finish_dispatch(
         &self,
@@ -2819,6 +2843,12 @@ impl Orchestrator {
         // 虚假完成只靠回复文本是拦不住的。
         let elapsed = self.turn_started.map(|t| t.elapsed().as_secs_f64());
         let verdict = self.evaluate_completion(text, &lead_reply, &[], elapsed);
+        // 门禁拦截必须让用户在**正文**看到：`emit_thinking` 发的是 `kind=narration`，
+        // 前端渲染成默认折叠的 ActivityNarration —— 用户不展开就看不到。
+        // 而「虚假完成」的本质正是：用户相信了正文里的「已完成」。
+        // 对照 plan/runner.rs 的硬阻断，这里选「可见但不阻断」——
+        // Solo 常产出解释性回复，硬阻断会误伤，先保证看得见。
+        let lead_reply = Self::annotate_reply_with_verdict(lead_reply, &verdict);
         if !verdict.allowed {
             self.emit_thinking(&format!(
                 "> 完成门禁提示：本次产出存在 {} 项可疑（{}），产出可能未经验证，请人工复核。",
@@ -4728,6 +4758,43 @@ mod tests {
             b,
             crate::governance::completion_gate::BlockReason::PlacationDetected
         )));
+    }
+
+    #[test]
+    fn test_blocked_verdict_is_visible_in_reply_body() {
+        // 「虚假完成」的核心是正文说完成了。门禁拦了就必须写进正文 ——
+        // 否则警告只落在默认折叠的 narration 块里，用户根本不会展开。
+        let o = Orchestrator::new(cfg());
+        let v = o.evaluate_completion("修复登录 bug", "已修复问题，请查看。", &[], None);
+        assert!(!v.allowed, "前置：敷衍话术应被拦");
+
+        let body = "已修复问题，请查看。";
+        let out = Orchestrator::annotate_reply_with_verdict(body.to_string(), &v);
+        assert!(out.contains("完成核验未通过"), "正文必须含标注：{out}");
+        assert!(out.starts_with(body), "原文必须保留在最前：{out}");
+        // 理由必须是给人看的中文，不能把 BlockReason 的 Debug 名直接倒给用户
+        assert!(
+            !out.contains("PlacationDetected") && !out.contains("BlockReason"),
+            "理由不得暴露枚举名：{out}"
+        );
+    }
+
+    #[test]
+    fn test_allowed_verdict_leaves_reply_untouched() {
+        let o = Orchestrator::new(cfg());
+        let v = o.evaluate_completion(
+            "解释闭包",
+            "闭包是捕获环境的匿名函数，示例：\n```rust\nlet f = |x| x + 1;\n```",
+            &[],
+            None,
+        );
+        assert!(v.allowed, "前置：正常报告应过门");
+        let body = "闭包是捕获环境的匿名函数".to_string();
+        assert_eq!(
+            Orchestrator::annotate_reply_with_verdict(body.clone(), &v),
+            body,
+            "通过时正文必须一字不改"
+        );
     }
 
     #[test]

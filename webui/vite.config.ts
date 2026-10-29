@@ -94,7 +94,10 @@ export default defineConfig(async ({ command }) => {
     build: {
       outDir: resolve(__dirname, 'dist'),
       emptyOutDir: true,
-      sourcemap: true,
+      // Never on: `sourcesContent` puts every hand-written .vue/.ts file back
+      // together on the user's disk, and this build ships inside the installer.
+      // Measured on the published 0.2.17 MSI: 206/206 maps carried sources.
+      sourcemap: false,
       rollupOptions: {
         output: {
           assetFileNames: (assetInfo) => {

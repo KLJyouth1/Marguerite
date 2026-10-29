@@ -885,6 +885,20 @@ export function useChatHistory(options: UseChatHistoryOptions) {
       return { ok: true }
     } catch (error: unknown) {
       // History endpoint may not exist yet.
+      const cancelled = isRpcAbort(error)
+        || bootstrap.signal.aborted
+        || (error instanceof Error && error.name === 'AbortError')
+      if (!cancelled) {
+        // Real failures used to leave zero trace: a stale request was dropped
+        // silently (isCurrentRequest() false) and the current one only flipped
+        // a UI banner. Keep one line so "history vanished" is diagnosable.
+        console.warn('[useChatHistory] chat.history failed', {
+          key,
+          phase: params.prepend ? 'prepend' : 'initial',
+          current: isCurrentRequest(),
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
       if (isCurrentRequest()) {
         const initialLoadFailed = isInitialLoad && !bridgeAttempted
         failedHistoryRequest = bridgeAttempted

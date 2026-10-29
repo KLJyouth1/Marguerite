@@ -2,19 +2,31 @@ import type { ArtifactPayload } from '@/types/rpc'
 import type { IconName } from '@/utils/icons'
 
 const ARTIFACT_MIME_CATEGORIES: Record<string, string> = {
-  'application/json': 'data', 'application/ndjson': 'data', 'application/pdf': 'document',
-  'application/x-ndjson': 'data', 'text/csv': 'data', 'text/html': 'document',
-  'text/markdown': 'document', 'text/plain': 'document', 'text/tab-separated-values': 'data',
+  'application/gzip': 'archive', 'application/json': 'data', 'application/ndjson': 'data',
+  'application/pdf': 'document', 'application/vnd.ms-excel': 'sheet',
+  'application/vnd.oasis.opendocument.spreadsheet': 'sheet',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'sheet',
+  'application/x-ndjson': 'data', 'application/zip': 'archive',
+  'text/csv': 'sheet', 'text/html': 'document', 'text/markdown': 'document',
+  'text/plain': 'document', 'text/tab-separated-values': 'sheet',
 }
 
+// 这里只登记「能给出正确图标与类型标签、并且知道如何降级」的扩展名。docx / pptx /
+// psd / blend 之类刻意不登记：没有对应预览器，登记成可预览只会得到点不开的
+// Open 按钮，所以它们继续落 `file`（只有下载）。
 const ARTIFACT_EXTENSION_CATEGORIES: Record<string, string> = {
   aac: 'audio', flac: 'audio', m4a: 'audio', mp3: 'audio', oga: 'audio', ogg: 'audio', opus: 'audio', wav: 'audio',
   avi: 'video', m4v: 'video', mkv: 'video', mov: 'video', mp4: 'video', ogv: 'video', webm: 'video',
   avif: 'visual', bmp: 'visual', gif: 'visual', ico: 'visual', jpeg: 'visual',
   jpg: 'visual', png: 'visual', svg: 'visual', webp: 'visual',
-  csv: 'data', htm: 'document', html: 'document', ipynb: 'data', json: 'data',
+  csv: 'sheet', htm: 'document', html: 'document', ipynb: 'data', json: 'data',
   jsonl: 'data', log: 'document', markdown: 'document', md: 'document',
-  ndjson: 'data', pdf: 'document', sql: 'code', tsv: 'data', txt: 'document',
+  ndjson: 'data', pdf: 'document', sql: 'code', txt: 'document',
+  ods: 'sheet', tsv: 'sheet', xls: 'sheet', xlsm: 'sheet', xlsx: 'sheet',
+  '7z': 'archive', bz2: 'archive', gz: 'archive', rar: 'archive',
+  tar: 'archive', tgz: 'archive', xz: 'archive', zip: 'archive',
+  dwg: 'model3d', fbx: 'model3d', glb: 'model3d', gltf: 'model3d',
+  obj: 'model3d', step: 'model3d', stl: 'model3d', stp: 'model3d',
 }
 
 const VIDEO_EXTENSIONS = new Set(['m4v', 'mov', 'mp4', 'ogv', 'webm'])
@@ -64,6 +76,9 @@ export function artifactCategoryLabel(artifact: ArtifactPayload): string {
     case 'code': return 'code'
     case 'audio': return 'audio'
     case 'video': return 'video'
+    case 'sheet': return 'sheet'
+    case 'archive': return 'archive'
+    case 'model3d': return '3D'
     default: return 'file'
   }
 }
@@ -75,6 +90,9 @@ export function artifactIconName(artifact: ArtifactPayload): IconName {
   if (cat === 'code') return 'fileCode'
   if (cat === 'audio') return 'music'
   if (cat === 'video') return 'video'
+  if (cat === 'sheet') return 'fileSpreadsheet'
+  if (cat === 'archive') return 'archive'
+  if (cat === 'model3d') return 'boxes'
   return 'fileText'
 }
 
@@ -114,7 +132,8 @@ export function artifactFileSubtitle(artifact: ArtifactPayload): string {
 
 /**
  * Previewable types get an Open affordance: images plus documents
- * (pdf / html / markdown / plain text). Data and code are download-only.
+ * (pdf / html / markdown / plain text). Data, code, spreadsheets, archives and
+ * 3D models are download-only — no renderer exists for them in the console.
  */
 export function canPreview(artifact: ArtifactPayload): boolean {
   const cat = artifactCategory(artifact)

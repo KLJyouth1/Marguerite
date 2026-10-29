@@ -165,7 +165,7 @@ const FLAGS: Array<{ key: FlagKey, label: string, hint: string, locked?: boolean
   { key: 'text', label: '文本对话', hint: '所有档案都以此为准，取消无意义', locked: true },
   { key: 'image_input', label: '图像输入', hint: '能「看图」：读截图/设计稿' },
   { key: 'image_output', label: '图像输出', hint: '能生图：image_generate 可用' },
-  { key: 'video_output', label: '视频输出', hint: '识别用；生成工具尚未内置' },
+  { key: 'video_output', label: '视频输出', hint: '勾选即声明可生成；工具 video_generate 已内置，缺的是端点配置' },
   { key: 'audio_input', label: '音频输入', hint: '能转写：audio_transcribe 走云端' },
   { key: 'audio_output', label: '语音输出', hint: '能朗读：audio_speak 走云端' },
 ]

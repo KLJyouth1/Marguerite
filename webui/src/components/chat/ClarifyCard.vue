@@ -433,8 +433,15 @@ function onSubmit() {
 }
 
 .clarify-card {
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: var(--sp-2) auto;
+  /* 会话阅读列（与 `.msg-ai` / `.plan-card` / `.approval-card` 同口径，见
+     styles/chat-view.css 的 --chat-gutter / --chat-col-start）：`--chat-col` 只当
+     宽度上限，起排固定在阅读起点，多出来的宽度留在右侧。过去
+     `width: var(--chat-col); margin: … auto` 会把卡片推到屏幕几何中心。
+     嵌套在历史行里的复位见文件末尾的 `.msg-ai` 规则。 */
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-block: var(--sp-2);
+  margin-inline: var(--chat-gutter, 24px) auto;
   background: var(--bg-surface);
   border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
   border-radius: var(--radius-lg);
@@ -457,6 +464,9 @@ function onSubmit() {
 }
 
 .clarify-card--docked {
+  /* 刻意保留居中：这一支不是消息流里的转写块，而是 `.plan-questionnaire-dock`
+     （chat-view.css: `position: absolute; left: 50%; translateX(-50%)`）里浮在输入框
+     正上方的问卷面板 —— 它锚的是**输入列**（--composer-col），居中就是它的语义。 */
   width: min(100%, var(--composer-col, 820px));
   max-height: min(64dvh, 520px);
   margin: 0 auto;
@@ -859,8 +869,13 @@ function onSubmit() {
 }
 
 .clarify-outcome {
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: var(--sp-2) auto;
+  /* 与 `.clarify-card` 同一个块：foldLiveTurn=0 回滚分支里它是 `.chat-thread`
+     弹性列的直接子元素，`width: var(--chat-col)` + `margin: auto` 会把这条
+     「已收到回答」横幅推到屏幕中心，而它上下的正文是左起排的。 */
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-block: var(--sp-2);
+  margin-inline: var(--chat-gutter, 24px) auto;
   display: flex;
   align-items: flex-start;
   gap: var(--sp-3);
@@ -927,6 +942,19 @@ function onSubmit() {
   color: var(--text-muted);
   font-size: var(--fs-sm);
   line-height: 1.4;
+}
+
+/* 嵌套上下文复位：同一份卡片也会折进历史行（AssistantMessage 的 `.msg-ai` /
+   活动时间线插槽，见 InterruptPart）。那一行的外层已经排在阅读起点上了，
+   所以这里只铺满整行，不再叠加第二次 --chat-gutter 缩进 —— 与
+   AssistantMessage 里 `.msg-ai-main > :deep(.clarify-card)` 的做法同口径，
+   只是那条钩子用的是子组合器，覆盖不到时间线插槽里的嵌套层。 */
+.msg-ai .clarify-card,
+.msg-ai .clarify-outcome {
+  width: 100%;
+  max-width: none;
+  margin-block: var(--sp-2);
+  margin-inline: 0;
 }
 
 @keyframes card-enter {

@@ -47,7 +47,7 @@ use crate::events::{Envelope, EventBus, EventType};
 use crate::guard::gateway::ApprovalGate;
 use crate::memory::{ExperienceKind, SelfEvolution};
 use crate::mode::{ModeKind, ModeManager};
-use crate::model::llm::{LLMClient, LLMConfig, LLMProvider};
+use crate::model::llm::{LLMClient, LLMConfig};
 use crate::model::selector::ModelSelector;
 use crate::orchestration::Orchestrator;
 use crate::persistence::config::Config;
@@ -397,14 +397,10 @@ impl EngineRunner for RealEngine {
 fn llm_config_for_extraction(config: &Config) -> LLMConfig {
     let api_key =
         std::env::var("MARGUERITE_API_KEY").unwrap_or_else(|_| config.model.api_key.clone());
-    let provider = match config.model.provider.as_str() {
-        "openai" => LLMProvider::OpenAI,
-        "deepseek" => LLMProvider::DeepSeek,
-        "anthropic" => LLMProvider::Anthropic,
-        _ => LLMProvider::Custom {
-            base_url: config.model.base_url.clone(),
-        },
-    };
+    let provider = crate::model::provider_protocol::provider_for_id(
+        &config.model.provider,
+        &config.model.base_url,
+    );
     LLMConfig {
         provider,
         model: config.model.model_name.clone(),

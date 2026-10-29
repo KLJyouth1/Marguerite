@@ -103,6 +103,25 @@
       </div>
 
       <div class="run-mode-panel__section">
+        <div class="run-mode-panel__section-title">{{ t('chat.composer.approvalBypass') }}</div>
+        <!-- P2-3：会话级提权开关。真实语义在 Rust 网关 / core::guard::elevated：
+             开启后高危工具不再弹确认卡，但放行仍会发 `elevated_skip` 审计事件。
+             这里只发出意图，持久化与同步由 ChatView → useChatElevatedMode 完成。 -->
+        <button
+          type="button"
+          class="run-mode-panel__approval-toggle"
+          :class="{ 'is-on': approvalBypass }"
+          role="switch"
+          :aria-checked="approvalBypass ? 'true' : 'false'"
+          @click="emit('setApprovalBypass', !approvalBypass)"
+        >
+          <span>{{ t('chat.composer.approvalBypass') }}</span>
+          <span class="run-mode-panel__approval-state">{{ approvalBypass ? t('chat.composer.approvalBypassOn') : t('chat.composer.approvalBypassOff') }}</span>
+        </button>
+        <p class="run-mode-panel__hint">{{ t('chat.composer.approvalBypassDesc') }}</p>
+      </div>
+
+      <div class="run-mode-panel__section">
         <div class="run-mode-panel__section-title">{{ t('chat.composer.modelRouting') }}</div>
         <ChatComposerModelRouting
           inline
@@ -146,6 +165,8 @@ const props = defineProps<{
   planModeAppliesNextTurn?: boolean
   modelRoutingMode: ModelRoutingMode
   modelRoutingSettingsBusy: boolean
+  /** P2-3：当前会话是否已开启审批旁路（bypass/full）。 */
+  approvalBypass?: boolean
   /** 模型路由「NEW」角标（首次打开前展示）。 */
   showNewBadge?: boolean
 }>()
@@ -154,6 +175,7 @@ const emit = defineEmits<{
   setRunMode: [mode: SandboxRunMode]
   setCollaborationMode: [mode: CollaborationMode]
   setModelRoutingMode: [mode: ModelRoutingMode]
+  setApprovalBypass: [enabled: boolean]
 }>()
 
 const effectiveCollaborationMode = computed<CollaborationMode>(
@@ -332,6 +354,18 @@ onBeforeUnmount(() => {
 
 .run-mode-panel__lock-tip {
   position: absolute;
+  /* 【2026-10-29·真机审计 P2-1】这是**提示**，不是常驻标签。
+     旧实现只要 `runModeLocked` 为真就无条件渲染一个 `z-index: 50` 的浮层：
+     ① 它常驻在工具栏上方，遮挡相邻的「完全·默认」等控件；② 没有
+     `pointer-events: none`，于是那块区域的点击被它吃掉（"点了没反应"）；
+     ③ 空会话上只要锁定态残留，用户会看到一条说"运行中"的提示而实际没任务在跑。
+     改成标准 tooltip 语义：默认不可见且不参与命中测试，只在悬停芯片 / 芯片键盘聚焦 /
+     面板展开（`aria-describedby` 指向它）时出现。
+     可访问性无回退：芯片在锁定态是 `disabled`（不可聚焦，读屏本就会跳过），同一句文案
+     在面板内还有一份 `.run-mode-panel__lock-note`（`role="note"`）可读。 */
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
   /* Pinned into the composer's control band, never over the box the user types
      in. The panel this is anchored to is 0-height (the chip overflows it while
      staying centred on it), so `bottom` is measured down from the chip's vertical
@@ -358,6 +392,15 @@ onBeforeUnmount(() => {
   line-height: 1.4;
   text-align: left;
   z-index: 50;
+}
+
+/* 可见性开关（见上方注释）：悬停芯片、键盘聚焦芯片、或面板展开时显示提示。 */
+.run-mode-panel__chip:hover ~ .run-mode-panel__lock-tip,
+.run-mode-panel__chip:focus-visible ~ .run-mode-panel__lock-tip,
+.run-mode-panel:focus-within .run-mode-panel__lock-tip,
+.run-mode-panel:has(> .run-mode-panel__popover) .run-mode-panel__lock-tip {
+  visibility: visible;
+  opacity: 1;
 }
 
 .run-mode-panel__popover {
@@ -453,6 +496,56 @@ onBeforeUnmount(() => {
 
 .run-mode-panel__plan-option:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+/* P2-3：审批旁路开关（会话级提权）。开启态用 warn 色，和「沙箱/协作/路由」
+   的中性选择区分开：它确实会关闭人工确认，必须一眼可见。 */
+.run-mode-panel__approval-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-mode-panel__approval-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.run-mode-panel__approval-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.run-mode-panel__approval-toggle.is-on {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+}
+
+.run-mode-panel__approval-state {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.run-mode-panel__approval-toggle.is-on .run-mode-panel__approval-state {
+  color: var(--warn);
+}
+
+.run-mode-panel__hint {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 .run-mode-panel__plan-option:focus-visible {

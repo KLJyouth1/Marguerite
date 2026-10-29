@@ -544,11 +544,18 @@ onBeforeUnmount(() => {
 .plan-card {
   --plan-card-collapsed-height: 220px;
 
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  max-width: 100%;
+  /* 会话阅读列（与 `.msg-ai` 同口径，见 styles/chat-view.css 的 --chat-gutter /
+     --chat-col-start）：`--chat-col` 只当宽度**上限**，起排固定在阅读起点。
+     绝不用 `width: var(--chat-col); margin: … auto` —— 那会把计划卡推到屏幕几何
+     中心（宽屏下左右各剩大片空白），而它左右的消息行是左起排的。
+     多出来的宽度全部留在右侧；窄屏由 --chat-gutter 的媒体查询退回 24px。
+     嵌套在历史行里时由 AssistantMessage 的 `.plan-message-card` 复位为整行宽。 */
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
   min-width: 0;
   box-sizing: border-box;
-  margin: var(--sp-3) auto;
+  margin-block: var(--sp-3);
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: var(--sp-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -847,7 +854,8 @@ onBeforeUnmount(() => {
   .plan-card {
     --plan-card-collapsed-height: 180px;
 
-    width: calc(100% - 24px);
+    /* 这里不再写 `width: calc(100% - 24px)`：窄屏的左右留边由 chat-view.css 的
+       `--chat-gutter` 媒体查询统一退回 24px，硬编码会和阅读列口径打架。 */
     padding: var(--sp-3);
   }
 

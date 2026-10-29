@@ -73,6 +73,8 @@ export interface SessionItem {
   provisional?: boolean
   /** True when this session was forked from its parent's transcript. */
   forkedFromParent: boolean
+  /** 分叉来源会话键；空串/缺省 = 非分叉，或该引擎不下发（Rust 侧目前没有 fork）。 */
+  parentSessionKey?: string
   /** 会话级思考强度（'off'|'normal'|'deep'|'max'）；null/缺省 = 继承全局模型配置 */
   reasoningEffort?: string | null
   /** 会话级上下文长度；null/缺省 = 继承全局模型配置 */
@@ -105,6 +107,20 @@ function numberValue(value: unknown): number | null {
   if (value == null || value === '') return null
   const n = Number(value)
   return Number.isFinite(n) ? n : null
+}
+
+/** 时间戳字段：毫秒数或 RFC3339 字符串都接受。
+ *
+ * 后端契约是毫秒整数，但桥接层/旧网关可能回 ISO 字符串；`Number('2026-…')`
+ * 是 NaN，此前会静默落到 0 → 会话在侧栏里永远排到最后、显示成 1970。 */
+export function timestampValue(value: unknown): number | null {
+  const numeric = numberValue(value)
+  if (numeric != null) return numeric
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
 }
 
 export function normalizeRunStatus(status: string | undefined): string {
@@ -286,12 +302,12 @@ function fallbackSessionTitle(row: RawSessionItem, key: string, sessionKind: str
 }
 
 function normalizeUpdatedAt(row: RawSessionItem, gaps: string[]): number {
-  const activityValue = numberValue(row.lastActivityAt) ?? numberValue(row.last_activity_at)
+  const activityValue = timestampValue(row.lastActivityAt) ?? timestampValue(row.last_activity_at)
   if (activityValue != null) return activityValue
-  const contractValue = numberValue(row.updatedAt)
+  const contractValue = timestampValue(row.updatedAt)
   if (contractValue != null) return contractValue
   gaps.push('updatedAt')
-  return numberValue(row.updated_at) || 0
+  return timestampValue(row.updated_at) || 0
 }
 
 function normalizeMessageCount(row: RawSessionItem, gaps: string[]): number | null {
@@ -392,6 +408,7 @@ export function normalizeSessionItem(item: unknown): SessionItem | null {
     updatedAt,
     interactive: raw.interactive === true,
     forkedFromParent: raw.forkedFromParent === true || raw.forked_from_parent === true,
+    parentSessionKey: String(raw.parentSessionKey || raw.parent_session_key || ''),
     reasoningEffort,
     contextWindow,
     contractGaps: Array.from(new Set(gaps)),
@@ -874,27 +891,28 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
    * the user can still see; the polling refresh re-adds them if they truly exist.
    */
   function mergeSessionsList(returned: RawSessionListEntry[]) {
-    const seen = new Set<string>()
-    const merged: RawSessionListEntry[] = []
+    // Dedupe *within* the response as well: two engines (or a paged/joint reply)
+    // can return the same key twice, which rendered as duplicated sidebar rows.
+    // Later entries win (the freshest authoritative view), first-seen order kept.
+    const mergedByKey = new Map<string, RawSessionListEntry>()
     for (const entry of returned) {
       const key = itemKey(entry)
       if (!key) continue
-      seen.add(key)
       missingRefreshCounts.delete(key)
-      merged.push(entry)
+      mergedByKey.set(key, entry)
     }
     for (const local of sessionsList.value) {
       const key = itemKey(local)
-      if (!key || seen.has(key)) continue
+      if (!key || mergedByKey.has(key)) continue
       const misses = (missingRefreshCounts.get(key) || 0) + 1
       if (misses >= SESSION_LIST_MISSING_TOLERANCE) {
         missingRefreshCounts.delete(key)
         continue
       }
       missingRefreshCounts.set(key, misses)
-      merged.push(local)
+      mergedByKey.set(key, local)
     }
-    sessionsList.value = merged
+    sessionsList.value = Array.from(mergedByKey.values())
   }
 
   async function loadSessions() {
@@ -987,6 +1005,32 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
     return true
   }
 
+  /**
+   * Authoritative removal for keys the user (or the server) has just deleted.
+   *
+   * `mergeSessionsList` deliberately keeps rows that go missing from an
+   * unsolicited refresh (degraded response). A *confirmed* delete is the
+   * opposite case: the row must disappear immediately, without waiting out
+   * SESSION_LIST_MISSING_TOLERANCE refreshes, or the sidebar shows a
+   * conversation that no longer exists for up to two minutes.
+   */
+  function forgetSessions(keys: Iterable<string>) {
+    const drop = new Set(keys)
+    if (drop.size === 0) return
+    let changed = false
+    const next: RawSessionListEntry[] = []
+    for (const entry of sessionsList.value) {
+      const key = itemKey(entry)
+      if (key && drop.has(key)) {
+        missingRefreshCounts.delete(key)
+        changed = true
+        continue
+      }
+      next.push(entry)
+    }
+    if (changed) sessionsList.value = next
+  }
+
   return {
     sessionsList,
     sessionListError,
@@ -995,6 +1039,7 @@ export function useSessions(readCallOptions?: RpcCallOptions) {
     allSessions,
     loadSessions,
     applySessionRunStatus,
+    forgetSessions,
   }
 }
 

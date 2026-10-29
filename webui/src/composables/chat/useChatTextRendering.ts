@@ -111,6 +111,14 @@ DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
     return
   }
 
+  // Images: markdown emits `![alt](url)` as <img src>, but `src` must not be
+  // usable as a generic attribute elsewhere (e.g. smuggling a payload onto an
+  // otherwise harmless tag). Scheme enforcement stays with ALLOWED_URI_REGEXP.
+  if (data.attrName === 'src') {
+    if (tag !== 'img') data.keepAttr = false
+    return
+  }
+
   // The only inputs markdown emits are disabled task-list checkboxes.
   if (data.attrName === 'type') {
     if (!(tag === 'input' && data.attrValue === 'checkbox')) data.keepAttr = false
@@ -145,6 +153,21 @@ DOMPurify.addHook('afterSanitizeAttributes', node => {
       node.setAttribute('target', '_blank')
       node.setAttribute('rel', 'noopener noreferrer')
     }
+    return
+  }
+  if (node.nodeName === 'IMG') {
+    // Assistant markdown renders images through `![alt](https://…)`; before
+    // this branch existed the sanitizer stripped <img> outright, so every
+    // generated image silently vanished. Keep remote images only, and make
+    // them lazy + referrer-free so a long transcript does not fan out loads.
+    const src = node.getAttribute('src') || ''
+    if (!src) {
+      node.parentNode?.removeChild(node)
+      return
+    }
+    node.setAttribute('loading', 'lazy')
+    node.setAttribute('decoding', 'async')
+    node.setAttribute('referrerpolicy', 'no-referrer')
     return
   }
   if (node.nodeName === 'INPUT') {
@@ -209,13 +232,14 @@ function sanitizeMarkdownHtml(rawHtml: string, allowKatex = false): string {
         'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
         'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
         'strong', 'em', 'del', 'a', 'table', 'thead',
-        'tbody', 'tr', 'th', 'td', 'div', 'span', 'sup', 'input',
+        'tbody', 'tr', 'th', 'td', 'div', 'span', 'sup', 'input', 'img',
       ],
       // `align` carries GFM table column alignment; `type`/`checked`/`disabled`
-      // are the (disabled) task-list checkbox attributes. No script vectors.
+      // are the (disabled) task-list checkbox attributes. `src` only survives on
+      // <img> (see the attribute hook) and only for http(s) URLs. No script vectors.
       ALLOWED_ATTR: [
         'href', 'title', 'alt', 'target', 'rel', 'class', 'align', 'type',
-        'checked', 'disabled', 'data-lang', 'data-path',
+        'checked', 'disabled', 'data-lang', 'data-path', 'src',
         ...(allowKatex ? ['style', 'aria-hidden'] : []),
       ],
       // `align`/`type` carry inert presentational values, not URIs; mark them

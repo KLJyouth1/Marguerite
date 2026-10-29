@@ -1,5 +1,5 @@
 <template>
-  <div class="control-stage terminal-stage">
+  <div class="control-stage terminal-stage" :class="{ 'terminal-stage--focus': focusMode }">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
         <h1 class="control-stage__title">{{ t('terminal.title') }}</h1>
@@ -10,6 +10,19 @@
           <span class="terminal-dot" aria-hidden="true"></span>
           {{ connected ? (running ? t('terminal.running') : t('terminal.ended')) : t('terminal.disconnected') }}
         </span>
+        <!-- Focus mode: the terminal is a work surface, not a dashboard — once
+             the session is running the big title block is dead vertical space.
+             The toggle keeps state per-view (not persisted): it reads as a
+             temporary zoom, so reopening the page resets to the titled view. -->
+        <button
+          class="btn btn--ghost"
+          :aria-pressed="focusMode"
+          :title="focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode')"
+          @click="focusMode = !focusMode"
+        >
+          <Icon :name="focusMode ? 'collapse' : 'expand'" :size="16" />
+          <span>{{ focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode') }}</span>
+        </button>
         <button class="btn btn--ghost" :disabled="busy || !connected || !running" @click="interrupt">
           <Icon name="stop" :size="16" /><span>{{ t('terminal.interrupt') }}</span>
         </button>
@@ -119,12 +132,92 @@ const lostBytes = ref(0)
 const busy = ref(false)
 const roots = ref<string[]>([])
 const outputRef = ref<HTMLElement | null>(null)
+/** 专注模式：隐藏标题头，把垂直空间还给输出区（视图内瞬态，不持久化）。 */
+const focusMode = ref(false)
 
 let terminalId = ''
 let pollTimer: number | null = null
 let killed = false
 // 游标读取：只追加增量，避免「两次轮询之间有人取走输出」导致丢内容。
 let cursor = 0
+
+/**
+ * 纯文本回放器的跨分片残留：一个 CSI 序列可能被拆在两次 `sandbox.terminal.read`
+ * 之间（例如 `\u001b[` 与 `6n` 分属两片），必须按状态机跨片续接。
+ */
+let ansiPending = ''
+
+/** CSI 序列里最多容许的残留字符数；超过视为流损坏，直接丢弃，避免无界缓存。 */
+const ANSI_PENDING_MAX = 64
+
+/**
+ * 剥掉 ANSI 控制序列，只留可读文本。
+ *
+ * 这个视图是 `<pre>` 纯文本回放（不是 xterm），没有任何光标定位能力：
+ * 把 `\u001b[6n`（DSR 光标查询）原样塞进去，用户第一眼看到的就是
+ * `□[6n□[6n□[6n`（ESC 是不可打印字符，浏览器渲染成方块）——真机首屏事故。
+ * 顺序里同时兼容 OSC（窗口标题）与双字符转义，避免它们把后续正文一起吞掉。
+ */
+function stripAnsiChunk(chunk: string): string {
+  const s = ansiPending + chunk
+  ansiPending = ''
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    const ch = s[i]
+    if (ch !== '\u001b') {
+      out += ch
+      i += 1
+      continue
+    }
+    if (i + 1 >= s.length) {
+      ansiPending = s.slice(i)
+      break
+    }
+    const next = s[i + 1]
+    if (next === '[') {
+      // CSI：参数字节 0x30-0x3F、中间字节 0x20-0x2F、终止字节 0x40-0x7E
+      let j = i + 2
+      while (j < s.length && s[j] >= '\u0030' && s[j] <= '\u003f') j += 1
+      while (j < s.length && s[j] >= '\u0020' && s[j] <= '\u002f') j += 1
+      if (j >= s.length) {
+        ansiPending = s.slice(i)
+        break
+      }
+      i = j + 1
+      continue
+    }
+    if (next === ']') {
+      // OSC：以 BEL 或 ESC \ 结束
+      let j = i + 2
+      let closed = false
+      while (j < s.length) {
+        if (s[j] === '\u0007') {
+          j += 1
+          closed = true
+          break
+        }
+        if (s[j] === '\u001b' && s[j + 1] === '\\') {
+          j += 2
+          closed = true
+          break
+        }
+        j += 1
+      }
+      if (!closed) {
+        ansiPending = s.slice(i)
+        break
+      }
+      i = j
+      continue
+    }
+    // 其余双字符转义（ESC 7 / ESC = / ESC M …）
+    i += 2
+  }
+  if (ansiPending.length > ANSI_PENDING_MAX) ansiPending = ''
+  // 兜底：ESC 之外的 C0 控制字符（保留 \n \r \t）也不该出现在回放文本里。
+  return out.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+}
 
 const rootsHint = computed(() =>
   roots.value.length
@@ -221,6 +314,7 @@ async function spawn(): Promise<void> {
         Array.isArray(r.roots) && r.roots.length ? r.roots : resolved,
       )
       output.value = ''
+      ansiPending = ''
       lostBytes.value = 0
       startPolling()
     } else {
@@ -243,7 +337,7 @@ async function poll(): Promise<void> {
   try {
     const r = await rpc.call<ReadResult>('sandbox.terminal.read', { terminalId, cursor })
     if (r.ok) {
-      const chunk = String(r.output ?? '')
+      const chunk = stripAnsiChunk(String(r.output ?? ''))
       if (chunk) {
         output.value = (output.value + chunk).slice(-MAX_BUFFER_CHARS)
       }
@@ -324,6 +418,7 @@ async function restart(): Promise<void> {
   if (!(await kill())) return
   output.value = ''
   cursor = 0
+  ansiPending = ''
   lostBytes.value = 0
   error.value = ''
   await spawn()
@@ -350,7 +445,24 @@ onUnmounted(() => {
 .terminal-shell__roots { flex: 0 0 auto; padding: 0 8px; border: 1px solid var(--hairline); border-radius: 999px; font-size: 11px; color: var(--text-dim); cursor: help; white-space: nowrap; }
 .terminal-shell__shell { font-size: 11px; color: var(--accent); }
 .terminal-shell__hint { font-size: 11px; }
-.terminal-output { min-height: 320px; max-height: 60vh; overflow: auto; margin: 0; padding: 14px 12px; background: var(--bg); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text); }
+/* 输出区随视口生长：旧实现固定 320px/60vh，高窗下方全是死留白（拥挤感的
+   反面——浪费）。高度 = 视口减去标题头/输入行/脚注的实测开销，再夹住上下
+   界；专注模式隐藏标题头后，同式给出更大的偏移。 */
+.terminal-output {
+  height: clamp(280px, calc(100vh - 320px), 1600px);
+  overflow: auto;
+  margin: 0;
+  padding: 14px 12px;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+.terminal-stage--focus .control-stage__header { display: none; }
+.terminal-stage--focus .terminal-output { height: clamp(280px, calc(100vh - 200px), 1800px); }
 .terminal-lost { margin: 0; padding: 4px 12px; font-size: 11px; color: var(--warn); border-top: 1px solid var(--hairline); }
 .terminal-input-row { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--hairline); }
 .terminal-prompt { font-family: var(--font-mono); color: var(--accent); font-weight: 700; }

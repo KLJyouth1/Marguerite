@@ -16,6 +16,30 @@ pub(crate) fn onboarding_catalog() -> Value {
         { "name": "model", "label": "Model", "type": "text", "required": true, "placeholder": "model-name" },
     ]);
 
+    // 自定义端点的字段**不能**复用上面那份：它把 `api_key` 标成 required，
+    // 而自建/回环端点（llama.cpp、vLLM、内网网关）多数无鉴权 —— 用户被
+    // 强制填一个不存在的密钥才能保存，等于「自定义不可用」。
+    // `base_url` 反过来必须是 required：没有它是唯一确定性的失败。
+    let custom_openai_fields = json!([
+        { "name": "api_key", "label": "API Key", "type": "password", "required": false, "secret": true,
+          "description": "端点要求鉴权时填写；本地/无鉴权端点留空" },
+        { "name": "base_url", "label": "Base URL", "type": "text", "required": true,
+          "placeholder": "https://api.example.com/v1" },
+        { "name": "model", "label": "Model", "type": "text", "required": true, "placeholder": "model-name" },
+        { "name": "wire_api", "label": "请求协议", "type": "select", "required": false, "default": "chat",
+          "choices": ["chat", "responses"],
+          "description": "chat = /v1/chat/completions（绝大多数端点）；responses = /v1/responses（仅 OpenAI Responses）" },
+    ]);
+
+    let custom_anthropic_fields = json!([
+        { "name": "api_key", "label": "API Key", "type": "password", "required": false, "secret": true,
+          "description": "兼容网关按 Authorization: Bearer 鉴权；留空则不带密钥" },
+        { "name": "base_url", "label": "Base URL", "type": "text", "required": true,
+          "placeholder": "https://api.example.com" },
+        { "name": "model", "label": "Model", "type": "text", "required": true,
+          "placeholder": "claude-sonnet-4-20250514" },
+    ]);
+
     let providers = json!([
         {
             "providerId": "deepseek",
@@ -62,12 +86,19 @@ pub(crate) fn onboarding_catalog() -> Value {
             "whatYouNeed": ["Anthropic API Key"],
             "fields": [
                 { "name": "api_key", "label": "API Key", "type": "password", "required": true, "secret": true },
+                { "name": "base_url", "label": "Base URL", "type": "text", "required": false,
+                  "default": "https://api.anthropic.com",
+                  "description": "官方端点留空即可；走代理/中转时填它的地址" },
                 { "name": "model", "label": "Model", "type": "text", "required": false, "default": "claude-sonnet-4-20250514" },
             ],
         },
         {
-            "providerId": "qwen",
-            "label": "Qwen (Alibaba Cloud)",
+            // id 必须与 pyengine/provider/registry.py 一致：此前这里是 `qwen`，
+            // 而注册表里叫 `dashscope` —— 离线目录能选中、能存盘，等侧车上线
+            // 就变成 UnknownProvider（`rust_fallback_catalog_ids_exist_in_the_python_registry`
+            // 这条守卫就是为此而设）。
+            "providerId": "dashscope",
+            "label": "Qwen (Alibaba Cloud DashScope)",
             "runtimeSupported": true,
             "routerSupported": true,
             "acceptsApiKey": true,
@@ -142,8 +173,19 @@ pub(crate) fn onboarding_catalog() -> Value {
             "acceptsApiKey": true,
             "requiresApiKey": false,
             "deployment": "custom",
-            "whatYouNeed": ["OpenAI-compatible API endpoint", "API Key (if required)"],
-            "fields": &openai_compatible_fields,
+            "whatYouNeed": ["OpenAI 兼容端点（/v1/chat/completions 或 /v1/responses）", "API Key（若端点要求）"],
+            "fields": &custom_openai_fields,
+        },
+        {
+            "providerId": "custom_anthropic",
+            "label": "Custom Anthropic-compatible endpoint",
+            "runtimeSupported": true,
+            "routerSupported": false,
+            "acceptsApiKey": true,
+            "requiresApiKey": false,
+            "deployment": "custom",
+            "whatYouNeed": ["Anthropic Messages 兼容端点（/v1/messages）", "API Key（若端点要求）"],
+            "fields": &custom_anthropic_fields,
         },
         {
             "providerId": "ollama",
@@ -496,6 +538,12 @@ pub(crate) fn onboarding_status(ctx: &GatewayContext) -> Value {
     // 当成配置文件、`--config <目录>` 亦是坏命令；pyengine 侧契约测试明确要求
     // `payload["configPath"] == cfg.config_path`（文件），两侧语义必须一致。
     let config_path = Config::config_path().to_string_lossy().to_string();
+    // 隔离模式（`MARGUERITE_CONFIG_DIR` 指向临时目录，见 scripts/verify.sh）：
+    // 前端页脚不直接暴露 `E:\temp\...` 这类隔离路径，改为「用户配置目录（隔离模式）」，
+    // 真路径只放在 title / 复制内容里。回传布尔值，不让前端按路径形状猜。
+    let config_isolated = std::env::var_os("MARGUERITE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .is_some();
     json!({
         "needsOnboarding": !llm_configured,
         "hasConfig": llm_configured,
@@ -506,6 +554,7 @@ pub(crate) fn onboarding_status(ctx: &GatewayContext) -> Value {
         "searchConfigured": false,
         "imageGenerationConfigured": false,
         "configPath": config_path,
+        "configIsolated": config_isolated,
         "sections": {
             "llm": if llm_configured { "complete" } else { "incomplete" },
             // 非阻断分区：本地能力默认可用，不再恒报 incomplete 触发横幅
@@ -636,6 +685,107 @@ pub(crate) fn onboarding_provider_configure(ctx: &GatewayContext, params: &Value
     }
 }
 
+/// 探测请求的鉴权方式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeAuth {
+    /// `Authorization: Bearer <key>`（OpenAI 兼容，以及 Bearer 风格的 Anthropic 兼容网关）
+    Bearer(String),
+    /// `x-api-key: <key>` + `anthropic-version`（Anthropic 官方 / TokenHub）
+    XApiKey(String),
+    /// 不带鉴权头（本机推理服务）
+    None,
+}
+
+/// 探测请求的落点：URL + 鉴权 + 请求体。
+#[derive(Debug, Clone)]
+pub(crate) struct ProbeTarget {
+    pub url: String,
+    pub auth: ProbeAuth,
+    pub body: Value,
+}
+
+/// 按**端点真实协议**解析探测请求（纯函数，便于表驱动单测）。
+///
+/// # 为什么必须分开算（原实现的三个确定性失败）
+///
+/// 旧实现恒发 `{base}/chat/completions` + `Authorization: Bearer`：
+/// 1. **Anthropic 家族**（`anthropic` / `custom_anthropic` / `*_anthropic`）只有
+///    `/v1/messages`，且官方要 `x-api-key` —— 恒 404 / 401，界面上却显示
+///    「连接失败」，用户据此以为密钥或模型名写错了；
+/// 2. **`responses` 协议**的值机只提供 `/v1/responses`，同样恒 404；
+/// 3. `{base}/chat/completions` 少了 `/v1`：`https://api.openai.com` 这类
+///    不带版本段的 base 会拼出 `/chat/completions`（与真实请求用的
+///    [`crate::model::llm::build_chat_url`] 规则不一致 —— 探测说通不过，
+///    实际对话却能用，或者反过来）。
+///
+/// 所以这里复用与真实请求**同一套** URL 规则与鉴权规则，避免"探测通过但对话 404"。
+pub(crate) fn probe_target(
+    provider_id: &str,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    wire_api_raw: Option<&str>,
+) -> Result<ProbeTarget, String> {
+    use crate::model::wire::WireApi;
+
+    let provider = crate::model::provider_protocol::provider_for_id(provider_id, base_url);
+    let is_anthropic = provider.speaks_anthropic_messages();
+    let wire = match wire_api_raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => WireApi::from_key(raw).ok_or_else(|| {
+            format!("未知 wire_api: {raw}（可选：chat / responses）")
+        })?,
+        None => WireApi::Chat,
+    };
+    crate::model::wire::validate(
+        wire,
+        crate::model::provider_protocol::is_anthropic_family(provider_id),
+    )?;
+
+    let (url, body) = match wire {
+        WireApi::Responses => (
+            crate::model::wire::responses_url(base_url),
+            json!({
+                "model": model,
+                "input": "hi",
+                // Responses 的输出上限字段名与 Chat 不同
+                "max_output_tokens": 5,
+                "stream": false,
+            }),
+        ),
+        WireApi::Chat if is_anthropic => (
+            crate::model::llm::build_chat_url(base_url, true),
+            // Anthropic 的 max_tokens 是**必填**；messages 的 content 可以是纯字符串
+            json!({
+                "model": model,
+                "max_tokens": 5,
+                "messages": [{ "role": "user", "content": "hi" }],
+            }),
+        ),
+        WireApi::Chat => (
+            crate::model::llm::build_chat_url(base_url, false),
+            json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "max_tokens": 5,
+                "stream": false,
+            }),
+        ),
+    };
+
+    let auth = if api_key.is_empty() {
+        ProbeAuth::None
+    } else if is_anthropic {
+        match provider.anthropic_auth() {
+            crate::model::llm::AnthropicAuth::XApiKey => ProbeAuth::XApiKey(api_key.to_string()),
+            crate::model::llm::AnthropicAuth::Bearer => ProbeAuth::Bearer(api_key.to_string()),
+        }
+    } else {
+        ProbeAuth::Bearer(api_key.to_string())
+    };
+
+    Ok(ProbeTarget { url, auth, body })
+}
+
 /// `onboarding.provider.probe`：验证 API Key 并尝试连接模型服务商。
 pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
     let api_key = params
@@ -653,14 +803,24 @@ pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
     let model_name = params
         .get("modelName")
         .or_else(|| params.get("model_name"))
+        .or_else(|| params.get("model"))
         .and_then(Value::as_str)
         .unwrap_or("deepseek-chat")
         .to_string();
+    // 控制台发的是 `providerId`（见 useSetupProviderForm.connectionParams）。
+    // 只认 `provider` 会让每次探测都退化成默认的 deepseek —— 于是无论用户选
+    // 什么服务商，探测都按 OpenAI 兼容 + Bearer 发。
     let provider = params
-        .get("provider")
+        .get("providerId")
+        .or_else(|| params.get("provider_id"))
+        .or_else(|| params.get("provider"))
         .and_then(Value::as_str)
         .unwrap_or("deepseek")
         .to_string();
+    let wire_api_raw = params
+        .get("wire_api")
+        .or_else(|| params.get("wireApi"))
+        .and_then(Value::as_str);
 
     // R72：**本地/回环端点豁免密钥**。Ollama / LM Studio 等本地推理服务不需要
     // API Key，原先一刀切「密钥不能为空」让用户永远无法添加本地模型
@@ -676,13 +836,12 @@ pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
         return json!({ "ok": false, "error": "API 密钥不能为空" });
     }
 
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": model_name,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 5,
-        "stream": false,
-    });
+    let target = match probe_target(&provider, &base_url, &api_key, &model_name, wire_api_raw) {
+        Ok(t) => t,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let url = target.url;
+    let body = target.body;
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -692,21 +851,18 @@ pub(crate) async fn onboarding_provider_probe(params: &Value) -> Value {
         Err(e) => return json!({ "ok": false, "error": format!("HTTP 客户端创建失败: {e}") }),
     };
 
-    match client
-        .post(&url)
-        .header(
-            "Authorization",
-            if api_key.is_empty() {
-                "Bearer local".to_string()
-            } else {
-                format!("Bearer {api_key}")
-            },
-        )
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+    req = match &target.auth {
+        ProbeAuth::Bearer(key) => req.header("Authorization", format!("Bearer {key}")),
+        ProbeAuth::XApiKey(key) => req
+            .header("x-api-key", key.clone())
+            .header("anthropic-version", "2023-06-01"),
+        // 本地端点：不带任何鉴权头（此前硬塞 `Bearer local` 会让严格要求
+        // 无鉴权的自建服务把一次本来能通的探测判成 401）
+        ProbeAuth::None => req,
+    };
+
+    match req.json(&body).send().await {
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
@@ -814,4 +970,158 @@ mod tests {
         assert_eq!(llm_readiness("ollama", "http://127.0.0.1:11434", "sk-x"), (true, "config"));
     }
 
+    /// 自定义端点目录必须**真的能用**：这是「本地/云端 API 自定义选项缺失」
+    /// 的回归守卫。
+    ///
+    /// 三个具体缺陷各自对应一条断言，全部来自真机现象：
+    /// ① 没有 `custom_anthropic` → 用户自建的 Anthropic 兼容网关无从选择，
+    ///    只能被迫选 openai 兼容项，请求打到 /chat/completions 得 404；
+    /// ② `custom` 复用 openai 字段表，`api_key` 被标成 required →
+    ///    无鉴权的自建端点（llama.cpp / 内网网关）填不出密钥就存不下来；
+    /// ③ 没有协议选择字段 → 只提供 /v1/responses 的端点接不进来。
+    #[test]
+    fn custom_endpoint_catalog_offers_anthropic_and_protocol_choice() {
+        use super::onboarding_catalog;
+        use serde_json::Value;
+
+        let catalog = onboarding_catalog();
+        let providers = catalog["providers"].as_array().expect("providers 必须是数组");
+        let find = |id: &str| {
+            providers
+                .iter()
+                .find(|p| p["providerId"] == Value::String(id.to_string()))
+                .unwrap_or_else(|| panic!("目录里缺少 provider {id}"))
+        };
+        let field_required = |p: &Value, name: &str| -> Option<bool> {
+            p["fields"]
+                .as_array()?
+                .iter()
+                .find(|f| f["name"] == Value::String(name.to_string()))?
+                .get("required")?
+                .as_bool()
+        };
+
+        // ① Anthropic 兼容自定义端点存在，且 protocol 由 provider id 决定（无需再选）
+        let ca = find("custom_anthropic");
+        assert_eq!(ca["requiresApiKey"], false, "自定义端点不得强制要求密钥");
+        assert_eq!(field_required(ca, "base_url"), Some(true), "base_url 必须必填");
+        assert_eq!(field_required(ca, "api_key"), Some(false), "api_key 必须可选");
+        assert!(
+            crate::model::provider_protocol::is_anthropic_family("custom_anthropic"),
+            "custom_anthropic 必须落进 Anthropic Messages 协议族"
+        );
+
+        // ② OpenAI 兼容自定义端点：密钥可选、base_url 必填
+        let cu = find("custom");
+        assert_eq!(cu["requiresApiKey"], false);
+        assert_eq!(field_required(cu, "base_url"), Some(true));
+        assert_eq!(field_required(cu, "api_key"), Some(false));
+
+        // ③ 协议下拉：chat / responses 两个值都要给，且默认 chat（存量零迁移）
+        let wire = cu["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "wire_api")
+            .expect("custom 必须暴露 wire_api 字段");
+        assert_eq!(wire["type"], "select");
+        assert_eq!(wire["default"], "chat");
+        let choices: Vec<&str> = wire["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(choices, vec!["chat", "responses"]);
+
+        // 官方 anthropic 也能改端点（走代理/中转），但密钥仍必填
+        let an = find("anthropic");
+        assert_eq!(field_required(an, "api_key"), Some(true));
+        assert_eq!(field_required(an, "base_url"), Some(false));
+    }
+
+    /// 两侧目录的 provider id 必须真实存在。
+    ///
+    /// 离线回退目录（本文件）与 Python 侧车目录各写一份 id 名单，最容易发生的
+    /// 漂移是「Rust 这边凭空捏一个 id」—— 用户离线时能选中、配好，等侧车上线
+    /// 却发现 `get_provider_spec` 抛 UnknownProvider。故这里直接读侧车注册表
+    /// 源码做对账（读不到即测试失败，绝不静默跳过）。
+    #[test]
+    fn rust_fallback_catalog_ids_exist_in_the_python_registry() {
+        use super::onboarding_catalog;
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pyengine/src/opensquilla/provider/registry.py"
+        );
+        let registry = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("读不到 Python provider 注册表 {path}: {e}"));
+
+        let catalog = onboarding_catalog();
+        let mut checked = 0usize;
+        for p in catalog["providers"].as_array().unwrap() {
+            let id = p["providerId"].as_str().expect("providerId 必须是字符串");
+            // 形如 `"openai",` / `"custom_anthropic",` 的一行 —— 注册表里每个 id
+            // 都是 _spec(...) 的第一个位置参数。
+            let needle = format!("\"{id}\"");
+            assert!(
+                registry.contains(&needle),
+                "Rust 目录里的 provider id `{id}` 在 pyengine/provider/registry.py 中不存在：\
+                 离线可配、上线即 UnknownProvider"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 10, "目录条目过少（{checked}），这条守卫已失去意义");
+    }
+
+    /// 「测试连接」必须按端点的**真实协议**发请求。
+    ///
+    /// 旧实现恒发 `{base}/chat/completions` + `Authorization: Bearer`：
+    /// Anthropic 家族与 Responses 端点一律失败，且失败文案只写「连接失败」，
+    /// 把协议错配伪装成密钥/模型名错。
+    #[test]
+    fn probe_target_speaks_each_endpoints_real_protocol() {
+        use super::{probe_target, ProbeAuth};
+
+        // OpenAI 兼容：/v1/chat/completions + Bearer
+        let t = probe_target("openai", "https://api.openai.com", "sk-a", "gpt-4o", None).unwrap();
+        assert_eq!(t.url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(t.auth, ProbeAuth::Bearer("sk-a".into()));
+        assert_eq!(t.body["max_tokens"], 5);
+
+        // 已带 /v1 的 base 不得拼出 /v1/v1（Ollama、OpenRouter 的老坑）
+        let t = probe_target("custom", "http://127.0.0.1:11434/v1/", "", "qwen3:8b", Some("chat"))
+            .unwrap();
+        assert_eq!(t.url, "http://127.0.0.1:11434/v1/chat/completions");
+        assert_eq!(t.auth, ProbeAuth::None, "本地端点不得硬塞 Bearer local");
+
+        // Anthropic 官方：/v1/messages + x-api-key
+        let t = probe_target("anthropic", "https://api.anthropic.com", "sk-ant", "claude-sonnet-4-20250514", None)
+            .unwrap();
+        assert_eq!(t.url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(t.auth, ProbeAuth::XApiKey("sk-ant".into()));
+        assert_eq!(t.body["max_tokens"], 5, "Anthropic 的 max_tokens 是必填");
+
+        // Anthropic 兼容网关（Bearer 风格）：协议同 /messages，密钥头不同
+        let t = probe_target("custom_anthropic", "https://gw.example.com/v1", "sk-b", "claude-3-7-sonnet", None)
+            .unwrap();
+        assert_eq!(t.url, "https://gw.example.com/v1/messages");
+        assert_eq!(t.auth, ProbeAuth::Bearer("sk-b".into()));
+
+        // Responses：/v1/responses + max_output_tokens，且不带 chat 的 messages
+        let t = probe_target("custom", "https://gw.example.com", "sk-c", "gpt-4o", Some("responses"))
+            .unwrap();
+        assert_eq!(t.url, "https://gw.example.com/v1/responses");
+        assert_eq!(t.body["max_output_tokens"], 5);
+        assert!(t.body.get("messages").is_none(), "Responses 用 input，不用 messages");
+        assert_eq!(t.body["input"], "hi");
+
+        // 不兼容组合与拼写错误都要响亮失败，而不是偷偷按 chat 探
+        assert!(probe_target("anthropic", "https://api.anthropic.com", "k", "m", Some("responses"))
+            .unwrap_err()
+            .contains("anthropic"));
+        assert!(probe_target("openai", "https://api.openai.com", "k", "m", Some("respones"))
+            .unwrap_err()
+            .contains("respones"));
+    }
 }

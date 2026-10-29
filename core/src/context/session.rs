@@ -102,6 +102,21 @@ pub struct SessionContext {
     /// 之外的独立基线项，而不是累加进这里。
     #[serde(default)]
     pub overhead_tokens: u64,
+    /// 当前生效模型的**原始**上下文窗口（token）。0 = 从未设置。
+    ///
+    /// 为什么要单独存：`budget` 是 `window*3/4` 再 `clamp(32K, 1.5M)`
+    /// （见 [`budget_for_window`]），**不可逆** —— 从预算反推出来的「窗口」是假的
+    /// （128K 预算可能来自 170K 窗口，也可能来自 clamp 之后的 2M 窗口）。
+    /// 而压力芯片显示的是 `已用 / 窗口`，必须用真值，否则百分比整体偏低、
+    /// 用户永远看不到「即将压缩」。`#[serde(default)]` 兼容既有磁盘 JSON（缺 → 0）。
+    #[serde(default)]
+    pub context_window: u64,
+    /// 最近一次压缩留下的**结构化交接状态**（M1 Task 4）。
+    ///
+    /// 旧台账缺此键 ⇒ `None`；前端按 `source_gaps` 显示「未知」而不是 0
+    /// （见 `context::compact_state` 的设计红线）。
+    #[serde(default)]
+    pub compact_state: Option<crate::context::compact_state::CompactState>,
 }
 
 impl SessionContext {
@@ -120,6 +135,8 @@ impl SessionContext {
             project_paths: Vec::new(),
             partial_text: None,
             overhead_tokens: 0,
+            context_window: 0,
+            compact_state: None,
         }
     }
 
@@ -200,6 +217,44 @@ impl RecentToolKeys {
     }
 }
 
+/// 会话键 → 台账文件名（**单射**编码）。
+///
+/// 旧实现把每个非 `[A-Za-z0-9._-]` 字符一律替换为 `_`，于是 `web:1` 与 `web_1`
+/// 落到同一份文件 —— 后写者覆盖前者的上下文、项目归属与压缩快照，读回时还可能
+/// 拿到**另一个会话**的历史（静默串会话）。现在把非法字符按 UTF-8 字节转义成
+/// `%XX`（`%` 自身也转义），不同键绝不共用一个文件。
+fn safe_session_file_name(session: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(session.len());
+    for ch in session.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            let mut buf = [0u8; 4];
+            for byte in ch.encode_utf8(&mut buf).bytes() {
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// 旧版文件名（仅供读取迁移前的台账，不再用于写入）。
+fn legacy_session_file_name(session: &str) -> String {
+    session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 impl ContextLedger {
     fn new(data_dir: &std::path::Path) -> Self {
         let dir = data_dir.join("context");
@@ -213,43 +268,138 @@ impl ContextLedger {
     }
 
     fn path(&self, session: &str) -> std::path::PathBuf {
-        let safe: String = session
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.dir.join(format!("{safe}.json"))
+        self.dir
+            .join(format!("{}.json", safe_session_file_name(session)))
+    }
+
+    /// 旧版（把非法字符一律替换为 `_`）的文件名，只用于读取迁移前的台账。
+    fn legacy_path(&self, session: &str) -> std::path::PathBuf {
+        self.dir
+            .join(format!("{}.json", legacy_session_file_name(session)))
     }
 
     fn snapshots_dir(&self, session: &str) -> std::path::PathBuf {
-        let safe: String = session
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '_'
+        self.dir
+            .join("snapshots")
+            .join(safe_session_file_name(session))
+    }
+
+    fn legacy_snapshots_dir(&self, session: &str) -> std::path::PathBuf {
+        self.dir
+            .join("snapshots")
+            .join(legacy_session_file_name(session))
+    }
+
+    /// 读取一份台账文件；**内容里的 `session` 才是权威**。
+    ///
+    /// 旧文件名不单射，磁盘上可能存在「文件名相同、会话不同」的残留；
+    /// 名字匹配不代表内容属于该会话，必须逐字核对，否则就是串会话。
+    fn read_ctx(path: &std::path::Path, session: &str) -> Option<SessionContext> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                // NotFound 是「新会话」的正常路径；其余（权限/IO）此前与它同样
+                // 静默回落为空上下文 —— 用户看到的是「历史凭空消失」，日志全无。
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = %path.display(),
+                        session = %session,
+                        error = %err,
+                        "会话台账读取失败，本次按空上下文继续（磁盘上的历史可能仍然完整）"
+                    );
                 }
-            })
-            .collect();
-        self.dir.join("snapshots").join(safe)
+                return None;
+            }
+        };
+        match serde_json::from_str::<SessionContext>(&raw) {
+            Ok(ctx) => (ctx.session == session).then_some(ctx),
+            Err(err) => {
+                // 损坏的台账必须留证：后面的 `persist` 会原子覆盖同一路径，
+                // 不先把原文件挪开就再也无法人工恢复。
+                let quarantine = path.with_extension(format!("corrupt-{}.json", now_ms()));
+                let kept = std::fs::rename(path, &quarantine).is_ok();
+                tracing::warn!(
+                    path = %path.display(),
+                    session = %session,
+                    error = %err,
+                    bytes = raw.len(),
+                    quarantined = kept,
+                    quarantine = %quarantine.display(),
+                    "会话台账 JSON 损坏，已回退为空上下文（原文件已隔离保留）"
+                );
+                None
+            }
+        }
     }
 
     fn load(&mut self, session: &str) -> SessionContext {
         if let Some(s) = self.sessions.get(session) {
             return s.clone();
         }
-        let loaded = std::fs::read_to_string(self.path(session))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<SessionContext>(&raw).ok())
-            .unwrap_or_else(|| SessionContext::new(session));
-        self.sessions.insert(session.to_string(), loaded.clone());
-        loaded
+        let mut loaded = Self::read_ctx(&self.path(session), session);
+        let legacy = self.legacy_path(session);
+        if loaded.is_none() && legacy != self.path(session) {
+            loaded = Self::read_ctx(&legacy, session);
+            if let Some(ctx) = loaded.as_ref() {
+                // 迁移到单射文件名：否则 `context_sessions()` 会把同一会话扫出两行。
+                self.persist(ctx);
+                let _ = std::fs::remove_file(&legacy);
+            }
+        }
+        let ctx = loaded.unwrap_or_else(|| SessionContext::new(session));
+        self.sessions.insert(session.to_string(), ctx.clone());
+        ctx
+    }
+
+    /// 删除会话台账（内存 + 落盘 + 压缩快照），返回是否删掉了任何落盘文件。
+    fn remove(&mut self, session: &str) -> bool {
+        self.sessions.remove(session);
+        self.recent_tool_keys.remove(session);
+        let mut removed = false;
+        for path in [self.path(session), self.legacy_path(session)] {
+            if std::fs::remove_file(&path).is_ok() {
+                removed = true;
+            }
+        }
+        for dir in [self.snapshots_dir(session), self.legacy_snapshots_dir(session)] {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                removed = true;
+            }
+        }
+        removed
+    }
+
+    /// `sessions.reset` 的台账侧清理：清空对话内容，**保留会话壳**。
+    ///
+    /// 与 [`Self::remove`] 的差别只在一处：项目归属与预算留着（会话还在侧栏，
+    /// 还属于同一个工作区）。其余描述「这段对话」的状态全部归零——条目、压缩
+    /// 摘要与计数、部分文本、工具记账、以及**压缩快照**。快照必须删：它是压缩前
+    /// 的旧对话，留着会让 `context_rollback` 把用户刚清空的内容整段复活。
+    ///
+    /// 返回是否真的清掉了什么（有内容或有快照），供 RPC 如实回包。
+    fn reset(&mut self, session: &str) -> bool {
+        let mut ctx = self.load(session);
+        let had_content = !ctx.entries.is_empty()
+            || ctx.summary.is_some()
+            || ctx.partial_text.is_some()
+            || ctx.overhead_tokens > 0;
+        let snapshots_removed = [self.snapshots_dir(session), self.legacy_snapshots_dir(session)]
+            .iter()
+            .filter(|dir| std::fs::remove_dir_all(dir).is_ok())
+            .count();
+        ctx.entries.clear();
+        ctx.overhead_tokens = 0;
+        ctx.partial_text = None;
+        ctx.summary = None;
+        ctx.compaction_count = 0;
+        ctx.last_compact_ms = None;
+        ctx.last_mode = None;
+        ctx.compression_ratio = None;
+        ctx.snapshot_count = 0;
+        self.recent_tool_keys.remove(session);
+        self.persist(&ctx);
+        self.sessions.insert(session.to_string(), ctx);
+        had_content || snapshots_removed > 0
     }
 
     /// 落盘（原子写，走 `persistence::write_json_atomic`）。
@@ -262,8 +412,24 @@ impl ContextLedger {
     /// 计量同时失去依据，且界面看不出「曾经有过历史」。
     /// 改原子写后，读者要么看到旧完整内容、要么看到新完整内容。
     fn persist(&self, ctx: &SessionContext) {
-        if let Ok(raw) = serde_json::to_string_pretty(ctx) {
-            let _ = crate::persistence::write_json_atomic(&self.path(&ctx.session), &raw);
+        let raw = match serde_json::to_string_pretty(ctx) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!(session = %ctx.session, error = %err, "会话台账序列化失败，本轮未落盘");
+                return;
+            }
+        };
+        let path = self.path(&ctx.session);
+        if let Err(err) = crate::persistence::write_json_atomic(&path, &raw) {
+            // 曾经这里连 `NotFound`（父目录缺失）都被吞掉，台账静默永远为空；
+            // 任何落盘失败都必须留痕，否则「聊完重开历史没了」在日志里零证据。
+            tracing::warn!(
+                path = %path.display(),
+                session = %ctx.session,
+                entries = ctx.entries.len(),
+                error = %err,
+                "会话台账落盘失败"
+            );
         }
     }
 
@@ -398,7 +564,14 @@ impl ContextLedger {
     /// 恢复最近一次预压缩快照；成功返回 true
     fn rollback(&mut self, session: &str) -> bool {
         let mut ctx = self.load(session);
-        let dir = self.snapshots_dir(session);
+        let mut dir = self.snapshots_dir(session);
+        // 旧文件名下保存的快照：新目录为空时回退读取，别让「升级后回滚不了」发生。
+        if Self::snapshot_files_by_mtime(&dir).is_empty() {
+            let legacy = self.legacy_snapshots_dir(session);
+            if legacy != dir && !Self::snapshot_files_by_mtime(&legacy).is_empty() {
+                dir = legacy;
+            }
+        }
         let files = Self::snapshot_files_by_mtime(&dir);
         let Some(latest) = files.last() else {
             return false;
@@ -817,9 +990,106 @@ async fn cached_llm_summary(entries: &[ContextEntry]) -> Option<String> {
     summary
 }
 
+/// 台账根目录（其下 `context/` 存会话 JSON、`snapshots/` 存压缩快照）。
+///
+/// `cfg(test)` 下固定落到进程级临时目录：全局单例会经 `record_turn` 等入口
+/// **无条件写盘**，若指向真实 `data_dir` 就会把夹具条目写进用户的会话台账
+/// （与 R64 的 `usage.db` 事故同型：测试污染真实数据，界面随后显示假历史）。
+///
+/// 生产口径与 `sessions.db` 同根（[`Config::config_dir`]）。历史实现落在
+/// `data_dir()`：`sessions.list` 合并「DB + 台账」，`sessions.export` 只读 DB，
+/// 两个根不一致时同一会话在不同 RPC 上给出互相矛盾的答案（隔离环境实测：
+/// list 返回 20+ 真实历史、export 返回空数组）。同根后两者必然一致。
+fn context_root() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join(format!("marguerite-context-test-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    {
+        let root = Config::config_dir();
+        static MIGRATED: std::sync::Once = std::sync::Once::new();
+        MIGRATED.call_once(|| migrate_legacy_ledger(&root));
+        root
+    }
+}
+
+/// 一次性把旧台账（`data_dir()/context`）复制到新根（`config_dir()/context`）。
+///
+/// 只在新目录缺失或为空时执行；**复制而不是移动**——旧目录保留原样，迁移中途
+/// 失败最多是没迁成，不会让用户历史凭空消失。递归复制失败仅告警，不阻断启动。
+#[cfg(not(test))]
+fn migrate_legacy_ledger(target_root: &std::path::Path) {
+    let target = target_root.join("context");
+    let legacy = Config::data_dir().join("context");
+    if !legacy.is_dir() || legacy == target {
+        return;
+    }
+    let target_empty = std::fs::read_dir(&target)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
+    if !target_empty {
+        return;
+    }
+    match copy_dir_recursive(&legacy, &target) {
+        Ok(n) => tracing::info!(
+            files = n,
+            from = %legacy.display(),
+            to = %target.display(),
+            "会话台账已迁移到 config_dir"
+        ),
+        Err(e) => tracing::warn!(
+            err = %e,
+            from = %legacy.display(),
+            "会话台账迁移失败（旧目录保留，不影响启动）"
+        ),
+    }
+}
+
+/// 递归复制目录（仅标准库；调用方负责幂等与失败降级）。
+#[cfg(not(test))]
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            count += copy_dir_recursive(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn ledger() -> &'static Mutex<ContextLedger> {
     static LEDGER: OnceLock<Mutex<ContextLedger>> = OnceLock::new();
-    LEDGER.get_or_init(|| Mutex::new(ContextLedger::new(&Config::data_dir())))
+    LEDGER.get_or_init(|| Mutex::new(ContextLedger::new(&context_root())))
+}
+
+/// 读取指定会话的台账文件（新单射名优先，旧名回退；内容归属不符一律视为不存在）。
+///
+/// 供 `memory.*` 等**只读**旁路使用：它们不能各自拼文件名 —— 旧口径
+/// `{session}.json` 在键含 `:` 时已经对不上盘上的文件，表现为「感知记忆永远为空」。
+pub fn read_session_context(session: &str) -> Option<SessionContext> {
+    let dir = context_root().join("context");
+    let new = dir.join(format!("{}.json", safe_session_file_name(session)));
+    if let Some(ctx) = ContextLedger::read_ctx(&new, session) {
+        return Some(ctx);
+    }
+    let legacy = dir.join(format!("{}.json", legacy_session_file_name(session)));
+    if legacy != new {
+        return ContextLedger::read_ctx(&legacy, session);
+    }
+    None
+}
+
+/// 台账目录（供需要枚举文件的旁路使用；与 [`ledger`] 同源）。
+pub(crate) fn context_dir() -> std::path::PathBuf {
+    context_root().join("context")
 }
 
 /// `context.record_turn`（内部：chat 链路调用）
@@ -1020,6 +1290,30 @@ pub fn context_entries(session: &str) -> Vec<ContextEntry> {
         .entries
 }
 
+/// `sessions.delete` 的台账侧清理：内存、落盘 JSON 与压缩快照一并删除。
+///
+/// 返回是否删掉了任何落盘文件。此前删除只清 `sessions.db`，台账与快照留在
+/// `data_dir/context/` —— 会话从列表消失后 `sessions.list` 的台账兜底又会把它
+/// 「复活」，压缩快照也继续占着磁盘。
+pub fn remove_session(session: &str) -> bool {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session)
+}
+
+/// `sessions.reset` 的台账侧清理：清空对话内容，保留项目归属与预算。
+///
+/// **这是「清空对话」是否真的清空的唯一判据**：模型的历史是从这份台账灌进上下文
+/// 的（`gateway/chat.rs::session_history_messages`），而 `sessions.db` 只是给前端
+/// 翻看的历史记录。只清 DB 的旧实现会让用户在空对话里继续被模型「记得」全部前文。
+pub fn reset_session(session: &str) -> bool {
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reset(session)
+}
+
 /// 最后一条台账条目的时间戳（R70：供逐条落盘时取与台账一致的毫秒时间）。
 ///
 /// 与 `context_entries(session).last()` 等价，但**不复制整段条目** —— 每轮对话
@@ -1125,7 +1419,7 @@ pub struct ContextSessionSummary {
 /// 「context JSON 在、sessions.list 无记录」的可见性丢失；本函数让列表
 /// 数据源合并台账，避免会话重启后从侧边栏消失。
 pub fn context_sessions() -> Vec<ContextSessionSummary> {
-    let dir = Config::data_dir().join("context");
+    let dir = context_dir();
     let mut out: Vec<ContextSessionSummary> = Vec::new();
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return out;
@@ -1146,10 +1440,21 @@ pub fn context_sessions() -> Vec<ContextSessionSummary> {
         }
         let last = ctx.entries.last();
         let updated_ms = last.map(|e| e.at_ms).unwrap_or(0);
+        // 标题口径与 `sessions.db` 的 `generate_summary` 一致：**首条用户消息**
+        // 才是这个会话「在聊什么」。此前回退到 `last`（最后一条 assistant 输出），
+        // 于是只有台账、尚未整轮落库的会话在侧栏显示成一段回复正文 —— 同题重开
+        // 的多个会话标题几乎一样，看起来像重复行。
         let title = ctx
             .summary
             .clone()
-            .unwrap_or_else(|| last.map(|e| e.text.clone()).unwrap_or_default());
+            .unwrap_or_else(|| {
+                ctx.entries
+                    .iter()
+                    .find(|e| e.role == "user")
+                    .or_else(|| ctx.entries.first())
+                    .map(|e| e.text.clone())
+                    .unwrap_or_default()
+            });
         // 先按「多根优先、旧单值回退」取值，再把 `project_path` 移入结构体。
         let project_paths = ctx.projects();
         out.push(ContextSessionSummary {
@@ -1177,6 +1482,9 @@ pub fn context_status(session: &str) -> Value {
         "used_tokens": ctx.used_tokens(),
         "overhead_tokens": ctx.overhead_tokens,
         "budget": ctx.budget,
+        // 原始窗口（0 = 从未设置）。`ratio` 用的是**预算**口径，芯片用的是**窗口**口径
+        // —— 两者必须各自可见，否则前端只能拿不可逆的预算反推窗口（那是假的）。
+        "context_window": ctx.context_window,
         "ratio": ratio,
         "alert": if ratio >= COMPACT_RATIO { "compact_required" }
                  else if ratio >= WARN_RATIO { "warning" } else { "normal" },
@@ -1189,6 +1497,8 @@ pub fn context_status(session: &str) -> Value {
         "summary": ctx.summary,
         // F1：暴露流式 partial_text，供前端切回时恢复「正在生成」占位
         "partial_text": ctx.partial_text,
+        // M1-T4：结构化交接状态（上一次压缩留下的）。None ⇒ 前端按 null 显示「未知」。
+        "compact_state": ctx.compact_state,
     })
 }
 
@@ -1213,8 +1523,12 @@ pub fn set_budget(session: &str, context_window: u64) -> u64 {
     }
     let mut l = ledger().lock().unwrap_or_else(|e| e.into_inner());
     let mut ctx = l.load(session);
-    if ctx.budget != budget {
+    // 「预算变了」**不足以**判定要写盘：`budget_for_window` 会 clamp，
+    // 于是 2M 与 3M 两个窗口映射出同一个 1.5M 预算 —— 只比预算的话，
+    // 换模型后台账里的窗口永远停在旧值，芯片算出来的百分比就是错的。
+    if ctx.budget != budget || ctx.context_window != context_window {
         ctx.budget = budget;
+        ctx.context_window = context_window;
         l.persist(&ctx);
         l.sessions.insert(session.to_string(), ctx);
     }
@@ -1361,7 +1675,6 @@ pub fn context_rollback(session: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::config::Config;
 
     fn tmp_ledger(tag: &str) -> (ContextLedger, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("mgt-ctx-{tag}-{}", uuid::Uuid::new_v4()));
@@ -1379,6 +1692,201 @@ mod tests {
         assert_eq!(ctx.session, "s1");
         // 未知会话返回空台账
         assert_eq!(l.status("none").entries.len(), 0);
+    }
+
+    /// 旧文件名把 `:` 与 `_` 混为一谈：`web:1` 与 `web_1` 共用一份文件并串会话。
+    /// 单射编码必须让两者各自落盘、各自读回。
+    #[test]
+    fn colliding_session_keys_no_longer_share_one_ledger_file() {
+        let (mut l, dir) = tmp_ledger("keys");
+        l.record("web:1", "user", "colon session");
+        l.record("web_1", "user", "underscore session");
+        assert_eq!(l.status("web:1").entries.len(), 1);
+        assert_eq!(l.status("web_1").entries.len(), 1);
+        assert_eq!(l.status("web:1").entries[0].text, "colon session");
+        assert_eq!(l.status("web_1").entries[0].text, "underscore session");
+        let json_files = std::fs::read_dir(&l.dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+            .count();
+        assert_eq!(json_files, 2, "不同会话键必须各写一份台账");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 迁移前写下的台账仍然可读，但只有**内容里的 session 一致**才算属主；
+    /// 读取后迁到单射文件名，旧文件移除（否则列表会扫出重复会话）。
+    #[test]
+    fn legacy_ledger_file_is_migrated_only_to_its_real_owner() {
+        let (mut l, dir) = tmp_ledger("legacy");
+        let mut legacy_ctx = SessionContext::new("web:1");
+        legacy_ctx.entries.push(ContextEntry {
+            role: "user".into(),
+            text: "legacy".into(),
+            tokens: 1,
+            at_ms: 1,
+        });
+        std::fs::write(
+            l.legacy_path("web:1"),
+            serde_json::to_string(&legacy_ctx).unwrap(),
+        )
+        .unwrap();
+
+        // 同形文件名的另一个键不得继承这份历史
+        assert!(
+            l.status("web_1").entries.is_empty(),
+            "旧文件名同形不代表属主相同"
+        );
+        // 真正的属主读得到，并完成迁移
+        assert_eq!(l.status("web:1").entries[0].text, "legacy");
+        assert!(l.path("web:1").exists(), "应写入单射文件名");
+        assert!(!l.legacy_path("web:1").exists(), "迁移后旧文件必须移除");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 捕获指定线程上的 WARN 日志（`with_default` 是线程局部的，并行跑安全）。
+    fn capture_warn<T>(f: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Sink(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8_lossy(&buffer.lock().unwrap()).to_string();
+        (out, text)
+    }
+
+    /// 损坏的台账不能只在内存里当空处理：随后的 `persist` 会原子覆盖同一路径，
+    /// 静默回落等于把用户的历史文件永久抹掉，且日志里零证据。
+    #[test]
+    fn corrupt_ledger_is_quarantined_and_reported_instead_of_silently_replaced() {
+        let (mut l, dir) = tmp_ledger("corrupt");
+        let path = l.path("s-corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{\"session\":\"s-corrupt\",\"entries\":[trunc").unwrap();
+
+        let (ctx, logs) = capture_warn(|| l.status("s-corrupt"));
+        assert!(ctx.entries.is_empty(), "损坏台账按空上下文继续");
+        assert!(
+            logs.contains("会话台账 JSON 损坏"),
+            "损坏必须留下可诊断的日志，实际: {logs}"
+        );
+
+        let quarantined: Vec<_> = std::fs::read_dir(&l.dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(quarantined.len(), 1, "原文件必须被隔离保留，而不是就地丢弃");
+        let kept = std::fs::read_to_string(&quarantined[0]).unwrap();
+        assert!(kept.starts_with("{\"session\":\"s-corrupt\""), "隔离件必须是原始字节");
+
+        // 新的一轮记录不得覆盖隔离件（否则「先保留」毫无意义）
+        l.record("s-corrupt", "user", "after corruption");
+        assert!(quarantined[0].exists(), "后续落盘不得碰隔离件");
+        assert_eq!(l.status("s-corrupt").entries.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 落盘失败（父目录不可用）此前是 `let _ =` 静默吞掉 —— 台账会永远为空，
+    /// 而表面上会话照常可聊。必须至少留一条 WARN。
+    #[test]
+    fn persist_write_failure_is_logged_not_swallowed() {
+        let (mut l, dir) = tmp_ledger("wfail");
+        // 把 context 目录换成同名文件：create_dir_all 与写入都会失败。
+        let ctx_dir = l.dir.clone();
+        std::fs::remove_dir_all(&ctx_dir).unwrap();
+        std::fs::write(&ctx_dir, b"not a directory").unwrap();
+
+        let (_, logs) = capture_warn(|| l.record("s-wfail", "user", "hello"));
+        assert!(
+            logs.contains("会话台账落盘失败"),
+            "落盘失败必须留痕，实际: {logs}"
+        );
+        // 内存态仍然前进（落盘失败不应中断对话）
+        assert_eq!(l.status("s-wfail").entries.len(), 1);
+
+        let _ = std::fs::remove_file(&ctx_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_clears_memory_disk_and_snapshots() {
+        let (mut l, dir) = tmp_ledger("remove");
+        l.record("s-del", "user", "bye");
+        let ctx = l.status("s-del");
+        l.save_snapshot(&ctx, "cmp-x");
+        assert!(l.path("s-del").exists());
+        assert!(l.snapshots_dir("s-del").exists());
+
+        assert!(l.remove("s-del"), "应报告删掉了落盘文件");
+        assert!(
+            l.status("s-del").entries.is_empty(),
+            "内存缓存也必须一并清掉（否则列表兜底会复活会话）"
+        );
+        assert!(!l.path("s-del").exists());
+        assert!(!l.snapshots_dir("s-del").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.reset` 的语义：「清空对话」= 模型也忘记，但工作区归属还在。
+    ///
+    /// 这条测试盯两件事：① 描述这段对话的状态全部归零，且**压缩快照**一并删掉
+    /// （否则 `rollback` 会把用户刚清空的旧对话整段复活）；② 项目归属与预算
+    /// 不被抹掉 —— 会话还在侧栏、还属于同一个工作区。
+    #[test]
+    fn reset_forgets_conversation_and_snapshots_but_keeps_workspace_binding() {
+        let (mut l, dir) = tmp_ledger("reset");
+        l.record("s-reset", "user", "记住这个暗号：青鸟");
+        l.record_overhead("s-reset", 42);
+        l.set_projects("s-reset", &["D:/proj/a".to_string()]);
+        {
+            let mut ctx = l.load("s-reset");
+            ctx.budget = 9000;
+            ctx.summary = Some("旧对话摘要".into());
+            ctx.compaction_count = 2;
+            ctx.last_mode = Some("deterministic".into());
+            ctx.compression_ratio = Some(0.5);
+            l.save_snapshot(&ctx, "cmp-test");
+            l.persist(&ctx);
+            l.sessions.insert("s-reset".to_string(), ctx);
+        }
+        assert!(l.snapshots_dir("s-reset").exists());
+
+        assert!(l.reset("s-reset"), "有内容时必须如实回报清到了东西");
+
+        let ctx = l.status("s-reset");
+        assert!(ctx.entries.is_empty(), "模型历史必须真的被清空");
+        assert_eq!(ctx.overhead_tokens, 0);
+        assert!(ctx.summary.is_none(), "压缩摘要属于被清空的那段对话");
+        assert_eq!(ctx.compaction_count, 0);
+        assert_eq!(ctx.snapshot_count, 0);
+        assert_eq!(ctx.projects(), vec!["D:/proj/a".to_string()], "工作区归属必须保留");
+        assert_eq!(ctx.budget, 9000, "预算属于会话壳，不属于这段对话");
+        assert!(!l.snapshots_dir("s-reset").exists(), "压缩快照必须删掉");
+        assert!(!l.rollback("s-reset"), "清空后不得还能回滚出旧对话");
+
+        // 重新从磁盘加载：清空必须已经落盘，而不是只改了内存
+        let mut reread = ContextLedger::new(&dir);
+        assert!(reread.status("s-reset").entries.is_empty());
+        assert_eq!(reread.projects("s-reset"), vec!["D:/proj/a".to_string()]);
+
+        assert!(!l.reset("s-reset"), "已经清空 → 第二次应回报未清到东西");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// P2-9：多路径写入后按原序读出；只有旧字段时回退为单值。
@@ -1558,9 +2066,9 @@ mod tests {
 
     #[test]
     fn test_context_sessions_enumerates_ledger_json() {
-        // context_sessions 扫描全局 data_dir/context；写一个临时台账 JSON 验证枚举，
-        // 断言后立即删除，不污染真实台账。
-        let dir = Config::data_dir().join("context");
+        // context_sessions 扫描测试隔离的台账目录；写一个临时台账 JSON 验证枚举，
+        // 断言后立即删除（绝不碰真实 data_dir）。
+        let dir = context_dir();
         let _ = std::fs::create_dir_all(&dir);
         let probe = format!("mgt-ctx-enum-{}", uuid::Uuid::new_v4());
         let path = dir.join(format!("{probe}.json"));
@@ -1591,6 +2099,8 @@ mod tests {
             project_paths: Vec::new(),
             partial_text: None,
             overhead_tokens: 0,
+            context_window: 0,
+            compact_state: None,
         };
         let write = std::fs::write(&path, serde_json::to_string(&ctx).unwrap());
         assert!(write.is_ok(), "临时台账写入失败");
@@ -1600,7 +2110,13 @@ mod tests {
         let hit = hit.unwrap();
         assert_eq!(hit.message_count, 2);
         assert_eq!(hit.updated_ms, 1_700_000_000_500);
-        assert!(hit.title.contains("好的"), "标题应取最后一条原文");
+        // 标题口径 = 首条用户消息（与 sessions.db 的 generate_summary 一致）；
+        // 旧实现取最后一条 assistant 输出，导致侧栏出现「回复正文当标题」的重复行。
+        assert!(
+            hit.title.contains("fps"),
+            "标题应取首条用户消息，而不是最后一条回复：{}",
+            hit.title
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1762,15 +2278,14 @@ mod tests {
         let ctx = l2.status("p1");
         assert_eq!(ctx.entries.len(), 1);
         assert_eq!(ctx.entries[0].text, "持久化测试");
-        let _ = Config::data_dir();
     }
 
-    /// 删除全局台账中的临时会话文件，避免污染真实 data_dir（in-memory 条目无碍）。
+    /// 删除测试台账中的临时会话文件（in-memory 条目无碍）。
     fn cleanup_ledger_file(session: &str) {
-        let path = Config::data_dir()
-            .join("context")
-            .join(format!("{session}.json"));
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(context_dir().join(format!("{session}.json")));
+        let _ = std::fs::remove_file(
+            context_dir().join(format!("{}.json", safe_session_file_name(session))),
+        );
     }
 
     #[test]

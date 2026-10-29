@@ -69,11 +69,18 @@ const liveMode = computed(() => {
   display: flex;
   align-items: center;
   gap: 0.625rem;
-  width: var(--chat-col);
-  max-width: calc(100% - 48px);
+  /* 与 `.msg-ai` / `.msg-user` 同一条阅读列（上限 + 左起点），口径必须与
+     chat-view.css 里的同名根规则一致 —— 那一条只命中 ChatView 自己模板里的
+     维护行，这一条命中历史行；谁生效都不该改变版式。 */
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
   min-height: 1.75rem;
-  margin: 0.125rem auto 0.625rem;
+  margin-block: 0.125rem 0.625rem;
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.25rem 0.125rem;
+  text-align: start;
   color: color-mix(in srgb, var(--text) 58%, transparent);
   font-size: var(--fs-xs);
   line-height: 1.45;

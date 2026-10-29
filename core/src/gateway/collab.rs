@@ -142,6 +142,7 @@ async fn exec_ssh_entry(entry: &CollabSshEntry, command: &str, params: &Value) -
     if let Some(blocked) = crate::agent::tool_cycle::suspend_for_remote_command(
         crate::guard::gateway::agent_gate(),
         crate::guard::gateway::agent_approval_host_present(),
+        None,
         "collab.ssh.exec",
         &approval_args,
     )

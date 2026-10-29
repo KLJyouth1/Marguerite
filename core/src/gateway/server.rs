@@ -271,6 +271,14 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
             "/api/approvals/resolve",
             axum::routing::post(crate::gateway::approvals::approvals_resolve),
         )
+        // 会话级提权（P2-3）：WebUI 的审批旁路开关只走这条 REST。Rust 实现了它，
+        // 纯 Rust 托管下开关才有真实语义（此前请求落到通配代理回 501，前端只能
+        // 把模式回退成「不可用」）。侧车在线时也不再转发 —— 两侧语义以 Rust 为准，
+        // 避免「Rust 说 bypass、侧车说没收到」的双真相。
+        .route(
+            "/api/elevated-mode",
+            axum::routing::post(crate::gateway::elevated::elevated_mode),
+        )
         // 产物取字节：控制台的下载按钮 / 内联文本编辑**只走这条 REST**
         // （`artifacts.ts::artifactDownloadUrl` 对「有 id 无 download_url」的产物拼这个路径）。
         // 缺它 → 501 → 前端弹「下载失败」；`open_in_system`/`edit_inline` 另有 RPC 通道，不受影响。
@@ -1785,8 +1793,9 @@ mod tests {
     /// 未实现的 `/api/*` 必须回 **501 + JSON**，而不是落进 SPA 静态回退返回 HTML。
     ///
     /// 背景：前端有几处按 REST 约定调用，而网关从未实现这些端点
-    /// （`/api/elevated-mode`、`/api/approvals`、`/api/approvals/resolve`、
-    /// `/api/system/update`、`/api/v1/*` …）。没有这条路由时它们命中 `fallback`，
+    /// （历史实测：`/api/elevated-mode`、`/api/approvals`、`/api/system/update`、
+    /// `/api/v1/*` …；其中前两者现已由 Rust 实现，这里用一条确实不存在的路径守住
+    /// 通配代理的兜底语义）。没有这条路由时它们命中 `fallback`，
     /// 拿到 `<!doctype html>`，前端 `JSON.parse` 抛错后被 `console.warn` 吞掉 ——
     /// 失败完全不可见（`webui/.../useChatElevatedMode.ts` 就是这么烂了很久）。
     ///
@@ -1815,11 +1824,11 @@ mod tests {
         });
 
         // 未带 token 的代理调用必须 401（否则本机进程可借侧车通道零凭据操作）
-        let unauth = http_request(addr, "POST", "/api/elevated-mode", Some("{}")).await;
+        let unauth = http_request(addr, "POST", "/api/no-such-endpoint", Some("{}")).await;
         assert!(unauth.starts_with("HTTP/1.1 401"), "代理无 token 应 401: {unauth}");
 
         // POST 到未实现端点 -> 501 且响应体是 JSON（不是 HTML）
-        let raw = http_request_auth(addr, "POST", "/api/elevated-mode", Some("{}"), "api-probe-token").await;
+        let raw = http_request_auth(addr, "POST", "/api/no-such-endpoint", Some("{}"), "api-probe-token").await;
         assert!(raw.starts_with("HTTP/1.1 501"), "应为 501，实际: {raw}");
         assert!(
             raw.contains("\"error\":\"not_implemented\""),
@@ -1839,6 +1848,73 @@ mod tests {
         let health = http_request(addr, "GET", "/api/health", None).await;
         assert!(health.starts_with("HTTP/1.1 200"), "health 应 200: {health}");
         assert!(health.contains("\"status\":\"ok\""), "health 体: {health}");
+    }
+
+    /// P2-3：`POST /api/elevated-mode` 必须有真实语义（鉴权 + 校验 + 会话级台账）。
+    ///
+    /// 这是能**关闭人工审批**的写接口：匿名/跨源一律拒绝；合法请求要把模式记到
+    /// 该 session key 名下，`off` 能清除。
+    #[tokio::test]
+    async fn test_elevated_mode_endpoint_has_real_semantics() {
+        let state = Arc::new(GatewayState {
+            config: Config::default(),
+            bus: EventBus::default(),
+            token: "api-probe-token".to_string(),
+            started_at: Instant::now(),
+            webui_dir: test_webui_dir(),
+            rate_limiter: std::sync::Arc::new(crate::gateway::rate_limit::RateLimiter::new(
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+                crate::gateway::rate_limit::BucketConfig::new(240, 40.0),
+            )),
+            rate_limit_enabled: false,
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = build_router(Arc::clone(&state));
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let session = "agent:p2-3-rest-test";
+        let bypass_body = format!(r#"{{"sessionKey":"{session}","mode":"bypass"}}"#);
+
+        // 无 token → 401（写接口必须 fail-closed）
+        let unauth = http_request(addr, "POST", "/api/elevated-mode", Some(&bypass_body)).await;
+        assert!(unauth.starts_with("HTTP/1.1 401"), "匿名写请求应 401: {unauth}");
+        assert!(
+            !crate::guard::elevated::global().skips_approval_for(Some(session)),
+            "被拒绝的请求不能改变提权台账"
+        );
+
+        // 缺 sessionKey → 400
+        let missing = http_request_auth(addr, "POST", "/api/elevated-mode", Some("{}"), "api-probe-token").await;
+        assert!(missing.starts_with("HTTP/1.1 400"), "缺 sessionKey 应 400: {missing}");
+
+        // 非法 mode → 400（不能静默当成 off/bypass）
+        let bogus = r#"{"sessionKey":"agent:p2-3-rest-test","mode":"yolo"}"#;
+        let bogus_resp = http_request_auth(addr, "POST", "/api/elevated-mode", Some(bogus), "api-probe-token").await;
+        assert!(bogus_resp.starts_with("HTTP/1.1 400"), "非法 mode 应 400: {bogus_resp}");
+
+        // bypass → 200，并且台账真的记下（执行链据此跳过 Confirm）
+        let ok = http_request_auth(addr, "POST", "/api/elevated-mode", Some(&bypass_body), "api-probe-token").await;
+        assert!(ok.starts_with("HTTP/1.1 200"), "合法请求应 200: {ok}");
+        assert!(ok.contains("\"mode\":\"bypass\""), "响应应回显模式: {ok}");
+        assert!(
+            crate::guard::elevated::global().skips_approval_for(Some(session)),
+            "bypass 必须写入会话级台账"
+        );
+
+        // off → 200 且清除
+        let off_body = format!(r#"{{"sessionKey":"{session}","mode":"off"}}"#);
+        let off = http_request_auth(addr, "POST", "/api/elevated-mode", Some(&off_body), "api-probe-token").await;
+        assert!(off.starts_with("HTTP/1.1 200"), "关闭提权应 200: {off}");
+        assert!(off.contains("\"mode\":\"off\""), "关闭响应: {off}");
+        assert!(
+            !crate::guard::elevated::global().skips_approval_for(Some(session)),
+            "off 必须清除会话级台账"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2151,9 +2227,56 @@ mod tests {
         assert!(unauth.starts_with("HTTP/1.1 401"), "无 token 应 401: {unauth}");
         assert!(!unauth.contains("artifact payload"), "401 绝不能回文件本体: {unauth}");
 
-        let served = http_request_auth(addr, "GET", &format!("/api/v1/artifacts/{encoded}"), None, "e2e-test-token").await;
+        // 会话归属：缺键 / 错键一律 404（与 pyengine `_session_id_for_download` 同契约），
+        // 且绝不能回文件本体 —— 知道 id 不足以跨会话读取。
+        let no_session = http_request_auth(
+            addr,
+            "GET",
+            &format!("/api/v1/artifacts/{encoded}"),
+            None,
+            "e2e-test-token",
+        )
+        .await;
+        assert!(no_session.starts_with("HTTP/1.1 404"), "缺会话键应 404: {no_session}");
+        assert!(!no_session.contains("artifact payload"), "404 绝不能回文件本体: {no_session}");
+
+        let wrong_session = http_request_auth_with(
+            addr,
+            "GET",
+            &format!("/api/v1/artifacts/{encoded}"),
+            None,
+            "e2e-test-token",
+            &[("x-Marguerite-session-key", "agent:main:webchat:someone-else")],
+        )
+        .await;
+        assert!(wrong_session.starts_with("HTTP/1.1 404"), "错会话键应 404: {wrong_session}");
+        assert!(!wrong_session.contains("artifact payload"), "跨会话绝不能回文件本体: {wrong_session}");
+
+        let served = http_request_auth_with(
+            addr,
+            "GET",
+            &format!("/api/v1/artifacts/{encoded}"),
+            None,
+            "e2e-test-token",
+            &[("x-Marguerite-session-key", "agent:main:webchat:artifact-test")],
+        )
+        .await;
         assert!(served.starts_with("HTTP/1.1 200"), "已登记产物应 200: {served}");
         assert!(served.contains("artifact payload"), "应回文件本体: {served}");
+
+        // 查询参数是给不能设请求头的调用方的兼容通道（pyengine 同款优先级）
+        let via_query = http_request_auth(
+            addr,
+            "GET",
+            &format!(
+                "/api/v1/artifacts/{encoded}?sessionKey=agent%3Amain%3Awebchat%3Aartifact-test"
+            ),
+            None,
+            "e2e-test-token",
+        )
+        .await;
+        assert!(via_query.starts_with("HTTP/1.1 200"), "查询参数会话键应 200: {via_query}");
+        assert!(via_query.contains("artifact payload"), "应回文件本体: {via_query}");
         assert!(
             served.to_ascii_lowercase().contains("content-length: 16"),
             "应给出真实长度（前端据此拦超大文本）: {served}"
@@ -2228,13 +2351,29 @@ mod tests {
         body: Option<&str>,
         token: &str,
     ) -> String {
+        http_request_auth_with(addr, method, path, body, token, &[]).await
+    }
+
+    /// 同上，另加任意业务头（产物下载要带会话键头）。
+    async fn http_request_auth_with(
+        addr: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let body = body.unwrap_or("");
+        let extra: String = extra_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         let req = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Content-Type: application/json\r\nAuthorization: Bearer {token}\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+             {extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(req.as_bytes()).await.unwrap();

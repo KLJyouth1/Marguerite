@@ -58,6 +58,23 @@ const normalizedTextSuffixes = new Set([
 const ignoredSourceFileNames = new Set(['.DS_Store'])
 const forbiddenArtifactFileNames = new Set(['.ds_store', '.npmrc'])
 const forbiddenArtifactSuffixes = new Set(['.key', '.pem'])
+// Sourcemaps are the whole frontend source, repackaged. A closed-source build
+// that ships them has published its source regardless of what the repo says.
+const forbiddenSourceMapSuffixes = new Set(['.map'])
+// Some bundlers can inline the payload instead of emitting a `.map`, so the
+// extension check alone is not enough. `sourcesContent` is the key that holds
+// the original file bodies.
+const sourceMapPayloadKey = 'sourcesContent'
+const scannableTextSuffixes = new Set([
+  '.css',
+  '.html',
+  '.js',
+  '.json',
+  '.mjs',
+  '.svg',
+  '.txt',
+  '.webmanifest',
+])
 // Whitelisted official music assets. The four CC0 ambient tracks ship from
 // public/music/ and land in dist/music/; anything else under music/ in an
 // official build is still a personal/copyrighted upload and must be rejected.
@@ -278,6 +295,27 @@ export function verifyDist(
   if (actual !== expected) {
     throw new Error(
       'Web UI artifact does not match its manifest. Rebuild it with `npm run build`.',
+    )
+  }
+  const shippedSourceMaps = actualRecords
+    .map((record) => record.path)
+    .filter((path) => forbiddenSourceMapSuffixes.has(path.slice(path.lastIndexOf('.'))))
+  if (shippedSourceMaps.length > 0) {
+    throw new Error(
+      `Web UI artifact must not ship source maps: ${shippedSourceMaps.join(', ')}`,
+    )
+  }
+  const inlinedSource = actualRecords
+    .filter((record) =>
+      scannableTextSuffixes.has(record.path.slice(record.path.lastIndexOf('.'))),
+    )
+    .filter((record) =>
+      readFileSync(resolve(root, record.path)).includes(sourceMapPayloadKey),
+    )
+    .map((record) => record.path)
+  if (inlinedSource.length > 0) {
+    throw new Error(
+      `Web UI artifact contains an inlined source map payload: ${inlinedSource.join(', ')}`,
     )
   }
   if (forbidPersonalBgm) {

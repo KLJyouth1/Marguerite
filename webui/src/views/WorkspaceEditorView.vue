@@ -1,11 +1,23 @@
 <template>
-  <div class="control-stage editor-stage">
+  <div class="control-stage editor-stage" :class="{ 'editor-stage--focus': focusMode }">
     <header class="control-stage__header">
       <div class="control-stage__title-block">
         <h1 class="control-stage__title">{{ t('workspaceEditor.title') }}</h1>
         <p class="control-stage__subtitle">{{ t('workspaceEditor.subtitle') }}</p>
       </div>
       <div class="control-stage__actions">
+        <!-- 专注模式：编辑器是大内容面，聚焦时只折叠标题块，保存/刷新必须留在原地 -->
+        <button
+          class="btn btn--ghost"
+          type="button"
+          :aria-pressed="focusMode"
+          :title="focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode')"
+          data-testid="editor-focus-toggle"
+          @click="focusMode = !focusMode"
+        >
+          <Icon :name="focusMode ? 'collapse' : 'expand'" :size="16" />
+          <span>{{ focusMode ? t('chrome.focusModeOff') : t('chrome.focusMode') }}</span>
+        </button>
         <button class="btn btn--ghost" :disabled="busy" @click="loadTree(treePath)">
           <Icon name="refresh" :size="16" /><span>{{ t('workspaceEditor.refresh') }}</span>
         </button>
@@ -94,6 +106,8 @@ interface EditorTab { path: string; name: string; content: string; dirty: boolea
 
 const error = ref('')
 const busy = ref(false)
+// 专注模式（瞬态，不持久化）：与 TerminalView 同款，只折叠标题块、保留操作钮
+const focusMode = ref(false)
 const treePath = ref('')
 const treeRoot = ref('')
 const treeEntries = ref<TreeEntry[]>([])
@@ -286,6 +300,12 @@ onMounted(async () => {
 .editor-tab--dirty::after { content: '•'; color: var(--accent); }
 .editor-tab__close { color: var(--text-dim); padding: 0 2px; }
 .editor-area { flex: 1; min-height: 60vh; padding: 14px; background: var(--bg); color: var(--text); border: 0; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; resize: none; outline: none; }
+
+/* ── 专注模式：折叠标题块，内容面吃满视口（操作钮保留）── */
+.editor-stage--focus .control-stage__title-block { display: none; }
+.editor-stage--focus .editor-tree { max-height: calc(100vh - 200px); }
+.editor-stage--focus .editor-main { min-height: calc(100vh - 200px); }
+.editor-stage--focus .editor-area { min-height: calc(100vh - 250px); }
 .editor-status { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--hairline); font-size: 11px; color: var(--text-dim); }
 .editor-status span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor-empty { padding: 24px; color: var(--text-dim); font-size: 13px; text-align: center; }

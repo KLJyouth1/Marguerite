@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { toolResultCount } from '@/utils/chat/toolDisplay'
+import { toolResultCount, toolResultIsError } from '@/utils/chat/toolDisplay'
 
 describe('toolResultCount', () => {
   it('counts structured result collections', () => {
@@ -52,5 +52,20 @@ describe('toolResultCount', () => {
     ]
 
     expect(toolResultCount(JSON.stringify({ results }), 'web_search')).toBe(2)
+  })
+})
+
+describe('toolResultIsError', () => {
+  it('honours the persisted ok flag even when a result body exists', () => {
+    expect(toolResultIsError({ ok: false, result: 'exit 1' })).toBe(true)
+    expect(toolResultIsError({ ok: true, result: '' })).toBe(false)
+  })
+
+  it('falls back to execution_status and explicit error flags', () => {
+    expect(toolResultIsError({ execution_status: { status: 'error' } })).toBe(true)
+    expect(toolResultIsError({ execution_status: { status: 'cancelled' } })).toBe(true)
+    expect(toolResultIsError({ execution_status: { status: 'success' } })).toBe(false)
+    expect(toolResultIsError({ is_error: true })).toBe(true)
+    expect(toolResultIsError({})).toBe(false)
   })
 })

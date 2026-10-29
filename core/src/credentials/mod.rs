@@ -324,7 +324,11 @@ impl CredentialsStore {
         drop(snapshot);
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("写临时台账失败: {e}"))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| format!("台账落盘失败: {e}"))
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("台账落盘失败: {e}"))?;
+        // 台账里有加密后的密钥与**明文**的 Grant 载荷（授权范围/租约等），
+        // 与 `.env` 同级看待：只有属主可读写。
+        let _ = crate::persistence::harden_private_file(&self.path);
+        Ok(())
     }
 }
 

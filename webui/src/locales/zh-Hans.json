@@ -561,6 +561,19 @@
     "available": "Marguerite {version} 已发布",
     "viewRelease": "查看发布说明",
     "dismiss": "忽略",
+    "dialog": {
+      "newVersion": "新版本可用",
+      "updateNow": "立即更新",
+      "later": "稍后提醒",
+      "skipVersion": "忽略此版本",
+      "downloading": "正在下载更新",
+      "downloadedTitle": "更新已就绪",
+      "downloadedDesc": "{version} 已下载完成，重启以完成安装。",
+      "restartNow": "立即重启",
+      "restartLater": "稍后重启",
+      "failedTitle": "更新失败",
+      "close": "关闭"
+    },
     "desktop": {
       "indicatorAvailable": "更新 {version}",
       "indicatorDownloaded": "更新已就绪",
@@ -985,6 +998,38 @@
     "localMode": "本地模式",
     "detached": "分离 HEAD"
   },
+  "cockpit": {
+    "title": "浏览器驾驶舱",
+    "subtitle": "零依赖 CDP 操控：导航 / JS 控制台 / 截图点击 / 无障碍树 / Resource Timing 网络面板（browser.* RPC）",
+    "detect": "检测",
+    "closeSession": "关闭会话",
+    "navigate": "导航",
+    "open": "打开",
+    "pageTitle": "标题：{title}",
+    "emptyCdp": "输入 URL 打开页面（真实 Chromium CDP，需本机 Chrome/Edge）",
+    "emptyShot": "点击「刷新截图」查看页面",
+    "shotOverlay": "点击截图任意位置 = 真实鼠标点击",
+    "refreshShot": "刷新截图",
+    "dumpDom": "DOM 快照",
+    "consoleTitle": "JS 控制台（evaluate）",
+    "run": "运行",
+    "consoleEmpty": "(空)",
+    "a11yTitle": "无障碍节点（a11y）",
+    "a11yRead": "读取",
+    "networkTitle": "DevTools 网络面板（Resource Timing · 近似段）",
+    "capture": "捕获",
+    "clear": "清空",
+    "networkMeta": "{n} 条资源（近 100 条 · 按加载倒序）",
+    "networkEmpty": "暂无捕获（打开页面后点「捕获」；数据来自浏览器 Resource Timing API，不含请求头/响应体）",
+    "thResource": "资源",
+    "thType": "类型",
+    "thDuration": "耗时",
+    "thSize": "大小",
+    "iframeTitle": "内置浏览器（iframe 直载 · 轻量预览）",
+    "load": "载入",
+    "iframeEmpty": "输入 URL 载入。跨域站点若拒绝被嵌套（X-Frame-Options / CSP），iframe 会留白 —— 请改用上方 CDP 驾驶舱（真实 Chromium）。",
+    "iframeNote": "iframe 预览不携带你的会话凭据；登录型站点请走 CDP 会话。若站点拒绝嵌套，属于站点自身安全策略，非本工具缺陷。"
+  },
   "chrome": {
     "settings": "设置",
     "theme": "主题",
@@ -998,7 +1043,10 @@
     "expandSidebar": "展开侧边栏",
     "collapseSidebar": "收起侧边栏",
     "toggleSidebar": "切换侧边栏",
+    "iconRail": "图标栏",
     "zenMode": "禅模式",
+    "focusMode": "专注模式",
+    "focusModeOff": "退出专注模式",
     "resizeSidebar": "调整侧边栏宽度",
     "sidebarWidthValue": "侧边栏宽度：{width}px，{preset}",
     "sidebarWidthLimitedValue": "侧边栏宽度：{width}px，{preset}；受当前窗口限制（偏好 {preference}px）",
@@ -1006,6 +1054,8 @@
     "sidebarCollapseCanceled": "已取消收起侧边栏",
     "openBlockedSession": "打开被阻塞的会话",
     "approvalRequired": "需要审批",
+    "sidecarOfflineApprovals": "侧车离线 · {count} 条审批待同步",
+    "sidecarOfflineApprovalsTitle": "Python 侧车当前离线，这些审批仍留在它的队列里，重连后会重新出现。点击查看连接状态。",
     "manageConnection": "管理网关连接",
     "connectionTitle": "连接：{state} — 在设置中管理",
     "connectionState": {
@@ -1543,6 +1593,7 @@
       "discardAll": "全部放弃（{count}）",
       "moreOptionsIn": "更多选项位于",
       "copyConfigPath": "复制配置路径",
+      "configPathIsolated": "用户配置目录（隔离模式）",
       "applyLiveNote": "大多数更改即时生效；部分需要重启网关",
       "discardTitle": "放弃未保存的修改？",
       "discardBody": "有尚未保存的编辑，现在关闭将丢失它们。",
@@ -3353,6 +3404,8 @@
     },
     "ledger": {
       "fork": "分叉",
+      "forkedFrom": "分叉自「{title}」",
+      "forkTooltip": "分叉自更早的任务，此前的消息被复制到这里。",
       "subagent": "子智能体",
       "subagentWithParent": "子智能体 · {parent}",
       "session": "会话",
@@ -4737,6 +4790,10 @@
       "customBaseUrl": "端点，例如 https://api.example.com/v1",
       "customModel": "模型名，例如 gpt-4o-mini",
       "customApiKey": "API Key（可留空，稍后在设置中填写）",
+      "customProtocol": "请求协议",
+      "customProtocolChat": "OpenAI 兼容 · /v1/chat/completions",
+      "customProtocolResponses": "OpenAI Responses 协议 · /v1/responses",
+      "customProtocolAnthropic": "Anthropic 协议 · /v1/messages",
       "customSubmit": "保存并启用",
       "customCancel": "收起",
       "customRequired": "端点与模型名为必填项。",
@@ -4756,7 +4813,7 @@
       "ttft": "首 token {ms}（客户端实测）",
       "sessionTokens": "本会话 token {n}",
       "rounds": "轮次 {n}",
-      "cacheHitRate": "缓存命中率 {pct}%"
+      "cacheHitRate": "服务商缓存命中 {pct}%"
     },
     "artifactEditorAria": "产物编辑与预览",
     "recoveringGeneration": "检测到未完成的生成，正在恢复…",
@@ -4850,6 +4907,17 @@
     "deliverablesCount": "产物（{count}）",
     "contextPressure": "上下文 {pct}%",
     "contextPressureTitle": "上下文窗口 {used}k / {window}k tokens — 接近压缩阈值",
+    "contextMeter": {
+      "tool": "工具 {k}k",
+      "windowApprox": "窗口为估算值",
+      "aria": "上下文用量：{used}k / {window}k（{pct}%），{tier}",
+      "tier": {
+        "normal": "正常",
+        "watch": "留意",
+        "advise": "偏高",
+        "compact": "即将压缩"
+      }
+    },
     "sessionDeliverables": "会话产物",
     "noDeliverables": "暂无产物。",
     "openArtifact": "打开 {title}，{subtitle}",
@@ -5305,6 +5373,16 @@
     "slashCommands": {
       "unknown": "未知命令 {command}。请继续编辑，或使用 // 将其作为普通文本发送。"
     },
+    "handoff": {
+      "commandDescription": "生成工作区交接单（产物清单+交接说明落盘），下一个模型/会话直接读工作区承接，无需传文件",
+      "usage": "/handoff [给接手方的话]",
+      "toastOk": "交接单已写入工作区：{path}",
+      "toastFail": "交接单写入失败：{error}",
+      "noticeTitle": "发现工作区交接单",
+      "noticeUse": "引用到输入框",
+      "noticeOpen": "在编辑器打开",
+      "insertText": "请先阅读工作区交接单 handoff/{file}，按其承接指引继续任务；不要重做已完成步骤，产出继续落盘工作区并登记产物。"
+    },
     "codingMode": {
       "enabled": "Coding mode 已为所有聊天开启。",
       "disabled": "Coding mode 已关闭。",
@@ -5354,6 +5432,10 @@
       "modelRoutingOmniDesc": "由单一编排智能体在每一轮协调当前最优的可用模型。",
       "modelRoutingOmni": "极致编排路由",
       "runModePanel": "运行模式与路由",
+      "approvalBypass": "审批确认",
+      "approvalBypassOn": "已跳过确认",
+      "approvalBypassOff": "需要确认",
+      "approvalBypassDesc": "开启后，本会话的高危工具调用不再弹出确认卡；模式黑名单、Plan 只读与沙箱策略不受影响，每次跳过仍会记入审计事件。",
       "thinking": "深度思考",
       "modeShort": {
         "safe": "安全",
@@ -5477,6 +5559,7 @@
       "failed": "失败",
       "done": "完成",
       "pending": "待处理",
+      "unknown": "未确认",
       "results": "{count} 条结果",
       "countRunning": "{count} 项运行中",
       "countDone": "{count} 项完成",
@@ -5518,6 +5601,7 @@
       "downloadFailedHttp": "下载失败 — HTTP {status}",
       "downloadFailed": "下载失败",
       "forkFailed": "创建分支失败",
+      "forkUnavailable": "会话分支需要 Python 侧车（当前为纯 Rust 模式）。启动侧车后重试，或改用「复制对话」。",
       "forkOpenFailed": "分支已创建，但暂时无法打开。你可以从会话列表中打开它。",
       "copyFailed": "复制失败",
       "shareSaveFailed": "无法保存图片，请重试。",
@@ -5554,6 +5638,7 @@
       "planningNextStep": "规划下一步",
       "readingContext": "读取上下文",
       "waitingForModel": "等待模型",
+      "waitingSerialHint": "已等 {s}s · 模型调用为串行（默认 Agent 模式），切换 Bloom 可并行",
       "preparingOutput": "准备输出",
       "generatingCandidates": "正在生成候选",
       "synthesizingCandidates": "正在融合候选",
@@ -5809,7 +5894,12 @@
       "restartUnavailable": "当前形态无法重启宿主进程：请在桌面应用中重试，或重新打开应用。",
       "restartFailed": "重启宿主进程失败：{error}",
       "restarted": "已重启宿主进程，正在重连…",
-      "alreadyRunning": "宿主进程已在运行，正在刷新状态…"
+      "alreadyRunning": "宿主进程已在运行，正在刷新状态…",
+      "bannerTitle": "Python 辅助引擎未启动，部分诊断不可用。",
+      "details": "详情",
+      "hideDetails": "收起详情",
+      "dismiss": "关闭",
+      "restart": "重启辅助引擎"
     },
     "errorActions": {
       "viewLogs": "查看日志",
@@ -6040,6 +6130,13 @@
       "bulkDeleteFailed": "删除已选任务失败",
       "deleteSessionDone": "会话已删除",
       "deleteSessionFailed": "删除会话失败",
+      "resetConversation": "清空对话",
+      "resetSessionTitle": "清空对话",
+      "resetSessionBody": "清空任务“{title}”的对话？将删除 {count} 条消息，会话设置与产出的文件保留。此操作无法撤销。",
+      "resetSessionBodyNoCount": "清空任务“{title}”的对话？将删除本任务的消息，会话设置与产出的文件保留。此操作无法撤销。",
+      "resetSessionConfirm": "清空",
+      "resetSessionDone": "会话已清空",
+      "resetSessionFailed": "清空会话失败",
       "renameSessionDone": "会话已重命名",
       "renameSessionFailed": "重命名会话失败",
       "showMore": "显示更多（还有 {count} 条）",
@@ -6356,6 +6453,15 @@
     "elapsed": "耗时",
     "artifacts": {
       "empty": "暂无交付物。文件生成后会立即显示在这里。"
+    },
+    "review": {
+    "pending": "待审查",
+    "approved": "已通过",
+    "flagged": "已打回",
+    "approve": "通过",
+    "flag": "打回",
+    "openArtifact": "打开产物",
+    "hint": "审查结论由人工给出并保存在本地；当前不会暂停后端流水线。"
     },
     "runStatus": {
       "idle": "空闲",
@@ -6733,6 +6839,11 @@
     }
   },
   "engineHealth": {
+    "sidecarDegradedTitle": "侧车能力降级",
+    "sidecarMissing": "缺少依赖：{modules}",
+    "sidecarNumpyImpact": "本地 ML 路由已停用（回退 default-tier），聊天仍可用",
+    "sidecarGenericImpact": "相关网关能力将回落或不可用",
+    "sidecarInterpreter": "解释器：{path}",
     "title": "引擎健康 · 模型 · 模式",
     "subtitle": "能力透明化：能力健康度 / Rust 模型档案 / 重型运行时 / 运行时模式",
     "refresh": "刷新",
@@ -7112,6 +7223,9 @@
       "refresh": "刷新",
       "toolCalls": "次工具调用",
       "lastActivity": "最近活动",
+      "viewGrid": "网格视图",
+      "viewKanban": "看板视图",
+      "colEmpty": "暂无成员",
       "status": {
         "running": "进行中",
         "waiting": "等待中",
@@ -7128,7 +7242,7 @@
       "coverageSkipped": "跳过 {count}",
       "coverageMerged": "合并 {count}",
       "coveragePlugins": "插件引用 {refs}（已解析 {resolved}，未解析 {unresolved}）",
-      "coverageUnavailable": "技能覆盖统计不可用",
+      "coverageUnavailable": "统计数据不可用",
       "tabSkills": "技能",
       "tabTools": "工具与 MCP",
       "tabProposals": "提案",

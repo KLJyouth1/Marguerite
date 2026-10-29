@@ -92,6 +92,31 @@ export const useAppStore = defineStore('app', () => {
   const locale = ref<LocaleCode>('en')
   const pendingChannelNoticeLocale = ref<LocaleCode | null>(readPendingLocaleSync())
   const sidebarOpen = ref(true)
+  // Icon-rail mode: the docked sidebar renders as a narrow icon-only strip
+  // (grouped nav becomes hover flyouts; conversations panel is hidden).
+  // Orthogonal to sidebarOpen — it only takes effect while docked (drawer
+  // mode ignores it) and persists browser-locally like the width preference.
+  const SIDEBAR_ICON_RAIL_KEY = 'marguerite.sidebar.iconRail.v1'
+  function loadSidebarIconRail(): boolean {
+    try {
+      return localStorage.getItem(SIDEBAR_ICON_RAIL_KEY) === '1'
+    } catch {
+      // Storage unavailable → default to the full sidebar.
+      return false
+    }
+  }
+  const sidebarIconRail = ref(loadSidebarIconRail())
+  function setSidebarIconRail(on: boolean) {
+    sidebarIconRail.value = on
+    try {
+      localStorage.setItem(SIDEBAR_ICON_RAIL_KEY, on ? '1' : '0')
+    } catch {
+      // Persistence is best-effort; the in-session state still applies.
+    }
+  }
+  function toggleSidebarIconRail() {
+    setSidebarIconRail(!sidebarIconRail.value)
+  }
   // Browser-local layout preference, hydrated synchronously so the first
   // mounted frame uses the saved width. Viewport clamping is intentionally a
   // consumer concern: zooming or rotating must not overwrite this preference.
@@ -102,6 +127,10 @@ export const useAppStore = defineStore('app', () => {
   // still supports snapshot consumers (back-compat).
   const pendingApprovals = ref<PendingApproval[]>([])
   const approvalCountRaw = ref(0)
+  // P2-4：侧车离线时它队列里仍未裁决的审批数（来自 GET /api/approvals 的
+  // `pending_sidecar_offline`）。这不是「本进程挂起」的审批，故单独计数、单独提示，
+  // 不混进 approvalCount（否则 badge 会指向一张并不存在的卡片）。
+  const sidecarOfflineApprovals = ref(0)
   const approvalFocusRequest = ref<ApprovalFocusRequest | null>(null)
   let approvalFocusRequestId = 0
 
@@ -408,6 +437,10 @@ export const useAppStore = defineStore('app', () => {
     approvalCountRaw.value = count
   }
 
+  function setSidecarOfflineApprovals(count: number) {
+    sidecarOfflineApprovals.value = Math.max(0, Math.trunc(Number(count) || 0))
+  }
+
   // Replace the app-wide pending list and mark it the live source so
   // `approvalCount` derives from it. Called on the reconnect seed fetch.
   function setPendingApprovals(items: PendingApproval[]) {
@@ -498,9 +531,11 @@ export const useAppStore = defineStore('app', () => {
     pendingChannelNoticeLocale,
     resolvedTheme,
     sidebarOpen,
+    sidebarIconRail,
     sidebarWidthPreference,
     approvalCount,
     pendingApprovals,
+    sidecarOfflineApprovals,
     oldestPendingWithSession,
     approvalFocusRequest,
     features,
@@ -514,12 +549,15 @@ export const useAppStore = defineStore('app', () => {
     syncLocaleToGateway,
     setSidebarOpen,
     toggleSidebar,
+    setSidebarIconRail,
+    toggleSidebarIconRail,
     zenMode,
     setZenMode,
     toggleZenMode,
     setSidebarWidthPreference,
     resetSidebarWidthPreference,
     setApprovalCount,
+    setSidecarOfflineApprovals,
     setPendingApprovals,
     upsertPendingApproval,
     removePendingApproval,

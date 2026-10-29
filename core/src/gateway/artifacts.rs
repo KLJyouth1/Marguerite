@@ -243,7 +243,8 @@ pub fn artifacts_edit_inline(params: &Value) -> Value {
 ///
 /// API 只接受 **id**，且 id 必须命中 Rust 产物台账（`file_change::get_artifact`）——台账里的路径
 /// 是 agent 真实产出并登记过的，调用方无法用它去读任意文件。换成「按 URL 里的路径读文件」就是
-/// 任意文件读取漏洞，故此处绝不接受路径。
+/// 任意文件读取漏洞，故此处绝不接受路径。会话键还必须与产物台账里的归属一致（见
+/// [`requested_session_key`]），否则 404 —— 知道 id 不足以跨会话读取。
 ///
 /// `?variant=thumb` 会被忽略（Rust 没有缩略图存储）：返回原图而不是伪造一个空图 —— 前端把它当
 /// 图片显示即可，代价是缩略图网格会拉整图（已知差距，见 AGENTS.md）。
@@ -280,6 +281,13 @@ pub async fn artifact_download(
             None => artifact_not_found(),
         };
     };
+    // 会话归属：pyengine 的同一路由在会话键缺失/不符时回 404（`_session_id_for_download`
+    // 拿不到会话即 NOT_FOUND）。此前 Rust 只认 id，于是换一个会话键（或不带）也能读走
+    // 别的会话的产物 —— 与侧车契约分歧，也是越权面。回 404 而不是 403 同样是刻意的：
+    // 403 会泄露「这个 id 存在」。
+    if requested_session_key(&headers, &uri).as_deref() != Some(entry.session_key.as_str()) {
+        return artifact_not_found();
+    }
     let path = std::path::PathBuf::from(&entry.path);
     // 目录类产物 / 已被删除的文件：都是「取不到」→ 404，而不是 500 或空响应
     match tokio::fs::metadata(&path).await {
@@ -320,6 +328,71 @@ pub async fn artifact_download(
         .unwrap_or_else(|_| artifact_not_found())
 }
 
+/// 请求里的会话键（与 pyengine `session_key.request_session_key` 同优先级：
+/// 品牌名头 → 旧名头 → 查询参数）。头优先是刻意的 —— URL 里的凭据会进日志与 Referer，
+/// 查询参数只为兼容不能设请求头的调用方保留。
+fn requested_session_key(
+    headers: &axum::http::HeaderMap,
+    uri: &axum::http::Uri,
+) -> Option<String> {
+    for name in ["x-marguerite-session-key", "x-opensquilla-session-key"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    for pair in uri.query()?.split('&') {
+        let Some((key, raw)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "sessionKey" || key == "session_key" {
+            let decoded = percent_decode(raw);
+            let trimmed = decoded.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 只解 `%XX` 与 `+`，够查询参数用（不引入 URL 解析依赖）。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let decoded = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match decoded {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// 未登记 / 取不到的产物（载荷与 pyengine `api_artifacts` 同形）
 fn artifact_not_found() -> Response {
     (
@@ -356,6 +429,38 @@ fn ascii_filename(name: &str) -> String {
 #[cfg(test)]
 mod rest_tests {
     use super::*;
+
+    #[test]
+    fn requested_session_key_prefers_brand_header_then_legacy_then_query() {
+        let mut headers = axum::http::HeaderMap::new();
+        let uri: axum::http::Uri = "/api/v1/artifacts/x?sessionKey=q".parse().unwrap();
+        assert_eq!(requested_session_key(&headers, &uri).as_deref(), Some("q"));
+        headers.insert("x-opensquilla-session-key", "legacy".parse().unwrap());
+        assert_eq!(
+            requested_session_key(&headers, &uri).as_deref(),
+            Some("legacy"),
+            "旧名头优先于查询参数"
+        );
+        headers.insert("x-marguerite-session-key", "brand".parse().unwrap());
+        assert_eq!(
+            requested_session_key(&headers, &uri).as_deref(),
+            Some("brand"),
+            "品牌名头优先于旧名头"
+        );
+        // 空值不算来源：否则空键会匹配上「空会话」的产物
+        headers.remove("x-opensquilla-session-key");
+        headers.insert("x-marguerite-session-key", "  ".parse().unwrap());
+        assert_eq!(requested_session_key(&headers, &uri).as_deref(), Some("q"));
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_plus() {
+        assert_eq!(percent_decode("agent%3Amain"), "agent:main");
+        assert_eq!(percent_decode("a+b"), "a b");
+        // 非法转义原样保留（不能吞字节，否则键会被悄悄改写成另一个值）
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
 
     #[test]
     fn ascii_filename_is_header_safe() {

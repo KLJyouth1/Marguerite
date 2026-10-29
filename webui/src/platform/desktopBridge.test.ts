@@ -182,7 +182,7 @@ describe('installDesktopBridge', () => {
     await expect(bridge().chooseProjectDirectory()).resolves.toBeNull()
   })
 
-  it('declares no native updater so the update banner keeps working', async () => {
+  it('declares managed updater so the passive banner stays suppressed on desktop', async () => {
     installTauri(async () => null)
     installDesktopBridge()
     const api = window.MargueriteDesktop as unknown as {
@@ -190,7 +190,7 @@ describe('installDesktopBridge', () => {
       isDesktopUpdateManaged: () => Promise<boolean>
     }
 
-    await expect(api.isAutoUpdateEnabled()).resolves.toBe(false)
-    await expect(api.isDesktopUpdateManaged()).resolves.toBe(false)
+    await expect(api.isAutoUpdateEnabled()).resolves.toBe(true)
+    await expect(api.isDesktopUpdateManaged()).resolves.toBe(true)
   })
 })

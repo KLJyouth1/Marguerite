@@ -15,6 +15,90 @@ fn rfc3339_to_ms(s: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// 从会话 key 推导列表元数据 `(sessionKind, surface, conversationKind)`。
+///
+/// 此前 `sessions.list` 对每一行都硬编码 `chat` / `web` / `main`：CLI 与 TUI
+/// 会话因此混进 Web 侧栏、子智能体会话被当成普通聊天（不缩进、不归任务），
+/// 多智能体场景下所有行都挂在「main」名下。前端虽有按 key 推导的兜底，但
+/// **后端只要给出显式值（哪怕是假的）就被采信**，兜底永远不会执行。
+/// 这里按 pyengine `session/keys.py` 的权威契约如实推导：
+/// `agent:<id>:main`、`agent:<id>:webchat:<rest>`、`agent:<id>:<channel>:<kind>:<peer>`、
+/// `agent:<id>:subagent:<run>`、内部面（cli/tui/mcp/standalone）、`cron:*`、`web.<id>`。
+/// 渠道适配器名不受限（pyengine 里就是 `channel or "unknown"`），不能按白名单判。
+fn session_list_meta(key: &str) -> (&'static str, &str, &'static str) {
+    // 旧 `subagent:<base>` 前缀（pyengine `is_subagent_key` 仍认），没有 agent 段。
+    if key.starts_with("subagent:") {
+        return ("task", "subagent", "internal");
+    }
+    // `web.<id>`（`sessions.create` 的旧形态）没有 `:` 分段，会一路掉到下面的
+    // `""` 分支被当成 unknown。它其实是 main 的直连 chat 会话 —— 用既有的
+    // 判定函数显式接住，别让合法旧键在列表里显示成「未知类型」。
+    if is_legacy_webchat_key(key) {
+        return ("chat", "web", "direct");
+    }
+    let parts: Vec<&str> = key.split(':').collect();
+    let surface = if parts.first() == Some(&"agent") && parts.len() >= 3 {
+        parts[2]
+    } else {
+        ""
+    };
+    match surface {
+        "subagent" => ("task", "subagent", "internal"),
+        "cli" | "standalone" => ("chat", "cli", "internal"),
+        "tui" => ("chat", "tui", "internal"),
+        "mcp" => ("chat", "mcp", "internal"),
+        "cron" => ("cron", "cron", "unknown"),
+        "main" => ("chat", "main", "direct"),
+        "webchat" => ("chat", "webchat", "direct"),
+        _ if key.starts_with("cron:") || key.contains(":cron:") => ("cron", "cron", "unknown"),
+        "" => ("unknown", "unknown", "unknown"),
+        // 其余 surface 是渠道适配器名（slack / discord / feishu / …）：pyengine
+        // 用 `agent:<id>:<channel>:<kind>:<peer>` 建键，kind 决定会话类型。
+        _ => {
+            let kind = if key.contains(":group:") {
+                "group"
+            } else if key.contains(":channel:") {
+                "channel"
+            } else if key.contains(":direct:") || key.contains(":dm:") {
+                "direct"
+            } else {
+                "group"
+            };
+            ("channel", surface, kind)
+        }
+    }
+}
+
+/// `web.<id>`：`sessions.create` 的既有默认键（前端从不生成，但 API 客户端
+/// 可能用），属于合法的旧形态。
+fn is_legacy_webchat_key(key: &str) -> bool {
+    key.strip_prefix("web.")
+        .map(|rest| !rest.is_empty())
+        .unwrap_or(false)
+}
+
+/// 会话 key 是否属于产品**可寻址**的会话形态（决定它是否进入 `sessions.list`）。
+///
+/// 契约来自 pyengine `session/keys.py` —— 合法的 `agent:` 键至少三段
+/// （`agent:<id>:main` / `agent:<id>:<surface>:<rest>`），surface 既可以是内部面，
+/// 也可以是任意渠道适配器名；另有旧前缀 `subagent:`、`cron:*` 与 `web.<id>`。
+/// 探针 / 压测客户端自选的裸键（`ws.*` / `qa*` / `bench1_*` …）不符合任何形态：
+/// 它们没有 surface，无法归属导航分组，也不该出现在任何人的会话列表里。
+/// 数据仍然保留 —— 知道 key 时 `chat.history` / `sessions.get` 照常可读。
+fn is_addressable_session_key(key: &str) -> bool {
+    let parts: Vec<&str> = key.split(':').collect();
+    if parts.first() == Some(&"agent") && parts.len() >= 3 {
+        return !parts[1].is_empty() && !parts[2].is_empty();
+    }
+    if let Some(rest) = key.strip_prefix("subagent:") {
+        return !rest.is_empty();
+    }
+    if let Some(rest) = key.strip_prefix("cron:") {
+        return !rest.is_empty();
+    }
+    is_legacy_webchat_key(key)
+}
+
 /// `sessions.list`：列出会话（DB 记录 + context 台账双轨合并）。
 pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
     let limit = params
@@ -35,8 +119,16 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
     let running: std::collections::HashSet<String> = crate::gateway::chat::running_sessions()
         .into_iter()
         .collect();
-    if let Ok(sessions) = manager.init().and_then(|_| manager.list_sessions(limit)) {
+    if let Ok(sessions) = manager.init().and_then(|_| manager.list_all_sessions()) {
         for s in sessions {
+            // 列表是**产品会话索引**：只收有明确 surface 归属、且真的有消息的会话。
+            // 探针裸键与零消息占位行（`sessions.create` 的空快照等）不再以
+            // 「普通聊天」的身份出现 —— 真机库实测 325 行里 196 行是前者、16 行
+            // 是后者，侧栏因此长期满屏重复标题。过滤必须在截断之前做，否则它们
+            // 会挤掉真实会话（见 `list_all_sessions` 的注释）。
+            if !is_addressable_session_key(&s.session_id) || s.message_count == 0 {
+                continue;
+            }
             seen.insert(s.session_id.clone());
             let ledger_paths = ledger_projects
                 .get(&s.session_id)
@@ -50,6 +142,9 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
             };
             let project_path = s.project_path.clone().or_else(|| project_paths.first().cloned());
             let is_running = running.contains(&s.session_id);
+            let (session_kind, surface, conversation_kind) = session_list_meta(&s.session_id);
+            let effective_agent_id =
+                crate::agent::store::agent_id_from_session(&s.session_id).unwrap_or("main");
             items.push((
                 rfc3339_to_ms(&s.updated_at),
                 json!({
@@ -58,10 +153,10 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
                     "sessionKey": s.session_id,
                     "title": s.summary,
                     "summary": s.summary,
-                    "sessionKind": "chat",
-                    "surface": "web",
-                    "conversationKind": "chat",
-                    "effectiveAgentId": "main",
+                    "sessionKind": session_kind,
+                    "surface": surface,
+                    "conversationKind": conversation_kind,
+                    "effectiveAgentId": effective_agent_id,
                     "messageCount": s.message_count,
                     "updatedAt": rfc3339_to_ms(&s.updated_at),
                     "createdAt": rfc3339_to_ms(&s.created_at),
@@ -84,6 +179,10 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
         if seen.contains(&cs.session) {
             continue;
         }
+        // 与 DB 行同一口径：无 surface 归属 / 无消息的台账不进入产品列表。
+        if !is_addressable_session_key(&cs.session) || cs.message_count == 0 {
+            continue;
+        }
         let is_running = running.contains(&cs.session);
         // 台账多根优先；旧台账只有单值 → 回退成单元素集合
         let ledger_paths: Vec<String> = if cs.project_paths.is_empty() {
@@ -91,6 +190,9 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
         } else {
             cs.project_paths.clone()
         };
+        let (session_kind, surface, conversation_kind) = session_list_meta(&cs.session);
+        let effective_agent_id =
+            crate::agent::store::agent_id_from_session(&cs.session).unwrap_or("main");
         items.push((
             cs.updated_ms as i64,
             json!({
@@ -99,10 +201,10 @@ pub fn sessions_list(_ctx: &GatewayContext, params: &Value) -> Value {
                 "sessionKey": cs.session,
                 "title": cs.title,
                 "summary": cs.title,
-                "sessionKind": "chat",
-                "surface": "web",
-                "conversationKind": "chat",
-                "effectiveAgentId": "main",
+                "sessionKind": session_kind,
+                "surface": surface,
+                "conversationKind": conversation_kind,
+                "effectiveAgentId": effective_agent_id,
                 "messageCount": cs.message_count,
                 "updatedAt": cs.updated_ms,
                 "createdAt": cs.updated_ms,
@@ -191,6 +293,16 @@ fn paginate_history(
 /// 现在如实兑现：返回最近 `limit` 条（或 `before` 之前的一页）、给出双向游标与
 /// `has_more`。游标用**绝对下标**而不是时间戳 —— 同一毫秒内的多条消息在时间戳
 /// 游标下会被整段跳过，那是静默丢历史。
+///
+/// # 工具行归一（会话历史与流式同形）
+///
+/// `session_messages` 里的 `role='tool'` 行**不再**作为独立消息下发：WebUI 没有
+/// `tool` 角色的渲染分支，它会落到 `SystemMessage` 兜底，把 `[name] input → output`
+/// 原样显示成系统气泡；而同一回合在流式期间渲染的是可折叠工具卡。刷新一次就变成
+/// 两副样子，用户感知为「历史内容和刚才不一样」。本函数把成串的工具行折成结构化
+/// `tool_calls`（与流式载荷同形），由**紧邻其后**的 assistant 行承接；没有紧邻
+/// assistant 行（回合中断）时合成一条空文本 assistant 行，绝不跨 user/system 行
+/// 归属。`total` / 游标基于折叠后的行集，因此分页条数等于用户真正看到的条数。
 pub fn chat_history(_ctx: &GatewayContext, params: &Value) -> Value {
     let session = params
         .get("sessionKey")
@@ -224,6 +336,12 @@ pub fn chat_history(_ctx: &GatewayContext, params: &Value) -> Value {
     let db_ok = loaded.is_ok();
     let messages = loaded.map(|snap| snap.messages).unwrap_or_default();
     let from_db = !messages.is_empty();
+    // 工具成败信号：只有 DB 路径带 `tool_ok`；台账条目没有该列，按未知呈现。
+    let tool_outcomes = if from_db {
+        manager.tool_outcome_flags(session).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let entries = if from_db {
         Vec::new()
     } else {
@@ -234,16 +352,119 @@ pub fn chat_history(_ctx: &GatewayContext, params: &Value) -> Value {
     // 前端按 id 去重，id 用绝对下标生成才能在翻页时保持稳定、不重不漏。
     let mut rows: Vec<(usize, i64, Value)> = Vec::new();
     if from_db {
+        // 工具行不再以独立 `role:"tool"` 消息下发：前端 `ChatMessageList`
+        // 只为 user / maintenance / assistant 分派组件，其余一律落到
+        // `SystemMessage` 兜底 —— 于是 `[name] input → output` 这坨原始文本
+        // 会变成系统气泡，而同一回合在流式期间渲染的是可折叠工具卡。
+        // 用户看到的就是「刷新一次，工具卡变回原始文本、内容对不上」。
+        //
+        // 现在折成结构化 `tool_calls`（与流式载荷同形）：
+        // - 紧跟其后的 assistant 行承接（正常一回合：user → tool* → assistant，
+        //   与流式渲染同形：工具卡属于它后面那条回复）；
+        // - 没有紧邻 assistant 行（回合被打断 / 仍在执行）时单独合成一条
+        //   空文本 assistant 行 —— 绝不把上一回合的工具算到下一回合头上
+        //   （中间只要有 user/system 行就断开）。
+        let mut tool_calls_by_row: std::collections::HashMap<usize, Vec<Value>> =
+            std::collections::HashMap::new();
+        let mut synthetic_rows: std::collections::HashMap<usize, (i64, Vec<Value>)> =
+            std::collections::HashMap::new();
+        let mut cursor = 0usize;
+        while cursor < messages.len() {
+            if !matches!(messages[cursor], crate::types::Message::Tool { .. }) {
+                cursor += 1;
+                continue;
+            }
+            let run_start = cursor;
+            let first_ts = messages[run_start].timestamp().timestamp_millis();
+            let mut calls: Vec<Value> = Vec::new();
+            while let Some(crate::types::Message::Tool {
+                name,
+                input,
+                output,
+                elapsed_ms,
+                ..
+            }) = messages.get(cursor)
+            {
+                let call_idx = cursor;
+                cursor += 1;
+                // 空工具名的行没有可展示的卡片；`normalizeToolName` 也会把它
+                // 丢掉，留着只会造出一条空 assistant 气泡。
+                // `router_control` 是控制面内部工具，WebUI 的
+                // `isInternalToolName` 同样把它当透明项 —— 一并跳过，
+                // 否则「只调了 router_control 的回合」会渲染成一张空卡片。
+                let trimmed = name.trim();
+                if trimmed.is_empty() || trimmed == "router_control" {
+                    continue;
+                }
+                let mut call = json!({
+                    "type": "tool_call",
+                    "tool_use_id": format!("hist-tool-{call_idx}"),
+                    "name": name,
+                    "input": input,
+                    "result": output,
+                });
+                if let Some(ms) = elapsed_ms {
+                    call["elapsedMs"] = json!(ms);
+                }
+                // `tool_ok` 是权威成败信号（与流式事件同源落盘）。不带上它，
+                // 前端只能按「有没有输出」推断 —— 失败工具刷新后显示成功。
+                // NULL（旧数据/回合中断）= 无信号：不下发，前端按未知处理。
+                match tool_outcomes.get(call_idx).copied().flatten() {
+                    Some(true) => {
+                        call["ok"] = json!(true);
+                        call["execution_status"] = json!({ "status": "success" });
+                    }
+                    Some(false) => {
+                        call["ok"] = json!(false);
+                        call["is_error"] = json!(true);
+                        call["execution_status"] = json!({ "status": "error" });
+                    }
+                    None => {}
+                }
+                calls.push(call);
+            }
+            if calls.is_empty() {
+                continue;
+            }
+            if matches!(
+                messages.get(cursor),
+                Some(crate::types::Message::Assistant { .. })
+            ) {
+                tool_calls_by_row.entry(cursor).or_default().append(&mut calls);
+                cursor += 1;
+            } else {
+                synthetic_rows.insert(run_start, (first_ts, calls));
+            }
+        }
+
         for (idx, m) in messages.iter().enumerate() {
-            // P2-10/T14：工具行保留既有 `text`（兼容）并**附加结构化字段**
-            // `elapsedMs`（可空；旧快照为 None → 前端降级不显示耗时）。
-            let mut elapsed_ms: Option<u64> = None;
+            // 悬挂工具（后面没有 assistant 行）：合成一条空文本 assistant 行，
+            // 让工具卡仍按回合出现，而不是被静默丢弃。
+            if let Some((ts, calls)) = synthetic_rows.get(&idx) {
+                rows.push((
+                    idx,
+                    *ts,
+                    json!({
+                        "role": "assistant",
+                        "text": "",
+                        "timestamp": ts,
+                        "ts": ts,
+                        "id": format!("hist-{idx}"),
+                        "message_id": format!("hist-{idx}"),
+                        "tool_calls": calls,
+                    }),
+                ));
+                continue;
+            }
+            if matches!(m, crate::types::Message::Tool { .. }) {
+                continue;
+            }
             // 思考正文必须随历史一起下发：`session_messages.thinking` 一直有落盘，
             // 但旧的历史 RPC 只吐 role/text，前端 `mapHistoryMessage` 读不到
             // `reasoning_content`，于是「思考」折叠块在回合结束后永远是空的
             // ——用户点开只能看到「思考过程」标题，看不到任何内容。
             let mut reasoning: Option<String> = None;
-            let (role, text) = match m {
+            let (role, text): (&str, String) = match m {
                 crate::types::Message::User { content, .. } => ("user", content.clone()),
                 crate::types::Message::Assistant {
                     content, thinking, ..
@@ -252,16 +473,9 @@ pub fn chat_history(_ctx: &GatewayContext, params: &Value) -> Value {
                     ("assistant", content.clone())
                 }
                 crate::types::Message::System { content, .. } => ("system", content.clone()),
-                crate::types::Message::Tool {
-                    name,
-                    input,
-                    output,
-                    elapsed_ms: tool_elapsed,
-                    ..
-                } => {
-                    elapsed_ms = *tool_elapsed;
-                    ("tool", format!("[{name}] {input}\n→ {output}"))
-                }
+                // 工具行已在上方整体折叠；`continue` 让新增变体时编译器
+                // 仍然要求这里处理，而不是静默落成一条没人认领的行。
+                crate::types::Message::Tool { .. } => continue,
             };
             let ts = m.timestamp().timestamp_millis();
             let mut row = json!({
@@ -279,9 +493,8 @@ pub fn chat_history(_ctx: &GatewayContext, params: &Value) -> Value {
             {
                 row["reasoning_content"] = json!(thought);
             }
-            if let Some(ms) = elapsed_ms {
-                row["elapsedMs"] = json!(ms);
-                row["elapsed_ms"] = json!(ms);
+            if let Some(calls) = tool_calls_by_row.get(&idx) {
+                row["tool_calls"] = json!(calls);
             }
             rows.push((idx, ts, row));
         }
@@ -336,16 +549,18 @@ fn session_item(
     context_window: Option<u32>,
 ) -> Value {
     let is_running = crate::gateway::chat::running_sessions().contains(&key.to_string());
+    let (session_kind, surface, conversation_kind) = session_list_meta(key);
+    let effective_agent_id = crate::agent::store::agent_id_from_session(key).unwrap_or("main");
     json!({
         "key": key,
         "session": key,
         "sessionKey": key,
         "title": title,
         "summary": title,
-        "sessionKind": "chat",
-        "surface": "web",
-        "conversationKind": "chat",
-        "effectiveAgentId": "main",
+        "sessionKind": session_kind,
+        "surface": surface,
+        "conversationKind": conversation_kind,
+        "effectiveAgentId": effective_agent_id,
         "messageCount": message_count,
         "updatedAt": updated_ms,
         "createdAt": updated_ms,
@@ -392,10 +607,33 @@ pub fn sessions_create(ctx: &GatewayContext, params: &Value) -> Value {
 
     let db_path = Config::config_dir().join("sessions.db");
     let mut manager = SessionManager::new(&db_path);
-    if let Err(e) = manager
-        .init()
-        .and_then(|_| manager.save_snapshot(&key, "idle", &[], 0))
-    {
+    if let Err(e) = manager.init() {
+        return json!({ "ok": false, "error": format!("会话落库失败: {e}") });
+    }
+    // 幂等创建：键已存在时**绝不覆盖**。
+    //
+    // 旧实现无条件 `save_snapshot(&key, "idle", &[], 0)`，而 `save_snapshot`
+    // 的语义是「整段重写」—— 于是任何复用已有键的创建调用（重连、前端重试、
+    // 从历史里「新建」同键会话）都会把整段历史清空，且返回 `ok:true`。
+    if let Ok(Some(existing)) = manager.get_session(&key) {
+        if let Some(project) = params
+            .get("projectPath")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            crate::context::session::bind_session_project(&key, project);
+        }
+        let item = session_item(
+            &existing.session_id,
+            &existing.summary,
+            existing.message_count,
+            rfc3339_to_ms(&existing.updated_at),
+            existing.reasoning_effort.as_deref(),
+            existing.context_window,
+        );
+        return json!({ "ok": true, "session": item, "existing": true });
+    }
+    if let Err(e) = manager.save_snapshot(&key, "idle", &[], 0) {
         return json!({ "ok": false, "error": format!("会话落库失败: {e}") });
     }
     // 项目归属（context 台账；save_snapshot_for_project 需要真实消息列表，此处仅登记）
@@ -413,10 +651,12 @@ pub fn sessions_create(ctx: &GatewayContext, params: &Value) -> Value {
     json!({ "ok": true, "session": item })
 }
 
-/// `sessions.delete`：删除会话（DB 行 + 消息级联）。
+/// `sessions.delete`：删除会话（DB 行 + 消息级联 + 上下文台账 + 压缩快照）。
 ///
-/// 说明：进程内 context 台账无移除 API，重启后台账自然收敛；
-/// DB 是持久层权威数据源，删除即生效。
+/// 此前只删 `sessions.db`：`data_dir/context/<key>.json` 与压缩快照留在磁盘，
+/// 而 `sessions.list` 有「台账兜底」—— 用户删掉的会话会在下一次刷新时**复活**
+/// （甚至在压缩快照里继续占空间）。同时停掉本进程内的运行句柄：正在跑的任务
+/// 结束后会重新 `save_snapshot`，等于删除后又写回一条。
 pub fn sessions_delete(ctx: &GatewayContext, params: &Value) -> Value {
     let key = params
         .get("key")
@@ -429,12 +669,21 @@ pub fn sessions_delete(ctx: &GatewayContext, params: &Value) -> Value {
     if key.is_empty() {
         return json!({ "ok": false, "error": "缺少 key" });
     }
+    let stopped = crate::gateway::chat::stop_running_task(key);
+    let cancelled_runs = crate::orchestration::cancel::cancel_session(key);
+    let ledger_removed = crate::context::session::remove_session(key);
     let db_path = Config::config_dir().join("sessions.db");
     let mut manager = SessionManager::new(&db_path);
     match manager.init().and_then(|_| manager.delete_session(key)) {
         Ok(()) => {
             publish_sessions_changed(ctx, "deleted");
-            json!({ "ok": true, "deleted": key })
+            json!({
+                "ok": true,
+                "deleted": key,
+                "stopped_running": stopped,
+                "orchestration_cancelled": cancelled_runs,
+                "ledger_removed": ledger_removed,
+            })
         }
         Err(e) => json!({ "ok": false, "error": format!("删除失败: {e}") }),
     }
@@ -483,8 +732,12 @@ pub fn sessions_get(_ctx: &GatewayContext, params: &Value) -> Value {
     json!({ "ok": false, "error": "会话不存在", "code": "session.not_found" })
 }
 
-/// `sessions.search`：搜索会话（标题/ID 模糊匹配）。
+/// `sessions.search`：搜索会话（标题/ID 模糊匹配 + 消息全文子串匹配）。
 /// P0 契约补齐：此前前端调用但后端完全缺失。
+///
+/// 前端命令面板读的是 `res.sessions` 与 `res.messages`（`CommandPalette.vue`），
+/// 而本函数此前只返回 `items`、还从 `sessions_list` 里取不存在的 `items` 键 ——
+/// 标题和对话两个面都恒为空。现在按前端契约返回，`items` 仅为兼容保留。
 pub fn sessions_search(ctx: &GatewayContext, params: &Value) -> Value {
     let query = params.get("query").and_then(Value::as_str).unwrap_or("");
     let limit = params
@@ -494,7 +747,11 @@ pub fn sessions_search(ctx: &GatewayContext, params: &Value) -> Value {
         .min(200) as usize;
     // 复用 sessions_list 获取全部，再 filter
     let list = sessions_list(ctx, &json!({ "limit": 200 }));
-    let items = list.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    let items = list
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let filtered: Vec<Value> = items
         .iter()
         .filter(|item| {
@@ -509,7 +766,41 @@ pub fn sessions_search(ctx: &GatewayContext, params: &Value) -> Value {
         .take(limit)
         .cloned()
         .collect();
-    json!({ "items": filtered, "total": filtered.len(), "ok": true })
+
+    // 对话面：DB 消息全文子串搜索（空查询不扫全表）。
+    let messages: Vec<Value> = if query.trim().is_empty() {
+        Vec::new()
+    } else {
+        let db_path = Config::config_dir().join("sessions.db");
+        let mut manager = SessionManager::new(&db_path);
+        let hits = manager
+            .init()
+            .and_then(|_| manager.search_messages(query, limit.min(50)))
+            .unwrap_or_default();
+        hits.into_iter()
+            // 命令面板是产品面：探针裸键的消息同样不出现（与列表同一口径）。
+            .filter(|hit| is_addressable_session_key(&hit.session_id))
+            .map(|hit| {
+                json!({
+                    // 命令面板用 key 跳转会话，必须是会话键而不是消息唯一 id
+                    "key": hit.session_id,
+                    "title": hit.title,
+                    "role": hit.role,
+                    "snippet": hit.snippet,
+                    "createdAt": hit.created_at_ms,
+                    "effectiveAgentId": "main",
+                })
+            })
+            .collect()
+    };
+
+    json!({
+        "items": filtered,
+        "sessions": filtered,
+        "messages": messages,
+        "total": filtered.len(),
+        "ok": true,
+    })
 }
 
 /// `sessions.abort`：中止会话（标记状态为 Aborted）。
@@ -790,7 +1081,13 @@ pub fn sessions_preview(_ctx: &GatewayContext, params: &Value) -> Value {
     json!({ "ok": false, "error": "会话不存在或无消息", "code": "session.not_found" })
 }
 
-/// `sessions.reset`：重置会话消息（保留会话记录，清除消息）。
+/// `sessions.reset`：清空会话的对话内容（保留会话记录本身）。
+///
+/// 1. **先停运行中的任务**：不清空一个还在产出的回合 —— 否则流式输出会在用户
+///    刚清空的对话里继续长出消息。侧车的同一 RPC 也会先取消运行任务（对齐语义）。
+/// 2. **清 context 台账**：模型历史是从台账灌进上下文的，只清 `sessions.db`
+///    等于「界面空了、模型还记得」。项目归属与预算保留（会话仍属同一工作区）。
+/// 3. 清 `sessions.db` 的消息行（前端翻看的历史）。
 pub fn sessions_reset(ctx: &GatewayContext, params: &Value) -> Value {
     let key = params
         .get("session")
@@ -801,12 +1098,22 @@ pub fn sessions_reset(ctx: &GatewayContext, params: &Value) -> Value {
     if key.is_empty() {
         return json!({ "ok": false, "error": "缺少 session key" });
     }
+    let stopped = crate::gateway::chat::stop_running_task(key);
+    let cancelled_runs = crate::orchestration::cancel::cancel_session(key);
+    let ledger_cleared = crate::context::session::reset_session(key);
     let db_path = Config::config_dir().join("sessions.db");
     let mut manager = SessionManager::new(&db_path);
     match manager.init().and_then(|_| manager.clear_messages(key)) {
         Ok(()) => {
             publish_sessions_changed(ctx, "reset");
-            json!({ "ok": true, "session": key, "reset": true })
+            json!({
+                "ok": true,
+                "session": key,
+                "reset": true,
+                "stopped_running": stopped,
+                "orchestration_cancelled": cancelled_runs,
+                "ledger_cleared": ledger_cleared,
+            })
         }
         Err(e) => json!({ "ok": false, "error": format!("重置失败: {e}") }),
     }
@@ -1004,6 +1311,434 @@ mod hydration_shape_tests {
         let sidecar = json!({ "projectPaths": ["/sidecar/project"] });
         let merged = merge_hydration(rust, sidecar);
         assert_eq!(merged["projectPaths"][0], "/sidecar/project");
+    }
+
+    /// 「清空对话」必须让模型真的忘记。
+    ///
+    /// 旧实现的 `sessions.reset` 只删 `sessions.db` 的消息行，而模型历史是从
+    /// context 台账灌进上下文的（`chat::session_history_messages`）—— 于是界面
+    /// 空了，模型仍记得全部前文。这条用例盯住台账被清、工作区归属保留，以及
+    /// 回包如实报告清到了什么。
+    #[test]
+    fn reset_clears_model_memory_and_reports_what_it_cleared() {
+        let dir = isolated_config_dir("reset-memory");
+        let ctx = test_ctx();
+        let key = "web.reset-memory";
+        crate::context::session::record_turn(key, "user", "记住这个暗号：青鸟");
+        crate::context::session::record_turn(key, "assistant", "已记住");
+        crate::context::session::bind_session_projects(key, &["D:/proj/a".to_string()]);
+        assert_eq!(crate::context::session::context_entries(key).len(), 2);
+
+        let out = sessions_reset(&ctx, &json!({ "key": key }));
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["reset"], true);
+        assert_eq!(out["ledger_cleared"], true, "台账必须被清，回包要如实说");
+        assert!(
+            crate::context::session::context_entries(key).is_empty(),
+            "模型历史必须真的被清空，否则「清空对话」只是把界面擦干净"
+        );
+        assert_eq!(
+            crate::context::session::session_projects(key),
+            vec!["D:/proj/a".to_string()],
+            "清空对话不得抹掉工作区归属"
+        );
+
+        // 再清一次：已经没有内容，如实回报「没清到东西」，不假装成功清了一大堆。
+        let again = sessions_reset(&ctx, &json!({ "key": key }));
+        assert_eq!(again["ok"], true);
+        assert_eq!(again["ledger_cleared"], false);
+
+        let missing = sessions_reset(&ctx, &json!({}));
+        assert_eq!(missing["ok"], false, "缺 key 必须拒绝");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_ctx() -> GatewayContext {
+        GatewayContext {
+            config: Config::default(),
+            token: "t".into(),
+            started_at: std::time::Instant::now(),
+            bus: std::sync::Arc::new(crate::events::EventBus::default()),
+        }
+    }
+
+    /// `sessions.create` 对已存在的键必须幂等：复用键（重连 / 前端重试）
+    /// 过去会走 `save_snapshot(..., &[], 0)` 把整段历史清空，且回 `ok:true`。
+    #[test]
+    fn create_is_idempotent_and_never_wipes_existing_history() {
+        let dir = isolated_config_dir("create-idempotent");
+        let ctx = test_ctx();
+        let key = "web.create-idempotent";
+        let db_path = dir.join("sessions.db");
+
+        let mut manager = SessionManager::new(&db_path);
+        manager.init().expect("init");
+        let messages = vec![
+            crate::types::Message::User {
+                content: "第一问".into(),
+                timestamp: chrono::Utc::now(),
+            },
+            crate::types::Message::Assistant {
+                content: "第一答".into(),
+                timestamp: chrono::Utc::now(),
+                thinking: None,
+            },
+        ];
+        manager
+            .save_snapshot(key, "idle", &messages, 0)
+            .expect("写入历史");
+
+        let created = sessions_create(&ctx, &json!({ "key": key }));
+        assert_eq!(created["ok"], true);
+        assert_eq!(created["existing"], true, "已存在的键必须走幂等分支");
+        assert_eq!(created["session"]["messageCount"], 2);
+
+        let mut check = SessionManager::new(&db_path);
+        check.init().expect("init");
+        let snap = check.load_snapshot(key).expect("会话应仍存在");
+        assert_eq!(snap.messages.len(), 2, "create 绝不能清空历史");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `chat.history` 必须把 `role='tool'` 行折成结构化 `tool_calls`。
+    ///
+    /// 此前的行为是：工具行原样成一条 `role:"tool"` 消息，而前端
+    /// `ChatMessageList` 没有 `tool` 分支 → 落到 `SystemMessage` 兜底，
+    /// `[name] input → output` 的原始文本直接铺成系统气泡；同一回合在流式
+    /// 期间却是可折叠工具卡。「刷新一次，历史内容和刚才不一样」就是这么来的。
+    #[test]
+    fn history_folds_tool_rows_into_structured_tool_calls() {
+        let dir = isolated_config_dir("history-tool-fold");
+        let key = "web.history-tool-fold";
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        // 正常一回合：user → tool → tool → assistant（工具卡属于后面的回复）
+        manager
+            .append_message(key, "user", "看看目录", "2026-10-26T10:00:00Z", Some("看看目录"))
+            .expect("user");
+        manager
+            .append_tool_message(
+                key,
+                "shell_exec",
+                "dir",
+                "a.txt",
+                Some(12),
+                Some(true),
+                "2026-10-26T10:00:01Z",
+            )
+            .expect("tool 1");
+        manager
+            .append_tool_message(
+                key,
+                "read_file",
+                "a.txt",
+                "hello",
+                None,
+                Some(true),
+                "2026-10-26T10:00:02Z",
+            )
+            .expect("tool 2");
+        manager
+            .append_message(key, "assistant", "目录里只有 a.txt", "2026-10-26T10:00:03Z", None)
+            .expect("assistant");
+        // 悬挂工具：回合被打断，后面没有 assistant 行
+        manager
+            .append_message(key, "user", "再跑一次", "2026-10-26T10:01:00Z", None)
+            .expect("user 2");
+        manager
+            .append_tool_message(
+                key,
+                "shell_exec",
+                "dir /w",
+                "b.txt",
+                Some(7),
+                Some(false),
+                "2026-10-26T10:01:01Z",
+            )
+            .expect("tool 3");
+
+        let value = chat_history(&test_ctx(), &json!({ "sessionKey": key }));
+        let messages = value["messages"].as_array().cloned().unwrap_or_default();
+
+        assert!(
+            messages.iter().all(|m| m["role"] != "tool"),
+            "工具行不得再作为独立消息下发（会被渲染成系统气泡）：{messages:?}"
+        );
+        assert_eq!(value["total"], 4, "折叠后的条数才是用户看到的条数：{messages:?}");
+        assert_eq!(
+            messages.iter().map(|m| m["role"].clone()).collect::<Vec<_>>(),
+            vec!["user", "assistant", "user", "assistant"],
+            "{messages:?}"
+        );
+
+        let reply = &messages[1];
+        assert_eq!(reply["text"], "目录里只有 a.txt", "回复正文必须原样保留");
+        assert_eq!(reply["message_id"], "hist-3", "承接行的 id 保持绝对下标");
+        let calls = reply["tool_calls"].as_array().cloned().unwrap_or_default();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["name"], "shell_exec");
+        assert_eq!(calls[0]["input"], "dir");
+        assert_eq!(calls[0]["result"], "a.txt");
+        assert_eq!(calls[0]["elapsedMs"], 12);
+        assert_eq!(calls[1]["name"], "read_file");
+        assert_eq!(calls[1]["elapsedMs"], Value::Null, "未测到耗时不臆造");
+
+        let dangling = &messages[3];
+        assert_eq!(dangling["message_id"], "hist-5");
+        assert_eq!(dangling["text"], "");
+        let dangling_calls = dangling["tool_calls"].as_array().cloned().unwrap_or_default();
+        assert_eq!(dangling_calls.len(), 1);
+        assert_eq!(dangling_calls[0]["name"], "shell_exec");
+        assert_eq!(dangling_calls[0]["result"], "b.txt");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.list` 的会话元数据必须从 key 如实推导。
+    ///
+    /// 此前每行都硬编码 `chat` / `web` / `main`：子智能体会话被当成普通聊天、
+    /// CLI/TUI 会话混进 Web 侧栏，且前端「按 key 推导」的兜底永远不执行
+    /// （显式值优先）。此用例钉住三类真实 key 与一个未知形态的回落。
+    #[test]
+    fn list_derives_agent_surface_and_kind_from_the_session_key() {
+        let dir = isolated_config_dir("list-meta");
+        let ctx = test_ctx();
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        for key in [
+            "agent:data-analyst:subagent:run-1",
+            "agent:main:cli:abc",
+            "web.legacy",
+        ] {
+            manager
+                .append_message(key, "user", "问一句", "2026-10-27T10:00:00Z", Some("问一句"))
+                .expect("append");
+        }
+
+        let value = sessions_list(&ctx, &json!({ "limit": 50 }));
+        let rows = value["sessions"].as_array().cloned().unwrap_or_default();
+        let row = |key: &str| {
+            rows.iter()
+                .find(|r| r["key"] == key)
+                .cloned()
+                .unwrap_or_else(|| panic!("缺少会话行 {key}：{rows:?}"))
+        };
+
+        let subagent = row("agent:data-analyst:subagent:run-1");
+        assert_eq!(subagent["effectiveAgentId"], "data-analyst");
+        assert_eq!(subagent["sessionKind"], "task");
+        assert_eq!(subagent["surface"], "subagent");
+        assert_eq!(subagent["conversationKind"], "internal");
+
+        let cli = row("agent:main:cli:abc");
+        assert_eq!(cli["effectiveAgentId"], "main");
+        assert_eq!(cli["sessionKind"], "chat");
+        assert_eq!(cli["surface"], "cli");
+        assert_eq!(cli["conversationKind"], "internal");
+
+        let legacy = row("web.legacy");
+        assert_eq!(legacy["effectiveAgentId"], "main", "`web.<id>` 旧形态归属 main");
+        assert_eq!(legacy["sessionKind"], "chat", "`web.<id>` 是 sessions.create 的旧形态");
+        assert_eq!(legacy["surface"], "web");
+
+        // 探针裸键不再伪装成 chat/web（它们不会进入列表，这里直接钉 meta）。
+        assert_eq!(
+            session_list_meta("ws.probe-key"),
+            ("unknown", "unknown", "unknown")
+        );
+        assert_eq!(
+            session_list_meta("agent:main:main"),
+            ("chat", "main", "direct"),
+            "pyengine 的 DM 主键只有三段，不得因段数少被判成未知"
+        );
+        assert_eq!(
+            session_list_meta("agent:main:webchat:x"),
+            ("chat", "webchat", "direct")
+        );
+        assert_eq!(
+            session_list_meta("agent:main:slack:group:C123"),
+            ("channel", "slack", "group"),
+            "渠道适配器名不受限：`agent:<id>:<channel>:<kind>:<peer>` 必须归到渠道"
+        );
+        assert_eq!(
+            session_list_meta("agent:main:discord:direct:u1"),
+            ("channel", "discord", "direct")
+        );
+        assert_eq!(
+            session_list_meta("subagent:agent:main:webchat:x"),
+            ("task", "subagent", "internal"),
+            "旧 `subagent:` 前缀没有 agent 段，仍须归为子智能体任务"
+        );
+        assert_eq!(
+            session_list_meta("cron:job-1:run:abc"),
+            ("cron", "cron", "unknown")
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 列表只收**可寻址且非空**的会话。
+    ///
+    /// 真机库实测 325 行里 196 行是探针裸键（`ws.*` / `qa*` / `bench1_*` …）、
+    /// 16 行是零消息占位行 —— 前者过去被 meta 兜底成「普通 Web 聊天」，
+    /// 于是侧栏满屏近似重复的标题（用户可见投诉）。过滤必须发生在截断之前，
+    /// 否则它们会挤掉真实会话。数据本身保留：按 key 直读历史仍然可用。
+    #[test]
+    fn list_hides_probe_keys_and_empty_sessions_but_keeps_history_addressable() {
+        let dir = isolated_config_dir("list-addressable");
+        let ctx = test_ctx();
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        for key in [
+            "agent:main:webchat:real-1",
+            "agent:main:main",
+            "agent:main:slack:group:C123",
+            "subagent:agent:main:webchat:x",
+            "web.legacy-used",
+            "cron:job-1",
+            "ws.probe-key",
+            "qa.bench-1",
+            "bench1_1788236785679",
+            "sess-fully-bogus",
+        ] {
+            manager
+                .append_message(key, "user", "问一句", "2026-10-27T10:00:00Z", Some("问一句"))
+                .expect("append");
+        }
+        // 零消息占位行（sessions.create 空快照 / touch_session 的既有产物）
+        manager
+            .touch_session("agent:main:webchat:fresh-but-empty")
+            .expect("touch");
+        manager
+            .save_snapshot("web.empty-created", "idle", &[], 0)
+            .expect("empty snapshot");
+
+        let value = sessions_list(&ctx, &json!({ "limit": 50 }));
+        let keys: Vec<String> = value["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r["key"].as_str().map(str::to_string))
+            .collect();
+
+        for visible in [
+            "agent:main:webchat:real-1",
+            "agent:main:main",
+            "agent:main:slack:group:C123",
+            "subagent:agent:main:webchat:x",
+            "web.legacy-used",
+            "cron:job-1",
+        ] {
+            assert!(
+                keys.iter().any(|k| k == visible),
+                "应列出 {visible}：{keys:?}"
+            );
+        }
+        for hidden in [
+            "ws.probe-key",
+            "qa.bench-1",
+            "bench1_1788236785679",
+            "sess-fully-bogus",
+            "agent:main:webchat:fresh-but-empty",
+            "web.empty-created",
+        ] {
+            assert!(
+                !keys.iter().any(|k| k == hidden),
+                "不得列出 {hidden}：{keys:?}"
+            );
+        }
+
+        // 过滤只是「不把探针当产品会话」，历史仍在、按 key 可读。
+        let history = chat_history(&ctx, &json!({ "sessionKey": "ws.probe-key" }));
+        assert_eq!(history["total"], 1, "探针会话历史按 key 仍可读：{history:?}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.search` 的返回键必须与前端命令面板一致（`sessions` / `messages`）。
+    ///
+    /// 旧实现从 `sessions_list` 里读取不存在的 `items` 键，且只回 `items` ——
+    /// 命令面板两个面都恒为空，看起来像「没有历史」。
+    #[test]
+    fn search_returns_the_contract_the_command_palette_reads() {
+        let dir = isolated_config_dir("search-contract");
+        let ctx = test_ctx();
+        let key = "web.search-contract";
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        manager
+            .save_snapshot(
+                key,
+                "idle",
+                &[
+                    crate::types::Message::User {
+                        content: "帮我排查部署失败的原因".into(),
+                        timestamp: chrono::Utc::now(),
+                    },
+                    crate::types::Message::Assistant {
+                        content: "日志里显示端口被占用".into(),
+                        timestamp: chrono::Utc::now(),
+                        thinking: None,
+                    },
+                ],
+                0,
+            )
+            .expect("写入历史");
+
+        // 会话面：按键名检索
+        let by_key = sessions_search(&ctx, &json!({ "query": "search-contract", "limit": 10 }));
+        assert_eq!(by_key["ok"], true);
+        let sessions = by_key["sessions"].as_array().expect("sessions 数组");
+        assert!(
+            sessions.iter().any(|s| s["key"] == key),
+            "会话面应命中：{sessions:?}"
+        );
+        assert_eq!(by_key["items"], by_key["sessions"], "items 仅为兼容别名");
+
+        // 对话面：消息正文命中，snippet 带高亮标记，key 是会话键（前端据此跳转）
+        let by_msg = sessions_search(&ctx, &json!({ "query": "端口", "limit": 10 }));
+        let messages = by_msg["messages"].as_array().expect("messages 数组");
+        let hit = messages
+            .iter()
+            .find(|m| m["key"] == key)
+            .unwrap_or_else(|| panic!("对话面应命中：{messages:?}"));
+        assert!(
+            hit["snippet"].as_str().unwrap_or("").contains(">>>端口<<<"),
+            "命中片段应带高亮标记：{hit:?}"
+        );
+        assert_eq!(hit["role"], "assistant");
+
+        // 空查询不扫全表
+        let empty = sessions_search(&ctx, &json!({ "query": "  ", "limit": 10 }));
+        assert_eq!(empty["messages"].as_array().map(Vec::len), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.delete` 必须把 context 台账一起删掉，否则列表的台账兜底
+    /// 会让用户刚删掉的会话在下次刷新时「复活」。
+    #[test]
+    fn delete_removes_db_row_and_context_ledger() {
+        let dir = isolated_config_dir("delete-ledger");
+        let ctx = test_ctx();
+        let key = "web.delete-ledger";
+        crate::context::session::record_turn(key, "user", "hello");
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        manager.save_snapshot(key, "idle", &[], 0).expect("建会话");
+
+        let deleted = sessions_delete(&ctx, &json!({ "key": key }));
+        assert_eq!(deleted["ok"], true);
+        assert_eq!(deleted["ledger_removed"], true);
+
+        let mut check = SessionManager::new(&dir.join("sessions.db"));
+        check.init().expect("init");
+        assert!(check.get_session(key).expect("读会话").is_none());
+        assert!(
+            crate::context::session::context_entries(key).is_empty(),
+            "删除后台账不得留下任何条目（否则会话会复活）"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

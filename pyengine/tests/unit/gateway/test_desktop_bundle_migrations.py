@@ -20,6 +20,16 @@ PACKAGE_SCRIPT_LIGHT = REPO_ROOT / "scripts" / "package_app.cmd"
 MIGRATIONS = REPO_ROOT / "pyengine" / "migrations"
 
 
+def read_script(path: Path) -> str:
+    """批处理脚本按 GBK(cp936) 发布（cmd.exe 的解析证据见 scripts/check-batch-parse.py），
+    但历史版本是 UTF-8；这里两种编码都接受，本用例只关心内容契约。"""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("gbk")
+
+
 def test_repo_migrations_dir_exists_with_versioned_files() -> None:
     assert MIGRATIONS.is_dir(), f"仓库里必须有 {MIGRATIONS}"
     assert list(MIGRATIONS.glob("V*.py")), (
@@ -38,7 +48,7 @@ def test_repo_layout_candidate_matches_where_the_bundle_puts_it() -> None:
 
 
 def test_packaging_script_copies_migrations_into_the_bundle() -> None:
-    text = PACKAGE_SCRIPT.read_text(encoding="utf-8")
+    text = read_script(PACKAGE_SCRIPT)
     assert "pyengine\\migrations" in text, (
         "package_full.cmd 必须把 pyengine\\migrations 复制进 resources\\pyengine\\"
         "（否则安装版引擎起不来）"
@@ -49,7 +59,7 @@ def test_packaging_script_copies_migrations_into_the_bundle() -> None:
 
 def test_light_packaging_script_declares_where_full_resources_come_from() -> None:
     """轻量脚本不复制资源，必须把「资源从哪来」写清楚，避免有人当它是全量打包。"""
-    text = PACKAGE_SCRIPT_LIGHT.read_text(encoding="utf-8")
+    text = read_script(PACKAGE_SCRIPT_LIGHT)
     assert "package_full" in text or "resources" in text, (
         "package_app.cmd 必须指明全量资源由 package_full.cmd（或手工同步）提供"
     )

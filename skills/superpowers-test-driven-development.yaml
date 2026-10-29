@@ -31,3 +31,11 @@ prompt_template: |
   - 测试命名描述行为而非方法名
   - 边界条件（空输入、错误、溢出）必须有测试
   - 提交前确保全部测试通过
+
+# 供给面声明（2026-10-29 补）：安装前要展示「它要什么」。
+# 由 scripts/stamp-skill-requires.mjs 从上面的 tools 推导，规则见该脚本头部注释。
+requires:
+  network: false
+  fs_write: false
+  credentials: false
+  shell: false

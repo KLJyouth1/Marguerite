@@ -1057,20 +1057,28 @@ function ensembleRole(role: string, label: string): string {
   position: relative;
   display: flex;
   gap: 0.625rem;
-  /* 会话阅读列只在 ChatMessageList 里定义一次（左对齐 + 左侧固定起排）。
-     这里不再用 `margin: 0 auto`：宽面板上 --chat-col 有上限，auto 外边距会把
-     整段历史缩到屏幕中间（任务结束后与实时气泡版式不一致的根因）。 */
+  /* 会话阅读列：与 ChatView scoped 的 `.msg-ai`（实时流式 / thinking 气泡）**同一口径**，
+     两条规则谁在后谁生效都不该改变版式，所以两边必须写成一样的声明。
+     `--chat-col` 只当宽度上限（max-width = --chat-col-start），起排在阅读起点
+     （--chat-gutter：桌面 64px 让位左侧 minimap 轨道，手机 24px；口径只在 chat-view.css 定义一次），
+     宽屏多出来的空间留在右侧。绝不用 `width: var(--chat-col); margin: 0 auto`：
+     那会把整段历史推到屏幕几何中心（任务结束后用户点名的「排版错乱」）。 */
+  box-sizing: border-box;
+  min-width: 0;
   width: 100%;
-  max-width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin-inline: 0;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.5rem 0;
   align-items: flex-start;
+  text-align: start;
 }
 
 .msg-ai--share-mode {
   cursor: pointer;
-  width: min(calc(100% - 16px), 1012px);
-  max-width: calc(100% - 16px);
+  /* 勾选态沿用同一条阅读列的左起点，所以横向留边也必须按 --chat-gutter 收，
+     否则「24px 左边距 + width: calc(100% - 16px)」会把整行推出容器右侧。 */
+  width: min(calc(100% - var(--chat-gutter, 24px) * 2), 1012px);
+  max-width: calc(100% - var(--chat-gutter, 24px) * 2);
   box-sizing: border-box;
   padding: 0.5rem 1rem 0.5rem 2.5rem;
   border-radius: var(--radius-lg);

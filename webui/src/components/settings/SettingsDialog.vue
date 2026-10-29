@@ -267,7 +267,7 @@
 
       <footer class="settings-foot">
         <span class="settings-foot__text">{{ t('settings.dialog.moreOptionsIn') }}</span>
-        <code class="settings-foot__path">{{ displayConfigPath }}</code>
+        <code class="settings-foot__path" :title="configPath || displayConfigPath">{{ displayConfigPath }}</code>
         <button
           type="button"
           class="settings-foot__copy"
@@ -354,6 +354,7 @@ const {
   presetPanel,
   capabilitiesPanel,
   configPath,
+  configIsolated,
   selectInitialSection,
   sectionStatus,
   sectionDirty,
@@ -503,7 +504,17 @@ const dirtyDiscardLabel = computed(() => {
   if (onlyDirtySection.value === 'modelStrategy') return t('settings.dialog.discardRouting')
   return t('common.discard')
 })
-const displayConfigPath = computed(() => configPath.value || '~/.Marguerite/config.toml')
+const HOME_CONFIG_SHORTHAND = '~/.marguerite/config.yaml'
+const displayConfigPath = computed(() => {
+  // 隔离模式（MARGUERITE_CONFIG_DIR 覆盖）：只显示语义文案，真路径放 title / 复制内容，
+  // 不把 E:\temp\... 这类临时路径直接摆在页脚。
+  if (configIsolated.value) return t('settings.dialog.configPathIsolated')
+  if (!configPath.value) return HOME_CONFIG_SHORTHAND
+  // 默认位置本地化为 ~ 简写；非默认目录如实显示完整路径，不冒充默认值。
+  return configPath.value.replace(/\\/g, '/').toLowerCase().endsWith('/.marguerite/config.yaml')
+    ? HOME_CONFIG_SHORTHAND
+    : configPath.value
+})
 // Provider drafts deliberately stay out of the settings-wide dirty bar because
 // their editor owns Save/Cancel. They still participate in every path that
 // unmounts Settings so browser navigation cannot silently discard credentials.

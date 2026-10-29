@@ -26,6 +26,7 @@ pub mod meta;
 pub mod registry;
 pub mod routing;
 pub mod subagent;
+pub mod trust;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +68,10 @@ pub use routing::{HarnessRouter, RoutingPolicy};
 pub use subagent::{
     ConcurrencyGate, IsolatedOutcome, IsolatedSpec, IsolatedSubagents, SidechainTranscript,
     SubagentBudget,
+};
+pub use trust::{
+    budget_gate, trust_gate, BudgetVerdict, ChangeKind, ChangeProposal, ChangeRecord,
+    EditBudget, TrustVerdict, VerificationRecord,
 };
 
 /// harness 配置

@@ -1,14 +1,13 @@
 // useChatElevatedMode — 提权（审批绕过）模式的同步行为守卫。
 //
-// 背景：这个 composable 此前**没有任何测试**，于是一个静默的功能失效活了下来 ——
-// 它每次进入 chat 都会 `POST /api/elevated-mode`，而网关**根本没有这个端点**
-// （`core/src/gateway/server.rs:149-156` 只注册了 `/ws`、`/api/health`、`/control/*`；
-// 全仓 Rust 代码里搜不到 elevated 相关 handler）。请求因此被 SPA 静态回退接住，
-// 静态处理器只收 GET/HEAD → **405**。旧代码只对 `403` 做降级，其它非 2xx 一律
-// `console.warn` 吞掉，于是 localStorage 里仍然留着 `elevatedMode`，
-// 界面继续声称「审批绕过已开启」，而网关从不执行任何绕过。
+// 背景：这个 composable 曾经每次进入 chat 都 `POST /api/elevated-mode`，而旧网关
+// 没有这个端点，请求被 SPA 静态回退接住回 405；旧代码只在「不支持」时永久闩锁，
+// 网关升级后必须刷新页面才能恢复。P2-3 起：
+//   1) Rust 网关真实实现该端点（core/src/gateway/elevated.rs）；
+//   2) 前端**不再写永久闩锁** —— 不支持时只回退本次状态，下一次切换仍会重试。
 //
-// 本测试锁住的正是这条不变量：**不支持该端点的任何状态都必须落到「模式未启用」**。
+// 本测试锁住的不变量：**不支持 / 网络失败 / 2xx 三种情况下，界面状态都必须诚实**，
+// 且不支持状态不得阻止后续重试。
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ref } from 'vue'
 import { useChatElevatedMode } from './useChatElevatedMode'
@@ -63,7 +62,7 @@ describe('useChatElevatedMode', () => {
   })
 
   describe('syncElevatedMode against a gateway without the endpoint', () => {
-    // 405 是当前网关对 `/api/elevated-mode` 的真实回答（见文件头注释）。
+    // 旧网关对 `/api/elevated-mode` 的回答（Rust 已实现，这里守住旧部署的降级）。
     for (const status of [403, 404, 405, 501]) {
       it(`treats HTTP ${status} as "unsupported" and stops claiming the mode is on`, async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(status))
@@ -75,7 +74,6 @@ describe('useChatElevatedMode', () => {
         // 允许 syncElevatedMode 的 promise 落地
         await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
-        expect(api.elevatedUnavailable.value).toBe(true)
         expect(api.elevatedMode.value).toBe('')
         expect(api.effectiveElevatedMode.value).toBe('')
         // 不能把「服务端不支持」的模式留在本地存储里
@@ -84,7 +82,7 @@ describe('useChatElevatedMode', () => {
       })
     }
 
-    it('latches after an unsupported status so it stops hammering the endpoint', async () => {
+    it('does not latch after an unsupported status: the next toggle retries', async () => {
       const fetchMock = vi.fn().mockResolvedValue(jsonResponse(405))
       vi.stubGlobal('fetch', fetchMock)
 
@@ -92,10 +90,9 @@ describe('useChatElevatedMode', () => {
       api.setElevatedMode('bypass', { sync: true })
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
-      // 再次切换不应再发请求（elevatedUnavailable 已置位）
-      api.setElevatedMode('full')
-      await new Promise((r) => setTimeout(r, 10))
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // P2-3：不再永久闩锁 —— 网关升级后无需刷新页面即可重试
+      api.setElevatedMode('full', { sync: true })
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     })
   })
 
@@ -107,9 +104,27 @@ describe('useChatElevatedMode', () => {
     api.setElevatedMode('bypass', { sync: true })
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
-    expect(api.elevatedUnavailable.value).toBe(false)
     expect(api.effectiveElevatedMode.value).toBe('bypass')
     expect(store.getItem(ELEVATED_MODE_KEY)).toBe('bypass')
+  })
+
+  it('explicit off overrides a globally configured bypass for the session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(204))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const api = harness()
+    // config.permissions.default_mode = 'bypass' 时，全局默认会点亮开关。
+    api.setGlobalElevatedMode('bypass')
+    expect(api.effectiveElevatedMode.value).toBe('bypass')
+
+    // 用户显式关闭：必须压过全局默认，且后端收到的是清除（线上值 off）。
+    api.setElevatedMode('off', { sync: true })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    expect(api.effectiveElevatedMode.value).toBe('')
+    expect(store.getItem(ELEVATED_MODE_KEY)).toBe('off')
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
+    expect(body.mode).toBe('off')
   })
 
   it('on a network rejection does not leave the UI claiming the mode is on', async () => {
@@ -121,8 +136,6 @@ describe('useChatElevatedMode', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     await vi.waitFor(() => expect(api.elevatedMode.value).toBe(''))
 
-    // 网络故障不是「永久不支持」——保持可重试，不要 latch
-    expect(api.elevatedUnavailable.value).toBe(false)
     expect(warn).toHaveBeenCalled()
   })
 

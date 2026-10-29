@@ -40,6 +40,7 @@ import {
   STOPPED_STREAM_TASK_ID,
   acceptStreamSeq as decideStreamSeq,
   activeTaskGroupRunState as buildActiveTaskGroupRunState,
+  frameSessionKey,
   isCurrentSessionPayload as payloadIsCurrentSession,
   isCurrentTaskPayload as payloadIsCurrentTask,
   isStaleEpoch as payloadIsStaleEpoch,
@@ -1390,7 +1391,11 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     options.handleRouterControlReplay()
   }
 
-  function handleRpcAny(rawEvent: string, rawPayload: unknown) {
+  function handleRpcAny(
+    rawEvent: string,
+    rawPayload: unknown,
+    meta?: Record<string, unknown>,
+  ) {
     const payloadObj = (rawPayload && typeof rawPayload === 'object' ? rawPayload : {}) as SessionEventPayload
     const taskSucceededFallback = rawEvent === 'task.succeeded'
     const terminalStatus = eventTaskTerminalStatus(rawEvent)
@@ -1484,9 +1489,18 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     // （实测 done = {text, reason, strategy, completeness}），此前只从 done 累加
     // 的 `usageAccum` 因此永远是 0 —— 底部计量条显示的 token 也就是假的。
     if (event === 'session.event.usage') {
-      // 只累计「本会话当前这一轮」：usage 帧的 payload 不带 session 字段（session
-      // 在 meta 里，而这里只拿得到 payload），所以用流状态做归属判据 ——
-      // 非流式期间到达的 usage 属于定时任务 / 其它会话，不能计入本会话计量条。
+      // 只累计「本会话」的用量。归属判据有两条，先强后弱：
+      //
+      // ① **帧信封的 meta.session（权威）**：网关 `envelope_to_frame` 给每一帧都盖了
+      //    `meta.session`，用量帧的 payload 里**没有**会话字段。此前直接丢掉 meta、
+      //    只靠「本页是否在流式中」判归属 —— 而多标签页并行时，A 页在跑模型、B 页刚
+      //    发出请求同样处于 `isStreaming`，于是 A 的 usage 帧被广播到 B 页并被 B 计入，
+      //    表现为「B 轮次 0 / 首 token 从未收到，页脚却显示 token 108854」（真机审计
+      //    2026-10-29 P1-1）。meta 带着会话键时以它为准，不是本会话就丢弃。
+      // ② 没有 meta（旧网关 / 重放路径）时保留原判据：非流式期间到达的 usage 属于
+      //    定时任务或其它会话，不计入。
+      const frameSession = frameSessionKey(payload, meta)
+      if (frameSession && sessionKey.value && frameSession !== sessionKey.value) return
       if (!stream.isStreaming.value) return
       const u = (payload as Record<string, unknown>) || {}
       const input = Number(u.input_tokens ?? u.inputTokens ?? u.prompt_tokens ?? u.promptTokens ?? 0) || 0

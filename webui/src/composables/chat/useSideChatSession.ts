@@ -1,7 +1,7 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { agentIdFromSessionKey, newWebchatSessionKey } from '@/utils/chat/sessionKeys'
 import { createClientMessageId, createClientRequestId } from '@/utils/chat/messageIdentity'
-import { payloadTaskId } from '@/utils/chat/streamEvents'
+import { frameSessionKey, payloadTaskId } from '@/utils/chat/streamEvents'
 
 /**
  * Side chat = a second, independent conversation that runs **beside** the main
@@ -96,28 +96,16 @@ export function defaultSideChatKey(mainSessionKey: string): string {
   return newWebchatSessionKey(agentId, suffix)
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : null
-}
-
 /**
  * Session key carried by a WS frame. `meta.session` wins because it is the
  * envelope identity the gateway stamps on every broadcast; only when the meta
  * frame is absent do we fall back to the payload's own key fields. An empty
  * result means "not addressed to any session" and callers must drop the frame.
  */
-export function sideChatFrameKey(payload: unknown, meta?: unknown): string {
-  const metaRecord = asRecord(meta)
-  if (metaRecord) {
-    const metaKey = metaRecord.session ?? metaRecord.session_key ?? metaRecord.sessionKey ?? metaRecord.key
-    if (typeof metaKey === 'string' && metaKey.trim()) return metaKey.trim()
-  }
-  const record = asRecord(payload)
-  if (!record) return ''
-  for (const candidate of [record.session, record.session_key, record.sessionKey, record.key]) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
-  }
-  return ''
+export const sideChatFrameKey = frameSessionKey
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null
 }
 
 function defaultStorage(): SideChatStorage | null {

@@ -31,6 +31,12 @@ export const routes: RouteRecordRaw[] = [
   // 为 false ⇒ 悬浮窗窗口加载 /control/pet-overlay 落到 NotFound，
   // 360×420 的透明窗口里显示「未找到」+ 整条侧栏。
   ...(platform.capabilities.isDesktop ? desktopRoutes : []),
+  // 直觉 URL 的 redirect（真机实测三个都 404：04/05/06 截图）。
+  // 用户对「模型 / 能力 / 缓存」的第一直觉路径不是产品命名，缺了这层等于告诉
+  // 用户页面不存在。放在 catch-all 之前，否则会被 NotFound 吞掉。
+  { path: '/models', redirect: '/local-models', meta: { platforms: ['web', 'desktop'] } },
+  { path: '/capabilities', redirect: '/capabilities-hub', meta: { platforms: ['web', 'desktop'] } },
+  { path: '/cache', redirect: '/control-center', meta: { platforms: ['web', 'desktop'] } },
   { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView, meta: { title: 'Not Found', platforms: ['web', 'desktop'] } },
 ]
 

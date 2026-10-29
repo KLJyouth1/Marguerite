@@ -757,4 +757,43 @@ mod tests {
     fn snippets_to_stable_prefix_empty_is_none() {
         assert!(snippets_to_stable_prefix(&[]).is_none());
     }
+
+    /// 召回耗时基准（**默认不跑**：依赖本机真实记忆语料）。
+    ///
+    /// 为什么要它：真机审计量到首 token 11–14s，而「回合前置准备」里最可疑的就是
+    /// 跨项目召回 —— 它要为**每个**记忆文件读全文、算整文件向量，再逐行算向量。
+    /// 没有这个数字，任何"并行化/加缓存"的改动都只是猜。
+    ///
+    /// 跑法：`cargo test -p marguerite-core --lib bench_recall -- --ignored --nocapture`
+    #[test]
+    #[ignore = "基准：依赖本机 ~/.trae-cn/memory/projects 的真实语料"]
+    fn bench_recall_cost() {
+        use std::time::Instant;
+        let root = memory_root();
+        let files = collect_files(&root);
+        let total_bytes: u64 = files
+            .iter()
+            .filter_map(|(_, p, _)| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        println!(
+            "[bench] memory_root={} files={} bytes={}",
+            root.display(),
+            files.len(),
+            total_bytes
+        );
+        // 冷跑一次（把向量/文件缓存预热），再计时 5 次取均值。
+        let _ = cross_project_recall_hint("网关 侧车 记忆", 4, "bench");
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            let hint = cross_project_recall_hint("网关 侧车 记忆", 4, "bench");
+            samples.push((t.elapsed(), hint.chars().count()));
+        }
+        for (d, chars) in &samples {
+            println!("[bench] {:>8.1}ms  hint_chars={chars}", d.as_secs_f64() * 1000.0);
+        }
+        let avg = samples.iter().map(|(d, _)| d.as_secs_f64()).sum::<f64>() / samples.len() as f64;
+        println!("[bench] avg={:.1}ms over {} samples", avg * 1000.0, samples.len());
+    }
 }

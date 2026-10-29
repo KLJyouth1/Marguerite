@@ -12,7 +12,7 @@ memory. No account, no cloud relay, no telemetry.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-4230%20passing-brightgreen.svg)](#-quality-gates)
+[![Tests](https://img.shields.io/badge/core%20tests-4341%20passing-brightgreen.svg)](#-quality-gates)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-security-model)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-recursive-self-improvement)
 
@@ -126,7 +126,7 @@ the body filing an objection. Meals out and trips away still meant a remote desk
 in the bag.
 
 **Fourteen model providers have actually been wired into this workbench**
-(see `core/src/provider`): DeepSeek · Ollama · OpenAI · Anthropic · Gemini · Qwen · Kimi ·
+(see `core/src`): DeepSeek · Ollama · OpenAI · Anthropic · Gemini · Qwen · Kimi ·
 Doubao · Hunyuan · Zhipu GLM · Moonshot · Mistral · SiliconFlow · OpenRouter. No ad slots,
 nobody excluded.
 
@@ -376,22 +376,22 @@ bash scripts/verify.sh --workbench    # workbench sub-project only (71 offline t
 bash scripts/verify.sh --release      # adds the Tauri release bundle
 ```
 
-Current baseline — the full gate dispatches 25 checks, and the last complete run that
-recorded **25/25** was on 2026-10-28; every number in the table below comes from that run. Every layer
+Current baseline — the full gate dispatches 26 checks, and the last complete run that
+recorded **26/26** was on 2026-10-29; every number in the table below comes from that run. Every layer
 below runs in CI (`.github/workflows/ci.yml`) except the web e2e layer, which is
 **local-gate-only for now**: CI would need a Playwright browser cache and a
 Rust-built gateway in the same job (tracked as follow-up, not silently claimed).
 
 | Gate | Result |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 4230 passed / 0 failed / 24 ignored |
+| `cargo test -p marguerite-core --lib` | 4341 passed / 0 failed / 25 ignored |
 | core integration tests (`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`) | offline and deterministic; `third_party_integration` is `[SKIP]` when `third_party/` is absent (a skip is never counted as a pass) |
-| `webui` unit tests (Vitest) | 4898 passed / 0 failed (495 files) |
+| `webui` unit tests (Vitest) | 4927 passed / 0 failed (500 files) |
 | `pyengine` unit tests (pytest, `tests/unit`) | 823 passed / 0 failed / 7 skipped |
 | `pyengine` gateway contracts (pytest, `tests/test_gateway`) | 2956 passed / 0 failed / 11 skipped |
-| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4445 passed / 0 failed / 390 skipped |
+| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4446 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero warnings |
-| `npm run check:architecture` | 10 architecture guards green |
+| `npm run check:architecture` | 13 architecture guards green |
 | `scripts/check-doc-cli-drift.py` | every documented CLI token resolves to real code |
 | `scripts/check-version-sync.py` | core / tui / gui / webui versions pinned to `core/Cargo.toml`, incl. both npm lockfile self-entries |
 | `npm ci --dry-run` | console lockfile is self-consistent with `package.json` (the check `npm audit` cannot see) |
@@ -400,6 +400,8 @@ Rust-built gateway in the same job (tracked as follow-up, not silently claimed).
 | `scripts/check-secrets.py` | no real-looking API key in any file that would ship — a fixture must label itself (`sk-fake-…`) or it fails |
 | `scripts/check-doc-links.py` | every relative link in this project's own docs resolves (vendored skill packs are out of scope) |
 | `scripts/check-readme-claims.py` | the English and Chinese READMEs agree on every hard fact, and the gate total they print is the number of checks `verify.sh --all` actually dispatches |
+| `scripts/check-batch-parse.py` | every tracked `.cmd`/`.bat` is dry-run through `cmd.exe` with its commands neutered to `echo`; a UTF-8-without-BOM Chinese script gets its lines split mid-character into phantom commands (measured: 71 stderr lines from `package_full.cmd`), so the packaging scripts ship as GBK + CRLF and this proves the parser agrees |
+| `scripts/check-website-claims.py` | the landing page's 23 printed numbers (code lines, architecture guards, RPC declarations, CLI routes, test baselines, BPM) are re-measured from the shipping file set, every path it cites exists, and it links no source repository — runs in CI, not in `verify.sh`, so the gate total above stays the dispatched count |
 | `workbench` backend tests (pytest) | 71 offline tests — this sub-project ships, so it is gated like the rest |
 | `workbench` version sync | its own `VERSION` line matches the backend and frontend declarations |
 | web e2e (Playwright) | an isolated gateway (temp HOME + `MARGUERITE_CONFIG_DIR`, dedicated port) runs the deterministic spec subset; its pass count is a ratchet that may only rise, and the not-yet-deterministic specs are listed as a backlog instead of being called green |
@@ -467,7 +469,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
 
 - Version numbers across the four front ends are now pinned to `core/Cargo.toml`
   and enforced by `scripts/check-version-sync.py` in CI. The engine version is
-  authoritative (`marguerite-core --version`; currently `0.2.17`).
+  authoritative (`marguerite-core --version`; currently `0.2.18`).
 - The desktop app expects the web console bundle next to it. Run it from a packaged
   installer or from the repository — a bare copied `.exe` cannot serve a console it
   does not have. Since this round it no longer fails silently in that case: the
@@ -479,7 +481,7 @@ Marguerite is **pre-1.0 and moving fast**. Honest notes:
   its own Python backend (`engine` · `api` · `cli` · `llmlab` · `ttc` · `agentloop`),
   its own React SPA served by FastAPI on `:8011`, its own packaging pipeline, and
   **its own version line** (`workbench/VERSION`, currently `1.1.0` — independent of the
-  engine's `0.2.17`). It bridges the core store through `core_bridge`, in the same spirit
+  engine's `0.2.18`). It bridges the core store through `core_bridge`, in the same spirit
   as `pyengine/`; the Rust binaries do not import it. Its 71 offline tests and its
   version gate had never been run by any gate until this round, even though the
   sub-project ships — `verify.sh --workbench` now covers both.

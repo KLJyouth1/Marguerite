@@ -19,6 +19,11 @@ pub(crate) fn read_file_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecu
             Box::pin(async move {
                 let p = args.get("path").ok_or_else(|| anyhow!("missing 'path'"))?;
                 let abs = ws.resolve(p)?;
+                // L3 读取边界：`.env` / 网关 token / 凭据台账即使落在工作区内
+                // （未绑定项目时工作区根就是数据目录）也不得读进模型上下文。
+                if let Some(denied) = gate(&PREFLIGHT.check_read_multi(&abs, &guard_roots(&ws))) {
+                    return denied;
+                }
                 if !abs.is_file() {
                     return err(format!("not a file: {}", p), "NOT_FOUND");
                 }
@@ -292,6 +297,11 @@ pub(crate) fn grep_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> 
                     if hits.len() >= max {
                         break;
                     }
+                    // 凭证文件不参与内容检索：grep 会把命中的原文行直接回给模型，
+                    // 与 read_file 泄露的是同一份密钥。
+                    if crate::security::scanner_l3::is_credential_file(f) {
+                        continue;
+                    }
                     // 跳过明显二进制（按扩展名粗判）
                     let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "pdf" | "zip" | "exe" | "dll" | "so" | "o" | "rlib" | "rmeta") {
@@ -343,6 +353,10 @@ pub(crate) fn codebase_search_tool(workspace: impl Into<RootSet>) -> Box<dyn Too
                 all.dedup();
                 let mut scored: Vec<(usize, String)> = Vec::new();
                 for f in &all {
+                    // 同 grep：检索结果会暴露「哪一行命中了」，凭证文件一律跳过。
+                    if crate::security::scanner_l3::is_credential_file(f) {
+                        continue;
+                    }
                     let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if matches!(ext, "png" | "jpg" | "pdf" | "zip" | "exe" | "dll" | "so" | "o" | "rlib" | "rmeta") {
                         continue;
@@ -417,6 +431,46 @@ pub(crate) fn edit_file_tool(
                 let sess = current_session();
                 crate::tools::file_change::record_artifact(&sess, p, "modified");
                 ok(format!("edited {} ({}->{} bytes)", p, content.len(), replaced.len()))
+            })
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 工具输出留底取回（M1 Task 3）
+// ---------------------------------------------------------------------------
+
+/// 取回被入口截流砍掉的工具输出原文。
+///
+/// 指纹来自历史里的
+/// `…[中间省略 N 个字符；原文全文可用 tool_output_retrieve("<fp>") 取回]…` 标注。
+///
+/// 放在 fs 族是因为它读的是本机留底文件；但**不**注册进 `chain/builtin.rs` ——
+/// 链式执行器只有 5 个自带工具、且本就不做入口截流，那边没有可取的原文，
+/// 塞进去只会多一个恒定失败的入口。
+pub(crate) fn tool_output_retrieve_tool() -> Box<dyn ToolExecutor> {
+    boxed(
+        // 点号名会被 `register_local` 自动修正成别名（P1-E 守卫：内置名必须
+        // 首次即合法 `^[a-zA-Z0-9_-]+$`），而模型只看得到合法名 —— 所以这里用下划线。
+        "tool_output_retrieve",
+        "取回已被入口截流砍掉的工具输出原文全文。指纹取自历史里的 \
+         [中间省略 N 个字符；原文全文可用 tool_output_retrieve(\"<fp>\") 取回] 标注。 \
+         参数: fingerprint(必填，32 位小写十六进制)",
+        json!({"type":"object","properties":{"fingerprint":{"type":"string"}},"required":["fingerprint"]}),
+        Arc::new(|args| {
+            Box::pin(async move {
+                let fp = args
+                    .get("fingerprint")
+                    .ok_or_else(|| anyhow!("missing 'fingerprint'"))?;
+                match crate::context::spool::retrieve(fp) {
+                    Some(text) => ok(text),
+                    // 取不到必须是**明确的失败**：回 `ok("")` 会被模型读成
+                    // 「原文就是空的」，比没有这个工具更糟。
+                    None => err(
+                        "原文不可用：指纹非法、留底已被淘汰，或该输出从未被截断".to_string(),
+                        "NOT_FOUND",
+                    ),
+                }
             })
         }),
     )

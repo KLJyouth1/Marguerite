@@ -150,6 +150,12 @@ pub struct MemoryConfig {
     /// 短期记忆存储路径
     #[serde(default = "default_short_term_path")]
     pub short_term_path: String,
+    /// 短期记忆（跨会话全文检索）的留存上限，超出按 `updated_at` 淘汰最旧的。
+    ///
+    /// 旧默认 **50** 意味着「跑两周就把自己检索不回来了」：每轮沉淀占一个槽位，
+    /// 超出的会话连内容带索引一起静默消失（消失后检索只会回「没有」，无人起疑）。
+    #[serde(default = "default_short_term_max_sessions")]
+    pub short_term_max_sessions: usize,
     /// 记忆自动捕获开关（webui `memory.auto_capture_enabled`；纯 Rust 离线模式持久化用）
     #[serde(default = "default_true")]
     pub auto_capture_enabled: bool,
@@ -182,11 +188,16 @@ fn default_short_term_path() -> String {
     "memory/short_term".to_string()
 }
 
+fn default_short_term_max_sessions() -> usize {
+    crate::memory::short_term::DEFAULT_MAX_SESSIONS
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             sensory_path: default_sensory_path(),
             short_term_path: default_short_term_path(),
+            short_term_max_sessions: default_short_term_max_sessions(),
             auto_capture_enabled: default_true(),
             synapse_enabled: default_true(),
             tiered_enabled: false,
@@ -495,6 +506,44 @@ pub struct OpsConfig {
     pub hosts: Vec<crate::ops::HostRef>,
 }
 
+/// 上下文压力与入口截流配置（JSON 键 `context.*`）。
+///
+/// 整块**新增** ⇒ 缺字段的旧配置走 `ContextConfig::default()`，零迁移
+/// （同 `MemoryConfig.layers` 的处理方式）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// 三档压力阶梯 `[watch, advise, compact]`，必须严格递增且落在 `(0, 1]`。
+    /// 坏值由 `crate::context::pressure::sanitize_ladder` 回落默认，不静默生效。
+    #[serde(default = "default_context_ladder")]
+    pub ladder: [f64; 3],
+    /// 工具输出进历史前是否做入口截流（M1 Task 3）。
+    ///
+    /// **默认 true，且与现网一致**：D11（2026-10-29）已把中间截断无条件接进
+    /// runtime / stream_loop / multi_strategy 三条回路 —— 此键是**紧急关闭阀**，
+    /// 不是灰度开关。默认若取 false，升级后的第一天就会静默把模型看到的文本从
+    /// 截断版换回全文（prompt 前缀全变、缓存全废），那正是最难排查的那种回归。
+    #[serde(default = "default_entry_truncation")]
+    pub entry_truncation: bool,
+}
+
+fn default_context_ladder() -> [f64; 3] {
+    crate::context::pressure::DEFAULT_LADDER
+}
+
+/// 见 `ContextConfig::entry_truncation` 的说明：缺键 = 开（保持现网行为）。
+fn default_entry_truncation() -> bool {
+    true
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            ladder: default_context_ladder(),
+            entry_truncation: default_entry_truncation(),
+        }
+    }
+}
+
 /// 主配置结构体
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -507,6 +556,9 @@ pub struct Config {
     /// 记忆系统配置
     #[serde(default)]
     pub memory: MemoryConfig,
+    /// 上下文压力与入口截流配置（`context.*`）
+    #[serde(default)]
+    pub context: ContextConfig,
     /// 记忆 Dream 子配置（嵌套在 memory 下，JSON 键 memory.dream.*）
     #[serde(default)]
     pub dream: DreamConfig,
@@ -917,6 +969,10 @@ impl Config {
                 std::fs::create_dir_all(p)?;
             }
             std::fs::write(env_path, lines.join("\n") + "\n")?;
+            // `.env` 是本仓**唯一合法**的明文密钥落盘位置（见 observability::redact），
+            // 因此必须只有属主可读。每次写入都收紧一次：覆写不会重置已有文件的
+            // mode，老的 0644 文件不补这一步就永远是 0644。
+            let _ = crate::persistence::harden_private_file(env_path);
             Ok(())
         })();
         match res {
@@ -1032,6 +1088,27 @@ mod tests {
         assert_eq!(config.model.provider, "deepseek");
         assert_eq!(config.model.model_name, "deepseek-v4-pro");
         assert_eq!(config.log.level, "info");
+    }
+
+    #[test]
+    fn an_old_config_file_without_the_context_section_still_loads() {
+        // 这就是「零迁移」的可执行证明：删掉整节也必须能解析。
+        let cfg: Config = serde_json::from_str(r#"{"model":{"provider":"openai"}}"#)
+            .expect("缺 context 节的旧配置必须解析成功");
+        assert_eq!(cfg.context.ladder, crate::context::pressure::DEFAULT_LADDER);
+        // D11 已无条件上线入口截流 ⇒ 缺键必须等于**现网行为**（开），
+        // 否则「升级」这件事本身就会把模型看到的文本换掉。
+        assert!(cfg.context.entry_truncation);
+    }
+
+    #[test]
+    fn a_ladder_written_backwards_does_not_take_effect() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"context":{"ladder":[0.9,0.5,0.3]}}"#).unwrap();
+        assert_eq!(
+            crate::context::pressure::sanitize_ladder(cfg.context.ladder),
+            crate::context::pressure::DEFAULT_LADDER
+        );
     }
 
     /// 配置目录解析顺序：`MARGUERITE_CONFIG_DIR` 覆盖 > 用户主目录。

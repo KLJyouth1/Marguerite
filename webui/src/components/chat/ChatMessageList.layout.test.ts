@@ -68,21 +68,35 @@ function classSignature(el: Element): string {
 }
 
 describe('ChatMessageList 阅读列版式', () => {
-  it('CSS 合约：.msg-ai 不再用 auto 外边距居中，两个渲染路径共用左对齐列', () => {
-    const assistantRule = assistantSource.match(/\.msg-ai\s*\{([\s\S]*?)\}/)?.[1] ?? ''
-    expect(assistantRule).not.toMatch(/margin:\s*0\s+auto\s*;/)
-    expect(assistantRule).toMatch(/margin-inline:\s*0\s*;/)
-    expect(assistantRule).toMatch(/width:\s*100%/)
+  it('行容器只做容器：阅读列的权威在根规则，不在这层叠加 `>` 覆盖', () => {
+    // 曾经的形态：本组件用 `.chat .chat-thread > .msg-ai` /
+    // `.chat .chat-turn-row > .msg-ai` 去覆盖居中。子组合器只在一种 DOM 形状下
+    // 命中（水合包裹层 / 分享态一变就整条失配），失配时回落到居中 —— 就是
+    // 「有时像修过、有时又居中」的机制。现在根规则本身即左对齐：
+    //   · 实时气泡 → styles/chat-view.css 的 `.msg-ai`
+    //   · 历史行 → AssistantMessage.vue / UserMessage.vue / CompactionEvent.vue
+    // 完整不变量见 src/styles/chat-reading-column.contract.test.ts。
+    const listCss = (messageListSource.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(listCss).not.toMatch(/>\s*\.msg-(ai|user)/)
+    expect(listCss).not.toMatch(/--chat-col|--chat-gutter/)
+    expect(listCss).not.toMatch(/margin-inline:\s*24px\s+auto/)
 
-    // 实时气泡（ChatView 直出）与历史行（.chat-turn-row 内）都必须命中同一规则。
-    expect(messageListSource).toMatch(
-      /\.chat \.chat-thread > \.msg-ai:not\(\.msg-ai--share-mode\)/,
-    )
-    expect(messageListSource).toMatch(
-      /\.chat \.chat-turn-row > \.msg-ai:not\(\.msg-ai--share-mode\)/,
-    )
-    expect(messageListSource).toMatch(/margin-inline:\s*24px auto/)
-    expect(messageListSource).toMatch(/text-align:\s*start/)
+    // AssistantMessage 自己那一条必须已经是「上限 + 左起点」，不靠外层覆盖救。
+    // ⚠️ 必须**先剥掉注释**再匹配：规则体里的说明文字逐字引用了被守卫的声明原文
+    // （`margin: 0 auto` / `width: var(--chat-col)`），否则会因为一句注释而误红
+    // —— 这个坑 sidebar-layout.contract.test.ts 已经踩过。
+    const assistantCss = (assistantSource.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    const assistantRule = assistantCss.match(/\.msg-ai\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
+    expect(assistantRule).not.toBe('')
+    expect(assistantRule).not.toMatch(/margin:\s*0\s+auto/)
+    expect(assistantRule).not.toMatch(/(?:^|\n)\s*width\s*:\s*var\(--chat-col/)
+    expect(assistantRule).toMatch(/max-width:\s*var\(--chat-col-start/)
+    expect(assistantRule).toMatch(/margin-inline:\s*var\(--chat-gutter,\s*24px\)\s+auto/)
+    expect(assistantRule).toMatch(/text-align:\s*start/)
+
+    // 行容器本身不得居中。
     expect(messageListSource).not.toMatch(/\.chat-turn-row\s*\{[^}]*margin:\s*0 auto/s)
   })
 

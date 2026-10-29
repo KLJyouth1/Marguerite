@@ -31,3 +31,11 @@ prompt_template: |
      - 提出调整建议，等待确认
   5. 每 3 步设置一个检查点：回顾已完成内容，确认方向正确
   6. 全部完成后执行「完成前验证」流程
+
+# 供给面声明（2026-10-29 补）：安装前要展示「它要什么」。
+# 由 scripts/stamp-skill-requires.mjs 从上面的 tools 推导，规则见该脚本头部注释。
+requires:
+  network: false
+  fs_write: false
+  credentials: false
+  shell: false

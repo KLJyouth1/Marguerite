@@ -128,7 +128,12 @@
           </tr>
         </tbody>
       </table>
-      <div v-else-if="cov" class="market__note">{{ t('plugins.manage.empty') }}</div>
+      <EmptyState
+        v-else-if="cov"
+        icon="plugin"
+        :title="t('plugins.manage.empty')"
+        test-id="plugins-manage-empty"
+      />
       <div v-if="cov" class="market__note">{{ t('plugins.manage.boundary') }}</div>
     </section>
 
@@ -150,7 +155,12 @@
             </div>
           </div>
         </div>
-        <div v-if="!filtered.length && !error" class="plugins-empty">{{ t('plugins.empty') }}</div>
+        <EmptyState
+          v-if="!filtered.length && !error"
+          icon="search"
+          :title="t('plugins.empty')"
+          test-id="plugins-empty"
+        />
       </section>
 
     <!-- 插件装配状态（P0 S4b：boot 装配 patch → PluginSlot，经 plugins.status 可见） -->
@@ -547,6 +557,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { useRpcStore } from '@/stores/rpc'
 import { useConfirm } from '@/composables/useConfirm'
 import { openViewPanel } from '@/components/workbench/AppWorkbench.vue'
@@ -1328,7 +1339,6 @@ watch(
 .plugin-card__desc { font-size: 11px; color: var(--text-muted); margin: 6px 0; line-height: 1.5; }
 .plugin-card__meta { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
 .plugin-card__group { padding: 1px 6px; background: var(--bg-hover); border-radius: var(--radius-sm); }
-.plugins-empty { text-align: center; padding: 40px; color: var(--text-dim); font-size: 13px; }
 .skill-create { margin-top: 20px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 16px; }
 .skill-create__title { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
 .skill-create__form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

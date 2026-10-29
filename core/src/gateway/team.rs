@@ -165,6 +165,174 @@ fn expert_roster(id: &str) -> Option<&'static [(&'static str, &'static str)]> {
         .map(|(_, roster)| *roster)
 }
 
+// ── 开工前澄清问卷（团队启动前；由 gateway/clarify.rs 装载进 QuestionQueue）──
+
+/// deck_craft 开工问卷导语。必须如实写明「会员状态未自动探测」，
+/// 否则用户会以为选项里的「可用/不可用」是引擎探测出来的事实。
+const DECK_CRAFT_KICKOFF_INTRO: &str =
+    "PPT 专家团队（deck_craft）开工前先对齐：生成方式（操控软件 / 脚本生成 / 其他自填）、\
+     大纲确认与图片来源。选择「操控电脑」后会追问所用软件及其会员素材库可用性 ——\
+     会员状态当前由引擎标记为未探测，请以你本机的真实情况回答，引擎不会替你假定。";
+
+/// 会员/素材库探测的三态（诚实口径：探测到可用 / 探测到不可用 / 未探测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipProbe {
+    /// 探测到可用：素材库/模板/字体经感知层确认真实可达
+    Available,
+    /// 探测到不可用：确认无会员或素材库不可用
+    Unavailable,
+    /// 未探测：没有（或无法）完成自动探测
+    NotProbed,
+}
+
+impl MembershipProbe {
+    /// 机器可读值（写进问卷字段/回执，供后续接线时不改形状）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MembershipProbe::Available => "available",
+            MembershipProbe::Unavailable => "unavailable",
+            MembershipProbe::NotProbed => "not_probed",
+        }
+    }
+
+    /// 面向用户的文案 —— 直接进问题标题，避免「看起来像探测过」的错觉。
+    pub fn label(self) -> &'static str {
+        match self {
+            MembershipProbe::Available => "探测到可用",
+            MembershipProbe::Unavailable => "探测到不可用",
+            MembershipProbe::NotProbed => "未探测",
+        }
+    }
+}
+
+/// 会员/素材库的当前探测态。
+///
+/// 诚实默认：自动探测需要 computer-use 感知层的多步 GUI 作业
+/// （`tools::computer_use::dispatch` 先要求配置 VLMM，否则 VISION_UNAVAILABLE），
+/// 而问卷开启这条 RPC 链路没有可同步完成的探测目标 —— 因此这里**不新写屏幕抓取、
+/// 不假定任何软件有会员**，如实返回 `NotProbed`。接线探测属于执行期能力，见模块汇报。
+pub fn current_membership_probe() -> MembershipProbe {
+    MembershipProbe::NotProbed
+}
+
+fn choice(label: &str, description: &str) -> crate::mode::ask::QuestionOption {
+    crate::mode::ask::QuestionOption {
+        label: label.to_string(),
+        description: Some(description.to_string()),
+    }
+}
+
+/// 可复用问卷片段：图片来源（A 网络 / B 自动生成 / C 指定目录 + 「其他」自填走 allow_other）。
+///
+/// 复用落点：任何需要图源决策的团队都直接调用本函数，再按需覆盖 `depends_on`。
+pub fn image_source_question() -> crate::mode::ask::Question {
+    crate::mode::ask::Question {
+        id: "deck_image_source".into(),
+        header: Some("图片来源".into()),
+        question: "PPT 使用的图片来源？".into(),
+        options: vec![
+            choice("网络获取图片", "联网检索/获取图片，需要出网且注意素材授权"),
+            choice("自动生成图片", "由程序生成图表/示意，不外网取图"),
+            choice("指定目录图片", "使用本机目录中的现有图片；请在「其他」补充目录路径"),
+        ],
+        multi_select: false,
+        allow_other: true,
+        depends_on: None,
+    }
+}
+
+/// 可复用问卷片段：大纲确认（交付前必须对齐页面大纲）。
+pub fn outline_confirmation_question() -> crate::mode::ask::Question {
+    crate::mode::ask::Question {
+        id: "deck_outline".into(),
+        header: Some("大纲确认".into()),
+        question: "页面大纲如何确认？团队成员会按这条回答直接落结构。".into(),
+        options: vec![
+            choice("按需求中的大纲执行", "需求描述里已给出大纲，原样使用"),
+            choice("先生成大纲再逐项确认", "团队先出大纲草案，再回到这里复核"),
+        ],
+        multi_select: false,
+        allow_other: true,
+        depends_on: None,
+    }
+}
+
+/// 团队专属开工问卷登记表：目前只有 deck_craft（首例）。
+///
+/// 返回 `(导语, 问题集)`；问题集带分支依赖，由 clarify.rs 装载进
+/// [`crate::mode::ask::QuestionQueue`] 并按批派发卡。
+pub fn kickoff_questionnaire_for(team_id: &str) -> Option<(&'static str, Vec<crate::mode::ask::Question>)> {
+    match team_id {
+        "deck_craft" => Some((DECK_CRAFT_KICKOFF_INTRO, deck_craft_kickoff_questions())),
+        _ => None,
+    }
+}
+
+fn deck_craft_kickoff_questions() -> Vec<crate::mode::ask::Question> {
+    use crate::mode::ask::{Question, QuestionDependency};
+    let probe = current_membership_probe();
+    let gate_operate = QuestionDependency {
+        question: "deck_form".into(),
+        answer: Some("操控电脑".into()),
+    };
+    let gate_any_form = QuestionDependency {
+        question: "deck_form".into(),
+        answer: None,
+    };
+    vec![
+        Question {
+            id: "deck_form".into(),
+            header: Some("生成方式".into()),
+            question: "这份 PPT 希望怎样生成？".into(),
+            options: vec![
+                choice("操控电脑", "真实驱动本机安装的演示软件（如 WPS）生成页面"),
+                choice("脚本生成", "由脚本/程序直接产出大纲与 PPT 结构，不驱动本机软件"),
+            ],
+            multi_select: false,
+            // C 分支：自由描述生成方式（自定义答案不会解锁 A 分支专属追问，见 ready_batch 口径）
+            allow_other: true,
+            depends_on: None,
+        },
+        Question {
+            id: "deck_software".into(),
+            header: Some("演示软件".into()),
+            question: "准备操控哪款演示软件？引擎不代为检测本机软件，请按实际填写。".into(),
+            options: vec![
+                choice("WPS", "WPS 演示（随 WPS Office 安装）"),
+                choice("Microsoft Office", "PowerPoint"),
+            ],
+            multi_select: false,
+            allow_other: true,
+            depends_on: Some(gate_operate.clone()),
+        },
+        Question {
+            id: "deck_membership".into(),
+            header: Some(format!("会员与素材库 · {}", probe.label())),
+            question: format!(
+                "该软件的账号是否能使用会员素材库/模板/字体？当前引擎探测状态：{}。\
+                     请勿默认「可用」，不确定就选「无法确定」，开工后以本机实际为准。",
+                probe.label()
+            ),
+            options: vec![
+                choice("可用", "确认账号为会员且素材库/模板/字体可用"),
+                choice("不可用", "无会员或素材库不可用"),
+                choice("无法确定", "开工后由成员在执行现场确认，勿凭空假定"),
+            ],
+            multi_select: false,
+            allow_other: true,
+            depends_on: Some(gate_operate),
+        },
+        Question {
+            depends_on: Some(gate_any_form.clone()),
+            ..outline_confirmation_question()
+        },
+        Question {
+            depends_on: Some(gate_any_form),
+            ..image_source_question()
+        },
+    ]
+}
+
 /// 读取调用方请求的并行规模（0 = 未指定，按自动检测）。
 ///
 /// 这里是数量上限的**唯一来源**：不再 `.min(16)`。用户选多少就执行多少，
@@ -804,5 +972,109 @@ mod roster_tests {
 
         let empty = selected_rosters(&json!({ "teams": ["no-such-team"] }));
         assert!(empty.is_empty());
+    }
+}
+
+/// deck_craft 开工问卷的形状与分支流（纯 Rust，离线可测；不触网不抓屏）。
+#[cfg(test)]
+mod kickoff_questionnaire_tests {
+    use super::*;
+    use crate::mode::ask::{Answer, QuestionQueue};
+
+    fn ids(qs: &[crate::mode::ask::Question]) -> Vec<String> {
+        qs.iter().map(|q| q.id.clone()).collect()
+    }
+
+    #[test]
+    fn deck_craft_questionnaire_has_the_product_shape() {
+        let (intro, qs) = kickoff_questionnaire_for("deck_craft").expect("deck_craft 应有开工问卷");
+        assert!(intro.contains("未探测"), "导语必须如实声明会员探测未接线: {intro}");
+        assert_eq!(
+            ids(&qs),
+            vec!["deck_form", "deck_software", "deck_membership", "deck_outline", "deck_image_source"]
+        );
+        let form = &qs[0];
+        assert!(form.allow_other, "C 分支（其他自填）靠 allow_other 表达");
+        assert_eq!(
+            form.depends_on, None,
+            "gate 本身必须无条件就绪"
+        );
+        // 分支表达：软件与会员追问仅在「操控电脑」后出现
+        use crate::mode::ask::QuestionDependency;
+        assert_eq!(
+            qs[1].depends_on,
+            Some(QuestionDependency {
+                question: "deck_form".into(),
+                answer: Some("操控电脑".into())
+            })
+        );
+        assert_eq!(qs[2].depends_on.as_ref().map(|d| d.question.as_str()), Some("deck_form"));
+        // 大纲与图片来源：两条分支都要确认（gate 已答即就绪，不限选项）
+        assert_eq!(
+            qs[3].depends_on,
+            Some(QuestionDependency { question: "deck_form".into(), answer: None })
+        );
+        assert_eq!(
+            qs[4].depends_on,
+            Some(QuestionDependency { question: "deck_form".into(), answer: None })
+        );
+        // 图片来源 = 三选项 + 其他自填（第四路），与产品口径一致
+        let labels: Vec<&str> = qs[4].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["网络获取图片", "自动生成图片", "指定目录图片"]);
+        assert!(qs[4].allow_other, "图片来源必须保留「其他-自填」入口");
+        // 会员题面：探测态如实写进标题/题面，绝无「WPS 有会员」式假定
+        assert!(qs[2].header.as_deref().unwrap_or("").contains("未探测"));
+        assert!(qs[2].question.contains("未探测"));
+        assert!(
+            kickoff_questionnaire_for("fullstack_craft").is_none(),
+            "目前只有 deck_craft 首例；其它团队不得被凭空弹出问卷"
+        );
+    }
+
+    #[test]
+    fn computer_branch_asks_software_and_membership() {
+        let (_, qs) = kickoff_questionnaire_for("deck_craft").unwrap();
+        let mut queue = QuestionQueue::new();
+        queue.ask_many(qs);
+        assert_eq!(ids(&queue.ready_batch()), vec!["deck_form"]);
+        assert!(queue.answer(Answer {
+            id: "deck_form".into(),
+            selected: vec!["操控电脑".into()],
+            custom: None,
+        }));
+        let stage2 = ids(&queue.ready_batch());
+        assert_eq!(
+            stage2,
+            vec!["deck_software", "deck_membership", "deck_outline", "deck_image_source"],
+            "A 分支追问软件与会员，且仍要确认大纲/图源"
+        );
+    }
+
+    #[test]
+    fn script_branch_completes_without_computer_questions() {
+        let (_, qs) = kickoff_questionnaire_for("deck_craft").unwrap();
+        let mut queue = QuestionQueue::new();
+        queue.ask_many(qs);
+        queue.answer(Answer {
+            id: "deck_form".into(),
+            selected: vec!["脚本生成".into()],
+            custom: None,
+        });
+        assert_eq!(
+            ids(&queue.ready_batch()),
+            vec!["deck_outline", "deck_image_source"],
+            "B 分支不得追问软件/会员（不可达题被丢弃而非伪造回答）"
+        );
+        queue.answer(Answer {
+            id: "deck_outline".into(),
+            selected: vec!["按需求中的大纲执行".into()],
+            custom: None,
+        });
+        queue.answer(Answer {
+            id: "deck_image_source".into(),
+            selected: vec![],
+            custom: Some("用我自己的图库".into()),
+        });
+        assert!(queue.is_empty());
     }
 }

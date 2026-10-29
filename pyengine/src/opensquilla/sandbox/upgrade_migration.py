@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import functools
 import hashlib
 import json
 import os
@@ -110,6 +111,45 @@ def _running_on_windows() -> bool:
     return os.name == "nt"
 
 
+@functools.lru_cache(maxsize=1)
+def _resolve_windows_powershell() -> str:
+    """把 PowerShell 解析成**绝对路径**，解析不到才退回裸命令。
+
+    真机事故（2026-10-28 隔离网关实测）：`_protect_private_path` 用裸 `powershell`
+    起子进程。Windows 的 CreateProcess 默认只搜 System32 本身，**不搜**
+    `System32\\WindowsPowerShell\\v1.0`；一旦侧车进程的 PATH 不含该目录（内嵌运行时
+    / 精简环境 / 被上游清洗过的环境），spawn 直接 `FileNotFoundError: [WinError 2]
+    系统找不到指定的文件`，经 `ensure_sandbox_upgrade_migrated` 升级为
+    `migration_failed_manual_recovery_required` —— 整个 Python 侧车起不来，
+    overview/tools/memory/knowledge 全部数据真空。
+
+    这里先按 SystemRoot 拼绝对路径；文件确实不存在时才退回裸命令（保留原来的
+    清晰报错语义，不假装成功）。
+    """
+
+    if not _running_on_windows():
+        return "powershell"
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    for candidate in (
+        Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        Path(root) / "Sysnative" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return "powershell"
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_windows_whoami() -> str:
+    """`whoami.exe` 同样按绝对路径解析（同一类 PATH 解析失败）。"""
+
+    if not _running_on_windows():
+        return "whoami"
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    candidate = Path(root) / "System32" / "whoami.exe"
+    return str(candidate) if candidate.is_file() else "whoami"
+
+
 def _set_windows_dll_directory(path: str | None) -> None:
     import ctypes
 
@@ -140,7 +180,7 @@ def _system_windows_process_context() -> Iterator[None]:
 def _current_windows_user_sid() -> str:
     with _system_windows_process_context():
         completed = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
+            [_resolve_windows_whoami(), "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
             # 中文 Windows 上 `whoami` 输出含本机代码页（GBK）字节，默认按 UTF-8
@@ -186,7 +226,7 @@ def _protect_private_path(
         with _system_windows_process_context():
             completed = subprocess.run(
                 [
-                    "powershell",
+                    _resolve_windows_powershell(),
                     "-NoProfile",
                     "-NonInteractive",
                     "-EncodedCommand",

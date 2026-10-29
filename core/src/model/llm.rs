@@ -77,12 +77,51 @@ pub enum LLMProvider {
     DeepSeek,
     /// Anthropic Messages API（x-api-key/Anthropic-Version；原生 content blocks/tool_use）
     Anthropic,
+    /// Anthropic Messages **兼容网关**：协议与 `Anthropic` 完全相同
+    /// （`/v1/messages` + content blocks + tool_use），差别只在**鉴权头**用
+    /// `Authorization: Bearer` 而不是 `x-api-key`。
+    ///
+    /// MiniMax / Kimi / 腾讯 Token 计划 等第三方网关把 Anthropic Messages 协议
+    /// 暴露在自建路径上，却沿用 OpenAI 风格的密钥头。分成两个变体，才能只换鉴权头、
+    /// 不换 URL 与请求体 —— 把它们合并成一个会让其中一半必然 401。
+    AnthropicCompatible,
     /// 自定义 API
     #[serde(rename = "custom")]
     Custom {
         /// 自定义 base URL
         base_url: String,
     },
+}
+
+/// Anthropic Messages 端点的鉴权头形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnthropicAuth {
+    /// `x-api-key: <key>`（Anthropic 官方、腾讯 TokenHub 按量付费端点）。
+    #[default]
+    XApiKey,
+    /// `Authorization: Bearer <key>`（MiniMax / Kimi / 腾讯 Token 计划 等兼容网关）。
+    Bearer,
+}
+
+impl LLMProvider {
+    /// 是否走 Anthropic Messages 协议（`/v1/messages` + content blocks + tool_use）。
+    pub fn speaks_anthropic_messages(&self) -> bool {
+        matches!(
+            self,
+            LLMProvider::Anthropic | LLMProvider::AnthropicCompatible
+        )
+    }
+
+    /// Anthropic Messages 端点的鉴权头形态。
+    ///
+    /// 非 Anthropic 端点返回 `XApiKey` 但**不会被用到** —— 调用方必须先判
+    /// [`LLMProvider::speaks_anthropic_messages`]。
+    pub fn anthropic_auth(&self) -> AnthropicAuth {
+        match self {
+            LLMProvider::AnthropicCompatible => AnthropicAuth::Bearer,
+            _ => AnthropicAuth::XApiKey,
+        }
+    }
 }
 
 /// LLM 配置
@@ -178,14 +217,8 @@ impl LLMConfig {
     pub fn from_model_config(config: &crate::persistence::config::Config) -> Self {
         let m = &config.model;
         Self {
-            provider: match m.provider.as_str() {
-                "openai" => LLMProvider::OpenAI,
-                "deepseek" => LLMProvider::DeepSeek,
-                "anthropic" => LLMProvider::Anthropic,
-                _ => LLMProvider::Custom {
-                    base_url: m.base_url.clone(),
-                },
-            },
+            // provider id → 协议走唯一事实源（`model::provider_protocol`）。
+            provider: crate::model::provider_protocol::provider_for_id(&m.provider, &m.base_url),
             model: m.model_name.clone(),
             api_key: m.api_key.clone(),
             base_url: m.base_url.clone(),
@@ -217,14 +250,7 @@ impl LLMConfig {
         let base_url = cop.base_url.clone().unwrap_or_else(|| m.base_url.clone());
         let api_key = cop.api_key.clone().unwrap_or_else(|| m.api_key.clone());
         Some(Self {
-            provider: match provider.as_str() {
-                "openai" => LLMProvider::OpenAI,
-                "deepseek" => LLMProvider::DeepSeek,
-                "anthropic" => LLMProvider::Anthropic,
-                _ => LLMProvider::Custom {
-                    base_url: base_url.clone(),
-                },
-            },
+            provider: crate::model::provider_protocol::provider_for_id(&provider, &base_url),
             model: cop.model_name.clone(),
             api_key,
             base_url,
@@ -644,7 +670,7 @@ impl LLMClient {
 
     /// 是否为 Anthropic Messages API（x-api-key / content blocks / tool_use）
     fn is_anthropic(&self) -> bool {
-        matches!(self.config.provider, LLMProvider::Anthropic)
+        self.config.provider.speaks_anthropic_messages()
     }
 
     /// 构建请求 URL（委托给纯函数 [`build_chat_url`]，便于表驱动单测）。
@@ -667,8 +693,20 @@ impl LLMClient {
     fn headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         if self.is_anthropic() {
-            if let Ok(v) = self.config.api_key.parse() {
-                headers.insert("x-api-key", v);
+            // 同一套 Anthropic Messages 协议，鉴权头按服务商分两种：
+            // 官方与腾讯 TokenHub 用 `x-api-key`；MiniMax / Kimi 等兼容网关用 Bearer。
+            match self.config.provider.anthropic_auth() {
+                AnthropicAuth::XApiKey => {
+                    if let Ok(v) = self.config.api_key.parse() {
+                        headers.insert("x-api-key", v);
+                    }
+                }
+                AnthropicAuth::Bearer => {
+                    headers.insert(
+                        reqwest::header::AUTHORIZATION,
+                        format!("Bearer {}", self.config.api_key).parse().unwrap(),
+                    );
+                }
             }
             if let Ok(v) = "2023-06-01".parse() {
                 headers.insert("anthropic-version", v);
@@ -1030,13 +1068,48 @@ impl LLMClient {
             // 三个断点：system / 最后一个 tool / 最后一条 user（Anthropic 上限 4）。
             // system 与最后一条 user 的断点由 `messages_to_anthropic` 负责，
             // 这里只补 tools 上的那个。
+            //
+            // Anthropic 的扩展思考与 OpenAI 的 `reasoning_effort` **不是同一个字段**：
+            // 请求体里是 `thinking: {type, budget_tokens}`，且开启后 temperature 必须缺省。
+            let effective_thinking =
+                crate::model::thinking::current_turn_effort().unwrap_or(self.config.thinking);
+            let thinking_payload = anthropic_thinking_payload(
+                &self.config.model,
+                effective_thinking,
+                self.config.max_tokens,
+            );
+            let max_tokens = thinking_payload
+                .as_ref()
+                .map(|(_, m)| *m)
+                .unwrap_or(self.config.max_tokens);
             let mut body = serde_json::json!({
                 "model": self.config.model,
                 "messages": api_messages,
-                "max_tokens": self.config.max_tokens,
-                "temperature": self.config.temperature,
+                "max_tokens": max_tokens,
                 "stream": stream,
             });
+            // Anthropic 开启扩展思考后不接受 temperature（必须缺省或为 1，否则 400）。
+            if thinking_payload.is_none() {
+                body["temperature"] = serde_json::json!(self.config.temperature);
+            }
+            if let Some((payload, _)) = thinking_payload {
+                body["thinking"] = payload;
+                note_effort_wire(
+                    &self.config.model,
+                    effective_thinking,
+                    true,
+                    "thinking.budget_tokens",
+                    Some("enabled"),
+                );
+            } else {
+                note_effort_wire(
+                    &self.config.model,
+                    effective_thinking,
+                    supports_anthropic_thinking(&self.config.model),
+                    "thinking.budget_tokens",
+                    None,
+                );
+            }
             if !system_blocks.is_empty() {
                 body["system"] = serde_json::Value::Array(system_blocks);
             }
@@ -1610,6 +1683,9 @@ impl LLMClient {
             let mut current_thinking = String::new();
             // T7：流式 usage 记账旗标（first-wins）；见下方 Ok(parsed) 记账块。
             let mut usage_recorded = false;
+            // Anthropic 把 usage 拆到 `message_start`（输入侧）与 `message_delta`
+            // （输出侧）两个事件，必须跨事件合并后才能交下游记账。
+            let mut anthropic_state = AnthropicStreamState::default();
 
             // SSE 流式解析
             let mut stream = response.bytes_stream();
@@ -1648,7 +1724,7 @@ impl LLMClient {
                                 let parsed_result = if responses {
                                     parse_responses_stream_chunk(data, &model)
                                 } else if anthropic {
-                                    parse_anthropic_stream_chunk(data, &model)
+                                    parse_anthropic_stream_event(data, &model, &mut anthropic_state)
                                 } else {
                                     parse_stream_chunk(data, &model)
                                 };
@@ -1729,6 +1805,21 @@ impl LLMClient {
                         return;
                     }
                 }
+            }
+
+            // 流末兜底：Anthropic 的流若中途断开（没走到 message_delta / message_stop），
+            // 已知的输入计数仍要落账 —— 否则「断流不丢已花费 token」这条契约
+            // 在 Anthropic 协议上不成立。
+            if let Some(u) = anthropic_state.take_usage() {
+                let _ = tx
+                    .send(Ok(LLMChunk {
+                        content: None,
+                        thinking: None,
+                        finish_reason: None,
+                        tool_calls: None,
+                        usage: Some(u),
+                    }))
+                    .await;
             }
         });
 
@@ -1875,6 +1966,9 @@ impl LLMClient {
             let mut tool_accum: Vec<PartialToolCall> = Vec::new();
             // T7：流式 usage 记账旗标（first-wins）；见下方 Ok(parsed) 记账块。
             let mut usage_recorded = false;
+            // Anthropic 把 usage 拆到 `message_start`（输入侧）与 `message_delta`
+            // （输出侧）两个事件，必须跨事件合并后才能交下游记账。
+            let mut anthropic_state = AnthropicStreamState::default();
             let mut stream = response.bytes_stream();
             use futures_util::StreamExt;
             let mut buffer = String::new();
@@ -1933,7 +2027,7 @@ impl LLMClient {
                                 let parsed_result = if responses {
                                     parse_responses_stream_chunk(data, &model)
                                 } else if anthropic {
-                                    parse_anthropic_stream_chunk(data, &model)
+                                    parse_anthropic_stream_event(data, &model, &mut anthropic_state)
                                 } else {
                                     parse_stream_chunk(data, &model)
                                 };
@@ -2029,6 +2123,21 @@ impl LLMClient {
                 }
             }
 
+            // 流末兜底：Anthropic 的流若中途断开（没走到 message_delta / message_stop），
+            // 已知的输入计数仍要落账 —— 否则「断流不丢已花费 token」这条契约
+            // 在 Anthropic 协议上不成立。
+            if let Some(u) = anthropic_state.take_usage() {
+                let _ = tx
+                    .send(Ok(LLMChunk {
+                        content: None,
+                        thinking: None,
+                        finish_reason: None,
+                        tool_calls: None,
+                        usage: Some(u),
+                    }))
+                    .await;
+            }
+
             // 非 SSE 提供方兜底：部分兼容端点忽略 `stream: true`，一次性返回整份 JSON。
             // 此前这类响应被逐行扫描后直接丢弃（剩余 buffer 从未消费），表现为
             // 「模型明明答了，客户端却拿到空文本」，从而把整个回合误判为空回复。
@@ -2120,7 +2229,7 @@ impl LLMClient {
                 let parsed = if responses {
                     parse_responses_stream_chunk(data, &model)
                 } else if anthropic {
-                    parse_anthropic_stream_chunk(data, &model)
+                    parse_anthropic_stream_event(data, &model, &mut anthropic_state)
                 } else {
                     parse_stream_chunk(data, &model)
                 };
@@ -2468,11 +2577,14 @@ fn parse_chat_response(response_text: String, model: &str) -> Result<LLMResponse
         model: model.to_string(),
         usage: response.usage.map_or(TokenUsage::default(), |u| {
             // DeepSeek 返回 `prompt_cache_hit_tokens`，OpenAI 系返回 `cache_read_input_tokens`
-            // 或嵌套 `prompt_tokens_details.cached_tokens`；三者归一为「服务端缓存命中 token」用于统一计量，
-            // 并上报进程级前缀缓存追踪器（呼应 GUI_Agent PrefixCacheTracker，使缓存命中率可观测）。
-            let cache_read = u.cache_read_input_tokens
-                + u.prompt_cache_hit_tokens
-                + u.prompt_tokens_details.map_or(0, |d| d.cached_tokens);
+            // 或嵌套 `prompt_tokens_details.cached_tokens`；三者是**同一数值的三个别名**
+            // （DeepSeek 文档："Same as prompt_cache_hit_tokens"），必须归一而非相加，
+            // 否则命中量翻倍 → 覆盖率恒被 clamp 到 100%（假 100%）。
+            let cache_read = normalize_cache_read([
+                Some(u.cache_read_input_tokens),
+                Some(u.prompt_cache_hit_tokens),
+                u.prompt_tokens_details.map(|d| d.cached_tokens),
+            ]);
             let cache_creation = u.cache_creation_input_tokens;
             crate::cache::report_prefix_cache_usage(
                 crate::cache::total_input_tokens(
@@ -2514,6 +2626,20 @@ struct ParsedChunk {
 struct PromptTokensDetails {
     #[serde(rename = "cached_tokens", default)]
     cached_tokens: u32,
+}
+
+/// 把「缓存命中 token」的三个别名归一成**一个**值。
+///
+/// DeepSeek 官方文档写明：`prompt_tokens_details.cached_tokens` 与
+/// `prompt_cache_hit_tokens` 是同一个数值（原文 "Same as prompt_cache_hit_tokens"），
+/// 且同一次响应里会**同时出现**。三者属于同一量纲的不同名字，因此
+/// **相加会把命中量翻倍**：`cache_read` 会超过 `prompt_tokens`（而 `prompt_tokens`
+/// 本就 = 命中 + 未命中，包含命中部分），覆盖率算出来 >100% 再被 clamp 成 100% ——
+/// 这正是「假 100%」的成因（实测 157952 命中 vs 102877 总输入）。
+///
+/// 取 `max` 而非「取第一个」：任意子集下 max 都等于那个唯一真实存在的值。
+fn normalize_cache_read(aliases: [Option<u32>; 3]) -> u32 {
+    aliases.into_iter().flatten().max().unwrap_or(0)
 }
 
 /// 流式工具调用 delta 片段（按 index 累积；name/arguments 嵌套在 function 下，与 OpenAI 一致）
@@ -2836,7 +2962,156 @@ fn parse_responses_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk>
 /// thinking_delta → thinking，tool_use 起始/input_json_delta → 工具调用
 /// delta 片段（复用 accumulate_tool_call 按 index 合并），
 /// message_delta/message_stop → finish_reason。
-fn parse_anthropic_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk> {
+/// Anthropic SSE 事件里的 usage 对象。
+///
+/// `message_start.message.usage` 与 `message_delta.usage` 同形但语义不同：
+/// 前者给**输入**侧（`input_tokens` 与缓存读写），后者给**输出**侧（`output_tokens`）。
+/// `message_start` 里的 `output_tokens` 是占位值（恒为 1），不是真实输出量。
+#[derive(Deserialize, Debug, Default)]
+struct AnthropicUsageFields {
+    #[serde(rename = "input_tokens", default)]
+    input_tokens: u32,
+    #[serde(rename = "output_tokens", default)]
+    output_tokens: u32,
+    #[serde(rename = "cache_read_input_tokens", default)]
+    cache_read_input_tokens: u32,
+    #[serde(rename = "cache_creation_input_tokens", default)]
+    cache_creation_input_tokens: u32,
+}
+
+/// Anthropic 流的跨事件状态：usage 合并 + 停止原因去重。
+///
+/// 为什么需要状态：下游对流式 usage 的记账是 **first-wins**（流内首个携带
+/// usage 的 chunk 立即落账，同一份 usage 只记一次）。而 Anthropic 把 usage
+/// 拆到两个事件里 —— `message_start` 给输入侧（`output_tokens` 是占位 1），
+/// `message_delta` 才给真实输出量。若「谁带 usage 就原样返回」，第一个
+/// `message_start` 会用占位输出量把账锁死，真实输出量永久丢失
+/// （token 台账与前缀缓存命中率恒为 0）。
+///
+/// 所以这里跨事件合并，等输出量到位后才吐出一份**完整**的 usage。
+#[derive(Debug, Default)]
+struct AnthropicStreamState {
+    usage: AnthropicUsageFields,
+    /// 是否见过 usage 字段（没有 usage 的流不该被记成 0）。
+    usage_seen: bool,
+    /// 是否已吐出过 usage（保证下游 first-wins：只吐一次）。
+    usage_emitted: bool,
+    /// 是否已吐出过停止原因（`message_stop` 不得覆盖 `message_delta` 的原因）。
+    stop_reason_sent: bool,
+}
+
+impl AnthropicStreamState {
+    /// 吸收 `message_start.message.usage`（输入侧）。
+    fn ingest_start_usage(&mut self, u: Option<&AnthropicUsageFields>) {
+        let Some(u) = u else { return };
+        self.usage_seen = true;
+        self.usage.input_tokens = u.input_tokens;
+        self.usage.cache_read_input_tokens = u.cache_read_input_tokens;
+        self.usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
+    }
+
+    /// 吸收 `message_delta.usage`（输出侧）。
+    fn ingest_delta_usage(&mut self, u: Option<&AnthropicUsageFields>) {
+        let Some(u) = u else { return };
+        self.usage_seen = true;
+        if u.output_tokens > 0 {
+            self.usage.output_tokens = u.output_tokens;
+        }
+    }
+
+    /// 取出合并后的 usage（只吐一次；下游 first-wins 依赖这一点）。
+    fn take_usage(&mut self) -> Option<TokenUsage> {
+        if !self.usage_seen || self.usage_emitted {
+            return None;
+        }
+        self.usage_emitted = true;
+        Some(TokenUsage {
+            prompt_tokens: self.usage.input_tokens,
+            completion_tokens: self.usage.output_tokens,
+            total_tokens: self.usage.input_tokens + self.usage.output_tokens,
+            cache_read_input_tokens: self.usage.cache_read_input_tokens,
+            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
+        })
+    }
+}
+
+/// Anthropic 的 `stop_reason` → OpenAI 风格的 `finish_reason`。
+///
+/// 两个词表同义不同名：上游只认 `stop` / `length` / `tool_calls`，
+/// Anthropic 发的是 `end_turn` / `max_tokens` / `tool_use` / `stop_sequence`。
+/// 不归一的后果：`tool_use` 这种非标准值一路流到 `AgentEvent::StepFinish.reason`，
+/// 按 `tool_calls` 判终态的调用方永远匹配不上。
+fn normalize_anthropic_stop_reason(reason: &str) -> &'static str {
+    match reason {
+        "end_turn" | "stop_sequence" => "stop",
+        "max_tokens" => "length",
+        "tool_use" => "tool_calls",
+        "refusal" => "content_filter",
+        _ => "stop",
+    }
+}
+
+/// Anthropic 扩展思考：返回 (`thinking` 片段, 生效的 `max_tokens`)。
+///
+/// Anthropic 的扩展思考与 OpenAI 的 `reasoning_effort` **不是同一个字段**：
+/// 请求体里是 `thinking: {type, budget_tokens}`，且
+/// ① `budget_tokens` 必须小于 `max_tokens`（否则 400）；
+/// ② 开启后 `temperature` 必须缺省或为 1（否则 400）。
+fn anthropic_thinking_payload(
+    model: &str,
+    effort: crate::model::thinking::ThinkingEffort,
+    max_tokens: u32,
+) -> Option<(serde_json::Value, u32)> {
+    use crate::model::thinking::ThinkingEffort;
+    let budget = match effort {
+        ThinkingEffort::Off => return None,
+        ThinkingEffort::Normal => 1024,
+        ThinkingEffort::Deep => 4096,
+        ThinkingEffort::Max => 8192,
+    };
+    if !supports_anthropic_thinking(model) {
+        return None;
+    }
+    // Anthropic 要求 budget_tokens < max_tokens；不够就抬高 max_tokens（与侧车同策略）。
+    let max_tokens = if max_tokens <= budget {
+        budget + 4096
+    } else {
+        max_tokens
+    };
+    Some((
+        serde_json::json!({ "type": "enabled", "budget_tokens": budget }),
+        max_tokens,
+    ))
+}
+
+/// 模型是否支持 Anthropic 扩展思考（3.7 / 4 系）。
+///
+/// 只认**已知支持**的型号：Claude 3.5 / 3.0 收到 `thinking` 会直接 400，
+/// 所以宁可少发也不发错（自定义网关的模型名千奇百怪，认不出就按不支持处理）。
+fn supports_anthropic_thinking(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if !m.contains("claude") {
+        return false;
+    }
+    m.contains("3-7")
+        || m.contains("3.7")
+        || m.contains("claude-4")
+        || m.contains("-4-")
+        || m.contains("-4.")
+        || m.contains("-4@")
+}
+
+#[cfg(test)]
+fn parse_anthropic_stream_chunk(data: &str, model: &str) -> Result<ParsedChunk> {
+    let mut state = AnthropicStreamState::default();
+    parse_anthropic_stream_event(data, model, &mut state)
+}
+
+fn parse_anthropic_stream_event(
+    data: &str,
+    _model: &str,
+    state: &mut AnthropicStreamState,
+) -> Result<ParsedChunk> {
     #[derive(Deserialize)]
     struct Event {
         #[serde(rename = "type")]
@@ -2847,6 +3122,16 @@ fn parse_anthropic_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk>
         delta: Option<serde_json::Value>,
         #[serde(default)]
         content_block: Option<serde_json::Value>,
+        #[serde(default)]
+        message: Option<MessageEnvelope>,
+        #[serde(default)]
+        usage: Option<AnthropicUsageFields>,
+    }
+
+    #[derive(Deserialize)]
+    struct MessageEnvelope {
+        #[serde(default)]
+        usage: Option<AnthropicUsageFields>,
     }
 
     let event: Event =
@@ -2861,6 +3146,12 @@ fn parse_anthropic_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk>
     };
 
     match event.kind.as_str() {
+        "message_start" => {
+            // 输入侧 usage 在这里；输出侧要等 message_delta，所以**不**在此处吐 usage
+            // （否则会用过期的占位 output_tokens 抢掉 first-wins 的记账机会）。
+            state.ingest_start_usage(event.message.as_ref().and_then(|m| m.usage.as_ref()));
+            Ok(empty())
+        }
         "content_block_start" => {
             let block = event.content_block.unwrap_or_default();
             match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
@@ -2930,26 +3221,36 @@ fn parse_anthropic_stream_chunk(data: &str, _model: &str) -> Result<ParsedChunk>
             }
         }
         "message_delta" => {
+            state.ingest_delta_usage(event.usage.as_ref());
             let stop_reason = event
                 .delta
                 .as_ref()
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .map(normalize_anthropic_stop_reason);
+            if stop_reason.is_some() {
+                state.stop_reason_sent = true;
+            }
             Ok(ParsedChunk {
                 content: None,
                 thinking: None,
-                finish_reason: stop_reason,
+                finish_reason: stop_reason.map(String::from),
                 tool_calls: Vec::new(),
-                usage: None,
+                usage: state.take_usage(),
             })
         }
         "message_stop" => Ok(ParsedChunk {
             content: None,
             thinking: None,
-            finish_reason: Some("stop".to_string()),
+            // message_stop 本身不带停止原因，且不得覆盖 message_delta 已给出的那个
+            // （否则 `tool_use` 会被抹成 `stop`，工具回路的终态判据就失效了）。
+            finish_reason: if state.stop_reason_sent {
+                None
+            } else {
+                Some("stop".to_string())
+            },
             tool_calls: Vec::new(),
-            usage: None,
+            usage: state.take_usage(),
         }),
         _ => Ok(empty()),
     }
@@ -2978,9 +3279,13 @@ struct StreamUsage {
 /// `usage::record_attributed` 的 no-op 条件一致（total / prompt / completion
 /// 全零视为未携带），避免把空 usage 对象记进台账。
 fn stream_usage_to_token_usage(u: &StreamUsage) -> Option<TokenUsage> {
-    let cache_read = u.cache_read_input_tokens.unwrap_or(0)
-        + u.prompt_cache_hit_tokens.unwrap_or(0)
-        + u.prompt_tokens_details.as_ref().map_or(0, |d| d.cached_tokens);
+    // 三个别名是同一个数值（DeepSeek 文档："Same as prompt_cache_hit_tokens"），
+    // 取 max 归一；相加会让命中量翻倍（详见 `normalize_cache_read`）。
+    let cache_read = normalize_cache_read([
+        u.cache_read_input_tokens,
+        u.prompt_cache_hit_tokens,
+        u.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
+    ]);
     let usage = TokenUsage {
         prompt_tokens: u.prompt_tokens.unwrap_or(0),
         completion_tokens: u.completion_tokens.unwrap_or(0),
@@ -3423,7 +3728,28 @@ mod tests {
             "total_tokens":15,"cache_read_input_tokens":6,
             "prompt_tokens_details":{"cached_tokens":2}}}"#;
         let u2 = parse_stream_chunk(openai, "m").unwrap().usage.unwrap();
-        assert_eq!(u2.cache_read_input_tokens, 8);
+        // 两个字段是同一量的别名，不是两笔命中：修复前 `6 + 2 = 8` 把命中量算多了，
+        // 这会让 `cache_read` 超过 `prompt_tokens`、覆盖率被 clamp 成 100%。
+        assert_eq!(u2.cache_read_input_tokens, 6);
+    }
+
+    /// 真实 DeepSeek 形态：`prompt_cache_hit_tokens` 与
+    /// `prompt_tokens_details.cached_tokens` **同时出现且数值相同**（官方文档
+    /// "Same as prompt_cache_hit_tokens"）。修复前二者相加 → 命中量翻倍。
+    #[test]
+    fn test_deepseek_dual_alias_not_double_counted() {
+        let body = r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,
+            "total_tokens":1005,"prompt_cache_hit_tokens":768,"prompt_cache_miss_tokens":232,
+            "prompt_tokens_details":{"cached_tokens":768}}}"#;
+        let u = parse_stream_chunk(body, "deepseek-chat")
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(u.cache_read_input_tokens, 768, "两个别名不得相加");
+        assert!(
+            u.cache_read_input_tokens <= u.prompt_tokens,
+            "命中量必须 ≤ 总输入（prompt_tokens 已包含命中部分），否则覆盖率会超 100%"
+        );
     }
 
     #[test]
@@ -3860,7 +4186,69 @@ mod tests {
 
         let done = r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#;
         let d = parse_anthropic_stream_chunk(done, "claude").unwrap();
-        assert_eq!(d.finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(d.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// Anthropic 流式：usage 必须跨事件合并，`stop_reason` 必须归一。
+    ///
+    /// 真机缺陷（两处，都是「自定义 Anthropic 协议不完整」的一部分）：
+    /// ① 解析器此前**完全不返回 usage** —— Anthropic 把 usage 拆到
+    ///    `message_start`（输入侧）与 `message_delta`（输出侧）两个事件，
+    ///    而流式记账是 first-wins（首个携带 usage 的 chunk 立即落账）。
+    ///    原实现两头都没有 usage，于是 Anthropic 的 token 台账与前缀缓存
+    ///    命中率**恒为 0**。
+    /// ② `stop_reason` 原样透传（`tool_use`），而下游按 OpenAI 词表
+    ///    （`stop` / `length` / `tool_calls`）判终态，非标准值匹配不上。
+    #[tokio::test]
+    async fn anthropic_stream_merges_usage_and_normalizes_stop_reason() {
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":120,\"output_tokens\":1,\"cache_read_input_tokens\":40,\"cache_creation_input_tokens\":10}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":55}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let url = mock_server(vec![(200, sse.to_string())]).await;
+        let config = LLMConfig {
+            provider: LLMProvider::Anthropic,
+            base_url: url,
+            api_key: "k".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            timeout_secs: 5,
+            ..Default::default()
+        };
+        let client = LLMClient::new(config);
+        let mut rx = client
+            .chat_stream_with_tools(&user_msg("hi"), &[])
+            .await
+            .unwrap();
+        let mut usage: Option<TokenUsage> = None;
+        let mut finish: Option<String> = None;
+        while let Some(item) = rx.recv().await {
+            let chunk = item.expect("流式帧不应出错");
+            if let Some(u) = chunk.usage {
+                usage = Some(u);
+            }
+            if chunk.finish_reason.is_some() {
+                finish = chunk.finish_reason;
+            }
+        }
+        assert!(
+            usage.is_some() && finish.as_deref() == Some("tool_calls"),
+            "Anthropic 流式应给出合并后的 usage，且把 tool_use 归一为 tool_calls；\
+             实得 usage={usage:?} finish={finish:?}"
+        );
+        let u = usage.unwrap();
+        assert_eq!(u.prompt_tokens, 120, "输入侧 token 来自 message_start");
+        assert_eq!(u.completion_tokens, 55, "输出侧 token 来自 message_delta");
+        assert_eq!(u.total_tokens, 175);
+        assert_eq!(u.cache_read_input_tokens, 40);
+        assert_eq!(u.cache_creation_input_tokens, 10);
     }
 
     #[test]

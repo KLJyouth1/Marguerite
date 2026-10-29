@@ -194,14 +194,29 @@ pub struct AccelerationReport {
 
 ### P0 · 门控与度量（2 周，可立即开工）
 
-| 任务 | 验收口径 |
-|---|---|
-| `PromotionCriteria` 加 `max_per_task_loss` + `protected_tasks` | 单测：构造「总涨但某任务跌」的候选 → 必须被拒 |
-| `eval.rs` 加 `AccelerationReport`（含 `reuse_rate`） | 单测：两轮评测输出 `delta_of_delta` 与 `reuse_rate` 非空 |
-| `ChangeTarget` 扩 7 类 | 单测：13 变体齐备，且 `core_source_is_not_a_change_target` 仍绿 |
-| 双真相源 CI 断言 | `scripts/check-expert-parity.py` 退出码 0/1 |
+**状态（2026-10-27）：代码已实现，核心测试通过；统一门禁未能在本机沙箱跑完 —— 见 §5.1。**
 
-**不做**：不动前端、不改 43 角色内容、不接本地模型。
+| 任务 | 验收口径 | 状态 |
+|---|---|---|
+| `PromotionCriteria` 加 `max_per_task_loss` + `protected_tasks` | 单测：构造「总涨但某任务跌」的候选 → 必须被拒 | ✅ `task_gate_rejects_when_total_up_but_one_task_down` |
+| `eval.rs` 加 `AccelerationReport`（含 `reuse_rate`） | 单测：两轮评测输出 `delta_of_delta` 与 `reuse_rate` 非空 | ✅ 3 条（含 JSON 序列化安全） |
+| `ChangeTarget` 扩 7 类 | 单测：13 变体齐备，且 `core_source_is_not_a_change_target` 仍绿 | ✅ 6 → 13，护栏断言同步更新 |
+| 双真相源 CI 断言 | `scripts/check-expert-parity.py` 退出码 0/1 | ✅ PASS；变异测试 4/4 被拦 |
+
+**额外做了清单外但必需的一件事**：`run_cycle_with_tasks`。没有它，`task_level_gate` 就是没人调用的孤儿函数 —— 那是「文件在 ≠ 能用」的典型假就绪。
+
+#### 5.1 验证边界（诚实声明）
+
+| 验证 | 结果 |
+|---|---|
+| `cargo test -p marguerite-core --lib harness::` | **136 passed / 0 failed**（含新增 10 条） |
+| `cargo test -p marguerite-core --lib` | **4106 passed / 1 failed / 24 ignored**。唯一失败是沙箱 Program Blacklist 拦 `wsl.exe`（MCP 测试启动 server 时触发 shell 探测），与 harness 改动无关 |
+| `cargo check -p marguerite-core --lib` | EXIT=0 |
+| `check-expert-parity.py`（CI 模式 / `--client-dir`） | 均 PASS；变异测试（缺角色 / 坏 team 引用 / 重复 role / 空团队）全部被拦 |
+| `bash scripts/verify.sh --core` | **未完成**：卡在第一个检查项 17 分钟（完整 lib 测试在此沙箱跑不完）；默认 target 的 `.cargo-lock` 另被并发 IDE 占用（`os error 5`） |
+| `cargo clippy -p marguerite-core --lib` | **未完成**：沙箱拒绝写 `E:\temp\...`（clippy 临时文件） |
+
+→ 因此 **P0 不标「已完成」**。解除条件：在无沙箱写入限制、且无并发 cargo 的窗口跑一次 `bash scripts/verify.sh --clean --all` 全绿。
 
 ### P1 · 共享执行栈成型（3 周）
 

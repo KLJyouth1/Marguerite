@@ -533,6 +533,18 @@ fn show_window(app: tauri::AppHandle) {
     }
 }
 
+/// 关窗时**是否收进托盘**而不是退出。
+///
+/// 只拦主窗口：`pet-overlay` / `task-overlay` 是独立 webview，用户点它们的关闭
+/// 就是想关掉那个浮窗；拦下来会变成"关不掉的浮窗"，比退出更让人恼火。
+fn should_hide_instead_of_close(label: &str) -> bool {
+    label == "main"
+}
+
+/// 「收进托盘」提示是否已发过（每进程一次，别每次关窗都弹通知）。
+static CLOSE_TO_TRAY_HINT_SENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 隐藏主窗口到托盘
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) {
@@ -973,15 +985,14 @@ fn model_path() -> String {
 fn model_config_to_llm(
     m: &marguerite_core::persistence::config::ModelConfig,
 ) -> marguerite_core::model::llm::LLMConfig {
-    use marguerite_core::model::llm::{LLMConfig, LLMProvider};
+    use marguerite_core::model::llm::LLMConfig;
     use marguerite_core::model::thinking::{ThinkingEffort, CONTEXT_WINDOW_DEFAULT};
-    let provider = match m.provider.to_lowercase().as_str() {
-        "openai" => LLMProvider::OpenAI,
-        "deepseek" => LLMProvider::DeepSeek,
-        _ => LLMProvider::Custom {
-            base_url: m.base_url.clone(),
-        },
-    };
+    // provider id → 协议走唯一事实源（与引擎侧同一处映射）。
+    // 此前这份副本连字面量 "anthropic" 都不认，一律落进 Custom。
+    let provider = marguerite_core::model::provider_protocol::provider_for_id(
+        &m.provider,
+        &m.base_url,
+    );
     LLMConfig {
         provider,
         model: m.model_name.clone(),
@@ -2304,6 +2315,70 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ───────────── 自动更新（Tauri Updater） ─────────────
+//
+// 两个薄命令：check_for_updates 查远程清单，download_and_install_update 下载并安装。
+// 进度经 `update://download-progress` 事件推给前端；安装完成后前端弹窗引导重启。
+// 签名密钥不硬编码——由 tauri.conf.json 的 updater 段 + TAURI_SIGNING_PRIVATE_KEY env var 提供。
+
+/// 检查远端是否有新版本。有更新返回 {available:true, version, date, body}；
+/// 无更新返回 {available:false}；网络/清单错误返回 {available:false, error:"..."}。
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let builder = app.updater_builder();
+    let updater = builder.build().map_err(|e| format!("updater init: {e}"))?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(serde_json::json!({
+            "available": true,
+            "version": update.version,
+            "date": update.date.as_ref().map(|d| d.to_string()),
+            "body": update.body.as_ref().map(|b| b.to_string()),
+        })),
+        Ok(None) => Ok(serde_json::json!({ "available": false })),
+        Err(e) => Ok(serde_json::json!({
+            "available": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+/// 下载并安装已检出的更新。下载过程中emit `update://download-progress`
+/// 事件（payload: {chunk, total}）。安装完成后不自动重启——由前端弹窗引导。
+#[tauri::command]
+async fn download_and_install_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let builder = app.updater_builder();
+    let updater = builder.build().map_err(|e| format!("updater init: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("check: {e}"))?
+        .ok_or_else(|| "没有可用更新".to_string())?;
+
+    let app_clone = app.clone();
+    update
+        .download_and_install(
+            move |chunk: usize, total: Option<u64>| {
+                let _ = app_clone.emit(
+                    "update://download-progress",
+                    serde_json::json!({ "chunk": chunk, "total": total }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("download/install: {e}"))?;
+
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// 立即重启应用（更新下载完成后由前端弹窗调用）。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.restart();
+}
+
 #[derive(serde::Serialize)]
 struct FleetRoleView {
     role_id: String,
@@ -3095,6 +3170,38 @@ fn grant_pet_overlay_capability(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 【2026-10-29 · D13】关窗 = 收进托盘，**不退出**。
+        //
+        // 为什么必须改：网关与任务都跑在**这个进程里**（core 是静态链接的），
+        // 窗口一关进程就退 = 把用户正在等的任务原地杀掉。审计里"合上窗口任务就断"
+        // 就是这个默认行为造成的，而托盘早就有了（`build_tray`），只差这一处拦截。
+        //
+        // 三条边界：
+        // ① 只拦 label == "main"（浮窗的关闭是用户真想关它）；
+        // ② 首次拦截发**一次**系统通知，告诉用户"还在后台跑、怎么真正退出"——
+        //    不给这句提示，用户会以为"这软件关不掉"；
+        // ③ 真正退出走托盘菜单「退出 Marguerite」（`app.exit(0)`），路径唯一且显式。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !should_hide_instead_of_close(window.label()) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.hide();
+                if !CLOSE_TO_TRAY_HINT_SENT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // 文案是中文硬编码：与托盘菜单/原生对话框同一现状（壳层未接 i18n），
+                    // 待壳层做多语言时一起收口，不要只改这一处。
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = window
+                        .app_handle()
+                        .notification()
+                        .builder()
+                        .title("Marguerite 仍在后台运行")
+                        .body("运行中的任务不会中断。点托盘图标可恢复窗口；要真正退出请用托盘菜单「退出 Marguerite」。")
+                        .show();
+                }
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -3102,6 +3209,10 @@ pub fn run() {
         // 用官方通知插件而不是 Web Notification API：后者在 WebView2 /
         // WKWebView 上行为不一致（部分平台静默失败），且无法在窗口最小化时弹出。
         .plugin(tauri_plugin_notification::init())
+        // 自动更新（2026-10-29）：签名密钥从 TAURI_SIGNING_PRIVATE_KEY 环境变量读取。
+        // endpoints 指向 GitHub Releases 的 latest.json 清单；installMode=passive 表示
+        // 下载完后由前端弹窗引导用户重启，而不是静默替换。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 第二实例启动：聚焦已存在的 “main” 窗口，而非再开一个进程。
             if let Some(win) = app.get_webview_window("main") {
@@ -3420,12 +3531,39 @@ pub fn run() {
                     // 热启动时网关 1–2s 就绪，动画会"一闪而过"——观感像闪屏，用户
                     // 根本看不清品牌素材（用户口径：启动界面和视频放久一点）。
                     // 冷启动本来就 >6s，这段不会额外增加等待。
-                    const MIN_SPLASH_MS: u64 = 6000;
+                    //
+                    // 【2026-10-29 · 用户口径再反转：6–30s 随机纯等待】
+                    //
+                    // 用户明确要求：**启动动画保持 6s–30s 随机时间，纯等待**。
+                    // 所以不再按"热启动越快越好"优化首帧（上一版 1500ms 就是那么来的）——
+                    // 这里是有意的产品决策：品牌素材要露够，随机区间让每次启动的观感
+                    // 不像是"卡在同一个秒数"。**这段就是纯等待，不要事后把它当缺陷修掉。**
+                    //
+                    // 熵源用系统时间的纳秒低位：需求是"每次不一样"，不是密码学随机；
+                    // 为此引 `rand` 只会让 gui 的依赖面变大，不值。
+                    // 目标值必须打日志：将来有人疑惑"为什么启动慢"，日志要能直接回答。
+                    const MIN_SPLASH_MS: u64 = 6_000;
+                    const MAX_SPLASH_MS: u64 = 30_000;
+                    let entropy = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as u64)
+                        .unwrap_or(0);
+                    let splash_target_ms =
+                        MIN_SPLASH_MS + entropy % (MAX_SPLASH_MS - MIN_SPLASH_MS + 1);
                     let shown = splash_started.elapsed().as_millis() as u64;
-                    if shown < MIN_SPLASH_MS {
+                    if shown < splash_target_ms {
+                        eprintln!(
+                            "[splash] 本次动画目标 {splash_target_ms}ms（6–30s 随机区间），已展示 {shown}ms"
+                        );
                         std::thread::sleep(std::time::Duration::from_millis(
-                            MIN_SPLASH_MS - shown,
+                            splash_target_ms - shown,
                         ));
+                    } else {
+                        // 冷启动本身就超过目标时长：如实说明"没有额外等待"，
+                        // 否则日志会让人以为是动画拖慢了启动。
+                        eprintln!(
+                            "[splash] 冷启动已耗时 {shown}ms ≥ 目标 {splash_target_ms}ms，无额外等待"
+                        );
                     }
                     if let Some(win) = handle.get_webview_window("main") {
                         match win.navigate(control_url().parse().unwrap_or_else(|_| {
@@ -3541,7 +3679,11 @@ pub fn run() {
             fs_mkdir,
             fs_delete,
             launch_downloader,
-            open_url
+            open_url,
+            // 自动更新（Tauri updater）
+            check_for_updates,
+            download_and_install_update,
+            restart_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -3553,6 +3695,28 @@ pub fn run() {
 // 此处把窗口决策的纯逻辑抽成可测函数（缺省位置 / 幂等标签），在 lib 层单测覆盖；
 // 命令本体（WebviewWindowBuilder 配置）由 `cargo check -p marguerite-gui` 编译门禁
 // + 人工 `cargo tauri dev` 冒烟清单（见 docs/development.md）保证。
+#[cfg(test)]
+mod close_to_tray_tests {
+    use super::*;
+
+    #[test]
+    fn only_main_window_hides_to_tray() {
+        // 主窗口：关窗 = 收进托盘（任务还在进程里跑，退出等于杀任务）
+        assert!(should_hide_instead_of_close("main"));
+    }
+
+    #[test]
+    fn overlay_windows_still_close_for_real() {
+        // 浮窗必须能真关掉：拦下来会变成"关不掉的浮窗"，比多一个退出入口更恼人
+        for label in ["pet-overlay", "task-overlay", "", "splash"] {
+            assert!(
+                !should_hide_instead_of_close(label),
+                "{label} 不应被拦截"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod pet_overlay_tests {
     use super::*;

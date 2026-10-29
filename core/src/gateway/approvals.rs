@@ -14,7 +14,8 @@
 //!
 //! # 契约（与 pyengine `app.py::api_approvals / api_approvals_resolve` 对齐）
 //!
-//! - `GET  /api/approvals`         → 200 `{pending, mode, allowPatterns, denyPatterns}`
+//! - `GET  /api/approvals`         → 200 `{pending, mode, allowPatterns, denyPatterns,
+//!   sidecarOffline, pending_sidecar_offline}`（后两项是 P2-4 的双引擎可见性）
 //! - `POST /api/approvals/resolve` → 200 `{resolved, approved}`；缺 `id` → 400
 //!
 //! 写接口按 pyengine `_same_origin` 的口径做同源校验（见 [`origin_allowed`]）。
@@ -39,8 +40,9 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
 use crate::gateway::server::GatewayState;
-use crate::guard::approval_registry::{global_registry, DecisionResult};
+use crate::guard::approval_registry::{global_registry, ApprovalRegistry, DecisionResult};
 use crate::guard::gateway::{PendingApproval, RiskLevel};
+use crate::observability::redact;
 
 /// 拉侧车快照的超时：控制台的 hydration 会被频繁触发（进入会话、可选的 2s 轮询），
 /// 侧车启动期（Python 网关 boot 可长达 ~90s）不能把它拖住 —— 宁可只报本进程那半。
@@ -54,7 +56,7 @@ const SIDECAR_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// 为什么必须在这里也校验 token：审批裁决是**能放行高危操作**的写接口，
 /// 仅靠 Origin 校验挡不住本机进程（无 Origin 头会被 `origin_allowed` 放行）。
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         axum::Json(json!({
@@ -91,7 +93,9 @@ pub(crate) async fn approvals_list(
     let mut allow_patterns = json!([]);
     let mut deny_patterns = json!([]);
 
-    if let Some(snapshot) = sidecar_snapshot(&state).await {
+    let snapshot = sidecar_snapshot(&state).await;
+    let sidecar_offline = snapshot.is_none();
+    if let Some(snapshot) = snapshot {
         if let Some(items) = snapshot.get("pending").and_then(Value::as_array) {
             pending = merge_pending(pending, items);
         }
@@ -107,14 +111,69 @@ pub(crate) async fn approvals_list(
             .cloned()
             .unwrap_or_else(|| json!([]));
     }
+    // P2-4：侧车离线时它的挂起审批既不会出现在 Rust 队列，也不会推事件 ——
+    // 用户只看到「没有待审批」，重连后那几条才突然冒出来。这里直接从侧车
+    // 持久化的审批队列（SQLite，`state/approval_queue.sqlite`）读出未裁决数量，
+    // 让前端能显示「侧车离线，N 条审批待同步」的黄条，而不是假装队列是空的。
+    let pending_sidecar_offline = if sidecar_offline {
+        offline_sidecar_pending().unwrap_or(0)
+    } else {
+        0
+    };
 
     let body = json!({
         "pending": pending,
         "mode": mode,
         "allowPatterns": allow_patterns,
         "denyPatterns": deny_patterns,
+        // 双口径：布尔给样式（黄条显隐），计数给文案（N 条待同步）。
+        "sidecarOffline": sidecar_offline,
+        "pending_sidecar_offline": pending_sidecar_offline,
     });
     (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+/// 侧车持久化审批队列的默认路径。
+///
+/// 侧车由本进程以 `OPENSQUILLA_HOME=<data_dir>/pyengine-home` 且未设置
+/// `OPENSQUILLA_PROFILE` 启动，于是 pyengine `paths.state_dir()` 解析成
+/// `<home>/default/state`（见 `pyengine/src/opensquilla/paths.py`）。
+/// 段名写死是有意为之：这条路径必须与 spawn 侧的约定一致，漂移会让离线计数
+/// 永远读到不存在的文件（表现为「静默 0」）。
+fn sidecar_queue_path() -> std::path::PathBuf {
+    crate::persistence::config::Config::data_dir()
+        .join("pyengine-home")
+        .join("default")
+        .join("state")
+        .join("approval_queue.sqlite")
+}
+
+/// 侧车离线时，读它落盘的队列统计「仍未裁决」的条数。
+///
+/// 返回 `None` = 队列文件不存在 / 表结构不符 / 打不开（从未跑过侧车，或侧车
+/// 降级到临时 home）——调用方按 0 处理；绝不因为读不到就编一个非零数字。
+fn offline_sidecar_pending() -> Option<u64> {
+    count_pending_in_queue(&sidecar_queue_path())
+}
+
+fn count_pending_in_queue(path: &std::path::Path) -> Option<u64> {
+    if !path.is_file() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM approval_queue WHERE resolved = 0 AND consumed = 0",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    u64::try_from(count).ok()
 }
 
 /// POST `/api/approvals/resolve`：裁决一个挂起审批。
@@ -280,8 +339,15 @@ fn merge_pending(local: Vec<Value>, remote: &[Value]) -> Vec<Value> {
 /// 只映射 UI 明确定义过的字段（`ApprovalsSnapshotItem`），且**只映射真实存在的信息**：
 /// Rust 的 [`PendingApproval`] 没有会话键、显示提示（displayKind/displayTarget）、
 /// 备份状态与截止时间，就不编造 —— 缺哪项，卡片就按「通用敏感操作」渲染。
+/// 把挂起审批投影成**可以在浏览器里显示**的条目。
+///
+/// `args` 是审批队列的内部策略记录，可能含工具凭据（`curl -H "Authorization: Bearer …"`）、
+/// 复核指纹等 —— 整个对象原样塞进 HTTP 响应，就等于把凭据送到任何能读本机回环的进程
+/// 与浏览器开发者工具里。pyengine 的 `approval_events.py::_json_safe_display_value`
+/// 对同一份数据做了「递归脱敏 + 丢弃 fingerprint/review* 键」，这里按同一口径对齐
+/// （REST 快照是**跨实现**契约，两侧形状必须一致，见本模块头注释）。
 fn pending_item(p: &PendingApproval) -> Value {
-    let args = serde_json::from_str::<Value>(&p.args).ok();
+    let args = display_value_opt(serde_json::from_str::<Value>(&p.args).ok());
     let command = args
         .as_ref()
         .and_then(|v| v.get("command"))
@@ -292,8 +358,109 @@ fn pending_item(p: &PendingApproval) -> Value {
         "namespace": "exec",
         "toolName": p.tool,
         "command": command,
-        "args": args.unwrap_or_else(|| json!({ "raw": p.args })),
+        // 解析不出来时也不能原样透传：`raw` 走同一套脱敏
+        "args": args.unwrap_or_else(|| json!({ "raw": redact::scrub_text(&p.args) })),
         "destructive": p.risk == RiskLevel::High,
+    })
+}
+
+fn display_value_opt(value: Option<Value>) -> Option<Value> {
+    value.map(|v| display_value(&v))
+}
+
+/// 递归脱敏（与 pyengine `_json_safe_display_value` 的判定顺序一致）：
+/// 先按键名丢弃复核指纹类字段，再按键名抹掉敏感值，其余字符串过文本脱敏。
+fn display_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !is_review_metadata(key))
+                .map(|(key, item)| {
+                    let projected = if redact::is_secret_key(key) {
+                        Value::String(redact::REDACTED.to_string())
+                    } else {
+                        display_value(item)
+                    };
+                    (key.clone(), projected)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(display_value).collect()),
+        Value::String(text) => Value::String(redact::scrub_text(text)),
+        other => other.clone(),
+    }
+}
+
+/// 复核指纹与 review 元数据不进展示面（pyengine 同款：`fingerprint` 子串 / `review` 前缀）。
+fn is_review_metadata(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    lowered.contains("fingerprint") || lowered.starts_with("review")
+}
+
+/// 状态查询的命名空间（与 pyengine `approval_lookup_status_rpc_payload` 同词表）。
+fn status_namespace(method: &str) -> &'static str {
+    if method.starts_with("plugin.") {
+        "plugin"
+    } else {
+        "exec"
+    }
+}
+
+/// RPC `exec.approval.status` / `plugin.approval.status` 的本进程应答
+/// （`Some` = 本条审批确实由 Rust 引擎持有且仍挂起；`None` = 不在本进程，调用方转发侧车）。
+///
+/// # 为什么状态查询也必须先问本进程
+///
+/// `exec.approval.` 在 `PY_ENGINE_PREFIXES` 里，于是状态探测会被代理到侧车。但两侧是
+/// **两套独立队列**（见模块头）：侧车对 Rust 抬起的审批一无所知，会如实回 `found:false` ——
+/// 而前端把 `found:false` 解读为**终态** `unavailable`，重连恢复时挂起卡片自己折叠成
+/// 「审批已不可用」，用户再也点不了「允许」。这与 R54（裁决 REST）/ R57（跨队列裁决）/
+/// R61（REST 面兜底）同族，是「某一侧沉默地被当成另一侧的答案」。
+pub(crate) fn registry_status(
+    registry: &ApprovalRegistry,
+    method: &str,
+    params: &Value,
+) -> Option<Value> {
+    // Rust 注册表只有 exec 语义的挂起项（`pending_item` 同样固定 `namespace: "exec"`）。
+    // `plugin.approval.status` 问进来时交还调用方转发，绝不跨命名空间作答。
+    if status_namespace(method) != "exec" {
+        return None;
+    }
+    let id = params.get("id").and_then(Value::as_str)?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    // `pending_snapshots` 已过滤超时项：超时即 fail-closed 拒绝，不该再答「仍挂起」。
+    let pending = registry
+        .pending_snapshots()
+        .into_iter()
+        .find(|p| p.id == id)?;
+    Some(json!({
+        "found": true,
+        "id": pending.id,
+        "namespace": "exec",
+        "pending": true,
+        "resolutionInProgress": false,
+        "resolved": false,
+        "approved": false,
+        "resolution": "",
+        "consumed": false,
+        // `PendingApproval` 只有单调的 `Instant`，没有墙上时钟截止时间 ——
+        // 如实回 null（前端 `applyApprovalDeadline` 遇非有限值直接跳过），不编造。
+        "deadline": Value::Null,
+    }))
+}
+
+/// 两侧队列都没有这条审批时的查询结果（与 pyengine
+/// `approval_lookup_status_rpc_payload` 的缺省分支逐字段同形）。
+pub(crate) fn missing_status(method: &str, params: &Value) -> Value {
+    json!({
+        "found": false,
+        "id": params.get("id").and_then(Value::as_str).unwrap_or(""),
+        "namespace": status_namespace(method),
+        "pending": false,
+        "resolutionInProgress": false,
+        "resolved": false,
     })
 }
 
@@ -389,6 +556,44 @@ fn is_loopback_hostname(host: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// P2-4：离线计数只统计「未裁决且未消费」的真实队列行，文件缺失按未知处理。
+    #[test]
+    fn offline_count_reads_unresolved_rows_from_sidecar_queue() {
+        let dir = std::env::temp_dir().join(format!(
+            "marguerite-approval-count-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("approval_queue.sqlite");
+
+        // 文件不存在 → None（不是 0，调用方自己决定回退）
+        assert_eq!(count_pending_in_queue(&db), None);
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE approval_queue (
+                approval_id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                params TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                approved INTEGER NOT NULL DEFAULT 0,
+                consumed INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO approval_queue (approval_id, namespace, params, created_at, resolved, consumed)
+            VALUES ('a', 'exec', '{}', 1, 0, 0),
+                   ('b', 'exec', '{}', 2, 0, 0),
+                   ('c', 'exec', '{}', 3, 1, 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(count_pending_in_queue(&db), Some(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn origin_guard_accepts_loopback_same_origin_only() {
         // 控制台自身的同源请求（webui 在 http://127.0.0.1:<port>/control/）
@@ -436,6 +641,115 @@ mod tests {
         ));
     }
 
+    /// 状态查询必须由**持有方**作答：本进程注册表里的挂起项回 found/pending，
+    /// 其余一律 `None`（调用方去问侧车），越界命名空间也不作答。
+    #[test]
+    fn registry_status_answers_only_for_live_local_exec_approvals() {
+        let reg = ApprovalRegistry::new();
+        let gate = std::sync::Arc::new(crate::guard::gateway::ApprovalGate::new(
+            Duration::from_secs(60),
+        ));
+        let pending = gate
+            .request("fs_delete", "{\"path\":\"x\"}".into(), RiskLevel::High)
+            .expect("首次挂起应成功");
+        reg.register(gate, &pending);
+
+        let status = registry_status(&reg, "exec.approval.status", &json!({ "id": pending.id }))
+            .expect("本进程持有的挂起审批必须作答");
+        assert_eq!(status["found"], true, "{status}");
+        assert_eq!(status["id"], pending.id, "{status}");
+        assert_eq!(status["namespace"], "exec", "{status}");
+        assert_eq!(status["pending"], true, "{status}");
+        assert_eq!(status["resolved"], false, "{status}");
+        assert_eq!(status["resolutionInProgress"], false, "{status}");
+        assert!(status["deadline"].is_null(), "没有墙上时钟截止时间就不要编：{status}");
+
+        // 不在本进程 / 空 id / 缺 id / 跨命名空间 → None（交给调用方转发侧车）
+        assert!(registry_status(&reg, "exec.approval.status", &json!({ "id": "ap_missing" })).is_none());
+        assert!(registry_status(&reg, "exec.approval.status", &json!({ "id": "  " })).is_none());
+        assert!(registry_status(&reg, "exec.approval.status", &json!({})).is_none());
+        assert!(
+            registry_status(&reg, "plugin.approval.status", &json!({ "id": pending.id })).is_none(),
+            "Rust 注册表没有 plugin 队列，不得跨命名空间作答"
+        );
+    }
+
+    /// 已超时的挂起项不得再被答成「仍挂起」：gate 的语义是 fail-closed 拒绝，卡片该收起。
+    #[test]
+    fn registry_status_ignores_timed_out_pending() {
+        let reg = ApprovalRegistry::new();
+        let gate = std::sync::Arc::new(crate::guard::gateway::ApprovalGate::new(
+            Duration::from_millis(1),
+        ));
+        let pending = gate
+            .request("exec", "{}".into(), RiskLevel::High)
+            .expect("首次挂起应成功");
+        reg.register(gate, &pending);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(registry_status(&reg, "exec.approval.status", &json!({ "id": pending.id })).is_none());
+    }
+
+    /// 缺省结果与 pyengine `approval_lookup_status_rpc_payload` 的 missing 分支逐字段同形。
+    #[test]
+    fn missing_status_matches_the_pyengine_lookup_shape() {
+        assert_eq!(
+            missing_status("plugin.approval.status", &json!({ "id": "x1" })),
+            json!({
+                "found": false,
+                "id": "x1",
+                "namespace": "plugin",
+                "pending": false,
+                "resolutionInProgress": false,
+                "resolved": false,
+            })
+        );
+        assert_eq!(missing_status("exec.approval.status", &json!({}))["id"], "");
+    }
+
+    /// 路线级回归（含 methods.rs 的拦截注册点）：Rust 抬起的审批，状态查询必须由本进程作答。
+    ///
+    /// 修复前 `exec.approval.status` 被 `PY_ENGINE_PREFIXES` 代理到侧车：离线回
+    /// `NOT_IMPLEMENTED`、在线回 `found:false` —— 前端把 `found:false` 判成终态
+    /// `unavailable`，重连恢复时仍挂起的卡片自己折叠，用户再也点不了「允许」。
+    #[tokio::test]
+    async fn dispatch_answers_status_for_rust_raised_approval() {
+        use crate::guard::gateway::ApprovalGate;
+        use crate::gateway::methods;
+
+        let gate = std::sync::Arc::new(ApprovalGate::new(Duration::from_secs(60)));
+        let pending = gate
+            .request("fs_delete", "{\"path\":\"x\"}".into(), RiskLevel::High)
+            .expect("首次挂起应成功");
+        global_registry().register(gate, &pending);
+
+        let ctx = methods::GatewayContext {
+            config: crate::persistence::config::Config::default(),
+            token: "t".into(),
+            started_at: std::time::Instant::now(),
+            bus: std::sync::Arc::new(crate::events::EventBus::default()),
+        };
+        let status = methods::dispatch(&ctx, "exec.approval.status", json!({ "id": pending.id }))
+            .await
+            .expect("状态查询必须被 Rust 网关服务（侧车在单测里未注册）");
+        assert_eq!(status["found"], true, "{status}");
+        assert_eq!(status["pending"], true, "{status}");
+        assert_eq!(status["namespace"], "exec", "{status}");
+
+        // 两侧都无 → 如实回缺省，而不是 NOT_IMPLEMENTED
+        let unknown = methods::dispatch(&ctx, "exec.approval.status", json!({ "id": "ap_missing-x" }))
+            .await
+            .expect("两侧皆无时必须如实回缺省");
+        assert_eq!(unknown["found"], false, "{unknown}");
+        // plugin 命名空间不得越界作答
+        let foreign = methods::dispatch(&ctx, "plugin.approval.status", json!({ "id": pending.id }))
+            .await
+            .expect("plugin 状态查询不得报 NOT_IMPLEMENTED");
+        assert_eq!(foreign["found"], false, "{foreign}");
+        assert_eq!(foreign["namespace"], "plugin", "{foreign}");
+
+        global_registry().unregister(&pending.id);
+    }
+
     #[test]
     fn pending_item_maps_only_real_fields() {
         let p = PendingApproval {
@@ -457,6 +771,62 @@ mod tests {
         assert!(item.get("sessionKey").is_none());
         assert!(item.get("warning").is_none());
         assert!(item.get("backupState").is_none());
+    }
+
+    /// 审批参数进入浏览器之前必须脱敏：凭据、复核指纹都不许出网关。
+    ///
+    /// 变异实测：删掉 `display_value`（恢复整包透传）→ 本用例在
+    /// `assert!(!serialized.contains("sk-live"))` 处判红。
+    #[test]
+    fn pending_item_never_leaks_secrets_or_review_metadata() {
+        let p = PendingApproval {
+            id: "ap_leak".to_string(),
+            tool: "shell".to_string(),
+            args: serde_json::json!({
+                "command": "curl -H \"Authorization: Bearer sk-live-ABCDEFGHIJKLMNOPQRSTUV\" https://api.example/x",
+                "apiKey": "sk-proj-SHOULD-NOT-ESCAPE-0123456789",
+                "accessToken": "plain-opaque-token-value",
+                "path": "/tmp/report.txt",
+                "fingerprint": "9f2c",
+                "reviewNotes": "internal reviewer said ok",
+                "nested": { "password": "hunter2", "keep": 7 },
+            })
+            .to_string(),
+            risk: RiskLevel::High,
+            origin: Default::default(),
+            created_at: std::time::Instant::now(),
+        };
+        let item = pending_item(&p);
+        let serialized = item.to_string();
+
+        assert!(!serialized.contains("sk-live"), "Authorization 明文泄漏: {serialized}");
+        assert!(!serialized.contains("SHOULD-NOT-ESCAPE"), "敏感键未抹: {serialized}");
+        assert!(!serialized.contains("plain-opaque-token-value"), "驼峰敏感键未抹: {serialized}");
+        assert!(!serialized.contains("hunter2"), "嵌套敏感键未抹: {serialized}");
+        assert!(!serialized.contains("internal reviewer"), "review 元数据不应进展示面");
+        assert!(!serialized.contains("9f2c"), "复核指纹不应进展示面");
+
+        // 展示需要的非敏感内容必须原样保留（否则卡片退化成空白）
+        assert_eq!(item["args"]["path"], "/tmp/report.txt");
+        assert_eq!(item["args"]["nested"]["keep"], 7);
+        assert!(item["command"].as_str().unwrap_or("").contains("curl"));
+    }
+
+    /// 无法解析的 `args` 走 `raw` 分支，同样要脱敏。
+    #[test]
+    fn pending_item_redacts_unparsable_args() {
+        let p = PendingApproval {
+            id: "ap_raw".to_string(),
+            tool: "shell".to_string(),
+            args: "opaque sk-ant-abcdefghijklmnopqrstuvwxyz012345 trailing".to_string(),
+            risk: RiskLevel::Low,
+            origin: Default::default(),
+            created_at: std::time::Instant::now(),
+        };
+        let item = pending_item(&p);
+        let raw = item["args"]["raw"].as_str().unwrap_or("");
+        assert!(!raw.contains("sk-ant-"), "raw 分支未脱敏: {raw}");
+        assert!(raw.contains("[redacted]"), "应保留脱敏占位: {raw}");
     }
 
     #[test]

@@ -452,8 +452,17 @@ function shortTask(text: string, max = 90): string {
 
 <style scoped>
 .orch-run {
+  /* 会话阅读列口径（见 chat-view.css 的 --chat-gutter / --chat-col-start）。
+     它是 `.chat-orch-runs`（`.chat-thread` 弹性列的直接子块，chat-view.css 里的
+     注释就写着「限制宽度跟随消息列」）里的子卡，过去 `margin: 0 auto` 会把每张
+     运行卡推到屏幕几何中心，而它上下的正文是左起排的。
+     宽度仍按 --composer-col 收一档（执行卡比正文窄是刻意的），但左边缘必须和
+     正文同一起排点，多出来的空间全部留在右侧。
+     窄屏由 --chat-gutter 的媒体查询退回 24px，这里不再硬编码。 */
   width: min(100%, var(--composer-col, 820px));
-  margin: 0 auto 10px;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-block: 0 10px;
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 12px 14px;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);

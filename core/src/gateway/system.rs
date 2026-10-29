@@ -10,6 +10,13 @@ use crate::persistence::config::Config;
 
 /// `health`：网关健康探针（最轻量，供前端心跳）。
 pub fn health(ctx: &GatewayContext) -> Value {
+    // 侧车依赖预检结论：只增字段，不改既有键（前端按可选处理）。
+    // 为什么放进 health 而不是只写日志：真机审计 2026-10-29 的 P1-2 里，
+    // 缺 numpy 导致本地 ML 路由静默回退，日志刷了 22 条而界面一片正常，
+    // 于是"能力没了"被用户当成"这版本就这样"。字段给前端，才有地方说清。
+    let sidecar = crate::pyengine::sidecar::preflight_report()
+        .map(|r| r.to_json())
+        .unwrap_or(Value::Null);
     json!({
         "status": "ok",
         "engine": "rust",
@@ -18,6 +25,7 @@ pub fn health(ctx: &GatewayContext) -> Value {
         "uptime_ms": ctx.started_at.elapsed().as_millis(),
         "data_dir": Config::data_dir().to_string_lossy(),
         "api_key_configured": !ctx.config.model.api_key.is_empty(),
+        "sidecar": sidecar,
     })
 }
 

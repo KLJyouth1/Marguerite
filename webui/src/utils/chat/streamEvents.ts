@@ -19,6 +19,27 @@ export function payloadSessionKey(payload: StreamEventEnvelope | null | undefine
   return payload?.key || payload?.session_key || payload?.sessionKey || ''
 }
 
+/**
+ * Session key carried by a WS frame. `meta.session` wins because it is the
+ * envelope identity the gateway stamps on every broadcast; only when the meta
+ * frame is absent do we fall back to the payload's own key fields. An empty
+ * result means "not addressed to any session" — callers decide whether that
+ * is lenient (chat handlers) or must be dropped (side chat).
+ */
+export function frameSessionKey(payload: unknown, meta?: unknown): string {
+  const metaRecord = meta && typeof meta === 'object' ? (meta as Record<string, unknown>) : null
+  if (metaRecord) {
+    const metaKey = metaRecord.session ?? metaRecord.session_key ?? metaRecord.sessionKey ?? metaRecord.key
+    if (typeof metaKey === 'string' && metaKey.trim()) return metaKey.trim()
+  }
+  const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null
+  if (!record) return ''
+  for (const candidate of [record.session, record.session_key, record.sessionKey, record.key]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return ''
+}
+
 export function isCurrentSessionPayload(payload: StreamEventEnvelope | null | undefined, sessionKey: string): boolean {
   const key = payloadSessionKey(payload)
   return !key || !sessionKey || key === sessionKey

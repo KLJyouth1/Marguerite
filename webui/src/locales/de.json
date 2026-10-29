@@ -561,6 +561,19 @@
     "available": "Marguerite {version} ist verfügbar",
     "viewRelease": "Version anzeigen",
     "dismiss": "Schließen",
+    "dialog": {
+      "newVersion": "Neue Version verfügbar",
+      "updateNow": "Jetzt aktualisieren",
+      "later": "Später erinnern",
+      "skipVersion": "Diese Version überspringen",
+      "downloading": "Update wird heruntergeladen",
+      "downloadedTitle": "Update bereit",
+      "downloadedDesc": "{version} wurde heruntergeladen. Starten Sie neu, um die Installation abzuschließen.",
+      "restartNow": "Jetzt neu starten",
+      "restartLater": "Später neu starten",
+      "failedTitle": "Update fehlgeschlagen",
+      "close": "Schließen"
+    },
     "desktop": {
       "indicatorAvailable": "Update {version}",
       "indicatorDownloaded": "Update bereit",
@@ -985,6 +998,38 @@
     "localMode": "Lokaler Modus",
     "detached": "Losgelöster HEAD"
   },
+  "cockpit": {
+    "title": "Browser-Cockpit",
+    "subtitle": "Abhängigkeitsfreie CDP-Steuerung: Navigation / JS-Konsole / Screenshot-Klick / A11y-Baum / Resource-Timing-Netzwerkpanel (browser.* RPC)",
+    "detect": "Erkennen",
+    "closeSession": "Sitzung schließen",
+    "navigate": "Navigieren",
+    "open": "Öffnen",
+    "pageTitle": "Titel: {title}",
+    "emptyCdp": "URL eingeben, um eine Seite zu öffnen (echtes Chromium-CDP; benötigt lokales Chrome/Edge)",
+    "emptyShot": "Auf „Screenshot aktualisieren“ klicken, um die Seite zu sehen",
+    "shotOverlay": "Klick auf eine beliebige Stelle des Screenshots = echter Mausklick",
+    "refreshShot": "Screenshot aktualisieren",
+    "dumpDom": "DOM-Snapshot",
+    "consoleTitle": "JS-Konsole (evaluate)",
+    "run": "Ausführen",
+    "consoleEmpty": "(leer)",
+    "a11yTitle": "Barrierefreiheits-Knoten (a11y)",
+    "a11yRead": "Lesen",
+    "networkTitle": "DevTools-Netzwerkpanel (Resource Timing · näherungsweise)",
+    "capture": "Erfassen",
+    "clear": "Leeren",
+    "networkMeta": "{n} Ressourcen (letzte 100 · neueste zuerst)",
+    "networkEmpty": "Noch nichts erfasst (Seite öffnen, dann auf „Erfassen“ klicken; Daten stammen aus der Resource-Timing-API ohne Anforderungsheader/Antwortkörper)",
+    "thResource": "Ressource",
+    "thType": "Typ",
+    "thDuration": "Dauer",
+    "thSize": "Größe",
+    "iframeTitle": "Integrierter Browser (iframe · leichte Vorschau)",
+    "load": "Laden",
+    "iframeEmpty": "URL zum Laden eingeben. Cross-Origin-Sites, die Einbettung ablehnen (X-Frame-Options / CSP), lassen das iframe leer — bitte stattdessen das CDP-Cockpit oben verwenden (echtes Chromium).",
+    "iframeNote": "Die iframe-Vorschau überträgt keine Sitzungsdaten; für Login-Sites bitte eine CDP-Sitzung nutzen. Eine Ablehnung der Einbettung ist die Sicherheitsrichtlinie der Site, kein Defekt dieses Tools."
+  },
   "chrome": {
     "settings": "Einstellungen",
     "theme": "Design",
@@ -998,7 +1043,10 @@
     "expandSidebar": "Seitenleiste erweitern",
     "collapseSidebar": "Seitenleiste einklappen",
     "toggleSidebar": "Seitenleiste umschalten",
+    "iconRail": "Symbolleiste",
     "zenMode": "Zen-Modus",
+    "focusMode": "Fokusmodus",
+    "focusModeOff": "Fokusmodus beenden",
     "resizeSidebar": "Breite der Seitenleiste ändern",
     "sidebarWidthValue": "Seitenleistenbreite: {width}px, {preset}",
     "sidebarWidthLimitedValue": "Seitenleistenbreite: {width}px, {preset}; durch dieses Fenster begrenzt (bevorzugt: {preference}px)",
@@ -1006,6 +1054,8 @@
     "sidebarCollapseCanceled": "Einklappen der Seitenleiste abgebrochen",
     "openBlockedSession": "Blockierte Sitzung öffnen",
     "approvalRequired": "Genehmigung erforderlich",
+    "sidecarOfflineApprovals": "Sidecar offline · {count} Genehmigungen warten auf Synchronisierung",
+    "sidecarOfflineApprovalsTitle": "Der Python-Sidecar ist offline. Diese Genehmigungen bleiben in seiner Warteschlange und erscheinen nach dem Wiederverbinden erneut. Klicken Sie, um die Verbindung zu prüfen.",
     "manageConnection": "Gateway-Verbindung verwalten",
     "connectionTitle": "Verbindung: {state} — in den Einstellungen verwalten",
     "connectionState": {
@@ -1543,6 +1593,7 @@
       "discardAll": "Alle verwerfen ({count})",
       "moreOptionsIn": "Weitere Optionen finden sich in",
       "copyConfigPath": "Konfigurationspfad kopieren",
+      "configPathIsolated": "Benutzerkonfigurationsverzeichnis (isolierter Modus)",
       "applyLiveNote": "Die meisten Änderungen werden sofort übernommen; einige erfordern einen Neustart des Gateways",
       "discardTitle": "Ungespeicherte Änderungen verwerfen?",
       "discardBody": "Es gibt ungespeicherte Änderungen. Beim Schließen gehen sie verloren.",
@@ -3353,6 +3404,8 @@
     },
     "ledger": {
       "fork": "Verzweigen",
+      "forkedFrom": "Abgezweigt von „{title}“",
+      "forkTooltip": "Von einer früheren Aufgabe abgezweigt; die bisherigen Nachrichten wurden hierher kopiert.",
       "subagent": "Subagent",
       "subagentWithParent": "Subagent · {parent}",
       "session": "Sitzung",
@@ -4737,6 +4790,10 @@
       "customBaseUrl": "Endpunkt, z. B. https://api.example.com/v1",
       "customModel": "Modell, z. B. gpt-4o-mini",
       "customApiKey": "API-Schlüssel (optional, später möglich)",
+      "customProtocol": "Anfrageprotokoll",
+      "customProtocolChat": "OpenAI-kompatibel · /v1/chat/completions",
+      "customProtocolResponses": "OpenAI Responses · /v1/responses",
+      "customProtocolAnthropic": "Anthropic Messages · /v1/messages",
       "customSubmit": "Speichern und verwenden",
       "customCancel": "Einklappen",
       "customRequired": "Endpunkt und Modell sind erforderlich.",
@@ -4756,7 +4813,7 @@
       "ttft": "Erstes Token {ms} (clientseitig gemessen)",
       "sessionTokens": "Token dieser Sitzung {n}",
       "rounds": "Runden {n}",
-      "cacheHitRate": "Cache-Trefferquote {pct} %"
+      "cacheHitRate": "Provider-Cache-Treffer {pct} %"
     },
     "artifactEditorAria": "Artefakt bearbeiten und ansehen",
     "recoveringGeneration": "Unvollendete Generierung erkannt — wird wiederhergestellt…",
@@ -4850,6 +4907,17 @@
     "deliverablesCount": "Ergebnisse ({count})",
     "contextPressure": "Kontext {pct} %",
     "contextPressureTitle": "Kontextfenster {used}k / {window}k Tokens — nahe der Komprimierungsschwelle",
+    "contextMeter": {
+      "tool": "Tools {k}k",
+      "windowApprox": "Fenster geschätzt",
+      "aria": "Kontextnutzung: {used}k / {window}k ({pct}%), {tier}",
+      "tier": {
+        "normal": "normal",
+        "watch": "beobachten",
+        "advise": "nahe am Limit",
+        "compact": "Komprimierung folgt"
+      }
+    },
     "sessionDeliverables": "Sitzungsergebnisse",
     "noDeliverables": "Noch keine Ergebnisse.",
     "openArtifact": "{title}, {subtitle} öffnen",
@@ -5305,6 +5373,16 @@
     "slashCommands": {
       "unknown": "Unbekannter Befehl {command}. Bearbeite ihn weiter oder verwende //, um ihn als Text zu senden."
     },
+    "handoff": {
+      "commandDescription": "Schreibt eine Workspace-Übergabenotiz (Artefaktliste + Ihre Notiz), damit das nächste Modell/die nächste Sitzung im Workspace weiterarbeiten kann, ohne Dateien erneut zu übertragen",
+      "usage": "/handoff [Notiz für die Übergabe]",
+      "toastOk": "Übergabenotiz in den Workspace geschrieben: {path}",
+      "toastFail": "Übergabenotiz fehlgeschlagen: {error}",
+      "noticeTitle": "Workspace-Übergabenotiz gefunden",
+      "noticeUse": "In den Composer übernehmen",
+      "noticeOpen": "Im Editor öffnen",
+      "insertText": "Bitte zuerst die Workspace-Übergabenotiz handoff/{file} lesen und die Aufgabe gemäß ihrer Anleitung fortsetzen. Bereits abgeschlossene Schritte nicht wiederholen; Ergebnisse landen weiter im Workspace und werden registriert."
+    },
     "codingMode": {
       "enabled": "Coding mode für alle Chats aktiviert.",
       "disabled": "Coding mode deaktiviert.",
@@ -5354,6 +5432,10 @@
       "modelRoutingOmniDesc": "Ein orchestrierender Agent koordiniert in jedem Durchlauf die besten verfügbaren Modelle.",
       "modelRoutingOmni": "Omni-Agent",
       "runModePanel": "Ausführungsmodus & Routing",
+      "approvalBypass": "Genehmigungsprüfung",
+      "approvalBypassOn": "Bestätigungen übersprungen",
+      "approvalBypassOff": "Jedes Mal fragen",
+      "approvalBypassDesc": "Wenn aktiviert, zeigen risikoreiche Tool-Aufrufe in dieser Sitzung keine Bestätigungskarte mehr. Modus-Sperrlisten, Plan-Schreibschutz und Sandbox-Richtlinien gelten weiterhin; jede Umgehung wird weiterhin als Audit-Ereignis erfasst.",
       "thinking": "Tiefes Denken",
       "modeShort": {
         "safe": "Sicher",
@@ -5477,6 +5559,7 @@
       "failed": "Fehlgeschlagen",
       "done": "Fertig",
       "pending": "Ausstehend",
+      "unknown": "Unbekannt",
       "results": "{count} Ergebnisse",
       "countRunning": "{count} laufen",
       "countDone": "{count} fertig",
@@ -5518,6 +5601,7 @@
       "downloadFailedHttp": "Download fehlgeschlagen — HTTP {status}",
       "downloadFailed": "Download fehlgeschlagen",
       "forkFailed": "Verzweigung konnte nicht erstellt werden",
+      "forkUnavailable": "Das Verzweigen einer Unterhaltung benötigt den Python-Sidecar (aktuell reiner Rust-Modus). Sidecar starten und erneut versuchen oder „Unterhaltung kopieren“ nutzen.",
       "forkOpenFailed": "Die Verzweigung wurde erstellt, konnte aber nicht geöffnet werden. Sie kann unter Sitzungen geöffnet werden.",
       "copyFailed": "Kopieren fehlgeschlagen",
       "shareSaveFailed": "Bild konnte nicht gespeichert werden. Versuchen Sie es erneut.",
@@ -5554,6 +5638,7 @@
       "planningNextStep": "Nächsten Schritt planen",
       "readingContext": "Kontext wird gelesen",
       "waitingForModel": "Warten auf Modell",
+      "waitingSerialHint": "Wartezeit {s}s · im Agent-Modus laufen Modellaufrufe seriell; mit Bloom parallel",
       "preparingOutput": "Ausgabe wird vorbereitet",
       "generatingCandidates": "Kandidaten werden generiert",
       "synthesizingCandidates": "Kandidaten werden zusammengeführt",
@@ -5809,7 +5894,12 @@
       "restartUnavailable": "Diese Variante kann den Hostprozess nicht neu starten. Versuche es in der Desktop-App oder öffne die Anwendung erneut.",
       "restartFailed": "Hostprozess konnte nicht neu gestartet werden: {error}",
       "restarted": "Hostprozess neu gestartet. Verbinde neu…",
-      "alreadyRunning": "Der Hostprozess läuft bereits. Aktualisiere…"
+      "alreadyRunning": "Der Hostprozess läuft bereits. Aktualisiere…",
+      "bannerTitle": "Die Python-Hilfsmaschine läuft nicht — einige Diagnosen sind nicht verfügbar.",
+      "details": "Details",
+      "hideDetails": "Details ausblenden",
+      "dismiss": "Schließen",
+      "restart": "Hilfsmaschine neu starten"
     },
     "errorActions": {
       "viewLogs": "Protokoll anzeigen",
@@ -6040,6 +6130,13 @@
       "bulkDeleteFailed": "Ausgewählte Sitzungen konnten nicht gelöscht werden",
       "deleteSessionDone": "Sitzung gelöscht",
       "deleteSessionFailed": "Sitzung konnte nicht gelöscht werden",
+      "resetConversation": "Unterhaltung leeren",
+      "resetSessionTitle": "Unterhaltung leeren",
+      "resetSessionBody": "Unterhaltung der Sitzung „{title}“ leeren? Dabei werden {count} Nachrichten gelöscht. Sitzungseinstellungen und erzeugte Dateien bleiben erhalten. Dies kann nicht rückgängig gemacht werden.",
+      "resetSessionBodyNoCount": "Unterhaltung der Sitzung „{title}“ leeren? Dabei werden die Nachrichten dieser Sitzung gelöscht. Sitzungseinstellungen und erzeugte Dateien bleiben erhalten. Dies kann nicht rückgängig gemacht werden.",
+      "resetSessionConfirm": "Leeren",
+      "resetSessionDone": "Unterhaltung geleert",
+      "resetSessionFailed": "Unterhaltung konnte nicht geleert werden",
       "renameSessionDone": "Sitzung umbenannt",
       "renameSessionFailed": "Sitzung konnte nicht umbenannt werden",
       "showMore": "Weitere {count} anzeigen",
@@ -6356,6 +6453,15 @@
     "elapsed": "Dauer",
     "artifacts": {
       "empty": "Noch keine Ergebnisse. Erzeugte Dateien erscheinen hier, sobald sie geschrieben werden."
+    },
+    "review": {
+    "pending": "Prüfung offen",
+    "approved": "Genehmigt",
+    "flagged": "Zurückgewiesen",
+    "approve": "Genehmigen",
+    "flag": "Zurückweisen",
+    "openArtifact": "Artefakt öffnen",
+    "hint": "Prüfentscheidungen werden manuell vergeben und lokal gespeichert; sie pausieren die Backend-Pipeline noch nicht."
     },
     "runStatus": {
       "idle": "Inaktiv",
@@ -6733,6 +6839,11 @@
     }
   },
   "engineHealth": {
+    "sidecarDegradedTitle": "Sidecar-Fähigkeiten eingeschränkt",
+    "sidecarMissing": "Fehlende Abhängigkeiten: {modules}",
+    "sidecarNumpyImpact": "Lokales ML-Routing ist deaktiviert (Rückfall auf default-tier); Chat funktioniert weiter",
+    "sidecarGenericImpact": "Zugehörige Gateway-Funktionen fallen zurück oder sind nicht verfügbar",
+    "sidecarInterpreter": "Interpreter: {path}",
     "title": "Engine-Zustand · Modelle · Modi",
     "subtitle": "Transparenz der Fähigkeiten: Fähigkeitszustand / Rust-Modellprofile / schwere Runtimes / Laufzeitmodi",
     "refresh": "Aktualisieren",
@@ -7112,6 +7223,9 @@
       "refresh": "Aktualisieren",
       "toolCalls": "Tool-Aufrufe",
       "lastActivity": "Letzte Aktivität",
+      "viewGrid": "Rasteransicht",
+      "viewKanban": "Boardansicht",
+      "colEmpty": "Keine Mitglieder",
       "status": {
         "running": "Läuft",
         "waiting": "Wartend",
@@ -7128,7 +7242,7 @@
       "coverageSkipped": "{count} übersprungen",
       "coverageMerged": "{count} zusammengeführt",
       "coveragePlugins": "Plugin-Referenzen: {refs} (aufgelöst {resolved}, offen {unresolved})",
-      "coverageUnavailable": "Skill-Abdeckung nicht verfügbar",
+      "coverageUnavailable": "Statistik nicht verfügbar",
       "tabSkills": "Skills",
       "tabTools": "Tools & MCP",
       "tabProposals": "Vorschläge",

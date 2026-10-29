@@ -49,13 +49,19 @@ pub fn runtime_mode() -> ModeKind {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// 设置运行时模式（幂等），返回实际生效的模式。
+/// 设置运行时模式（幂等），返回**替换前**的模式。
+///
+/// 返回旧值而不是新值是刻意的：调用方要能一句 `let prev = set_runtime_mode(x)` 之后
+/// 用 `set_runtime_mode(prev)` 复原。此前这里返回的是刚设进去的 `kind`，于是
+/// 「临时切到 Plan 再恢复」实际变成了**永久停在 Plan**——`tools/workbench.rs` 的
+/// 两个用例因此把全局模式留在了 Plan，连带污染同一进程里的其它用例。
 pub fn set_runtime_mode(kind: ModeKind) -> ModeKind {
     let mut guard = runtime_mode_slot()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let previous = *guard;
     *guard = kind;
-    kind
+    previous
 }
 
 /// 测试专用：串行化所有会改写全局 runtime_mode 的测试，避免并行竞态
@@ -921,6 +927,21 @@ mod tests {
                 k.as_str()
             );
         }
+    }
+
+    /// `set_runtime_mode` 必须返回**替换前**的模式：否则「临时切换再恢复」的写法
+    /// 会把全局模式永久留在临时值上（曾因返回新值让整套测试停在 Plan）。
+    #[test]
+    fn test_set_runtime_mode_returns_previous_mode() {
+        let _g = test_runtime_mode_guard();
+        let original = runtime_mode();
+        let prev = set_runtime_mode(ModeKind::Plan);
+        assert_eq!(prev, original, "返回值必须是替换前的模式，不是刚设进去的");
+        assert_eq!(runtime_mode(), ModeKind::Plan, "设置本身要生效");
+        // 复原走同一句：拿返回值再设回去。
+        let restored = set_runtime_mode(prev);
+        assert_eq!(restored, ModeKind::Plan, "第二次调用返回的应是它替换掉的 Plan");
+        assert_eq!(runtime_mode(), original, "复原必须真的回到原模式");
     }
 
     #[test]

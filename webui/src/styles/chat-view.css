@@ -19,6 +19,23 @@
   --composer-col: 820px;
   /* 落地页叙事列：比会话列窄，一句话 + 内联实体不会被拉成整屏横幅。 */
   --landing-col: min(calc(100% - 48px), 45rem);
+  /* ── 阅读起点（左对齐口径，唯一定义）───────────────────────────────
+     `--chat-col` 是「列宽上限」，把它当 `width` 再配 `margin: 0 auto` 会把整段
+     历史推到屏幕几何中心：1440px 窗口下左右各只剩 62px 看不出来，宽屏（列被
+     clamp 在 1280px）就会出现「长文本压在屏幕中间、左右大片空白」。
+     现在转写行一律 `max-width` + 左起排，多出来的宽度全部留在右侧。
+     左留边不是 24px 而是 64px：左侧 minimap 轨道绝对定位在 shell 的
+     0.875rem..(0.875rem + 2rem) 处（聚焦刻度线全长 1.875rem + 4px 焦点环 ≈ 48px），
+     `e2e/conversation-minimap.spec.ts` 要求正文左边界越过它再留 8px —— 56px 是下限，
+     64px 留 8px 余量。窄窗（≤768px）轨道隐藏，媒体查询里退回 24px 口径。 */
+  --chat-gutter: 64px;
+  --chat-gutter-end: 24px;
+  /* 列宽上限 = 会话列与「容器宽度 − 左右留边」的较小者：
+     左起点变大后，光靠 `--chat-col` 的 −48px 会让右边缘溢出容器。 */
+  --chat-col-start: min(
+    var(--chat-col, min(calc(100% - 48px), 980px)),
+    calc(100% - var(--chat-gutter, 24px) - var(--chat-gutter-end, 24px))
+  );
 }
 
 .chat--new-landing {
@@ -451,15 +468,26 @@
   opacity: 0.55;
 }
 
-/* AI message */
+/* AI message — the conversation reading column.
+   确定性左对齐：`--chat-col` 只作为**宽度上限**（max-width），起排位置固定在
+   阅读起点（margin-inline-start = --chat-gutter），剩余空间全部留在右侧。
+   禁止再写 `width: var(--chat-col); margin: 0 auto` —— 那条组合把整段历史推到
+   屏幕几何中心（宽面板上、任务结束后的历史视图里就是「排版错乱」本身）。
+   注意：本文件由 ChatView 以 `<style scoped>` 引入，只能命中 ChatView 自己模板里
+   的气泡（实时流式 / thinking）；历史行由 AssistantMessage / UserMessage /
+   CompactionEvent 各自的 scoped 规则负责，两处必须写成同一口径，否则「有时像修过、
+   有时又居中」。契约测试：src/styles/chat-reading-column.contract.test.ts。 */
 .msg-ai {
   display: flex;
   gap: 0.625rem;
-  width: var(--chat-col);
-  margin: 0 auto;
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: var(--chat-col-start, min(calc(100% - 48px), 980px));
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.5rem 0;
   align-items: flex-start;
-  max-width: calc(100% - 48px);
+  text-align: start;
 }
 
 .msg-ai-main {
@@ -580,11 +608,15 @@
   display: flex;
   align-items: center;
   gap: 0.625rem;
-  width: var(--chat-col);
-  max-width: calc(100% - 48px);
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: var(--chat-col-start, min(calc(100% - 48px), 980px));
   min-height: 1.75rem;
-  margin: 0.125rem auto 0.625rem;
+  margin-block: 0.125rem 0.625rem;
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.25rem 0.125rem;
+  text-align: start;
   color: color-mix(in srgb, var(--text) 58%, transparent);
   font-size: var(--fs-xs);
   line-height: 1.45;
@@ -795,9 +827,12 @@
 /* Composer (component root; inner composer styles live in ChatComposer.vue) */
 .chat-composer {
   /* Same conversation column as the messages above (+3rem = its own side
-     padding), so the input panel's edges line up with the thread content. */
-  width: min(100%, calc(var(--chat-col) + 3rem));
-  margin: 0 auto;
+     padding), so the input panel's edges line up with the thread content —
+     因此它的左边界必须比正文起点再往左让出自身内边距（1.5rem），而不是 `margin: 0 auto`
+     居中：宽屏上正文左起排、输入框居中会立刻读成「版式散架」。 */
+  width: min(100%, calc(var(--chat-col-start, var(--chat-col)) + 3rem));
+  margin-block: 0;
+  margin-inline: calc(var(--chat-gutter, 24px) - 1.5rem) auto;
 }
 
 .chat--new-landing .chat-composer {
@@ -1185,6 +1220,17 @@
 
 /* Mobile */
 @media (max-width: 768px) {
+  /* 手机上左侧 minimap 轨道隐藏，`.chat-thread` 自己带 0.75rem 横向 padding，
+     所以阅读起点退回 24px 口径（12px padding + 24px = 36px，与修前的实际留边一致），
+     输入框则回到居中：它的可用宽度已经被供应商列收窄，居中即为对齐。 */
+  .chat {
+    --chat-gutter: 24px;
+  }
+
+  .chat-composer {
+    margin-inline: auto;
+  }
+
   .chat-fork-transition-status--error {
     width: calc(100% - 1rem);
   }

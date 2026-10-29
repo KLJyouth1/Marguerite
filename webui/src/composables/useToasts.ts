@@ -9,6 +9,8 @@ export interface ToastItem {
 }
 
 const TOAST_DURATION_MS = 5000
+/** 错误要读得像事故报告：5 秒读不完（含 stderr 摘录时尤其），给 30 秒。 */
+const DANGER_TOAST_DURATION_MS = 30_000
 const MAX_TOASTS = 4
 
 // Module-level singleton so any composable or component can raise a toast
@@ -33,8 +35,10 @@ function pushToast(message: string, options: { tone?: ToastTone; duration?: numb
     dismissToast(toasts.value[0].id)
   }
   const id = ++nextId
-  toasts.value = [...toasts.value, { id, message: text, tone: options.tone ?? 'info' }]
-  timers.set(id, setTimeout(() => dismissToast(id), options.duration ?? TOAST_DURATION_MS))
+  const tone = options.tone ?? 'info'
+  toasts.value = [...toasts.value, { id, message: text, tone }]
+  const fallback = tone === 'danger' ? DANGER_TOAST_DURATION_MS : TOAST_DURATION_MS
+  timers.set(id, setTimeout(() => dismissToast(id), options.duration ?? fallback))
 }
 
 export function useToasts() {

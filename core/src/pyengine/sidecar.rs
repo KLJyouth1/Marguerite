@@ -21,6 +21,111 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+
+/// 最近一次侧车依赖预检的结论（进程内单例，供 `system.health` 读取）。
+///
+/// 为什么要有全局：预检发生在 spawn 时（没有 RPC 上下文），而**用户看到的**
+/// 是 Engine Health 面板。不落一份可读状态，就只剩日志 —— 而真机审计证明
+/// 用户不会看日志：22 条 `No module named 'numpy'` 在日志里刷了一整屏，
+/// 界面上却什么都没有，于是「本地智能路由静默失效」被当成"这版本就这样"。
+///
+/// 用 `RwLock<Option<_>>` 而不是 `OnceLock`：侧车会重启，重启后结论可能变化
+/// （用户补了依赖），必须允许覆盖。
+static PREFLIGHT: std::sync::RwLock<Option<PreflightReport>> = std::sync::RwLock::new(None);
+
+/// 侧车依赖预检结论。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    /// 实际跑起来的解释器绝对路径（不是配置里写的那个 —— 两者可能不同）。
+    pub python: String,
+    /// 实际注入 `PYTHONPATH` 的 pyengine 源码目录（本仓有 3 份副本，必须可见）。
+    pub pyengine_src: String,
+    /// 缺失的模块名（空 = 全部就位）。
+    pub missing: Vec<String>,
+}
+
+impl PreflightReport {
+    /// 是否降级（有缺失模块）。
+    pub fn degraded(&self) -> bool {
+        !self.missing.is_empty()
+    }
+
+    /// 转成 `system.health` 里的 JSON 片段。
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "python": self.python,
+            "pyengine_src": self.pyengine_src,
+            "missing": self.missing,
+            "degraded": self.degraded(),
+            // 给前端的稳定文案键：UI 负责翻译，后端不拼中文（i18n 纪律）。
+            "reason": if self.missing.iter().any(|m| m == "numpy") {
+                "local_ml_router_disabled"
+            } else if self.degraded() {
+                "dependencies_missing"
+            } else {
+                "ok"
+            },
+        })
+    }
+}
+
+/// 读最近一次预检结论（`None` = 还没跑过 / 预检失败）。
+pub fn preflight_report() -> Option<PreflightReport> {
+    PREFLIGHT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 覆盖预检结论（测试与预检本体共用）。
+pub fn set_preflight_report(report: PreflightReport) {
+    *PREFLIGHT.write().unwrap_or_else(|e| e.into_inner()) = Some(report);
+}
+
+#[cfg(test)]
+mod preflight_report_tests {
+    use super::*;
+
+    fn report(missing: &[&str]) -> PreflightReport {
+        PreflightReport {
+            python: "C:\\Python314\\python.exe".to_string(),
+            pyengine_src: "D:\\repo\\pyengine\\src".to_string(),
+            missing: missing.iter().map(|m| (*m).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn clean_report_is_not_degraded() {
+        let j = report(&[]).to_json();
+        assert_eq!(j["degraded"], false);
+        assert_eq!(j["reason"], "ok");
+        assert_eq!(j["missing"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn missing_numpy_maps_to_local_ml_router_reason() {
+        // 这条 reason 是给前端做**具体**说明用的：不是笼统的"依赖缺失"，
+        // 而是"本地 ML 路由被禁用"——用户才知道自己丢了哪个能力。
+        let j = report(&["numpy"]).to_json();
+        assert_eq!(j["degraded"], true);
+        assert_eq!(j["reason"], "local_ml_router_disabled");
+    }
+
+    #[test]
+    fn other_missing_modules_use_generic_reason() {
+        let j = report(&["httpx"]).to_json();
+        assert_eq!(j["degraded"], true);
+        assert_eq!(j["reason"], "dependencies_missing");
+    }
+
+    #[test]
+    fn structural_fields_are_exposed_for_troubleshooting() {
+        // pyengine 有 3 份副本，界面上必须能直接看到"实际跑的是哪份"。
+        let j = report(&[]).to_json();
+        assert_eq!(j["python"], "C:\\Python314\\python.exe");
+        assert_eq!(j["pyengine_src"], "D:\\repo\\pyengine\\src");
+    }
+}
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -1387,6 +1492,115 @@ async fn run_sidecar_supervisor(
     }
 }
 
+/// 启动前的能力预检：把「跑的是哪个解释器、缺哪些包」写成**一行可 grep** 的日志。
+///
+/// 为什么必须有（真机审计 2026-10-29 P1-2）：安装版侧车自己起得来，但 bundled Python
+/// 环境缺 `numpy`，于是 `squilla_router` 初始化失败 → **本地 ML 路由被静默禁用**、
+/// 回退 default-tier，日志里刷 22 条 `No module named 'numpy'` 而用户毫无感知。
+///
+/// 为什么日志第一步就够：本仓 pyengine 有 **3 份副本**（`pyengine/src` 源码、
+/// `gui/src-tauri/resources/pyengine` 打包源、`target/*/resources/pyengine` **实际加载**）。
+/// `detect_pyengine_src()` 选哪份、`detect_python()` 选中哪个解释器，此前**完全不可见** ——
+/// 不先把这两个事实打出来，修依赖必然是「改 A、验 A、跑的是 B」。
+///
+/// 行为约束：
+/// - 只做 `importlib.util.find_spec`，**不装包、不改环境**；
+/// - 5s 硬超时，超时只 `warn!`，**绝不阻塞侧车启动**；
+/// - 缺包只降级（warn + 明说会影响什么），不影响 spawn。
+async fn preflight_python_dependencies(cfg: &SidecarConfig) {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    // 顺序即"缺了会怎样"的重要性：numpy 掉的是本地 ML 路由，其余掉的是网关本体能力。
+    const MODULES: [&str; 4] = ["numpy", "httpx", "structlog", "anyio"];
+    let script = format!(
+        "import sys, importlib.util as u\n\
+         print('PY=' + sys.executable)\n\
+         for m in {modules:?}:\n\
+         \x20   try:\n\
+         \x20       print(('FOUND:' if u.find_spec(m) else 'MISSING:') + m)\n\
+         \x20   except Exception:\n\
+         \x20       print('MISSING:' + m)\n",
+        modules = MODULES
+    );
+    let mut cmd = Command::new(&cfg.python_exe);
+    cmd.arg("-c").arg(script);
+    // 与 spawn 同口径设置 PYTHONPATH：预检必须探到**侧车真正会看到的**模块集合，
+    // 否则会出现「预检说有、启动说没有」的第二种假象。
+    cmd.env("PYTHONPATH", &cfg.pyengine_src);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let output = match timeout(PROBE_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            warn!(
+                python = %cfg.python_exe.display(),
+                err = %e,
+                "侧车依赖预检无法执行（解释器可能不可用）；继续尝试启动，失败原因见后续日志"
+            );
+            return;
+        }
+        Err(_) => {
+            warn!(
+                python = %cfg.python_exe.display(),
+                timeout_secs = PROBE_TIMEOUT.as_secs(),
+                "侧车依赖预检超时；不阻塞启动，但下面的依赖结论缺失"
+            );
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut detected = String::new();
+    let mut missing: Vec<&str> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(p) = line.strip_prefix("PY=") {
+            detected = p.trim().to_string();
+        } else if let Some(m) = line.strip_prefix("MISSING:") {
+            missing.push(MODULES.iter().find(|x| **x == m.trim()).copied().unwrap_or("?"));
+        }
+    }
+    if detected.is_empty() {
+        // exit != 0 且没有 PY 行：解释器连 `-c` 都跑不起来（版本不对/被拦截）。
+        warn!(
+            python = %cfg.python_exe.display(),
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or(""),
+            "侧车依赖预检没拿到解释器路径：侧车大概率起不来"
+        );
+        return;
+    }
+
+    info!(
+        python = %detected,
+        python_cfg = %cfg.python_exe.display(),
+        pyengine_src = %cfg.pyengine_src.display(),
+        "侧车运行时事实（排障请对照这三行：改源 ≠ 改运行）"
+    );
+    // 落一份可读状态给 `system.health`：日志只有排障的人会看，界面上必须有。
+    set_preflight_report(PreflightReport {
+        python: detected.clone(),
+        pyengine_src: cfg.pyengine_src.display().to_string(),
+        missing: missing.iter().map(|m| (*m).to_string()).collect(),
+    });
+    if missing.is_empty() {
+        info!(modules = ?MODULES, "侧车依赖预检通过");
+        return;
+    }
+    for m in &missing {
+        match *m {
+            "numpy" => warn!(
+                module = "numpy",
+                python = %detected,
+                "侧车缺 numpy：本地 ML 路由（V4 Phase 3）会被禁用并回退 default-tier；聊天可用但「本地智能路由」静默失效"
+            ),
+            other => warn!(
+                module = other,
+                python = %detected,
+                "侧车缺依赖：对应的网关能力将回落或不可用"
+            ),
+        }
+    }
+}
+
 async fn spawn_once(
     cfg: &SidecarConfig,
     eff_home: &Path,
@@ -1394,6 +1608,7 @@ async fn spawn_once(
     started_at_slot: &Arc<std::sync::Mutex<Instant>>,
     fence_slot: &Arc<Mutex<Option<crate::pyengine::memfence::MemoryFence>>>,
 ) -> Result<Option<u32>> {
+    preflight_python_dependencies(cfg).await;
     let mut cmd = Command::new(&cfg.python_exe);
     cmd.args(["-m", "opensquilla.cli.main", "gateway", "run"])
         .arg("--bind")

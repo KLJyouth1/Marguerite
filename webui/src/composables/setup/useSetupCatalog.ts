@@ -173,6 +173,9 @@ interface OnboardingStatus {
   sectionDetails?: Record<string, SectionDetail>
   envRecoveryCommands?: Array<{ section?: string; command?: string; label?: string }>
   configPath?: string
+  // 隔离模式标记（MARGUERITE_CONFIG_DIR 覆盖了配置目录）：页脚据此显示
+  // 「用户配置目录（隔离模式）」，而不是把临时路径直接摆给用户。
+  configIsolated?: boolean
   channelCount?: number
   searchConfigured?: boolean
   searchProvider?: string
@@ -1283,6 +1286,9 @@ const providerProxy = computed(() => {
 })
 
 const configPath = computed(() => status.value.configPath || '')
+// 隔离模式（后端 `MARGUERITE_CONFIG_DIR` 覆盖）：页脚只显示「用户配置目录（隔离模式）」，
+// 真路径放 title / 复制内容，不把 E:\temp\... 这类临时路径暴露给用户。
+const configIsolated = computed(() => status.value.configIsolated === true)
 
 const savedSearchProvider = computed(() => (
   status.value.searchProvider
@@ -3749,6 +3755,7 @@ async function copyConfigPath() {
     recipeCommands,
     configSummary,
     configPath,
+    configIsolated,
     selectInitialSection,
     sectionStatus,
     sectionDirty,

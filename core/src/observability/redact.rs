@@ -100,6 +100,51 @@ fn assignment_re() -> &'static Regex {
     })
 }
 
+/// 键名本身是否属于「值必须整体抹掉」的敏感键（JSON 树用；文本用 [`scrub_text`]）。
+///
+/// 文本脱敏靠 `key=value` 的**整体形态**，而结构化数据里键与值是两个独立标量，
+/// 赋值正则看不到它们的关系 —— 所以 JSON 先按键名判定，值再交给 [`scrub_text`]。
+///
+/// 判定两步：先按 [`SECRET_KEY_PATTERN`] 整体匹配（`api_key` / `token` /
+/// `x_api_token` …），再用「去掉非字母数字后的小写形态」兜住驼峰与连字符写法
+/// （`apiKey` / `x-api-key` / `clientSecret`）。第二步刻意**强于** Python 侧
+/// `safety/secret_redaction.py::is_secret_key`：那张表只做字面包含关系，
+/// `accessToken` / `privateKey` 会漏 —— 而审批卡片是展示面，多抹一个键只是少一条
+/// 信息，漏抹一个键就是把凭据送进浏览器。
+pub fn is_secret_key(key: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(&format!(r"(?i)^(?:{SECRET_KEY_PATTERN})$"))
+            .expect("敏感键名正则必须可编译（模式为常量）")
+    });
+    if re.is_match(key) {
+        return true;
+    }
+    let compact: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        compact.as_str(),
+        "token"
+            | "apikey"
+            | "xapikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "bearertoken"
+            | "secret"
+            | "clientsecret"
+            | "privatekey"
+            | "secretkey"
+            | "credential"
+            | "credentials"
+            | "password"
+            | "authorization"
+    )
+}
+
 /// 裸`Authorization: Bearer <token>` 形态。
 ///
 /// 保留 `Bearer ` 方案词：诊断报告需要知道**用的是哪种鉴权**，

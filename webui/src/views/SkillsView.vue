@@ -376,17 +376,20 @@
           @open="openSkillDialog"
         />
 
-        <div v-if="installedEmpty" v-show="activeTab === 'skills'" class="state">
-          <div class="state-icon">
-            <Icon name="skills" :size="36" />
-          </div>
-          <p class="state-text">
+        <EmptyState
+          v-if="installedEmpty"
+          v-show="activeTab === 'skills'"
+          icon="skills"
+          :icon-size="36"
+          test-id="skills-empty"
+        >
+          <p class="empty-panel__hint">
             <i18n-t v-if="filterText" keypath="cronSkills.skillsView.noMatchFilter">
               <template #filter><strong>{{ filterText }}</strong></template>
             </i18n-t>
             <template v-else>{{ emptyMessage }}</template>
           </p>
-        </div>
+        </EmptyState>
       </div>
     </div>
 
@@ -467,6 +470,7 @@ import { computed, nextTick, onActivated, onDeactivated, onUnmounted, reactive, 
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import ControlSwitch from '@/components/ControlSwitch.vue'
 import AutoEnabledSkills from '@/components/skills/AutoEnabledSkills.vue'
 import BaotaCredentialsDialog from '@/components/skills/BaotaCredentialsDialog.vue'
@@ -2233,24 +2237,9 @@ async function saveSkillEdit() {
   color: var(--text-muted);
 }
 
-/* Empty state */
-.state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: var(--sp-5);
-  color: var(--text-muted);
-}
-.state-icon {
-  color: var(--text-dim);
-}
-.state-text {
-  margin: 0;
-  font-size: var(--fs-sm);
-}
-.state-text strong {
+/* Empty state 的样式已收口到 `components/EmptyState.vue`；
+   过滤词强调仍由 slot 内的 `.empty-panel__hint strong` 承载，故保留该规则。 */
+.empty-panel__hint strong {
   color: var(--text);
 }
 

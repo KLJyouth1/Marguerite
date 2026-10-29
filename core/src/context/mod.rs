@@ -4,10 +4,14 @@
 
 pub mod budget;
 pub mod cache;
+pub mod compact_state;
+pub mod middle_truncate;
 pub mod optimize;
 pub mod paging;
+pub mod pressure;
 pub mod project_docs;
 pub mod session;
+pub mod spool;
 
 pub use budget::{BudgetAlert, TokenBudget, TokenBudgetError};
 pub use cache::{CacheStats, SummaryCache};

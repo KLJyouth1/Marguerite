@@ -458,7 +458,10 @@ function summaryStatus(item: SessionItem | null, needsInput: boolean): RunTraceS
     case 'timeout': return 'error'
     case 'cancelled':
     case 'interrupted': return 'cancelled'
-    case 'idle': return 'success'
+    // 'idle' 只代表「当前没在跑」——`sessions.list` 对非运行会话一律发 idle，
+    // 既包括从未运行的空会话，也包括上一轮失败的会话。映射成 success 会让
+    // 检查器无条件宣称「已完成」（无证据的成功声明），按原值呈现。
+    case 'idle': return 'idle'
     default: return undefined
   }
 }

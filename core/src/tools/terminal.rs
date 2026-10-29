@@ -31,6 +31,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::sandbox::audit::{default_audit_dir, AuditRecord, AuditSink};
+use crate::agent::tool_cycle::ToolResult;
 use crate::security::scanner_l3::OpKind;
 use crate::security::{normalize_workspace, CommandGuard, Preflight};
 use crate::terminal::pty::{PtyTerminal, DEFAULT_COLS, DEFAULT_ROWS};
@@ -888,6 +889,660 @@ pub fn terminal_shells() -> Value {
         "defaultShell": default_id,
         "shells": items,
     })
+}
+
+// --------------------------------------------------------------------------- #
+// 工具面接线（P0-1b）：`terminal` 此前只被「声明」，从未注册成可调用工具
+// --------------------------------------------------------------------------- #
+//
+// 事实核对（2026-10-27）：`agent/tool_catalog.rs:65` 与 `:186` 把 `terminal` 写进了
+// 执行族目录与内置表面表，而 `tools/builtin.rs` 的 `register(...)` 列表里**没有**它
+// （`grep -c terminal tools/builtin.rs` = 0）。于是模型在提示里读到「有终端工具」，
+// 真正调用时却只能拿到「工具不存在」——它唯一的退路就是 `shell_exec` 手拼命令行，
+// 正是用户抱怨的「写脚本偏盲控电脑」。
+//
+// 本节的纪律：
+// - **不新增后端契约**。每个 action 都直接调用本文件已有的 `sandbox.terminal.*`
+//   RPC 处理函数（`terminal_spawn_for_session` / `terminal_input` / `terminal_key`
+//   / `terminal_resize` / `terminal_read` / `terminal_status` / `terminal_kill`
+//   / `terminal_list` / `terminal_shells`），工具面与界面面因此**不可能各说各话**；
+// - **R-10 诚实性**：处理器回 `ok:false` 时一律转成 `ToolResult::Error` 并带上
+//   它的 `code`，绝不把失败渲染成成功；`ok:true` 才回成功。
+
+/// `terminal` 工具支持的动作（与 `sandbox.terminal.*` RPC 一一对应，不新增契约）。
+pub const TERMINAL_TOOL_ACTIONS: &[&str] = &[
+    "spawn", "input", "key", "read", "resize", "status", "kill", "list", "shells",
+];
+
+/// 单次 `read` 交给模型的最大字符数；超出**如实标注截断**，不静默丢弃。
+const MAX_TOOL_READ_CHARS: usize = 8_000;
+
+/// 把 `HashMap<String, String>` 形态的工具入参转成 RPC 处理函数吃的 `Value`。
+///
+/// 键名沿用 RPC 契约（`terminalId` / `cwd` / `cols` / …），这样工具面与界面面
+/// 走的是**同一份参数定义**；数字字段按目标类型转换，转不动就干脆不写入
+/// （让处理器的既有默认值生效，而不是塞一个 0 进去）。
+fn tool_params(args: &HashMap<String, String>) -> Value {
+    let mut map = serde_json::Map::new();
+    for (key, raw) in args {
+        match key.as_str() {
+            "cols" | "rows" => {
+                if let Ok(n) = raw.trim().parse::<u64>() {
+                    if n > 0 {
+                        map.insert(key.clone(), json!(n));
+                    }
+                }
+            }
+            "cursor" => {
+                if let Ok(n) = raw.trim().parse::<u64>() {
+                    map.insert("cursor".to_string(), json!(n));
+                }
+            }
+            "terminal_id" => {
+                if !raw.trim().is_empty() {
+                    map.insert("terminalId".to_string(), json!(raw));
+                }
+            }
+            _ => {
+                if !raw.trim().is_empty() {
+                    map.insert(key.clone(), json!(raw));
+                }
+            }
+        }
+    }
+    Value::Object(map)
+}
+
+/// 把处理器返回的 `ok:false` 如实转成工具错误（R-10：绝不伪装成功）。
+fn terminal_failure(v: &Value, action: &str) -> ToolResult {
+    let code = v
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("TERMINAL_ACTION_FAILED")
+        .to_string();
+    let reason = v
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| v.get("message").and_then(Value::as_str))
+        .unwrap_or("未知失败");
+    ToolResult::Error {
+        message: format!("terminal {action} 未执行：{reason}"),
+        code,
+    }
+}
+
+/// 渲染 `read` 的载荷：输出正文（带截断标注）+ 游标 + 存活/退出码。
+fn render_read(v: &Value) -> String {
+    let raw = v.get("output").and_then(Value::as_str).unwrap_or("");
+    let (body, truncated_note) = if raw.chars().count() > MAX_TOOL_READ_CHARS {
+        let kept: String = raw.chars().take(MAX_TOOL_READ_CHARS).collect();
+        let dropped = raw.chars().count() - MAX_TOOL_READ_CHARS;
+        (kept, format!("（输出过长，已截断 {dropped} 个字符；用 cursor 参数继续读）"))
+    } else {
+        (raw.to_string(), String::new())
+    };
+    format!(
+        "输出:\n{body}{truncated_note}\n\nrunning={}\ncursor={}\nlost={}\nexitCode={}",
+        v.get("running").and_then(Value::as_bool).unwrap_or(false),
+        v.get("cursor").and_then(Value::as_u64).unwrap_or(0),
+        v.get("lost").and_then(Value::as_u64).unwrap_or(0),
+        v.get("exitCode")
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+    )
+}
+
+fn render_spawn(v: &Value) -> String {
+    let id = v["terminal"]["id"].as_str().unwrap_or("");
+    let mut lines = vec![format!(
+        "已启动真 PTY 会话 id={id}；后续动作都带 terminal_id={id}"
+    )];
+    if let Some(shell) = v["terminal"]["shell"].as_str() {
+        lines.push(format!("shell={shell}"));
+    }
+    if let Some(pid) = v["terminal"]["pid"] .as_u64() {
+        lines.push(format!("pid={pid}"));
+    }
+    if let Some(cwd) = v["terminal"]["cwd"].as_str() {
+        lines.push(format!("cwd={cwd}"));
+    }
+    if let Some(warn) = v.get("warning").and_then(Value::as_str) {
+        lines.push(format!("警告：{warn}"));
+    }
+    lines.push(
+        "提示：写命令用 action=input（自动回车提交，且必须过 L1/L2/L3 护栏）；\
+         取输出用 action=read。"
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn render_list(v: &Value) -> String {
+    let Some(items) = v["terminals"].as_array() else {
+        return "当前没有终端会话".to_string();
+    };
+    if items.is_empty() {
+        return "当前没有终端会话".to_string();
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|t| {
+            format!(
+                "{}\tshell={}\tcwd={}\trunning={}",
+                t["id"].as_str().unwrap_or(""),
+                t["shell"].as_str().unwrap_or("?"),
+                t["cwd"].as_str().unwrap_or("?"),
+                t["running"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    format!("{} 个终端会话:\n{}", lines.len(), lines.join("\n"))
+}
+
+fn render_shells(v: &Value) -> String {
+    let Some(items) = v["shells"].as_array() else {
+        return "未能枚举本机 shell".to_string();
+    };
+    let lines: Vec<String> = items
+        .iter()
+        .map(|s| {
+            let mark = if s["available"].as_bool().unwrap_or(false) {
+                "可用"
+            } else {
+                "未安装"
+            };
+            format!(
+                "{}\t({})\t{}\t[{}] 默认={}",
+                s["id"].as_str().unwrap_or("?"),
+                s["program"].as_str().unwrap_or("?"),
+                s["label"].as_str().unwrap_or("?"),
+                mark,
+                s["default"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    format!(
+        "PTY={} · 平台={} · 默认 shell={:?}\n{}",
+        v["pty"].as_bool().unwrap_or(false),
+        v["platform"].as_str().unwrap_or("?"),
+        v["defaultShell"].as_str(),
+        lines.join("\n")
+    )
+}
+
+fn render_status(v: &Value) -> String {
+    format!("终端详情:\n{}", v["terminal"])
+}
+
+/// 交互终端工具：**不自己实现任何执行逻辑**，只做「工具入参 → 既有
+/// `sandbox.terminal.*` 处理函数 → 结构化结果」的转接。
+pub fn terminal_tool() -> Box<dyn crate::mcp::registry::ToolExecutor> {
+    let run: crate::tools::builtin::ToolFn = Arc::new(|args: &HashMap<String, String>| {
+        let args = args.clone();
+        Box::pin(async move { run_terminal_tool(args).await })
+    });
+    crate::tools::builtin::make_local_tool(
+        "terminal",
+        "交互式终端（真 PTY 常驻会话）：一次启动、连续多条命令、保持 cwd 与环境、可看增量输出。\
+         动作 action=spawn|input|key|read|resize|status|kill|list|shells。\
+         **一次性的短命令请用 `shell_exec`，不要为它开终端**；需要跨调用保持会话状态（cd 之后再跑、\
+         交互式 REPL、需要 Ctrl+C 中断）才用本工具。\
+         写入的每一行都要过 L1/L2/L3 分层护栏；控制键只接受白名单（ctrl-c/ctrl-d/tab/esc/方向键等）。\
+         平台前置不满足（本机没有可用 shell / PTY 起不来）时如实回错，绝不伪装成功。",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": TERMINAL_TOOL_ACTIONS,
+                    "description": "要做的终端动作"
+                },
+                "terminal_id": {
+                    "type": "string",
+                    "description": "除 spawn/list/shells 外必填；用 spawn 返回的 id"
+                },
+                "cwd": {"type": "string", "description": "spawn 可选：起始目录，必须落在允许的工作区根内（越界会回落主根并告警）"},
+                "root": {"type": "string", "description": "spawn 可选：显式绑定的工作区根（单值）"},
+                "roots": {"type": "string", "description": "spawn 可选：显式工作区根列表，JSON 数组字符串，首个为主根"},
+                "shell": {"type": "string", "description": "spawn 可选：pwsh/powershell/cmd/git-bash/bash/sh/zsh/wsl；缺省用平台默认"},
+                "cols": {"type": "integer", "description": "spawn/resize 的列数"},
+                "rows": {"type": "integer", "description": "spawn/resize 的行数"},
+                "data": {"type": "string", "description": "input 必填：要写进 shell 的一行（自动回车提交，会先过安全护栏）"},
+                "sequence": {"type": "string", "description": "key 必填：白名单控制键（ctrl-c/ctrl-d/tab/esc/up/down/left/right/enter/backspace…）"},
+                "cursor": {"type": "integer", "description": "read 可选：从该字节游标增量读取（不传则用会话内部游标）"}
+            },
+            "required": ["action"]
+        }),
+        run,
+    )
+}
+
+async fn run_terminal_tool(args: HashMap<String, String>) -> Result<ToolResult> {
+    use crate::tools::builtin::{err, ok};
+    let action = args
+        .get("action")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if action.is_empty() {
+        return err(
+            format!(
+                "terminal 需要 action（{}）",
+                TERMINAL_TOOL_ACTIONS.join("|")
+            ),
+            "INVALID_PARAMS",
+        );
+    }
+    let params = tool_params(&args);
+    let require_id = |v: Value, what: &str| -> std::result::Result<Value, ToolResult> {
+        if v.get("terminalId").and_then(Value::as_str).unwrap_or("").is_empty() {
+            return Err(ToolResult::Error {
+                message: format!("terminal {what} 需要 terminal_id（先用 action=spawn 创建）"),
+                code: "INVALID_PARAMS".to_string(),
+            });
+        }
+        Ok(v)
+    };
+
+    let outcome: Result<ToolResult> = match action.as_str() {
+        "spawn" => {
+            // 前置检查走**既有** RPC 处理器 `terminal_shells`（不另立判据）：
+            // 本机没有任何可用 shell 时直接给结构化 unavailable，而不是让
+            // PTY 抛一个语义不明的错误。
+            let shells = terminal_shells();
+            let any_available = shells["shells"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .any(|s| s["available"].as_bool().unwrap_or(false))
+                })
+                .unwrap_or(false);
+            if !any_available {
+                return err(
+                    format!(
+                        "交互终端不可用：本机没有找到任何可用 shell（已探测 {} 个候选路径）。",
+                        shells["shells"].as_array().map(|a| a.len()).unwrap_or(0)
+                    ),
+                    "PTY_SHELL_UNAVAILABLE",
+                );
+            }
+            let session = crate::tools::builtin::current_session();
+            let v = terminal_spawn_for_session(&params, Some(session.as_str())).await;
+            if v["ok"].as_bool().unwrap_or(false) {
+                ok(render_spawn(&v))
+            } else {
+                Ok(terminal_failure(&v, "spawn"))
+            }
+        }
+        "input" => {
+            let v = match require_id(params, "input") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_input(&v).await;
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok("已写入并提交该行（用 action=read 取输出）".to_string())
+            } else {
+                Ok(terminal_failure(&r, "input"))
+            }
+        }
+        "key" => {
+            let v = match require_id(params, "key") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_key(&v);
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok(format!("已发送控制键 {:?}", r["sequence"].as_str()))
+            } else {
+                Ok(terminal_failure(&r, "key"))
+            }
+        }
+        "read" => {
+            let v = match require_id(params, "read") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_read(&v);
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok(render_read(&r))
+            } else {
+                Ok(terminal_failure(&r, "read"))
+            }
+        }
+        "resize" => {
+            let v = match require_id(params, "resize") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_resize(&v);
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok(format!(
+                    "尺寸已同步为 {}x{}",
+                    r["cols"].as_u64().unwrap_or(0),
+                    r["rows"].as_u64().unwrap_or(0)
+                ))
+            } else {
+                Ok(terminal_failure(&r, "resize"))
+            }
+        }
+        "status" => {
+            let v = match require_id(params, "status") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_status(&v);
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok(render_status(&r))
+            } else {
+                Ok(terminal_failure(&r, "status"))
+            }
+        }
+        "kill" => {
+            let v = match require_id(params, "kill") {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let r = terminal_kill(&v).await;
+            if r["ok"].as_bool().unwrap_or(false) {
+                ok("会话已终止（进程确认停止，注册表已移除）".to_string())
+            } else {
+                Ok(terminal_failure(&r, "kill"))
+            }
+        }
+        "list" => ok(render_list(&terminal_list())),
+        "shells" => ok(render_shells(&terminal_shells())),
+        other => {
+            let known = TERMINAL_TOOL_ACTIONS.join("|");
+            return err(
+                format!("terminal 不支持 action={other}；支持：{known}"),
+                "UNSUPPORTED_ACTION",
+            );
+        }
+    };
+    outcome
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn args(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// 工具面与界面面**同源**的自证：本节的每个 action 都必须命中一个既有的
+    /// `sandbox.terminal.*` 处理函数，且这些处理函数都已在 `gateway/methods.rs`
+    /// 的派发表里注册（工具不得私自开出第二套终端语义）。
+    #[test]
+    fn every_terminal_action_maps_to_an_existing_rpc_handler() {
+        let source = include_str!("terminal.rs");
+        for handler in [
+            "terminal_spawn_for_session",
+            "terminal_input",
+            "terminal_key",
+            "terminal_resize",
+            "terminal_read",
+            "terminal_status",
+            "terminal_kill",
+            "terminal_list",
+            "terminal_shells",
+        ] {
+            assert!(
+                source.contains(&format!("pub async fn {handler}("))
+                    || source.contains(&format!("pub fn {handler}(")),
+                "terminal 工具依赖的既有 RPC 处理函数 {handler} 不见了"
+            );
+        }
+        // 工具本体确实调用了这些处理器，而不是另写一套执行逻辑。
+        for call in [
+            "terminal_spawn_for_session(&params, Some(session.as_str()))",
+            "terminal_input(&v)",
+            "terminal_key(&v)",
+            "terminal_resize(&v)",
+            "terminal_read(&v)",
+            "terminal_status(&v)",
+            "terminal_kill(&v)",
+            "terminal_list()",
+            "terminal_shells()",
+        ] {
+            assert!(source.contains(call), "工具未复用既有处理函数：{call}");
+        }
+        // 且这些动作名与 TERMINAL_TOOL_ACTIONS 一一对应（多一个/少一个都判红）。
+        assert_eq!(
+            TERMINAL_TOOL_ACTIONS,
+            &[
+                "spawn",
+                "input",
+                "key",
+                "read",
+                "resize",
+                "status",
+                "kill",
+                "list",
+                "shells"
+            ]
+        );
+    }
+
+    /// 前置不满足必须是**结构化失败**，而不是伪造成功（R-10）。
+    ///
+    /// 用一个绝不存在的 shell id 触发：既有处理器会回
+    /// `{ok:false, code:"TERMINAL_SPAWN_FAILED"}`，工具必须原样转成 ToolResult::Error。
+    #[tokio::test]
+    async fn missing_shell_prerequisite_returns_structured_unavailable() {
+        let tool = terminal_tool();
+        let dir = std::env::temp_dir().join(format!("mgt_tool_absent_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = tool
+            .execute(&args(&[
+                ("action", "spawn"),
+                ("root", dir.to_string_lossy().as_ref()),
+                ("cwd", dir.to_string_lossy().as_ref()),
+                ("shell", "definitely-not-installed-shell-xyz"),
+            ]))
+            .await
+            .expect("execute 本身不应 panic");
+        match out {
+            ToolResult::Error { message, code } => {
+                assert_eq!(code, "TERMINAL_SPAWN_FAILED", "应带上处理器的原始码：{code}");
+                assert!(message.contains("未执行"), "文案要如实说明没执行：{message}");
+            }
+            other => panic!("缺失前置必须判失败，实际 {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unknown_action_is_a_structured_error_not_a_fake_success() {
+        let tool = terminal_tool();
+        let out = tool
+            .execute(&args(&[("action", "teleport")]))
+            .await
+            .unwrap();
+        match out {
+            ToolResult::Error { code, message } => {
+                assert_eq!(code, "UNSUPPORTED_ACTION");
+                assert!(message.contains("spawn|input|key|read"), "{message}");
+            }
+            other => panic!("未知 action 必须判失败：{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_without_terminal_id_is_rejected_before_touching_the_registry() {
+        let tool = terminal_tool();
+        for action in ["input", "key", "read", "kill"] {
+            let out = tool.execute(&args(&[("action", action)])).await.unwrap();
+            match out {
+                ToolResult::Error { code, message } => {
+                    assert_eq!(code, "INVALID_PARAMS", "{action} 缺 id 应为参数错");
+                    assert!(message.contains("terminal_id"), "{message}");
+                }
+                other => panic!("{action} 缺 terminal_id 却回了 {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tool_param_mapping_follows_the_rpc_contract() {
+        // 数字入参转不动时**不写入**，让处理器的既有默认值生效（不塞 0）。
+        let p = tool_params(&args(&[
+            ("terminal_id", "term_1"),
+            ("cols", "abc"),
+            ("rows", "40"),
+            ("data", "echo hi"),
+        ]));
+        assert_eq!(p["terminalId"], "term_1", "terminal_id 必须映射成 RPC 的 terminalId");
+        assert!(p.get("cols").is_none(), "非法 cols 不得写入");
+        assert_eq!(p["rows"], 40);
+        assert_eq!(p["data"], "echo hi");
+    }
+
+    #[test]
+    fn read_rendering_labels_truncation_instead_of_silently_dropping() {
+        // 填充字符必须**不出现**在 render_read 的固定文案里：此前用 'x'，
+        // 而输出尾部有 `exitCode=` 这个标签本身就含一个 'x'，于是
+        // `text.matches('x').count()` 恒为 MAX+1，断言永远失败。
+        let big = "z".repeat(MAX_TOOL_READ_CHARS + 7);
+        let text = render_read(&json!({
+            "output": big,
+            "running": true,
+            "cursor": 1234,
+            "lost": 0,
+            "exitCode": Value::Null,
+        }));
+        assert!(text.contains("已截断 7 个字符"), "{text}");
+        assert!(text.contains("cursor=1234"), "{text}");
+        assert!(text.matches('z').count() == MAX_TOOL_READ_CHARS, "只能保留上限个字符");
+    }
+
+    /// 真实往返：工具 spawn 一条会话 → input 写一行 echo → read 抓到 stdout。
+    ///
+    /// 断言的是**副作用真的发生**（终端里那条命令真的跑出输出了），不是 `ok:true`。
+    #[tokio::test]
+    async fn terminal_tool_round_trip_captures_real_command_output() {
+        let tool = terminal_tool();
+        let dir = std::env::temp_dir().join(format!("mgt_tool_rt_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let needle = "marguerite-terminal-tool-roundtrip";
+
+        let spawned = tool
+            .execute(&args(&[
+                ("action", "spawn"),
+                ("root", dir.to_string_lossy().as_ref()),
+                ("cwd", dir.to_string_lossy().as_ref()),
+            ]))
+            .await
+            .unwrap();
+        let id = match &spawned {
+            ToolResult::Success { data, .. } => {
+                let id = data
+                    .split("id=")
+                    .nth(1)
+                    .unwrap_or("")
+                    // `render_spawn` 用**全角**分号接下文（`id=…；后续动作…`），
+                    // 只按半角 ';' 切会把中文一起吞进 id，注册表里自然查不到。
+                    .split([';', '；', ' ', '\n'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                assert!(id.starts_with("term_"), "spawn 必须回真实会话 id：{data}");
+                id
+            }
+            ToolResult::Error { message, code } => {
+                // 本机没有可用 shell / PTY 起不来 → 前置缺失，已按结构化错误如实上报。
+                eprintln!("[跳过真 PTY 往返] spawn 判失败 {code}: {message}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+
+        // 等提示符就绪（冷启动 PowerShell 可能十几秒），再写命令。
+        let warm = global()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
+            .expect("spawn 成功的会话必须在注册表里（副作用可核验）");
+        wait_until_ready(&warm, Duration::from_secs(20)).await;
+
+        tool.execute(&args(&[
+            ("action", "input"),
+            ("terminal_id", &id),
+            ("data", &format!("echo {needle}")),
+        ]))
+        .await
+        .unwrap()
+        .assert_success();
+
+        let mut seen = String::new();
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let out = tool
+                .execute(&args(&[("action", "read"), ("terminal_id", &id)]))
+                .await
+                .unwrap();
+            if let ToolResult::Success { data, .. } = out {
+                seen.push_str(&data);
+                if seen.contains(needle) {
+                    break;
+                }
+            } else {
+                panic!("read 应成功");
+            }
+        }
+        assert!(
+            seen.contains(needle),
+            "工具读到的输出里必须有那条命令的回显，实际: {seen:?}"
+        );
+
+        tool.execute(&args(&[("action", "kill"), ("terminal_id", &id)]))
+            .await
+            .unwrap()
+            .assert_success();
+        assert!(
+            global()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .is_none(),
+            "kill 后注册表必须真的移除该会话"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn wait_until_ready(session: &TerminalSession, budget: Duration) {
+        let deadline = tokio::time::Instant::now() + budget;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (chunk, alive) = session.read();
+            if !chunk.trim().is_empty() || !alive {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = session.read();
+    }
+
+    trait AssertSuccess {
+        fn assert_success(self);
+    }
+    impl AssertSuccess for ToolResult {
+        fn assert_success(self) {
+            match self {
+                ToolResult::Success { .. } => {}
+                ToolResult::Error { message, code } => {
+                    panic!("预期成功却回了错误 {code}: {message}")
+                }
+                other => panic!("预期成功，实际 {other:?}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

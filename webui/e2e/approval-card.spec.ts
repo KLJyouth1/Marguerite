@@ -171,6 +171,65 @@ test.describe('In-thread approval card (mocked snapshot)', () => {
     await expect(page.getByTestId('approval-card')).toHaveCount(0)
   })
 
+  test('a late authoritative idle snapshot keeps the approved outcome row', async ({ page }) => {
+    let resolved = false
+    await mockApprovalsRoute(page, () => (resolved ? [] : [execApproval]))
+    await page.route('**/api/approvals/resolve', async route => {
+      resolved = true
+      await route.fulfill({ json: { resolved: true, approved: true } })
+    })
+    // Hold the session bootstrap responses back so the decision always lands
+    // before the authoritative idle snapshot — the same window a loaded gateway
+    // opens for real users. Chrome's network throttling does not touch
+    // WebSocket frames, so the delay is applied on the socket itself. 2s stays
+    // inside SESSION_SNAPSHOT_BUDGET_MS (3s), so the snapshot is late, not lost.
+    const bootstrapRequestIds = new Set<string>()
+    await page.routeWebSocket(url => url.pathname === '/ws', ws => {
+      const server = ws.connectToServer()
+      ws.onMessage(message => {
+        try {
+          const frame = JSON.parse(String(message)) as { id?: unknown; method?: unknown }
+          if (
+            frame?.method === 'sessions.messages.subscribe'
+            || frame?.method === 'sessions.messages.snapshot'
+          ) {
+            bootstrapRequestIds.add(String(frame.id))
+          }
+        } catch {
+          // Non-JSON frame: forward untouched.
+        }
+        server.send(message)
+      })
+      server.onMessage(message => {
+        let id = ''
+        try {
+          id = String((JSON.parse(String(message)) as { id?: unknown })?.id ?? '')
+        } catch {
+          // Non-JSON frame: forward untouched.
+        }
+        if (id && bootstrapRequestIds.delete(id)) {
+          setTimeout(() => void ws.send(message), 2000)
+          return
+        }
+        void ws.send(message)
+      })
+    })
+    await openMockedChat(page)
+
+    const card = page.getByTestId('approval-card')
+    await expect(card).toBeVisible({ timeout: 20000 })
+    await card.getByRole('button', { name: 'Allow once' }).click()
+
+    const outcome = page.getByTestId('approval-outcome')
+    await expect(outcome).toContainText('Approved. Run resumed')
+    // The bootstrap settles after this point; the stale-tail reset it performs
+    // must re-append the interrupt record instead of wiping the only content
+    // in the thread (which drops the page back to "No messages yet").
+    await page.waitForTimeout(4000)
+    await expect(page.getByTestId('approval-outcome')).toContainText('Approved. Run resumed')
+    await expect(page.getByTestId('approval-card')).toHaveCount(0)
+  })
+
   test('Deny sends approved=false exactly once and does not create another agent turn', async ({ page }) => {
     let resolved = false
     let resolveCalls = 0

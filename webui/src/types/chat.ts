@@ -275,6 +275,8 @@ export interface RawToolCallPayload extends Record<string, unknown> {
   is_error?: boolean
   isError?: boolean
   error?: unknown
+  /** 权威成败信号（Rust 网关按落盘的 `tool_ok` 下发；缺省 = 未知）。 */
+  ok?: boolean
   execution_status?: { status?: string }
   groupId?: string
   group_id?: string

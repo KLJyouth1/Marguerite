@@ -1578,6 +1578,28 @@ describe('useChatHistory canonical pagination', () => {
     }
   })
 
+  it('logs a real history failure but stays quiet for aborts', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { api, rpc } = makeHistory(false)
+      rpc.call.mockRejectedValueOnce(new Error('offline'))
+      await api.loadHistory()
+      expect(warn).toHaveBeenCalledWith(
+        '[useChatHistory] chat.history failed',
+        expect.objectContaining({ phase: 'initial', current: true, error: 'offline' }),
+      )
+
+      warn.mockClear()
+      const abort = new Error('aborted')
+      abort.name = 'AbortError'
+      rpc.call.mockRejectedValueOnce(abort)
+      await api.loadHistory()
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('keeps the new session loading when a stale request fails first', async () => {
     const sessionKey = ref('agent:main:webchat:old')
     let rejectOld!: (reason: Error) => void

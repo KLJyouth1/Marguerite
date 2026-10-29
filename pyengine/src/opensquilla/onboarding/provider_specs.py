@@ -25,6 +25,9 @@ class ProviderSetupField:
     default: str | bool | None = None
     description: str = ""
     secret: bool = False
+    # ``select`` fields need their option list on the wire; the console renders
+    # ``field.choices`` and has no other way to know the allowed values.
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -314,6 +317,24 @@ def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
                 "(e.g. http://127.0.0.1:7890)."
             ),
         ),
+        *(
+            (
+                ProviderSetupField(
+                    name="wire_api",
+                    label="Protocol",
+                    field_type="select",
+                    required=False,
+                    default="chat",
+                    description=(
+                        "chat = /v1/chat/completions (most endpoints). "
+                        "responses = /v1/responses (OpenAI Responses API only)."
+                    ),
+                    choices=("chat", "responses"),
+                ),
+            )
+            if spec.provider_id == "custom"
+            else ()
+        ),
     )
 
 
@@ -449,6 +470,7 @@ def _provider_entry_payload(s: ProviderSetupSpec) -> dict[str, Any]:
                 "default": f.default,
                 "description": f.description,
                 "secret": f.secret,
+                "choices": list(f.choices),
             }
             for f in s.fields
         ],

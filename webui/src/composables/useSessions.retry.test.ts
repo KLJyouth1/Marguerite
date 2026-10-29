@@ -8,7 +8,7 @@ vi.mock('@/stores/rpc', () => ({
   useRpcStore: () => ({ call: rpcCall, waitForConnection }),
 }))
 
-import { useSessions, SESSION_LIST_MISSING_TOLERANCE, SESSION_LIST_RETRY_DELAYS_MS, itemKey } from './useSessions'
+import { useSessions, SESSION_LIST_MISSING_TOLERANCE, SESSION_LIST_RETRY_DELAYS_MS, itemKey, timestampValue } from './useSessions'
 
 // A first `sessions.list` read can fail while the gateway is still warming up
 // (cold start after an install). The sidebar must heal itself instead of
@@ -181,5 +181,74 @@ describe('useSessions — merge (not wholesale replace) on refresh', () => {
       'ghost',
       'event=sessions.changed',
     )
+  })
+})
+
+// 侧栏曾出现同一会话重复多行（实测：标题重复的「只回复两个字：收到」×2、「收到」×3）。
+// 来源是两个引擎/分页合并后的 `sessions.list` 自身带重复 key —— 前端只要原样渲染
+// 就会重复，且 :key 冲突让 Vue 复用错行。响应内部的重复必须在这里收敛。
+describe('useSessions — duplicates inside one sessions.list response', () => {
+  beforeEach(() => {
+    rpcCall.mockReset()
+    waitForConnection.mockClear()
+  })
+
+  function mountSessions() {
+    const scope = effectScope()
+    const api = scope.run(() => useSessions())
+    if (!api) throw new Error('useSessions did not run inside the scope')
+    return { scope, api }
+  }
+
+  it('collapses duplicate keys, keeping the last authoritative row', async () => {
+    rpcCall.mockResolvedValueOnce({
+      sessions: [
+        { key: 'a', title: 'A first' },
+        { key: 'b', title: 'B' },
+        { key: 'a', title: 'A second' },
+      ],
+    })
+    const { api } = mountSessions()
+
+    await api.loadSessions()
+
+    expect(api.sessionsList.value.map(itemKey)).toEqual(['a', 'b'])
+    const a = api.sessionsList.value.find(entry => itemKey(entry) === 'a')
+    expect((a as { title?: string }).title).toBe('A second')
+    expect(api.allSessions.value).toHaveLength(2)
+  })
+})
+
+// 时间戳字段曾经只认毫秒整数：桥接层给 RFC3339 字符串时 `Number('2026-…')` 是
+// NaN → 静默落到 0，会话在侧栏排到最后并显示成 1970。两种形态都必须归一成毫秒。
+describe('useSessions — timestamp normalization', () => {
+  beforeEach(() => {
+    rpcCall.mockReset()
+    waitForConnection.mockClear()
+  })
+
+  it('accepts milliseconds, numeric strings and RFC3339 alike', () => {
+    expect(timestampValue(1_700_000_000_000)).toBe(1_700_000_000_000)
+    expect(timestampValue('1700000000000')).toBe(1_700_000_000_000)
+    expect(timestampValue('2026-01-02T03:04:05Z')).toBe(Date.parse('2026-01-02T03:04:05Z'))
+    expect(timestampValue('')).toBeNull()
+    expect(timestampValue(null)).toBeNull()
+    expect(timestampValue('not-a-date')).toBeNull()
+  })
+
+  it('sorts sessions by an RFC3339 updated_at instead of collapsing to 0', async () => {
+    rpcCall.mockResolvedValueOnce({
+      sessions: [
+        { key: 'old', title: 'Old', updated_at: '2026-01-01T00:00:00Z' },
+        { key: 'new', title: 'New', updated_at: '2026-01-02T00:00:00Z' },
+      ],
+    })
+    const scope = effectScope()
+    const api = scope.run(() => useSessions())
+    if (!api) throw new Error('useSessions did not run inside the scope')
+
+    await api.loadSessions()
+
+    expect(api.allSessions.value.map(item => item.key)).toEqual(['new', 'old'])
   })
 })

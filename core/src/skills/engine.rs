@@ -132,16 +132,16 @@ impl SkillEngine {
     ) -> Self {
         // KV-cache 极简实践：每个引擎实例持有独立缓存（不污染其他实例 / 测试），
         // 已配密钥时挂载到 LLM 客户端 → 技能执行走精确前缀命中，省去重复预填充。
-        // W-7b：缓存默认从 `~/.marguerite/prefix_cache.json` 加载冷上下文（落盘复用），
+        // W-7b：缓存默认从 `<data_dir>/llm-prefix-cache.json` 加载冷上下文（落盘复用），
         // 加载失败静默回退内存缓存，不致命。
+        // 路径必须与网关写入口（`gateway::chat::gateway_prefix_cache`）一致，否则技能
+        // 执行命中率统计不到网关的真实缓存，隔离环境还会穿透到真实 `~/.marguerite`。
         let skills_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".marguerite")
             .join("skills");
-        let cache_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".marguerite")
-            .join("prefix_cache.json");
+        let cache_path = crate::persistence::config::Config::data_dir()
+            .join("llm-prefix-cache.json");
         let llm = if config.model.api_key.trim().is_empty() {
             None
         } else {

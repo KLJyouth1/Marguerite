@@ -333,7 +333,7 @@ describe('UpdateBanner live update polling', () => {
     const { el } = await mountBanner()
 
     expect(el.querySelector('.update-banner__link')?.getAttribute('href')).toBe(
-      'https://github.com/Marguerite/Marguerite/releases',
+      'https://github.com/KLJyouth1/Marguerite-Releases/releases/latest',
     )
   })
 

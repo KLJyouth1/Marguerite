@@ -1,51 +1,63 @@
 <template>
-  <!-- S5 host-exit evidence card.
+  <!-- S5 host-exit evidence banner.
 
-       Skeleton choice: `ErrorState.vue`, NOT `.msg-error-card`. The latter looks
-       like a better fit but its styles live in a `<style scoped>` block inside
-       `SystemMessage.vue`, so those class names are unreachable from any other
-       component — reusing them would have produced an unstyled card with
-       confident-looking class names. `ErrorState` is a real component with its
-       own styles and a `message + retry` contract, which is exactly the shape
-       needed here.
+       形态：**内容区顶部的细横幅**，不是右下角常驻大卡片。
+       真机事故（2026-10-28 视觉审计 18 张截图全部中招）：旧实现用 `ErrorState`
+       的居中卡片（padding sp-6 + 重试按钮）钉在右下角，实际尺寸 ~400×180，
+       压住缓存面板最后一行、工具页「校验全部」按钮和桌宠。错误指示器不该
+       遮挡主内容，也不该用大色块占据阅读区。
 
-       Deliberate omission: `stderr_tail` NEVER appears in the headline. It can
-       contain file paths, URLs and usernames, so it is confined to a collapsed
-       <details> block. This mirrors the discipline in
-       `core/src/model/error_taxonomy.rs`. -->
-  <div v-if="visible" class="host-exit">
-    <ErrorState :message="heading" :on-retry="onRetry" />
+       现在的形状：单行标题 + [详情]（默认折叠，展开才出现退出码/stderr）+
+       [关闭]（本次运行内不再打扰）。`stderr_tail` 仍然绝不进标题行——它可能
+       含路径/URL/用户名（与 `core/src/model/error_taxonomy.rs` 同一纪律）。 -->
+  <div v-if="visible" class="host-exit" role="status" data-testid="host-exit-banner">
+    <span class="host-exit__icon" aria-hidden="true"><Icon name="info" :size="14" /></span>
+    <p class="host-exit__text">{{ bannerText }}</p>
+    <button
+      v-if="hasDetails"
+      type="button"
+      class="host-exit__action"
+      :aria-expanded="detailsOpen"
+      data-testid="host-exit-details"
+      @click="detailsOpen = !detailsOpen"
+    >{{ detailsOpen ? t('chat.hostExit.hideDetails') : t('chat.hostExit.details') }}</button>
+    <button
+      v-if="canRestart"
+      type="button"
+      class="host-exit__action host-exit__action--restart"
+      :disabled="retrying"
+      data-testid="host-exit-restart"
+      @click="onRetry"
+    >{{ t('chat.hostExit.restart') }}</button>
+    <button
+      type="button"
+      class="host-exit__dismiss"
+      :aria-label="t('chat.hostExit.dismiss')"
+      data-testid="host-exit-dismiss"
+      @click="dismiss"
+    ><Icon name="x" :size="13" /></button>
 
-    <!-- Structured facts. Each row is omitted when its value is unknown rather
-         than rendered as a placeholder that implies we looked and found
-         nothing — "exit code unknown" and "we have no data" are different
-         claims. -->
-    <dl v-if="facts.length" class="host-exit__facts">
-      <template v-for="fact in facts" :key="fact.label">
-        <dt class="host-exit__fact-label">{{ fact.label }}</dt>
-        <dd class="host-exit__fact-value">{{ fact.value }}</dd>
-      </template>
-    </dl>
-
-    <!-- stderr tail: collapsed by default and capped for display. The core side
-         already caps at 16KB; this cap is about not dumping a wall of text into
-         the DOM when the user does expand it. -->
-    <details v-if="displayTail" class="host-exit__details">
-      <summary class="host-exit__summary">{{ t('chat.errors.hostExitStderrLabel') }}</summary>
-      <pre class="host-exit__tail">{{ displayTail }}</pre>
-    </details>
+    <div v-if="detailsOpen && hasDetails" class="host-exit__panel">
+      <dl v-if="facts.length" class="host-exit__facts">
+        <template v-for="fact in facts" :key="fact.label">
+          <dt class="host-exit__fact-label">{{ fact.label }}</dt>
+          <dd class="host-exit__fact-value">{{ fact.value }}</dd>
+        </template>
+      </dl>
+      <pre v-if="displayTail" class="host-exit__tail">{{ displayTail }}</pre>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import ErrorState from '@/components/ErrorState.vue'
+import Icon from '@/components/Icon.vue'
 import { useHostExitEvidence } from '@/composables/useHostExitEvidence'
 import { useToasts } from '@/composables/useToasts'
 import { useRpcStore } from '@/stores/rpc'
 import { restartDesktopSidecar } from '@/utils/desktopSidecar'
-import { HOST_EXITED, localizedChatErrorMessage } from '@/utils/chat/errors'
+import { getTauriInvoke } from '@/utils/tauriBridge'
 
 const { t } = useI18n()
 const { pushToast } = useToasts()
@@ -78,12 +90,38 @@ const DISPLAY_TAIL_LIMIT = 2000
 const visible = computed(() =>
   hasEvidence.value
     && !sidecarPresent.value
-    && source.value === 'memory',
+    && source.value === 'memory'
+    && !dismissed.value,
 )
 
-const heading = computed(() =>
-  localizedChatErrorMessage(HOST_EXITED, t('chat.errors.hostExitedGeneric'), errorContext.value),
-)
+/** 本次运行内用户手动关掉后不再打扰（侧车恢复/再次退出会重新武装）。 */
+const dismissed = ref(false)
+const detailsOpen = ref(false)
+
+function dismiss(): void {
+  dismissed.value = true
+}
+
+// 侧车一旦恢复就重新武装关闭状态：下一次真退出仍要能被看见。
+watch(sidecarPresent, (present) => {
+  if (present) {
+    dismissed.value = false
+    detailsOpen.value = false
+  }
+})
+
+/** 细横幅只放一句人话：诊断信息（退出码/stderr）收进「详情」。 */
+const bannerText = computed(() => t('chat.hostExit.bannerTitle'))
+
+/** 有退出码或 stderr 才给「详情」入口，避免出现点了什么都没有的按钮。 */
+const hasDetails = computed(() => facts.value.length > 0 || displayTail.value.length > 0)
+
+/**
+ * 「重启辅助引擎」只在桌面形态出现：浏览器形态没有 Tauri 命令，按钮点了只会弹
+ * 一条「当前形态无法重启」。真机上这个动作确实能救回侧车，因此保留为次按钮
+ * （不是旧卡片里那个主色大按钮）。
+ */
+const canRestart = computed(() => getTauriInvoke() !== null)
 
 const displayTail = computed(() => {
   const raw = stderrTail.value.trim()
@@ -178,7 +216,76 @@ onUnmounted(stopPolling)
 </script>
 
 <style scoped>
+/* 单行细横幅：内容区顶部、可换行但不占大色块。旧实现是右下角 ErrorState 卡片
+   （sp-6 内边距 + 主色重试按钮，实测 ~400×180），18 张截图全部压住主内容。 */
 .host-exit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 8px var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, var(--border));
+  border-radius: var(--radius-sm);
+}
+
+.host-exit__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--warn);
+}
+
+.host-exit__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.host-exit__action,
+.host-exit__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 2px var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.host-exit__action:hover,
+.host-exit__dismiss:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.host-exit__action:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.host-exit__action:focus-visible,
+.host-exit__dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.host-exit__dismiss {
+  padding: 2px;
+}
+
+/* 详情：占满整行，独立成块，展开也不影响横幅的“细”。 */
+.host-exit__panel {
+  flex-basis: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -189,12 +296,12 @@ onUnmounted(stopPolling)
   grid-template-columns: auto 1fr;
   gap: var(--sp-1) var(--sp-3);
   margin: 0;
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-xs);
   text-align: left;
   background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
 }
 
 .host-exit__fact-label {
@@ -208,19 +315,9 @@ onUnmounted(stopPolling)
   color: var(--text);
 }
 
-.host-exit__details {
-  font-size: var(--fs-xs);
-  text-align: left;
-}
-
-.host-exit__summary {
-  cursor: pointer;
-  color: var(--text-muted);
-}
-
 .host-exit__tail {
   max-height: 12rem;
-  margin: var(--sp-2) 0 0;
+  margin: 0;
   padding: var(--sp-2);
   overflow: auto;
   font-family: var(--font-mono);

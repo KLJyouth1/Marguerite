@@ -1134,7 +1134,11 @@ function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall
     const result = tc.result || tc.content || tc.output || ''
     const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     const executionStatus = String(tc.execution_status?.status || '')
-    const isError = !!(tc.is_error || tc.isError || tc.error || ['error', 'timeout', 'cancelled'].includes(executionStatus))
+    const okFlag = typeof tc.ok === 'boolean' ? tc.ok : undefined
+    const isError = !!(
+      tc.is_error || tc.isError || tc.error || okFlag === false
+      || ['error', 'timeout', 'cancelled'].includes(executionStatus)
+    )
     const toolId = String(tc.tool_use_id || tc.toolId || tc.id || `${name}:${index}`)
     let item = byId.get(toolId)
     if (!item) {
@@ -1164,12 +1168,14 @@ function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall
     if (resultStr) {
       item.result = resultStr
       item.resultPreview = truncate(resultStr, 200)
-      item.status = isError ? 'error' : 'success'
     }
     if (tc.sources !== undefined) item.sources = tc.sources
     if (isError) {
       item.isError = true
       item.status = 'error'
+    } else if (resultStr || okFlag === true || executionStatus === 'success') {
+      // 空输出的成功（如静默写入）以前只能按「有没有输出」推断成待定。
+      item.status = 'success'
     }
   })
 

@@ -445,8 +445,27 @@ impl ChainExecutor {
         Box::pin(async move {
             let step = &p.step;
 
-            // 1) 审批门控
-            match self.approval_decision(step) {
+            // 1) 审批门控（P2-3：会话提权可跳过 Confirm，但绝不改写 Deny）
+            let decision = match self.approval_decision(step) {
+                GateDecision::Confirm { reason }
+                    if crate::guard::elevated::global().skips_approval_for(Some(session)) =>
+                {
+                    self.emit(Envelope::new(
+                        crate::events::envelope::EventType::Approval,
+                        serde_json::json!({
+                            "elevated_skip": true,
+                            "tool": step.target,
+                            "session_key": session,
+                            "key": session,
+                            "reason": reason,
+                        }),
+                        session,
+                    ));
+                    GateDecision::Allow
+                }
+                other => other,
+            };
+            match decision {
                 GateDecision::Allow => {}
                 GateDecision::Deny { reason } => {
                     let exec = StepExec::failed(&step.step_id, format!("审批被拒绝: {reason}"), 0);
@@ -465,7 +484,15 @@ impl ChainExecutor {
                         let trust = crate::guard::trust::global()
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        trust.is_trusted(&step.target, self.mode.current().as_str(), session)
+                        // 参数级信任：授予时绑定过参数的条目只对同一参数形态放行，
+                        // 免得"记住这次 rm -rf build/"顺带放行下一步 rm -rf ~/。
+                        let fp = crate::guard::trust::args_fingerprint(&p.params);
+                        trust.is_trusted_for(
+                            &step.target,
+                            self.mode.current().as_str(),
+                            session,
+                            Some(&fp),
+                        )
                     };
                     if let Some(trust_level) = trust_skip {
                         self.emit(Envelope::new(

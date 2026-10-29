@@ -818,7 +818,8 @@ Marguerite capabilities — 能力自检（真实落地状态）
 Marguerite cache — KV 缓存命中率与可缓存比
 
 用法:
-  marguerite cache stats                报告已落盘前缀缓存（prefix_cache.json）的命中率统计
+  marguerite cache stats                报告已落盘前缀缓存（<data_dir>/llm-prefix-cache.json）的命中率统计
+  marguerite cache status               同 stats（兼容习惯拼法）
   marguerite cache ratio [session-id]   计算某会话（默认最近）的稳定前缀可缓存比
   marguerite cache stats --json         以 JSON 输出（便于脚本 / agent 接入）
 
@@ -2647,13 +2648,15 @@ fn goal_handler(args: &Args, _config: &Config) -> Result<()> {
 
 /// cache — KV 缓存命中率与可缓存比
 ///
-/// `marguerite cache stats`：报告已落盘客户端前缀缓存（`~/.marguerite/prefix_cache.json`）
-/// 的命中率统计（查询/命中/未命中/命中率/复用率/前缀复用）。
+/// `marguerite cache stats`：报告网关实际使用的落盘客户端前缀缓存
+/// （`<data_dir>/llm-prefix-cache.json`）的命中率统计（查询/命中/未命中/命中率/复用率/前缀复用）。
 /// `marguerite cache ratio [session-id]`：计算某会话（默认最近）的稳定前缀可缓存比，
 /// 指导把易变数据移出前缀以放大 KV 命中率。
 fn cache_handler(args: &Args, _config: &Config) -> Result<()> {
     match args.sub_args.first().map(String::as_str).unwrap_or("") {
-        "stats" => cache_stats(args),
+        // `status` 是用户最自然的拼法，别名到 `stats`；历史实现在此静默退回帮助、
+        // exit 0，用户以为成功了（深度体验 P1-F1）。
+        "stats" | "status" => cache_stats(args),
         "ratio" => cache_ratio(args),
         _ => {
             print_subcommand_help("cache");
@@ -2663,11 +2666,12 @@ fn cache_handler(args: &Args, _config: &Config) -> Result<()> {
 }
 
 /// `cache stats`：加载落盘前缀缓存并输出命中率统计。
+///
+/// 路径必须与网关写入口一致（`gateway::chat::gateway_prefix_cache` →
+/// `<data_dir>/llm-prefix-cache.json`）。旧实现硬编码 `~/.marguerite/prefix_cache.json`：
+/// 隔离环境（只设 `MARGUERITE_CONFIG_DIR`）仍去读真实用户主目录，报的是另一份文件。
 fn cache_stats(args: &Args) -> Result<()> {
-    let path = std::env::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".marguerite")
-        .join("prefix_cache.json");
+    let path = crate::persistence::config::Config::data_dir().join("llm-prefix-cache.json");
     let cache = crate::cache::PrefixCache::open(&path);
     let s = cache.stats();
     let entries = cache.len();

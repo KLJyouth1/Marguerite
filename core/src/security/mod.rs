@@ -15,6 +15,7 @@ pub mod preflight;
 pub mod scanner_l2;
 pub mod scanner_l3;
 pub mod skill_scan;
+pub mod spotlight;
 pub mod ssrf_guard;
 
 pub use command_guard::CommandGuard;

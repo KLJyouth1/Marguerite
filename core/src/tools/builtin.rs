@@ -138,6 +138,9 @@ pub fn register_builtin_tools_with_roots(
 
     let mut tools: Vec<Box<dyn ToolExecutor>> = vec![
         read_file_tool(ws.clone()),
+        // M1-T3：入口截流砍掉的原文按指纹留底，这里是**真注册**的取回入口
+        // （只此一处；链式执行器不做截流，故不注册到 chain/builtin.rs）。
+        tool_output_retrieve_tool(),
         write_file_tool(ws.clone(), versions.clone()),
         append_file_tool(ws.clone(), versions.clone()),
         list_dir_tool(ws.clone()),
@@ -159,6 +162,16 @@ pub fn register_builtin_tools_with_roots(
         empty_trash_tool(ws.clone()),
         make_dir_tool(ws.clone()),
         shell_exec_tool(ws.clone(), guard.clone()),
+        // P0-1b：真 PTY 交互终端。此前 `terminal` 只被**声明**（tool_catalog 的执行族、
+        // mode/mod.rs:637 的 ExecWrite 分类表都写着它），`register_builtin_tools` 却从未
+        // 注册 —— 模型在提示里读到「有终端」，调用时只会拿到「工具不存在」，于是退回
+        // `shell_exec` 手拼命令，正是「写脚本盲控电脑」的根因之一。
+        // 本工具不新增后端契约：逐动作转调既有 `sandbox.terminal.*` 处理函数。
+        crate::tools::terminal::terminal_tool(),
+        // P0-1b：工作台自身可控的两个面板（产物中心 / 团队看板），同样只包既有
+        // `artifacts.*` 与 `team.members` RPC 处理函数，界面与工具面共用同一份数据。
+        crate::tools::workbench::artifacts_tool(),
+        crate::tools::workbench::team_board_tool(),
         crate::tools::code::code_exec_tool(),
         crate::tools::structured_output::structured_output_tool(),
         web_fetch_tool(ssrf.clone()),

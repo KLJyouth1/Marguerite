@@ -20,6 +20,7 @@ pub mod omni_execution;
 pub mod persona;
 pub mod prefetch;
 pub mod prompt_layout;
+pub mod provider_protocol;
 pub mod routing_contract;
 pub mod registry;
 pub mod router;
@@ -45,7 +46,8 @@ pub use fleet::{
     RoleId, RoleKind,
 };
 pub use llm::{
-    LLMChunk, LLMClient, LLMConfig, LLMProvider, LLMResponse, StreamReceiver, TokenUsage,
+    AnthropicAuth, LLMChunk, LLMClient, LLMConfig, LLMProvider, LLMResponse, StreamReceiver,
+    TokenUsage,
 };
 pub use omni::{OmniCandidateScore, OmniDecision, OmniScorer, OmniWeights, OmniWeightsError, OmniWeightsSource};
 pub use persona::{Moli, PersonaAspect, SourceArchetype};

@@ -55,4 +55,48 @@ describe('run trace tool identity', () => {
       operationKey: 'tool.mcpurlsearch',
     })
   })
+
+  it('reads the gateway-persisted tool_call rows and their outcome signal', () => {
+    const message = {
+      role: 'assistant',
+      tool_calls: [
+        {
+          type: 'tool_call',
+          tool_use_id: 'hist-tool-3',
+          name: 'write_file',
+          input: { path: 'a.txt' },
+          result: '',
+          ok: true,
+          execution_status: { status: 'success' },
+        },
+        {
+          type: 'tool_call',
+          tool_use_id: 'hist-tool-4',
+          name: 'shell',
+          input: '{"cmd":"false"}',
+          result: 'exit 1',
+          ok: false,
+          is_error: true,
+          execution_status: { status: 'error' },
+        },
+        {
+          type: 'tool_call',
+          tool_use_id: 'hist-tool-5',
+          name: 'read_file',
+          input: '{"path":"b.txt"}',
+          result: '',
+        },
+      ],
+    } as ChatHistoryMessage
+
+    const steps = nodeStepsFromHistoryMessage(message)
+    expect(steps.map(step => [step.toolName, step.state])).toEqual([
+      // 空输出的成功有权威 ok 信号 → 不得降级成「未完成」。
+      ['write_file', 'output-available'],
+      ['shell', 'output-error'],
+      // 无信号（旧数据 / 回合中断）→ 保持未知，不猜成功。
+      ['read_file', 'input-streaming'],
+    ])
+    expect(steps[1].isError).toBe(true)
+  })
 })

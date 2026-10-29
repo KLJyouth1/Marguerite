@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::llm::{LLMConfig, LLMProvider};
+use crate::model::llm::LLMConfig;
 use crate::model::tier::{ModelTier, TierCaps};
 
 /// 档案类别
@@ -326,14 +326,10 @@ pub struct ModelProfile {
 impl ModelProfile {
     /// 转 LLMConfig（供 LLMClient 使用）
     pub fn to_llm_config(&self) -> LLMConfig {
-        let provider = match self.provider.as_str() {
-            "openai" => LLMProvider::OpenAI,
-            "deepseek" => LLMProvider::DeepSeek,
-            "anthropic" => LLMProvider::Anthropic,
-            _ => LLMProvider::Custom {
-                base_url: self.base_url.clone(),
-            },
-        };
+        // provider id → 协议走唯一事实源：此前这里只认字面量 "anthropic"，
+        // 于是 `custom_anthropic` 与整族 `*_anthropic` 服务商全部落进 Custom，
+        // 请求打到 /v1/chat/completions 且带错鉴权头（见 provider_protocol 模块）。
+        let provider = crate::model::provider_protocol::provider_for_id(&self.provider, &self.base_url);
         // 上下文窗口必须来自档案自己的声明：此前后端硬编码 64K，
         // 让 1M 窗口的旗舰模型在 ~109K 就被判定「该压缩」，
         // 长任务的关键中间结论被摘要掉 → 越聊越差。
@@ -644,6 +640,7 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::llm::LLMProvider;
 
     /// 名字识别：保守但覆盖真实厂商命名习惯。
     ///

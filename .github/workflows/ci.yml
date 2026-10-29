@@ -86,6 +86,17 @@ jobs:
       - name: README claims vs verify.sh
         run: python3 scripts/check-readme-claims.py
 
+      # The landing page prints 23 hard numbers (code lines, guards, RPC
+      # declarations, test baselines). check-readme-claims.py only compares the
+      # two READMEs against each other, so nothing checked the site at all --
+      # and the first run of this one found six drifted figures, including a
+      # cited directory (`core/src/provider`) that does not exist. The count in
+      # this comment is itself reconciled by the script, so adding a claim here
+      # without updating the docs fails the build.
+      # Exit 2 means "could not measure", which is never treated as a pass.
+      - name: Website claims vs the shipping file set
+        run: python3 scripts/check-website-claims.py
+
   # ---------------------------------------------------------------------------
   # 2. Rust: unit tests, workspace build, clippy at -D warnings.
   # ---------------------------------------------------------------------------
@@ -369,3 +380,41 @@ jobs:
       # right place to import every test module.
       - name: Whole-tree collection check (0 collection errors)
         run: python ../scripts/check-pyengine-collection.py
+
+  # `workbench/` is the fifth entry point: a Python backend with its own version
+  # line (VERSION 1.1.0, independent of the engine's) whose 71 offline tests ship
+  # with the repo but had no CI until now. The README claimed every gate except
+  # the web e2e layer ran in CI; that sentence was false without this job.
+  workbench:
+    name: workbench / backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: workbench
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: workbench/backend/marguerite_workbench/requirements.txt
+
+      # requirements.txt is the sub-project's own declaration (fastapi / uvicorn /
+      # pydantic / pygments / httpx / pytest) — installing it here keeps a single
+      # source of truth instead of a second copy of the package list in CI.
+      - name: Install declared dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r backend/marguerite_workbench/requirements.txt
+
+      # `verify.sh` records a missing prerequisite as [SKIP] and still exits 0
+      # ("skipped != passed", AGENTS.md §8), so prove the layer can run first.
+      - name: Assert the gate layer can actually run
+        run: |
+          python -c "import pytest, fastapi, httpx, pydantic"
+          test -d backend/marguerite_workbench/tests
+
+      # `--workbench` needs no Rust/Node toolchain (verify.sh only demands cargo
+      # for the layers that use it), so this job stays a ~1 minute Python job.
+      - name: Workbench tests + version sync
+        run: bash ../scripts/verify.sh --workbench

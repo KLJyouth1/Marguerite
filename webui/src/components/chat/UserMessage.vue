@@ -292,12 +292,18 @@ function attachmentMeta(attachment: DisplayAttachment): string {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  /* Shared conversation column, defined on .chat — keeps user bubbles in the
-     same column as assistant content at every viewport width. */
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: 0 auto;
+  /* 与 `.msg-ai` 共用同一条阅读列：--chat-col 只作宽度上限，起排在 --chat-gutter
+     （--chat-gutter，桌面 64px / 手机 24px）处，右侧留白吸收多出来的宽度。气泡仍靠右
+     （align-items: flex-end），
+     但靠的是**阅读列的右边界**，不是屏幕中心线 —— 用 `width: var(--chat-col)` +
+     `margin: 0 auto` 会把整列推到屏幕几何中心。 */
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: 0.5rem 0;
-  max-width: calc(100% - 48px);
+  text-align: start;
 }
 
 .msg-user:focus-visible {
@@ -308,8 +314,10 @@ function attachmentMeta(attachment: DisplayAttachment): string {
 
 .msg-user--share-mode {
   cursor: pointer;
-  width: min(calc(100% - 16px), 1012px);
-  max-width: calc(100% - 16px);
+  /* 同 `.msg-ai--share-mode`：勾选态按 --chat-gutter 收留边，配合左起点的
+     margin-inline-start 才不会把行推出容器右边界。 */
+  width: min(calc(100% - var(--chat-gutter, 24px) * 2), 1012px);
+  max-width: calc(100% - var(--chat-gutter, 24px) * 2);
   box-sizing: border-box;
   padding: 0.5rem 2.5rem 0.5rem 1rem;
   border-radius: var(--radius-lg);

@@ -35,6 +35,76 @@ pub struct SessionInfo {
     pub context_window: Option<u32>,
 }
 
+/// `sessions.search` 的单条对话命中。
+#[derive(Debug, Clone)]
+pub struct MessageSearchHit {
+    /// 命中消息所属的会话（前端据此跳转）
+    pub session_id: String,
+    /// 会话标题（摘要）
+    pub title: String,
+    /// 消息角色（user / assistant / system / tool）
+    pub role: String,
+    /// 命中片段（`>>>`/`<<<` 包裹命中处）
+    pub snippet: String,
+    /// 消息时间（毫秒）
+    pub created_at_ms: i64,
+}
+
+/// `LIKE` 模式里的元字符转义（查询里有 `%`/`_` 时不能当通配符）。
+fn like_escape(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// 把命中处截成短片段并用 `>>>`/`<<<` 标记（前端高亮约定）。
+///
+/// 按**字符**而非字节定位：小写化会改变字节长度，用字节下标切片可能落在
+/// 字符边界中间直接 panic。
+fn search_snippet(content: &str, query: &str) -> String {
+    const LEAD: usize = 40;
+    const TAIL: usize = 80;
+    let chars: Vec<char> = content.chars().collect();
+    let hay: Vec<char> = chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let needle: Vec<char> = query
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    let hit = if needle.is_empty() || needle.len() > hay.len() {
+        None
+    } else {
+        hay.windows(needle.len())
+            .position(|window| window == needle.as_slice())
+    };
+    let Some(start) = hit else {
+        let mut plain: String = chars.iter().take(160).collect();
+        if chars.len() > 160 {
+            plain.push('…');
+        }
+        return plain;
+    };
+    let end = (start + needle.len()).min(chars.len());
+    let from = start.saturating_sub(LEAD);
+    let to = (end + TAIL).min(chars.len());
+    let mut out = String::new();
+    if from > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[from..start]);
+    out.push_str(">>>");
+    out.extend(&chars[start..end]);
+    out.push_str("<<<");
+    out.extend(&chars[end..to]);
+    if to < chars.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// 会话快照
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
@@ -156,6 +226,23 @@ impl SessionManager {
         if !has_tool_ok_col {
             db.execute_batch("ALTER TABLE session_messages ADD COLUMN tool_ok INTEGER;")?;
         }
+        // 数据修复（幂等）：旧版本会把「有内容但行先由 touch_session / 空快照
+        // 创建」的会话标题永久留在占位符上（真机库实测 3 个真实 webchat 会话
+        // 顶着 "Empty session"）。运行时回填只在追加消息时触发，这里补一次
+        // 存量修复：标题仍等于占位符时，取首条用户消息（没有则首条真实消息）
+        // 的前 100 字。用户重命名过的标题不等于占位符，不会被覆盖。
+        db.execute(
+            "UPDATE sessions SET summary = COALESCE(
+                (SELECT substr(trim(m.content), 1, 100) FROM session_messages m
+                  WHERE m.session_id = sessions.session_id AND m.role = 'user'
+                    AND trim(m.content) <> '' ORDER BY m.id LIMIT 1),
+                (SELECT substr(trim(m.content), 1, 100) FROM session_messages m
+                  WHERE m.session_id = sessions.session_id AND m.role IN ('user','assistant')
+                    AND trim(m.content) <> '' ORDER BY m.id LIMIT 1),
+                summary)
+             WHERE summary = ?1 AND message_count > 0",
+            rusqlite::params![PLACEHOLDER_SUMMARY],
+        )?;
         self.db = Some(db);
         Ok(())
     }
@@ -449,14 +536,29 @@ impl SessionManager {
 
     /// 列出会话
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionInfo>> {
+        self.query_sessions(Some(limit))
+    }
+
+    /// 列出**全部**会话（新的在前，无上限）。
+    ///
+    /// `sessions.list` 必须**先按 key 契约过滤再截断**：先 `LIMIT` 再过滤会让
+    /// 历史探针残留（真机库 196/325 行是 `ws.*` / `qa*` 这类裸键）挤掉真实
+    /// 会话。截断由调用方负责。
+    pub fn list_all_sessions(&self) -> Result<Vec<SessionInfo>> {
+        self.query_sessions(None)
+    }
+
+    fn query_sessions(&self, limit: Option<usize>) -> Result<Vec<SessionInfo>> {
         let db = self.db()?;
+        // SQLite 的 `LIMIT -1` 表示不限量。
+        let limit_param: i64 = limit.map(|l| l as i64).unwrap_or(-1);
         let mut stmt = db.prepare(
             "SELECT session_id, summary, message_count, state, created_at, updated_at, tokens_used, project_path, reasoning_effort, context_window
              FROM sessions ORDER BY updated_at DESC LIMIT ?1",
         )?;
 
         let results = stmt
-            .query_map(rusqlite::params![limit as i64], |row| {
+            .query_map(rusqlite::params![limit_param], |row| {
                 Ok(SessionInfo {
                     session_id: row.get(0)?,
                     summary: row.get(1)?,
@@ -474,6 +576,67 @@ impl SessionManager {
             .collect();
 
         Ok(results)
+    }
+
+    /// 会话消息的全文子串搜索（`sessions.search` 的对话面）。
+    ///
+    /// 只做 `LIKE` 子串匹配（本仓没有 FTS 索引），按消息 id 倒序取 `limit` 条；
+    /// 工具行的正文在 `tool_input` / `tool_output` 两列（`content` 为空），
+    /// 所以三列都要搜，否则「搜工具输出」永远是空。命中片段用 `>>>`/`<<<` 包裹
+    /// —— 前端 `highlightFtsSnippet` 按该约定高亮。
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<MessageSearchHit>> {
+        let db = self.db()?;
+        let mut stmt = db.prepare(
+            "SELECT m.session_id, m.role, m.content, m.tool_input, m.tool_output, m.timestamp,
+                    COALESCE(s.summary, '')
+             FROM session_messages m
+             LEFT JOIN sessions s ON s.session_id = m.session_id
+             WHERE m.content LIKE ?1 ESCAPE '\\'
+                OR m.tool_input LIKE ?1 ESCAPE '\\'
+                OR m.tool_output LIKE ?1 ESCAPE '\\'
+             ORDER BY m.id DESC LIMIT ?2",
+        )?;
+        let pattern = format!("%{}%", like_escape(query));
+        let rows = stmt
+            .query_map(
+                rusqlite::params![pattern, limit.clamp(1, 50) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )?
+            .filter_map(|r| r.ok())
+            .map(
+                |(session_id, role, content, tool_input, tool_output, timestamp, title)| {
+                    let mut snippet = search_snippet(&content, query);
+                    for field in [tool_input.as_deref(), tool_output.as_deref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if !snippet.contains(">>>") {
+                            snippet = search_snippet(field, query);
+                        }
+                    }
+                    MessageSearchHit {
+                        created_at_ms: chrono::DateTime::parse_from_rfc3339(&timestamp)
+                            .map(|d| d.timestamp_millis())
+                            .unwrap_or(0),
+                        snippet,
+                        session_id,
+                        role,
+                        title,
+                    }
+                },
+            )
+            .collect();
+        Ok(rows)
     }
 
     /// 删除会话
@@ -701,13 +864,21 @@ impl SessionManager {
              VALUES (?1, ?2, 'idle', 0, 0, ?3, ?3)",
             rusqlite::params![
                 session_id,
-                summary_seed.unwrap_or("Empty session"),
+                summary_seed.unwrap_or(PLACEHOLDER_SUMMARY),
                 now
             ],
         )?;
         // 行已存在时 INSERT OR IGNORE 不生效（inserted==0）→ 既有 summary 保持不变
         // （尊重用户重命名）；两分支的计数/时间刷新相同，合并为一条 UPDATE。
+        //
+        // 但「占位标题」不是用户选择：会话行可能先由 `touch_session` /
+        // `sessions.create` 的空快照 / 工具行创建（'Empty session'），随后才有
+        // 真实消息。不回填的话，这些有内容的会话永远顶着一个空标题（真机 DB
+        // 实测有带完整回复的 `agent:main:webchat:*` 会话仍叫 "Empty session"，
+        // 侧栏看上去像重复的空行）。回填只在标题**仍是占位符**时发生，用户
+        // 重命名过的会话不受影响。
         let _ = inserted;
+        backfill_placeholder_summary(&tx, session_id, role, content, summary_seed)?;
         tx.execute(
             "INSERT INTO session_messages (session_id, role, content, thinking, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -857,6 +1028,29 @@ impl SessionManager {
             .collect();
 
         Ok(messages)
+    }
+
+    /// 按行序返回工具成败标记（非工具行 = `None`），与 [`Self::restore_session`]
+    /// 的 `ORDER BY id` 同序。
+    ///
+    /// `tool_ok` 一直随工具行落盘（[`Self::append_tool_message`]），但读取链
+    /// 此前没把它带上，于是 `chat.history` 的历史工具卡只能按「有没有输出」
+    /// 推断成败 —— **刷新后失败的工具一律显示成成功**。NULL 是旧数据或回合
+    /// 被中断（无信号），调用方必须按「未知」呈现，不得臆测。
+    pub fn tool_outcome_flags(&self, session_id: &str) -> Result<Vec<Option<bool>>> {
+        let db = self.db()?;
+        let mut stmt = db.prepare(
+            "SELECT role, tool_ok FROM session_messages WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let flags = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                let role: String = row.get(0)?;
+                let ok: Option<i64> = row.get(1)?;
+                Ok(if role == "tool" { ok.map(|v| v != 0) } else { None })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(flags)
     }
 
     /// 生成会话摘要（基于消息内容）
@@ -1056,9 +1250,39 @@ fn normalize_projects(projects: &[String]) -> Vec<String> {
     out
 }
 
+/// 空会话占位标题（`append_message_with` / `touch_session` / 空快照 / 工具行共用）。
+const PLACEHOLDER_SUMMARY: &str = "Empty session";
+
+/// 把仍是占位标题的会话补成真实标题：用户消息用调用方给的种子（前 100 字），
+/// 没有种子时只在首条真实消息是 assistant 的情况下用正文兜底（与
+/// [`SessionManager::generate_summary`]「没有用户消息就取第一条」口径一致）。
+/// 标题已被重命名过（不等于占位符）时**绝不覆盖**。
+fn backfill_placeholder_summary(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    summary_seed: Option<&str>,
+) -> Result<()> {
+    let seed = summary_seed.map(str::trim).filter(|s| !s.is_empty());
+    let title = match seed {
+        Some(s) => s.chars().take(100).collect::<String>(),
+        None if role == "assistant" && !content.trim().is_empty() => content
+            .trim()
+            .chars()
+            .take(100)
+            .collect::<String>(),
+        None => return Ok(()),
+    };
+    tx.execute(
+        "UPDATE sessions SET summary = ?1 WHERE session_id = ?2 AND summary = ?3",
+        rusqlite::params![title, session_id, PLACEHOLDER_SUMMARY],
+    )?;
+    Ok(())
+}
+
 /// 按字符（不是字节）截断，避免切断多字节字符导致乱码。
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+fn truncate_chars(text: &str, max_chars: usize) -> String {    if text.chars().count() <= max_chars {
         return text.to_string();
     }
     let mut out: String = text.chars().take(max_chars).collect();
@@ -1117,8 +1341,17 @@ mod tests {
     use crate::types::Message;
     use chrono::Utc;
 
+    /// 每个用例独占目录：固定 tag 目录会跨**运行**残留 —— Windows 下用例结束时
+    /// manager 仍持有 sessions.db，收尾的 `remove_dir_all` 静默失败，下一轮就把
+    /// 上一轮的数据当成自己的初始状态（实测 `touch_session` 之后读到旧标题）。
     fn setup_manager(name: &str) -> (SessionManager, PathBuf) {
-        let tmp_dir = std::env::temp_dir().join(format!("marguerite_test_{}", name));
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "marguerite_test_{}_{}_{}",
+            name,
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let db_path = tmp_dir.join("sessions.db");
         let mut manager = SessionManager::new(&db_path);
@@ -1314,6 +1547,136 @@ mod tests {
 
         let info = manager.get_session("session-1").unwrap().unwrap();
         assert_eq!(info.summary, "Empty session");
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+
+    // 占位标题回填：行可能先由 touch_session / 空快照 / 工具行创建
+    // （'Empty session'），真实消息到达时必须自愈，否则侧栏里全是
+    // 带完整内容的空标题会话（真机 DB 实测存在）。
+    #[test]
+    fn test_append_message_backfills_placeholder_summary_with_seed() {
+        let (manager, tmp_dir) = setup_manager("ss_backfill_seed");
+        let now = Utc::now().to_rfc3339();
+
+        manager.touch_session("session-1").unwrap();
+        let info = manager.get_session("session-1").unwrap().unwrap();
+        assert_eq!(info.summary, "Empty session");
+
+        manager
+            .append_message(
+                "session-1",
+                "user",
+                "配置一下本地模型",
+                &now,
+                Some("配置一下本地模型"),
+            )
+            .unwrap();
+
+        let info = manager.get_session("session-1").unwrap().unwrap();
+        assert_eq!(info.summary, "配置一下本地模型");
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+
+    #[test]
+    fn test_append_message_backfills_placeholder_summary_from_assistant() {
+        let (manager, tmp_dir) = setup_manager("ss_backfill_assistant");
+        let now = Utc::now().to_rfc3339();
+
+        manager.touch_session("session-1").unwrap();
+        manager
+            .append_message(
+                "session-1",
+                "assistant",
+                "已为你启用本地模型路由。",
+                &now,
+                None,
+            )
+            .unwrap();
+
+        let info = manager.get_session("session-1").unwrap().unwrap();
+        assert_eq!(info.summary, "已为你启用本地模型路由。");
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+
+    #[test]
+    fn test_append_message_keeps_renamed_summary() {
+        let (manager, tmp_dir) = setup_manager("ss_backfill_rename");
+        let now = Utc::now().to_rfc3339();
+
+        manager.touch_session("session-1").unwrap();
+        manager
+            .update_summary("session-1", Some("用户自定义标题"))
+            .unwrap();
+        manager
+            .append_message("session-1", "user", "随便聊聊", &now, Some("随便聊聊"))
+            .unwrap();
+
+        let info = manager.get_session("session-1").unwrap().unwrap();
+        assert_eq!(info.summary, "用户自定义标题");
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
+    }
+
+    /// 存量修复：init 必须把「有内容但仍是占位标题」的旧数据补成真实标题，
+    /// 且**只**动占位符（用户重命名过的标题不受影响）。
+    #[test]
+    fn init_repairs_legacy_placeholder_titles_but_not_renames() {
+        let (mut manager, tmp_dir) = setup_manager("ss_title_repair");
+        let now = Utc::now().to_rfc3339();
+
+        manager
+            .append_message("session-1", "user", "帮我看看部署日志", &now, Some("帮我看看部署日志"))
+            .unwrap();
+        manager
+            .append_message("session-2", "assistant", "已检查完成", &now, None)
+            .unwrap();
+        manager.touch_session("session-3").unwrap();
+        // `update_summary` 只 UPDATE 已存在的行（不建行），所以重命名必须发生在
+        // 行创建之后；随后再追加一条消息，验证重命名不会被回填覆盖。
+        manager
+            .append_message("session-4", "user", "随便聊聊", &now, Some("随便聊聊"))
+            .unwrap();
+        manager
+            .update_summary("session-4", Some("用户自定义标题"))
+            .unwrap();
+        manager
+            .append_message("session-4", "user", "再聊一句", &now, Some("再聊一句"))
+            .unwrap();
+        manager
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET summary = 'Empty session' WHERE session_id = 'session-1'",
+                [],
+            )
+            .unwrap();
+
+        // init 常驻在每次 sessions.list 打开 manager 时执行，必须幂等。
+        manager.init().unwrap();
+        manager.init().unwrap();
+
+        assert_eq!(
+            manager.get_session("session-1").unwrap().unwrap().summary,
+            "帮我看看部署日志"
+        );
+        assert_eq!(
+            manager.get_session("session-2").unwrap().unwrap().summary,
+            "已检查完成",
+            "没有用户消息时用首条真实消息兜底"
+        );
+        assert_eq!(
+            manager.get_session("session-3").unwrap().unwrap().summary,
+            "Empty session",
+            "零消息会话保持占位符（不会凭空造标题）"
+        );
+        assert_eq!(
+            manager.get_session("session-4").unwrap().unwrap().summary,
+            "用户自定义标题",
+            "用户重命名过的不受影响"
+        );
 
         std::fs::remove_dir_all(&tmp_dir).unwrap_or(());
     }
@@ -1633,5 +1996,77 @@ mod append_only_tests {
             other => panic!("应为 tool：{other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.search` 的对话面：必须真的扫到消息正文，并把命中处标出来。
+    #[test]
+    fn search_messages_finds_content_and_marks_the_hit() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        let now = Utc::now();
+        mgr.save_snapshot(
+            "s-search",
+            "idle",
+            &[
+                Message::User {
+                    content: "帮我排查部署失败的原因".into(),
+                    timestamp: now,
+                },
+                Message::Assistant {
+                    content: "日志里显示端口被占用".into(),
+                    timestamp: now,
+                    thinking: None,
+                },
+            ],
+            0,
+        )
+        .unwrap();
+
+        let hits = mgr.search_messages("端口", 10).unwrap();
+        assert_eq!(hits.len(), 1, "应命中助手消息：{hits:?}");
+        assert_eq!(hits[0].session_id, "s-search");
+        assert_eq!(hits[0].role, "assistant");
+        assert!(hits[0].snippet.contains(">>>端口<<<"), "命中处必须可高亮：{}", hits[0].snippet);
+        assert!(hits[0].created_at_ms > 0);
+
+        // LIKE 元字符按字面匹配：`%` 不能变成通配符扫出全部消息
+        assert!(mgr.search_messages("%", 10).unwrap().is_empty());
+        // 空结果不 panic
+        assert!(mgr.search_messages("不存在的词", 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_messages_scans_tool_output_columns() {
+        let (mut mgr, dir) = temp_db();
+        mgr.init().unwrap();
+        mgr.append_tool_message(
+            "s-tool",
+            "shell_exec",
+            "ls",
+            "ENOENT: no such file",
+            None,
+            None,
+            "2026-10-24T10:00:01Z",
+        )
+        .unwrap();
+        let hits = mgr.search_messages("ENOENT", 10).unwrap();
+        assert_eq!(hits.len(), 1, "工具输出必须可被搜到：{hits:?}");
+        assert_eq!(hits[0].role, "tool");
+        assert!(hits[0].snippet.contains(">>>ENOENT<<<"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_snippet_is_char_safe_and_marks_the_match() {
+        let long = format!("{}{}{}", "前".repeat(100), "命中的词", "后".repeat(100));
+        let snippet = search_snippet(&long, "命中的词");
+        assert!(snippet.contains(">>>命中的词<<<"));
+        assert!(snippet.starts_with('…'), "左侧被截断应有省略号：{snippet}");
+        assert!(snippet.ends_with('…'), "右侧被截断应有省略号：{snippet}");
+        // 大小写不敏感，但标记区间必须来自原文
+        assert_eq!(search_snippet("The Deployment Failed", "deployment"), "The >>>Deployment<<< Failed");
+        // 未命中时退化为纯前缀，绝不 panic
+        assert_eq!(search_snippet("短文本", "缺"), "短文本");
     }
 }

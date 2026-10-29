@@ -194,11 +194,13 @@
               :plan-mode-busy="planModeBusy === true"
               :plan-mode-disabled="planModeDisabled === true"
               :plan-mode-applies-next-turn="planModeAppliesNextTurn === true"
+              :approval-bypass="approvalBypass === true"
               :model-routing-mode="modelRoutingMode"
               :model-routing-settings-busy="modelRoutingSettingsBusy"
               :show-new-badge="showRouterNewBadge"
               @set-run-mode="emit('setRunMode', $event)"
               @set-collaboration-mode="emit('setCollaborationMode', $event)"
+              @set-approval-bypass="emit('setApprovalBypass', $event)"
               @set-model-routing-mode="emit('setModelRoutingMode', $event)"
             />
 <ChatEffortSlider
@@ -371,6 +373,7 @@
               </div>
             </div>
           </div>
+          <ChatContextMeter :status="contextStatus ?? null" />
           <div class="chat-input-actions chat-input-actions--right">
             <Transition name="composer-ctl" mode="out-in">
               <button
@@ -463,6 +466,8 @@ import {
   type ContextRefItem,
 } from '@/composables/chat/contextRefs'
 import RunModePanel from '@/components/chat/RunModePanel.vue'
+import ChatContextMeter from '@/components/chat/ChatContextMeter.vue'
+import type { ContextStatus } from '@/composables/chat/useChatUsageWidget'
 import ProjectWorkspacePickerDialog from '@/components/ProjectWorkspacePickerDialog.vue'
 import {
   EXPERT_TEAMS,
@@ -535,6 +540,10 @@ const props = withDefaults(defineProps<{
   planModeBusy?: boolean
   planModeDisabled?: boolean
   planModeAppliesNextTurn?: boolean
+  /** P2-3：当前会话是否已开启审批旁路（会话级提权，见 RunModePanel）。 */
+  approvalBypass?: boolean
+  /** M1 T5：网关 `usage.status` 的 contextStatus；null/缺失时脚注整块不渲染。 */
+  contextStatus?: ContextStatus | null
   replanActive?: boolean
   promptCacheKeepaliveAvailable?: boolean
   promptCacheKeepaliveSessionReady?: boolean
@@ -578,6 +587,7 @@ const emit = defineEmits<{
   setEffort: [level: EffortLevel]
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
+  setApprovalBypass: [enabled: boolean]
   cancelReplan: []
   voiceInput: []
   voiceSetup: []
@@ -669,6 +679,10 @@ function updateMentionTrigger() {
 watch(inputText, updateMentionTrigger)
 
 function onTextareaKeydown(event: KeyboardEvent) {
+  // IME 组字期间 Enter/Tab/方向键属于输入法（确认候选、翻页），不是「选中 @ 候选」
+  // 或「发送」——父级快捷键已挡，但这里的 @ 浮层分支在 emit 之前，必须同样挡掉，
+  // 否则中文输入法里打 `@张三` 一按回车就把半截候选塞进输入框。
+  if (event.isComposing || event.keyCode === 229) return
   if (mentionQuery.value !== null && mentionPopoverEl.value) {
     if (event.key === 'ArrowDown') {
       event.preventDefault()

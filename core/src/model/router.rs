@@ -324,14 +324,11 @@ impl ModelRouter {
     /// 据配置构建模板 `LLMConfig`（主客户端与故障转移候选共用 provider/base_url/key）。
     fn build_template_config(config: &Config) -> LLMConfig {
         LLMConfig {
-            provider: match config.model.provider.as_str() {
-                "openai" => super::llm::LLMProvider::OpenAI,
-                "deepseek" => super::llm::LLMProvider::DeepSeek,
-                "anthropic" => super::llm::LLMProvider::Anthropic,
-                _ => super::llm::LLMProvider::Custom {
-                    base_url: config.model.base_url.clone(),
-                },
-            },
+            // provider id → 协议走唯一事实源（`model::provider_protocol`）。
+            provider: crate::model::provider_protocol::provider_for_id(
+                &config.model.provider,
+                &config.model.base_url,
+            ),
             model: config.model.model_name.clone(),
             api_key: config.model.api_key.clone(),
             base_url: config.model.base_url.clone(),

@@ -126,6 +126,24 @@ pub enum BlockReason {
     MissingArtifact,
 }
 
+impl BlockReason {
+    /// 面向人的中文短语。
+    ///
+    /// 存在的理由很具体：完成门禁的拦截理由现在会写进**用户可见的正文**，
+    /// 如果直接 `{:?}` 就会露出 `VerificationFailed` 这种枚举名 —— 用户看不懂，
+    /// 也就等于没告诉他为什么被拦。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::VerificationFailed => "声称的产物未通过核验",
+            Self::VerificationMissing => "声称的产物无法核验",
+            Self::TimePressure => "耗时远低于合理下限",
+            Self::PlacationDetected => "疑似敷衍话术",
+            Self::EmptyResult => "产出为空",
+            Self::MissingArtifact => "必需产物未落盘",
+        }
+    }
+}
+
 /// 必需产物核验报告（P1-2）：把「契约声明的交付物」逐一核验是否真实落盘且非空。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredArtifactsReport {

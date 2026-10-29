@@ -502,14 +502,29 @@ function formatBytes(value: number): string {
 .meta-setup-card {
   display: flex;
   flex-direction: column;
-  width: min(100%, var(--chat-col));
+  /* 会话阅读列口径（同 `.msg-ai` / `.plan-card`）：这张卡既会出现在已有会话里
+     （`.chat--meta-setup` 单独成立，左侧转写是左起排的），也会出现在落地页。
+     前者过去被 `width: min(100%, var(--chat-col))` + `margin: … auto` 推到屏幕
+     几何中心；后者仍按落地页的居中分组走（见下面 `.chat--new-landing` 分支）。 */
+  width: 100%;
+  max-width: var(--chat-col-start, min(100%, var(--chat-col, calc(100% - 48px))));
   max-height: min(42rem, calc(100dvh - 8rem));
-  margin: var(--sp-3) auto;
+  margin-block: var(--sp-3);
+  margin-inline: var(--chat-gutter, 24px) auto;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
   box-shadow: var(--shadow-sm);
+}
+
+/* 落地页的「一句话 + 品牌 chip + 输入框」是一组**刻意居中**的叙事（见
+   chat-view.css 的 `.chat--new-landing .chat-composer` / `.chat-landing-brand`），
+   此时 `.chat-body` 被隐藏、这张卡就是那组里唯一的内容块 —— 所以它必须留在
+   居中列上，不能按阅读列起排。`--landing-col` 缺席时回落 --chat-col 口径。 */
+.chat--new-landing .meta-setup-card {
+  max-width: var(--landing-col, min(calc(100% - 48px), 45rem));
+  margin-inline: auto;
 }
 
 .meta-setup-card__header,

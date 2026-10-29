@@ -78,6 +78,9 @@ PROVIDER_PRESET_KEYS = frozenset(
 )
 
 # Per-field spec shape the wizard uses to render setup form inputs.
+# ``choices`` is the option list a ``select`` field must carry on the wire —
+# without it the console renders an empty dropdown for the custom endpoint's
+# Protocol field (chat / responses).
 PROVIDER_FIELD_KEYS = frozenset(
     {
         "name",
@@ -87,6 +90,7 @@ PROVIDER_FIELD_KEYS = frozenset(
         "default",
         "description",
         "secret",
+        "choices",
     }
 )
 
@@ -141,6 +145,21 @@ def test_provider_catalog_entry_keys_are_frozen() -> None:
     # The default provider must stay addressable by its shipped id.
     provider_ids = {entry["providerId"] for entry in entries}
     assert "openrouter" in provider_ids
+
+
+def test_custom_endpoint_offers_both_protocols_and_an_anthropic_variant() -> None:
+    # A self-hosted / proxied endpoint is the one place the user picks the
+    # protocol by hand, so the choice must reach the console's dropdown.
+    entries = {entry["providerId"]: entry for entry in provider_catalog_payload()}
+    custom = entries["custom"]
+    wire = next(f for f in custom["fields"] if f["name"] == "wire_api")
+    assert wire["type"] == "select"
+    assert tuple(wire["choices"]) == ("chat", "responses")
+
+    anthropic = entries["custom_anthropic"]
+    assert anthropic["deployment"] == "custom"
+    names = {f["name"] for f in anthropic["fields"]}
+    assert {"api_key", "base_url", "model"} <= names
 
 
 def test_provider_catalog_preset_keys_are_frozen() -> None:

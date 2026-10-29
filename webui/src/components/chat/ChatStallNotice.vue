@@ -47,8 +47,14 @@ defineEmits<{
 
 <style scoped>
 .stall-notice {
-  width: var(--chat-col, min(calc(100% - 48px), 980px));
-  margin: var(--sp-2) auto;
+  /* 会话阅读列口径（同 `.msg-ai` / `.approval-card`）：它是 `.chat-thread`
+     弹性列的直接子元素，`width: var(--chat-col)` + `margin: … auto` 会把这条
+     「还在跑」横幅推到屏幕几何中心，而它上下的正文与思考行都是左起排的。
+     横幅**内容**不是居中语义（左侧圆点 + 左对齐文案 + 右侧按钮），所以照改。 */
+  width: 100%;
+  max-width: var(--chat-col-start, var(--chat-col, min(calc(100% - 48px), 980px)));
+  margin-block: var(--sp-2);
+  margin-inline: var(--chat-gutter, 24px) auto;
   padding: var(--sp-3) var(--sp-4);
   display: flex;
   align-items: center;

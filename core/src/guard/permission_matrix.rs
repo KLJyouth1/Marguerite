@@ -335,17 +335,29 @@ pub fn mode_authorizes_high_autonomy(user_mode: UserMode, autonomy: ToolAutonomy
 
 /// 对**审批面内**的工具做真实矩阵裁决；面外工具返回 `None`（不伪造字段）。
 ///
-/// `trusted` 来自 `guard::trust` 的真实信任库（工具 × 模式 × 会话）。
+/// `trusted` 来自 `guard::trust` 的真实信任库（工具 × 模式 × 会话 × 参数）。
 /// 模式取进程级 `mode::runtime_mode()` 反推的 3×3 档位，与对话页 `/mode` 同源。
-pub fn decide_tool(tool: &str, session: &str) -> Option<ToolApproval> {
+///
+/// `args` 是本次工具调用的参数（解析失败时传 `None`）：参数级信任条目只在参数
+/// 指纹一致时命中，拿不到参数就不命中（fail-closed）。
+pub fn decide_tool(
+    tool: &str,
+    session: &str,
+    args: Option<&serde_json::Value>,
+) -> Option<ToolApproval> {
     if !approval_surface(tool) {
         return None;
     }
     let mode = crate::mode::runtime_mode();
     let user_mode = crate::mode::default_user_mode_for(mode);
+    let args_fp = args.map(crate::guard::trust::args_fingerprint);
     let trusted = crate::guard::trust::global()
         .lock()
-        .map(|store| store.is_trusted(tool, mode.as_str(), session).is_some())
+        .map(|store| {
+            store
+                .is_trusted_for(tool, mode.as_str(), session, args_fp.as_deref())
+                .is_some()
+        })
         .unwrap_or(false);
     let autonomy = classify_tool_autonomy(tool);
     // 「标准 / 极致·执行」本身就是用户对该档位能力的**显式授权**：这两档的产品语义
@@ -599,8 +611,8 @@ mod tests {
         // 出网检索不属于「直接驱动本机」的拦截面（避免把 Ask/Plan 的查资料锁死），
         // 因此不产出 approval 字段（不伪造）。
         assert!(!approval_surface("web_search"));
-        assert!(decide_tool("web_search", "s").is_none());
-        assert!(decide_tool("read_file", "s").is_none());
+        assert!(decide_tool("web_search", "s", None).is_none());
+        assert!(decide_tool("read_file", "s", None).is_none());
     }
 
     /// 引擎裁决必须按真实档位变化：极简执行 → denied；极致执行（未授权）→ pending；
@@ -611,12 +623,12 @@ mod tests {
         let prev = crate::mode::runtime_mode();
 
         crate::mode::set_runtime_mode(crate::mode::ModeKind::Ensemble);
-        let denied = decide_tool("computer_use", "sess-approval-untouched").unwrap();
+        let denied = decide_tool("computer_use", "sess-approval-untouched", None).unwrap();
         assert_eq!(denied.status, "denied", "极简执行默认锁高自主");
         assert!(denied.reason.is_some());
 
         crate::mode::set_runtime_mode(crate::mode::ModeKind::OmniTranscend);
-        let approved_by_mode = decide_tool("computer_use", "sess-approval-untouched").unwrap();
+        let approved_by_mode = decide_tool("computer_use", "sess-approval-untouched", None).unwrap();
         // 极致·执行本身就是用户对该档位的显式授权（见 `mode_authorizes_high_autonomy`）：
         // 此前这里要求 pending，但桌面主路径没有同步审批通道 → fail-closed，
         // 于是「选了极致·执行却连截图都做不了」。现在按授权放行，并带全量审计。
@@ -635,7 +647,7 @@ mod tests {
                 "sess-approval-granted",
             )
         };
-        let approved = decide_tool("auto_replay", "sess-approval-granted").unwrap();
+        let approved = decide_tool("auto_replay", "sess-approval-granted", None).unwrap();
         assert_eq!(approved.status, "approved", "信任后应放行");
         assert!(approved.audit.is_some(), "高自主放行必须带全量审计强度");
         crate::guard::trust::global()

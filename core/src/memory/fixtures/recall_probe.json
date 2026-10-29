@@ -1,0 +1,396 @@
+{
+  "version": 1,
+  "note": "S1 记忆检索回归夹具。corpus 入库；queries 永不入库（探针曾因把改述也塞进语料而读出四条通路全 100% 的自匹配假象）。hard 族的 paraphrase 与同族语料的实词重合必须为 0，由 recall_probe.rs 的自证断言强制；实词口径由 memory::lexical 单点定义。",
+  "families": [
+    {
+      "id": "en-approval-501",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "The approvals REST endpoint is implemented only in the Python sidecar; the Rust gateway answers 501.",
+        "When Rust serves the console, GET /api/approvals returns 501 not implemented.",
+        "The approval resolve route exists in the sidecar app but not in the Rust gateway.",
+        "Console approval cards call REST, so a missing Rust implementation leaves the allow button dead.",
+        "Rust returns 501 for the resolve path because only the sidecar registers it."
+      ],
+      "queries": [
+        {
+          "text": "why does the approvals endpoint return 501 in the Rust gateway",
+          "kind": "lexical"
+        },
+        {
+          "text": "clicking allow in the console does nothing because the route is missing",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "the sidecar registers paths the engine forgot to add",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "en-config-dir",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "The home directory lookup on Windows uses the Known Folder API and ignores USERPROFILE.",
+        "Overriding HOME does not isolate the configuration directory on Windows.",
+        "The sandboxed gateway wrote into the real user config because the lookup ignored the env var.",
+        "A dedicated environment override was added so tests can redirect the configuration directory.",
+        "Only the roaming half of the isolation failed; the local app data half was honoured."
+      ],
+      "queries": [
+        {
+          "text": "why does the configuration directory ignore USERPROFILE on Windows",
+          "kind": "lexical"
+        },
+        {
+          "text": "the isolated gateway touched my real settings file",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "how do I point the engine at a different settings folder",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "en-fts5-delete",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "An external-content index keeps orphan rows unless you issue the delete command before re-inserting.",
+        "Updating a session summary without unindexing the old entry leaves stale matches.",
+        "External content tables do not store text; the shadow index must be maintained manually.",
+        "The short-term memory bug was a duplicate hit after a summary rewrite.",
+        "Pass the delete verb with the rowid to unindex a single row."
+      ],
+      "queries": [
+        {
+          "text": "how do I unindex a row in an external content table",
+          "kind": "lexical"
+        },
+        {
+          "text": "why do old summaries still match after I rewrite them",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "the search returns the same session twice",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "en-npm-lockfile",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "A clean install refuses to run when the lockfile and the manifest disagree.",
+        "The shell lockfile was missing the whole lint tree, so a fresh clone could not typecheck.",
+        "Two version fields inside a lockfile must both track the manifest.",
+        "A pre-populated dependency folder hides install-time failures from the developer.",
+        "Regenerate the lock only, without touching sources, when declarations move."
+      ],
+      "queries": [
+        {
+          "text": "why does a clean install fail when the lockfile is out of sync",
+          "kind": "lexical"
+        },
+        {
+          "text": "a brand new checkout cannot build but my machine is fine",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "the lint dependency is absent from the lock",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "en-tauri-dist",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "The desktop build aborts its setup script when a declared resource path does not exist.",
+        "The console bundle directory is ignored by git, so a fresh clone cannot build the shell until the SPA is built first.",
+        "Bundle resources point at the web console output directory.",
+        "A workspace build exits with resource path does not exist.",
+        "The gate script pre-creates the missing bundle directory before compiling the desktop shell."
+      ],
+      "queries": [
+        {
+          "text": "why does the workspace build complain a resource path does not exist",
+          "kind": "lexical"
+        },
+        {
+          "text": "the desktop shell cannot compile straight after cloning",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "packaging bails out before the compiler even starts",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "en-feature-hash",
+      "lang": "en",
+      "hard": false,
+      "corpus": [
+        "The local embedding hashes tokens into a fixed bucket count, then normalises the length.",
+        "Feature hashing gives dependency-free vectors but caps semantic generalisation.",
+        "Unigrams weigh one, adjacent pairs weigh a half.",
+        "Two phrasings sharing no token land on orthogonal vectors.",
+        "Cosine over these bag-of-word vectors measures vocabulary overlap, not meaning."
+      ],
+      "queries": [
+        {
+          "text": "how many buckets does the feature hashing embedding use",
+          "kind": "lexical"
+        },
+        {
+          "text": "why does reworded text fail to match its own meaning",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "is this real semantics or just vocabulary overlap",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "zh-toon-ramp",
+      "lang": "zh",
+      "hard": false,
+      "corpus": [
+        "三格渐变贴图里受光面只能采到后两格",
+        "卡通着色用贴图档位替代了法线与光向的点积",
+        "前半段贴图是死区，白色部件因此没有体积感",
+        "把贴图宽度改成六格后中间调占比明显上升",
+        "受光面明暗差只有百分之七时猫看起来像一块白板"
+      ],
+      "queries": [
+        {
+          "text": "受光面采不到贴图前半段会怎样",
+          "kind": "lexical"
+        },
+        {
+          "text": "桌宠看起来发灰发平是什么原因",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "白色部件没有立体感要怎么调",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "zh-approval-fold",
+      "lang": "zh",
+      "hard": false,
+      "corpus": [
+        "状态查询被转给不持有该审批的另一侧，回包说找不到",
+        "前端把找不到当成终态，卡片于是自己折叠",
+        "重连以后的恢复扫描会为每条未决中断探一次状态",
+        "两侧队列各有一份挂起项，互相看不见对方的编号",
+        "点允许没有作用是因为裁决发给了空队列"
+      ],
+      "queries": [
+        {
+          "text": "为什么审批卡片重连以后自己折叠了",
+          "kind": "lexical"
+        },
+        {
+          "text": "点允许没有任何反馈是怎么回事",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "两个队列互相看不见同一个编号",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "zh-tiered",
+      "lang": "zh",
+      "hard": false,
+      "corpus": [
+        "感知层只保留当前会话的原始上下文",
+        "短时层负责跨会话的全文检索",
+        "长时层写入稀疏索引，检索先粗排再精排",
+        "低于阈值的命中不注入上下文",
+        "升库把短时条目提升为长时并补建索引"
+      ],
+      "queries": [
+        {
+          "text": "长时层的粗排和精排是怎么分工的",
+          "kind": "lexical"
+        },
+        {
+          "text": "为什么有的记忆没有被放进上下文",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "短时条目如何变成跨会话的长期记忆",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "zh-gate",
+      "lang": "zh",
+      "hard": false,
+      "corpus": [
+        "跳过的检查记进独立的汇总，永远不算通过",
+        "增量编译缓存会掩盖库级编译错误",
+        "隔离解释器缺依赖时整层收集失败，看起来像产品坏了",
+        "终端显示乱码不等于文件损坏，要按字节复核",
+        "权威门禁必须先清理缓存再跑全量"
+      ],
+      "queries": [
+        {
+          "text": "为什么跳过的检查不算通过",
+          "kind": "lexical"
+        },
+        {
+          "text": "本地全绿但干净构建其实是坏的，怎么回事",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "控制台里的乱码是不是文件真的坏了",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "zh-sidecar",
+      "lang": "zh",
+      "hard": false,
+      "corpus": [
+        "侧车冷启动可以长达九十秒",
+        "没等它就绪就探测，测到的是纯内核模式",
+        "存活探针被自己的限流回四百二十九，看门狗把活着读成死了",
+        "有回答即存活证据，只有五百以上才算不健康",
+        "安装版探测不到引擎源码目录会静默降级"
+      ],
+      "queries": [
+        {
+          "text": "侧车启动很慢的时候探测会得到什么结果",
+          "kind": "lexical"
+        },
+        {
+          "text": "引擎明明活着却被判死重启是为什么",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "装出来的桌面版只用得上单引擎模式",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "hard-wipe",
+      "lang": "en",
+      "hard": true,
+      "corpus": [
+        "The nightly deploy wipes the staging database at two in the morning.",
+        "A cron job drops the whole staging schema around midnight.",
+        "Staging backups are deleted by the same release script.",
+        "The midnight run recreates the test database from scratch.",
+        "The release script truncates all staging tables prior to migrating."
+      ],
+      "queries": [
+        {
+          "text": "which cron job drops the staging schema at midnight",
+          "kind": "lexical"
+        },
+        {
+          "text": "the demo environment quietly loses its records while we sleep",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "is there a way to keep the preview copy intact past dawn",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "hard-context",
+      "lang": "en",
+      "hard": true,
+      "corpus": [
+        "When the context window overflows, the agent silently forgets the plan.",
+        "Token budget exhaustion truncates the oldest prompt history.",
+        "The planner step is dropped first because it sits at the head of the window.",
+        "Long sessions lose their goals once cutting reaches the system prompt.",
+        "Compaction keeps the tail and discards the head of the transcript."
+      ],
+      "queries": [
+        {
+          "text": "does the agent forget the plan when the context window overflows",
+          "kind": "lexical"
+        },
+        {
+          "text": "why do my later turns ignore what I said at the outset",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "my instructions from the opening message stop being respected halfway through",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "hard-ratelimit",
+      "lang": "en",
+      "hard": true,
+      "corpus": [
+        "The rate limiter keys its buckets on a header the caller controls.",
+        "Rotating the forwarded-for line on each request creates an endless supply of buckets.",
+        "Only the transport peer address is trustworthy as a client identity.",
+        "A trusted-proxy deployment must explicitly opt in before upstream headers are read.",
+        "Any local script can dodge the limiter by rewriting a single request header."
+      ],
+      "queries": [
+        {
+          "text": "why can a caller dodge the rate limiter by changing a header",
+          "kind": "lexical"
+        },
+        {
+          "text": "how do I keep an anonymous sender from getting a brand new quota each time",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "a loop that varies one fake field defeats the throttle",
+          "kind": "paraphrase2"
+        }
+      ]
+    },
+    {
+      "id": "hard-registry",
+      "lang": "en",
+      "hard": true,
+      "corpus": [
+        "The installer writes an uninstall entry into the current user hive.",
+        "Windows lists the app in the programs pane by reading that registry key.",
+        "Removing the key makes the shortcut vanish from the installed apps view.",
+        "A per-user entry avoids needing elevation for the uninstall record.",
+        "The removal tool deletes its own listing when it finishes cleaning files."
+      ],
+      "queries": [
+        {
+          "text": "which registry key does the installer write for uninstall",
+          "kind": "lexical"
+        },
+        {
+          "text": "how come the control panel no longer names this product after setup",
+          "kind": "paraphrase"
+        },
+        {
+          "text": "the settings screen forgot to advertise the newest build so it never appears",
+          "kind": "paraphrase2"
+        }
+      ]
+    }
+  ]
+}

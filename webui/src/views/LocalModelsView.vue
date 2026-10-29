@@ -82,6 +82,11 @@
       <div v-else-if="ollamaLive && ollamaLive.online && ollamaLive.models.length === 0" class="lm-muted">
         {{ t('localModels.ollamaLiveEmpty') }}
       </div>
+      <!-- 探测超时：复用既有 `ollamaLiveOfflineHint`（含 base 参数），不新增 i18n 键 —— 
+           新增键要 6 个 locale 齐平且必须做占位符语法编译校验，收益不如复用。 -->
+      <p v-else-if="ollamaProbeTimedOut" class="lm-muted">
+        {{ t('localModels.ollamaLiveOfflineHint', { base: 'http://localhost:11434' }) }}
+      </p>
       <div class="lm-ollama-grid">
         <div v-for="m in ollamaLive?.models ?? []" :key="m.name" class="lm-ollama-card">
           <div class="lm-ollama-name"><b>{{ m.name }}</b></div>
@@ -353,6 +358,14 @@ const tierLabel = computed(() => {
 // ── Ollama live 模型：部署档案按模型名对账，决定按钮是「加入 / 已加入 / 使用中」──
 const ollamaLive = ref<OllamaLiveResult | null>(null)
 const ollamaLoading = ref(false)
+// 探测是否**超时**（不是"没装"、也不是"旧网关没这个方法"）。
+// 真机审计 2026-10-29 P2-3：本机未装 Ollama 时页面永远停在「正在扫描…」，
+// 因为 RPC 没有超时上限，而网关侧对 11434 的探测也不保证返回。
+// 界面宁可给一个**确定的降级结论**，也不要一个无限转圈。
+const ollamaProbeTimedOut = ref(false)
+/** 探测上限：6s。Ollama 的 /api/tags 是本机回环，正常是毫秒级；
+ *  超过 6s 就说明服务没起或端口被防火墙吞了，继续等没有信息增量。 */
+const OLLAMA_PROBE_TIMEOUT_MS = 6000
 const ollamaDeploying = ref<string | null>(null)
 const ollamaMsg = ref('')
 const deployedOllamaModels = computed(() => new Set(localProfiles.value.map(p => p.model)))
@@ -401,17 +414,27 @@ function formatGb(v: number | undefined): string {
 
 async function loadOllamaLive() {
   ollamaLoading.value = true
+  ollamaProbeTimedOut.value = false
   try {
-    const r = await rpc.call<OllamaLiveResult>('models.local.ollama', {})
+    const r = await rpc.call<OllamaLiveResult>(
+      'models.local.ollama',
+      {},
+      { timeoutMs: OLLAMA_PROBE_TIMEOUT_MS },
+    )
     ollamaLive.value = r
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    // 三种失败要分开：① 探测超时（服务没起/端口被吞）；② 旧网关没注册该方法；
+    // ③ 网关本身报错。三种都落到「离线」，但只有 ① 追加"请先启动 Ollama"的指引，
+    // 否则会把"方法不存在"误导成"你没装 Ollama"。
+    ollamaProbeTimedOut.value = /timeout|timed out|超时/i.test(message)
     // 旧网关可能尚未注册该 RPC：降级为「离线」展示，不向用户抛 RPC 裸错。
     ollamaLive.value = {
       ok: false,
       online: false,
       base_url: '',
       models: [],
-      error: e instanceof Error ? e.message : String(e),
+      error: message,
     }
   } finally {
     ollamaLoading.value = false

@@ -67,6 +67,7 @@ const emit = defineEmits<{
   (e: 'select', key: string): void
   (e: 'refresh'): void
   (e: 'rename', payload: { key: string; title: string }): void
+  (e: 'reset', key: string): void
   (e: 'delete', key: string): void
   (e: 'bulk-delete', keys: string[]): void
   (e: 'reorder', payload: { draggedKey: string; targetKey: string; position: 'before' | 'after' }): void
@@ -741,6 +742,13 @@ async function requestDelete(row: SidebarConversationItem) {
   emit('delete', row.key)
 }
 
+// 清空的确认弹窗在 App.vue：文案要写「删除 N 条消息」，而消息数只在那边
+// 的会话列表里。这里只负责关菜单并把意图交上去。
+function requestReset(row: SidebarConversationItem) {
+  closeMenu()
+  emit('reset', row.key)
+}
+
 function emitProjectPin(row: SidebarConversationItem) {
   closeMenu()
   if (!row.workspaceId) return
@@ -1234,6 +1242,15 @@ function onSelectRow(row: SidebarConversationItem) {
                 >
                   <Icon name="pencil" :size="14" />
                   <span>{{ t('shared.sidebar.rename') }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="sidebar-row-menu__item"
+                  role="menuitem"
+                  @click.stop="requestReset(row)"
+                >
+                  <Icon name="refresh" :size="14" />
+                  <span>{{ t('shared.sidebar.resetConversation') }}</span>
                 </button>
                 <button
                   type="button"

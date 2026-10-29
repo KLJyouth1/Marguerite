@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::agent::store as agent_store;
 use crate::domain::{Message, Role};
+use crate::model::thinking::{resolve_effort_for_role, RoleOverrides, ThinkingEffort};
 
 // ── 角色信号词典（蒸馏 core_personality 的 identity/role 维度）─────────────
 const ROLE_SIGNALS: &[(&str, &[&str])] = &[
@@ -97,6 +98,14 @@ pub struct Persona {
     pub tone: String,
     /// 专长领域（蒸馏 capabilities）
     pub expertise: Vec<String>,
+    /// 人设级**可选**覆盖位（思考档位 / 模型）。
+    ///
+    /// `#[serde(default)]` = 旧台账/旧 JSON 里没有这个键也能读回来，读回来就是
+    /// [`RoleOverrides::NONE`]（完全继承会话/模式档位，行为与今日逐字节一致）。
+    /// 抽取式画像（[`auto_profile`]）永远不声明覆盖位——它只统计措辞，
+    /// 「替你决定该想多深」不是它的职责，必须由显式声明给出。
+    #[serde(default)]
+    pub overrides: RoleOverrides,
 }
 
 impl Persona {
@@ -106,6 +115,7 @@ impl Persona {
             role: DEFAULT_ROLE.to_string(),
             tone: DEFAULT_TONE.to_string(),
             expertise: Vec::new(),
+            overrides: RoleOverrides::NONE,
         }
     }
 
@@ -117,6 +127,14 @@ impl Persona {
             parts.push(format!("专长领域：{}。", self.expertise.join("、")));
         }
         parts.join("\n")
+    }
+
+    /// 人设档位覆盖 → 最终档位（优先级只有 [`resolve_effort_for_role`] 一处定义）。
+    ///
+    /// 返回 `None` = 「人设没声明、会话也没选」→ 调用方继续按自适应/模式档执行，
+    /// 此处**不**等于「不思考」（那是 `Some(Off)`）。
+    pub fn resolve_effort(&self, session_effort: Option<ThinkingEffort>) -> Option<ThinkingEffort> {
+        resolve_effort_for_role(session_effort, self.overrides.effort)
     }
 }
 
@@ -228,6 +246,9 @@ pub fn auto_profile(history: &[Message]) -> Persona {
         role: detect_role(&text),
         tone: detect_tone(history),
         expertise: detect_expertise(&text),
+        // 抽取式画像**不声明**档位覆盖：它只统计措辞与领域词频，
+        // 「这个用户/角色该想多深」不是能从历史里统计出来的事实。
+        overrides: RoleOverrides::NONE,
     }
 }
 
@@ -471,11 +492,49 @@ mod tests {
             role: "工程师".into(),
             tone: "直接简洁".into(),
             expertise: vec!["Rust".into(), "Python".into()],
+            overrides: RoleOverrides::NONE,
         };
         let sp = p.system_prompt();
         assert!(sp.contains("你是一个工程师。"));
         assert!(sp.contains("语气风格：直接简洁。"));
         assert!(sp.contains("专长领域：Rust、Python。"));
+    }
+
+    /// 抽取式画像永远不自作主张声明档位；覆盖位只能由显式声明带来。
+    #[test]
+    fn auto_profile_never_declares_effort_override() {
+        let h = vec![msg(Role::User, "写个 rust 后端函数并部署"), msg(Role::Assistant, "好的，我写代码。")];
+        let p = auto_profile(&h);
+        assert!(p.overrides.is_empty(), "自动抽取不得声明档位: {:?}", p.overrides);
+        assert_eq!(p.resolve_effort(None), None, "无覆盖 + 无会话档位 → 交给自适应");
+        assert_eq!(
+            p.resolve_effort(Some(ThinkingEffort::Deep)),
+            Some(ThinkingEffort::Deep),
+            "无覆盖时必须原样继承会话档位"
+        );
+    }
+
+    /// 人设声明了档位 → 压过会话档位（角色优先级的唯一定义点在 thinking.rs）。
+    #[test]
+    fn persona_effort_override_beats_session_effort() {
+        let mut p = Persona::neutral();
+        p.overrides = RoleOverrides::with_effort(ThinkingEffort::Max);
+        assert_eq!(
+            p.resolve_effort(Some(ThinkingEffort::Normal)),
+            Some(ThinkingEffort::Max)
+        );
+        // 显式 Off 是「声明」：同样压过会话档位（不是「没声明」）
+        p.overrides = RoleOverrides::with_effort(ThinkingEffort::Off);
+        assert_eq!(p.resolve_effort(Some(ThinkingEffort::Max)), Some(ThinkingEffort::Off));
+    }
+
+    /// 兼容铁证：旧 JSON（没有 overrides 键）必须能读回来，读回来 = 无覆盖。
+    #[test]
+    fn persona_deserializes_legacy_json_without_overrides() {
+        let legacy = r#"{"role":"研究员","tone":"直接","expertise":["Rust"]}"#;
+        let p: Persona = serde_json::from_str(legacy).expect("旧画像 JSON 必须仍能解析");
+        assert!(p.overrides.is_empty(), "缺键必须解析为无覆盖: {:?}", p.overrides);
+        assert_eq!(p.role, "研究员");
     }
 
     #[test]

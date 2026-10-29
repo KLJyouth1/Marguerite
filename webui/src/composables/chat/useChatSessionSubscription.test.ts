@@ -344,6 +344,53 @@ describe('useChatSessionSubscription', () => {
     expect(lastStreamSeq.value).toBe(2402)
   })
 
+  it('re-appends interrupt records when an authoritative idle snapshot clears a stale live turn', async () => {
+    const resetStreamLiveTurnState = vi.fn()
+    const reappendInterruptFrames = vi.fn()
+    const rpc = {
+      waitForConnection: vi.fn(async () => {}),
+      call: vi.fn(async <T = unknown>() => ({
+        subscribed: true,
+        run_status: 'idle',
+        current_stream_seq: 0,
+        replay_complete: true,
+      }) as T) as unknown as <T = unknown>(
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<T>,
+    }
+    const subscription = useChatSessionSubscription({
+      rpc,
+      sessionKey: ref('agent:main:webchat:approved-outcome'),
+      lastStreamSeq: ref(0),
+      runStatus: ref<ChatRunStatus>({ status: 'idle', label: '', task: null }),
+      // The approval card opened the live bubble, and the user has already
+      // decided: only an interrupt holds this turn open, and it is no longer
+      // pending. An idle snapshot still must not erase the outcome row.
+      isStreaming: ref(true),
+      hasActiveInterrupt: ref(false),
+      activeStreamTaskId: ref(''),
+      activeTaskGroups: ref(new Set<string>()),
+      sessionRunStatus: source => ({
+        status: String(source?.run_status || 'idle') as ChatRunStatusState,
+        label: '',
+        task: source?.active_task || null,
+      }),
+      startStreaming: vi.fn(),
+      loadHistory: vi.fn(),
+      resetStreamIdleTimer: vi.fn(),
+      resetStreamLiveTurnState,
+      reappendInterruptFrames,
+    })
+
+    await subscription.subscribeSession()
+
+    expect(resetStreamLiveTurnState).toHaveBeenCalledTimes(1)
+    expect(reappendInterruptFrames).toHaveBeenCalledTimes(1)
+    expect(resetStreamLiveTurnState.mock.invocationCallOrder[0])
+      .toBeLessThan(reappendInterruptFrames.mock.invocationCallOrder[0]!)
+  })
+
   it('hydrates the authoritative run-mode lock from the subscription snapshot', async () => {
     const onRunModeLock = vi.fn()
     const rpc = {

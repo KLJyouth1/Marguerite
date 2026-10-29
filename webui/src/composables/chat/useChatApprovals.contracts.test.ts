@@ -182,6 +182,30 @@ describe('approval safe display contracts', () => {
 })
 
 describe('approval reconnect recovery', () => {
+  it('does not sweep the status queue on the first connect (the snapshot is the authority)', async () => {
+    installSnapshot()
+    const runtime = await harness({ found: false, pending: false, resolved: false })
+    try {
+      runtime.handlers.get('exec.approval.requested')?.({
+        approval_id: 'ap-first-connect',
+        namespace: 'exec',
+        session_key: 'agent:main:web',
+        tool_name: 'shell',
+        args: null,
+        warning: '',
+      })
+      runtime.handlers.get('_state')?.('connected')
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
+      // Let the hydration settle: the sweep would run right after it.
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(runtime.rpcCall).not.toHaveBeenCalled()
+      expect(runtime.interruptState.value.get('ap-first-connect')?.resolution ?? null).toBeNull()
+    } finally {
+      runtime.unsubscribe()
+      runtime.scope.stop()
+    }
+  })
+
   it('marks an approval unavailable when the authoritative status says it is missing', async () => {
     installSnapshot()
     const runtime = await harness({ found: false, pending: false, resolved: false })
@@ -194,6 +218,8 @@ describe('approval reconnect recovery', () => {
         args: null,
         warning: '',
       })
+      // Recovery only runs after a real drop → reconnect.
+      runtime.handlers.get('_state')?.('disconnected')
       runtime.handlers.get('_state')?.('connected')
       await vi.waitFor(() => {
         expect(runtime.interruptState.value.get('gone')?.resolution).toBe('unavailable')
@@ -226,6 +252,7 @@ describe('approval reconnect recovery', () => {
         args: null,
         warning: '',
       })
+      runtime.handlers.get('_state')?.('disconnected')
       runtime.handlers.get('_state')?.('connected')
       await vi.waitFor(() => expect(runtime.rpcCall).toHaveBeenCalled())
       runtime.handlers.get('exec.approval.resolved')?.({
@@ -445,6 +472,114 @@ describe('clarify tool-result recovery', () => {
         error: '',
       })
       expect(runtime.approvals.clarifySubmitted.value).toBe(true)
+    } finally {
+      runtime.unsubscribe()
+      runtime.scope.stop()
+    }
+  })
+})
+
+// PRD §2.2 ③「A 会话的 pending 审批不得出现在 B 会话的聊天流」。这条隔离同时
+// 由两个入口把关：订阅时的快照水合，以及实时推送。两侧都出错的表现是用户看到
+// 一张「点了没反应」的卡片（id 属于另一个会话，裁决必然 404）。
+describe('approval session isolation', () => {
+  const clarifyResult = {
+    kind: 'user_input',
+    paused: true,
+    request_id: 'foreign-input',
+    run_id: 'plan-run-1',
+    step: 'confirm_scope',
+    clarify_schema: {
+      intro: 'Confirm the implementation scope.',
+      fields: [{ name: 'scope', type: 'enum', required: true, prompt: 'Which scope?', choices: ['a', 'b'] }],
+    },
+  }
+
+  it('hydrates only the current session out of a mixed snapshot', async () => {
+    installSnapshot([
+      {
+        id: 'own-snapshot',
+        namespace: 'exec',
+        sessionKey: 'agent:main:web',
+        approvalKind: 'sandbox_path',
+        args: { path: '/workspace/own.md', access: 'write' },
+        warning: '',
+      },
+      {
+        id: 'foreign-snapshot',
+        namespace: 'exec',
+        sessionKey: 'agent:other:web',
+        approvalKind: 'sandbox_path',
+        args: { path: '/workspace/other.md', access: 'write' },
+        warning: '',
+      },
+    ])
+    const runtime = await harness()
+    try {
+      expect(runtime.approvals.approvalEntries.value.map(entry => entry.approval.id))
+        .toEqual(['own-snapshot'])
+      expect(JSON.stringify(runtime.appendInterruptFrame.mock.calls))
+        .not.toContain('foreign-snapshot')
+    } finally {
+      runtime.unsubscribe()
+      runtime.scope.stop()
+    }
+  })
+
+  it('ignores an approval push tagged with another session', async () => {
+    installSnapshot()
+    const runtime = await harness()
+    try {
+      runtime.handlers.get('exec.approval.requested')?.({
+        approval_id: 'foreign-push',
+        namespace: 'exec',
+        session_key: 'agent:other:web',
+        tool_name: 'shell',
+        args: null,
+        warning: '',
+      })
+      await Promise.resolve()
+      expect(runtime.appendInterruptFrame).not.toHaveBeenCalled()
+
+      // 自证：同一形状的推送换成当前会话键就会渲染，说明拒绝的是「会话不符」
+      // 而不是这条推送本身有毛病。
+      runtime.handlers.get('exec.approval.requested')?.({
+        approval_id: 'own-push',
+        namespace: 'exec',
+        session_key: 'agent:main:web',
+        tool_name: 'shell',
+        args: null,
+        warning: '',
+      })
+      expect(runtime.appendInterruptFrame).toHaveBeenCalledWith(expect.objectContaining({
+        approvalId: 'own-push',
+      }))
+    } finally {
+      runtime.unsubscribe()
+      runtime.scope.stop()
+    }
+  })
+
+  it('ignores a clarify tool result tagged with another session', async () => {
+    installSnapshot()
+    const runtime = await harness()
+    try {
+      runtime.handlers.get('session.event.tool_result')?.({
+        session_key: 'agent:other:web',
+        tool_use_id: 'foreign-input',
+        name: 'request_user_input',
+        result: clarifyResult,
+      })
+      expect(runtime.approvals.pendingClarify.value).toBeNull()
+      expect(runtime.appendInterruptFrame).not.toHaveBeenCalled()
+
+      runtime.handlers.get('session.event.tool_result')?.({
+        session_key: 'agent:main:web',
+        tool_use_id: 'foreign-input',
+        name: 'request_user_input',
+        result: clarifyResult,
+      })
+      expect(runtime.approvals.pendingClarify.value?.requestId).toBe('foreign-input')
     } finally {
       runtime.unsubscribe()
       runtime.scope.stop()

@@ -102,13 +102,26 @@ pub fn tier_counts() -> (usize, usize, usize, usize) {
     )
 }
 
-/// 只读配置快照：`(每层容量上限, 余弦门控阈值)`。
+/// 只读配置快照：`(每层容量上限, 弱证据标注线)`。
+///
+/// 第二个量的历史名字叫「余弦门控阈值」—— 语义已变（见 `tiered` 模块头）：它不再决定
+/// 丢弃，只决定注入行是否带 `(弱相关)`。真正的丢弃规则是相对截断，见 [`tier_cutoff_rule`]。
 pub fn tier_limits() -> (usize, f64) {
     let g = cell().lock().unwrap_or_else(|e| e.into_inner());
-    (g.max_per_tier(), g.sim_threshold())
+    (g.max_per_tier(), g.weak_evidence())
 }
 
-/// 召回：flyhash 近邻粗排 + 精排，返回可直接拼进 prompt 的若干行。
+/// 只读截断规则：`(相对保留比例, 零重合可否单独成立)`。
+///
+/// 注入与否实际由这两项决定：前者是「不比最好的那条差多少」，后者在默认后端下
+/// 恒为 `false`（词面共享 0 个实词的候选一律不给，见 `scoring::LOCAL_HASH_IS_SEMANTIC`）。
+pub fn tier_cutoff_rule() -> (f64, bool) {
+    let g = cell().lock().unwrap_or_else(|e| e.into_inner());
+    g.cutoff_rule()
+}
+
+/// 召回：词面证据优先（零词面重合的候选在默认后端下不单独成立），档内按幅度排序后
+/// 相对截断，返回可拼进 prompt 的若干行（规则见 `crate::memory::scoring`）。
 ///
 /// 返回 `None` 表示无命中（**不返回空 Vec**：调用方据此完全跳过注入，
 /// 避免在 prompt 里留下一个空标题段）。
@@ -124,7 +137,10 @@ pub fn recall(query: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut used = 0usize;
     for h in hits {
-        let line = format!("[分层记忆] {}", h.entry.text.trim());
+        // 弱证据仍会注入（相对截断认为它是本查询能拿到的最好几条之一），
+        // 但必须让模型知道这是候选、不是事实——否则模糊召回会被当成既定结论引用。
+        let tag = if h.weak { "(弱相关) " } else { "" };
+        let line = format!("[分层记忆] {}{}", tag, h.entry.text.trim());
         let cost = line.chars().count();
         if used + cost > INJECT_CHAR_BUDGET {
             break;
@@ -141,7 +157,7 @@ pub fn recall(query: &str) -> Option<Vec<String>> {
 
 /// 组装成一段可直接塞进 System 消息的文本（带标题与来源标识）。
 pub fn render(lines: &[String]) -> String {
-    let mut s = String::from("## 相关分层记忆（flyhash 近邻召回，仅作参考）\n");
+    let mut s = String::from("## 相关分层记忆（关键词/语义两路证据，仅作参考；标 `(弱相关)` 的是候选不是事实）\n");
     for l in lines {
         s.push_str("- ");
         s.push_str(l);

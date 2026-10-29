@@ -13,17 +13,17 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tracing::warn;
 
 use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::lexical::{self, content_words, shared_content_words};
+use crate::memory::scoring;
 use crate::memory::sensory::SensoryMemory;
 use crate::memory::short_term::ShortTermMemory;
 
 /// 向量维度（特征哈希桶数）
 const VEC_DIM: usize = 256;
-/// 余弦相似度阈值（低于视为无相关）
-const SIM_THRESHOLD: f64 = 0.35;
 
 /// 已触发过「维度不符 → 自动重建」的后端标识集合（`名:维度`）。
 /// 进程内每个后端至多自动重建一次，避免每次检索都重建（有界、不阻塞）。
@@ -31,6 +31,24 @@ static REINDEXED_BACKENDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn reindexed_backends() -> &'static Mutex<HashSet<String>> {
     REINDEXED_BACKENDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// `memory_meta` 里记录向量口径版本的那个键。
+const VECTOR_FORMAT_KEY: &str = "vector_format";
+
+/// 当前向量口径：嵌入后端名 + 分词版本，任一变化都让**已落盘的向量**失去可比性。
+///
+/// 为什么不能只靠「维度不符」来发现：换分词口径（2026-10-29 D3 加 CJK 双字）时维度
+/// 仍是 256、后端名仍是 `local-hash`，旧的自动重建**结构上看不到任何变化** ——
+/// 于是历史向量会被静默当作同口径数据参与余弦，检索结果悄悄变成噪声。
+/// 把口径写进库本身，是让它可被检测的唯一办法。
+fn vector_format_stamp() -> String {
+    let provider = EmbeddingProvider::global();
+    format!(
+        "{}:{}",
+        provider.name(),
+        lexical::TOKENIZER_VERSION
+    )
 }
 
 /// 记忆条目
@@ -42,8 +60,12 @@ pub struct MemoryItem {
     pub meta: String,
     /// 时间戳
     pub timestamp: String,
-    /// 相似度分数
+    /// 综合分 = `max(实词覆盖率, 余弦)`，见 [`scoring`]
     pub score: f64,
+    /// 与查询共享的实词个数（词面证据）
+    pub keyword_overlap: usize,
+    /// 两路证据都弱：注入时应标注为候选而非事实
+    pub weak: bool,
 }
 
 /// 分层检索结果
@@ -69,17 +91,20 @@ impl LocalEmbedding {
     }
 
     /// 计算文本的特征向量（L2 归一化）
+    ///
+    /// 单字特征 +1.0、拉丁词组（bigram）+0.5。
+    /// ⚠️ 口径变化过：旧实现把「拉丁词列表 + 全部 CJK 单字」拼在一起再取 `windows(2)`，
+    /// 于是既造出「跨语言边界的假 bigram」，又让中文双字词（"审批""卡片"）在 256 维里
+    /// 彼此无关 —— 实测中文改写档最佳余弦中位数只有 0.346。现在双字由
+    /// [`lexical::tokens`] 显式给出，bigram 只走 [`lexical::latin_bigrams`]。
     pub fn embed(text: &str) -> Vec<f64> {
         let mut vec = vec![0.0f64; VEC_DIM];
-        // 词袋特征：按词与双词哈希到桶
-        let tokens = tokenize(text);
-        for t in &tokens {
-            let bucket = hash_to(t, 0) % VEC_DIM;
+        for t in lexical::tokens(text) {
+            let bucket = hash_to(&t, 0) % VEC_DIM;
             vec[bucket] += 1.0;
         }
-        for w in tokens.windows(2) {
-            let bigram = format!("{} {}", w[0], w[1]);
-            let bucket = hash_to(&bigram, 1) % VEC_DIM;
+        for bg in lexical::latin_bigrams(text) {
+            let bucket = hash_to(&bg, 1) % VEC_DIM;
             vec[bucket] += 0.5;
         }
         // L2 归一化
@@ -98,25 +123,6 @@ impl LocalEmbedding {
     }
 }
 
-/// 简单分词：字母数字序列（对中文按字符粒度切分）
-fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    // 拉丁词：按非字母数字分隔（含空格）
-    for word in text.split(|c: char| !c.is_alphanumeric()) {
-        let word = word.trim().to_lowercase();
-        if !word.is_empty() && word.is_ascii() {
-            tokens.push(word);
-        }
-    }
-    // 中日韩字符按单字切分（保证中文召回）
-    for ch in text.chars() {
-        if ch.is_alphabetic() && !ch.is_ascii() {
-            tokens.push(ch.to_string());
-        }
-    }
-    tokens
-}
-
 /// FNV-1a 哈希（带种子）
 fn hash_to(s: &str, seed: u64) -> usize {
     let mut h: u64 = 0xcbf29ce484222325 ^ seed.wrapping_mul(0x100000001b3);
@@ -125,6 +131,26 @@ fn hash_to(s: &str, seed: u64) -> usize {
         h = h.wrapping_mul(0x100000001b3);
     }
     h as usize
+}
+
+/// 排序：综合分降序，同分时词面证据多的在前，再同则时间戳、内容升序。
+///
+/// 后几级 tie-break 是为了**可复现**：这一路的命中会进 System 前缀，顺序不稳定
+/// 等于前缀不稳定（前缀缓存失效），而且排查时「同样两个数为什么这次反过来」。
+fn sort_items(items: &mut [MemoryItem]) {
+    items.sort_by(|a, b| {
+        scoring::lexical_first(a.keyword_overlap, a.score, b.keyword_overlap, b.score)
+            .then(a.timestamp.cmp(&b.timestamp))
+            .then(a.content.cmp(&b.content))
+    });
+}
+
+/// 截断（规则见 [`scoring`]）：本次查询拿不出词面证据时一条都不给，
+/// 否则只保留「不比最好的那条差 40%」的命中，然后取前 `limit` 条。
+fn keep_by_relative_score(items: &mut Vec<MemoryItem>, limit: usize) {
+    let best = items.first().map(|i| i.score).unwrap_or(0.0);
+    items.retain(|i| scoring::keeps(best, i.score));
+    items.truncate(limit);
 }
 
 /// 长期记忆
@@ -143,6 +169,11 @@ struct IndexRow {
     meta: String,
     timestamp: String,
     vec: Vec<f64>,
+    /// 内容的实词集合，加载索引时算一次。
+    ///
+    /// 词面那一路证据需要它；不在每次检索里重算 —— 检索是全表扫描，
+    /// 逐查询重新分词会把 O(库大小) 的常数再乘一遍。
+    words: Vec<String>,
 }
 
 impl LongTermMemory {
@@ -166,9 +197,50 @@ impl LongTermMemory {
                 vector TEXT NOT NULL,
                 timestamp TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_ltm_time ON long_term_memory(timestamp);",
+            CREATE INDEX IF NOT EXISTS idx_ltm_time ON long_term_memory(timestamp);
+            CREATE TABLE IF NOT EXISTS memory_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
         )?;
         self.db = Some(db);
+        // 口径戳记：分词/嵌入后端变化后，**同维度**的旧向量无法靠「维度不符」发现，
+        // 只能靠库里的这一行。失配就地重建一次（见 [`vector_format_stamp`]）。
+        self.align_vector_format()?;
+        Ok(())
+    }
+
+    /// 向量口径与库中戳记不一致时，用当前后端重写全部向量并刷新戳记。
+    ///
+    /// 全新库（空表）也会走一次：`reindex_all` 更新 0 行，代价是一次扫描，
+    /// 换来的是「库里没有一行没被核对过口径」——不必为空库/旧库分两种逻辑。
+    fn align_vector_format(&self) -> Result<()> {
+        let want = vector_format_stamp();
+        let stored: Option<String> = self
+            .db()?
+            .query_row(
+                "SELECT value FROM memory_meta WHERE key = ?1",
+                rusqlite::params![VECTOR_FORMAT_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if stored.as_deref() == Some(want.as_str()) {
+            return Ok(());
+        }
+        let updated = self.reindex_all()?;
+        if updated > 0 {
+            warn!(
+                updated,
+                stored = stored.as_deref().unwrap_or("(缺戳记)"),
+                current = %want,
+                "长期记忆：向量口径已变化，按当前后端重建全部向量"
+            );
+        }
+        self.db()?.execute(
+            "INSERT INTO memory_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![VECTOR_FORMAT_KEY, want],
+        )?;
         Ok(())
     }
 
@@ -201,6 +273,7 @@ impl LongTermMemory {
                     content: content.to_string(),
                     meta: meta.to_string(),
                     timestamp: now,
+                    words: content_words(content),
                     vec,
                 });
             }
@@ -208,10 +281,17 @@ impl LongTermMemory {
         Ok(())
     }
 
-    /// 语义检索：返回相似度排序的记忆
+    /// 语义检索：幅度按 [`scoring::fuse`]（零词面重合在默认后端下直接记 0），次序按
+    /// [`scoring::lexical_first`]（词面档在前），再按 [`scoring::keeps`] 相对截断丢弃
+    /// （规则见 [`scoring`]）。
+    ///
+    /// ⚠️ 旧实现是「余弦 ≥ 0.35 的绝对门」。这一路是**默认开启**的 prompt 注入路，
+    /// 所以绝对门的饿死效应直接对用户可见：实测中文改写档最佳余弦中位数 0.346
+    /// 恰好压在门下 —— 那一整档什么都不注入，看起来就像「记忆功能不存在」。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryItem>> {
         let provider = EmbeddingProvider::global();
         let qvec = provider.embed(query);
+        let query_words = content_words(query);
         // 索引失效检测：data_version 变化（其他连接提交了写）→ 全量重建。
         // 本连接自己的 store 已就地增量维护，无需重建。
         let version = self.db_data_version().unwrap_or(-1);
@@ -223,6 +303,7 @@ impl LongTermMemory {
             let (rows, skipped) = self.load_index_rows()?;
             // B2：存在维度不符的旧向量（如切换嵌入后端后）→ 自动重建一次并告警，
             // 否则这些历史记忆会被静默跳过、检索结果为空且用户无任何信号。
+            // （分词口径变化走 init 的戳记，不依赖这里。）
             let rows = if skipped > 0 && self.maybe_reindex_dim_mismatch(skipped)? {
                 self.load_index_rows()?.0
             } else {
@@ -233,25 +314,23 @@ impl LongTermMemory {
         let index = self.index.borrow();
         let rows = &index.as_ref().expect("索引刚加载").1;
 
-        let mut scored = Vec::new();
+        let mut scored: Vec<MemoryItem> = Vec::with_capacity(rows.len());
         for row in rows {
             // 维度不符的旧向量（如切换模型后端前写入）在加载时已跳过
-            let score = provider.cosine(&qvec, &row.vec);
-            if score >= SIM_THRESHOLD {
-                scored.push(MemoryItem {
-                    content: row.content.clone(),
-                    meta: row.meta.clone(),
-                    timestamp: row.timestamp.clone(),
-                    score,
-                });
-            }
+            let cosine = provider.cosine(&qvec, &row.vec);
+            let overlap = shared_content_words(&query_words, &row.words);
+            let score = scoring::fuse(overlap, scoring::coverage(query_words.len(), overlap), cosine);
+            scored.push(MemoryItem {
+                content: row.content.clone(),
+                meta: row.meta.clone(),
+                timestamp: row.timestamp.clone(),
+                score,
+                keyword_overlap: overlap,
+                weak: scoring::is_weak(score),
+            });
         }
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(limit);
+        sort_items(&mut scored);
+        keep_by_relative_score(&mut scored, limit);
         Ok(scored)
     }
 
@@ -268,7 +347,7 @@ impl LongTermMemory {
         let db = self.db()?;
         let dim = EmbeddingProvider::global().dim();
         let mut stmt =
-            db.prepare("SELECT content, meta, vector, timestamp FROM long_term_memory")?;
+            db.prepare("SELECT content, meta, vector, timestamp FROM long_term_memory ORDER BY id")?;
         let iter = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -290,6 +369,7 @@ impl LongTermMemory {
                 continue;
             }
             rows.push(IndexRow {
+                words: content_words(&item.0),
                 content: item.0,
                 meta: item.1,
                 timestamp: item.3,
@@ -437,7 +517,11 @@ impl HierarchicalMemory {
                     content: s.summary,
                     meta: format!("session:{}", s.session_id),
                     timestamp: s.updated_at,
+                    // 0.4 是历史占位常量，不是测出来的相关性 —— 如实标成弱证据，
+                    // 别让降级结果冒充一个有分数的语义命中。
                     score: 0.4,
+                    keyword_overlap: 0,
+                    weak: true,
                 });
             }
         }
@@ -575,10 +659,16 @@ mod tests {
         assert_ne!(hash_to("tokio", 0), hash_to("tokio", 1));
     }
 
+    /// 分词口径归一后，本模块不再自带 tokenize：这里是「嵌入吃到什么词元」的钉子，
+    /// 口径本身在 `memory::lexical` 里测。
     #[test]
     fn test_tokenize_cjk() {
-        let tokens = tokenize("异步运行 Rust 代码");
-        assert!(tokens.iter().any(|t| t == "异步") || tokens.iter().any(|t| t == "rust"));
+        let tokens = lexical::tokens("异步运行 Rust 代码");
+        assert!(
+            tokens.iter().any(|t| t == "异步"),
+            "双字组合必须进主通道（旧口径只有单字）: {tokens:?}"
+        );
+        assert!(tokens.iter().any(|t| t == "rust"));
         assert!(tokens.iter().any(|t| t == "代"));
     }
 

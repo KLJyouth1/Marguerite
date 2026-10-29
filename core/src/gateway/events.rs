@@ -15,10 +15,14 @@ use crate::events::envelope::Envelope;
 /// 类型，于是**所有**侧车事件都被拍平成 `session.event.status` —— 前端订阅的
 /// `state_change` / `cron_result` / `task_group.*` 在双引擎模式下一条也收不到。
 ///
-/// 只放行两种名字，防止侧车借此注入任意 WS 事件名：
+/// 只放行三类名字，防止侧车借此注入任意 WS 事件名：
 /// - `session.event.<[a-z0-9_.]+>`
-/// - 顶层 `sessions.changed`（其余顶层名如 `artifact.updated` 是 Rust 引擎自己的
-///   事件，pyengine 没有对应发射点，放行只会扩大可伪造面）
+/// - 顶层白名单 [`PYENGINE_TOP_LEVEL_EVENTS`]（侧车真实发射、前端真实订阅）
+///
+/// ⚠️ 这个白名单**必须**覆盖侧车实际发射的每个顶层事件：先前只放行
+/// `sessions.changed`，于是 `task.queued` / `task.running`（`task_runtime.py`）
+/// 与 `session.epoch_changed`（`rpc_sessions.py`）全部被拍平成 `session.event.status`
+/// —— 前端订阅着的泳道卡片、运行态与 epoch 边界一条也收不到。
 ///
 /// payload 不是对象时桥接层不会注入 `py_event`，返回 `None` 并回退到原有映射。
 fn pyengine_event_name(env: &Envelope) -> Option<String> {
@@ -47,8 +51,19 @@ fn pyengine_event_name(env: &Envelope) -> Option<String> {
             });
         return valid.then(|| raw.to_string());
     }
-    (raw == "sessions.changed").then(|| raw.to_string())
+    (PYENGINE_TOP_LEVEL_EVENTS.contains(&raw)).then(|| raw.to_string())
 }
+
+/// 侧车可以透传的**顶层**事件名（不使用 `session.event.*` 命名空间）。
+///
+/// 每一项都必须同时满足：pyengine 有真实发射点、webui 有真实订阅 ——
+/// 由 `pyengine_event_subscriptions_match_across_languages` 守卫。
+pub const PYENGINE_TOP_LEVEL_EVENTS: &[&str] = &[
+    "sessions.changed",
+    "task.queued",
+    "task.running",
+    "session.epoch_changed",
+];
 
 /// 把内核事件信封映射为 WS 事件帧
 ///
@@ -158,6 +173,22 @@ mod tests {
         assert_eq!(frame["event"], "sessions.changed");
     }
 
+    /// 侧车真实发射的顶层事件必须原样到达前端（此前被拍平成 status）。
+    #[test]
+    fn pyengine_top_level_task_and_epoch_events_are_forwarded() {
+        for name in [
+            "task.queued",
+            "task.running",
+            "session.epoch_changed",
+        ] {
+            let frame = envelope_to_frame(
+                &pyengine_envelope(json!(name), "pyengine.s1"),
+                1,
+            );
+            assert_eq!(frame["event"], name, "{name} 必须原样透传");
+        }
+    }
+
     /// 非法事件名绝不进入 WS 帧：回退到既有 status 映射（不 panic、不静默丢帧）。
     #[test]
     fn pyengine_illegal_event_name_falls_back_to_status() {
@@ -205,6 +236,8 @@ mod tests {
     const PY_CHANNEL_DISPATCH: &str =
         include_str!("../../../pyengine/src/opensquilla/gateway/channel_dispatch.py");
     const PY_TYPES: &str = include_str!("../../../pyengine/src/opensquilla/engine/types.py");
+    const PY_TASK_RUNTIME: &str =
+        include_str!("../../../pyengine/src/opensquilla/gateway/task_runtime.py");
     const WEBUI_SUBSCRIPTIONS: &str =
         include_str!("../../../webui/src/composables/chat/useChatRpcSubscriptions.ts");
 
@@ -219,6 +252,9 @@ mod tests {
             "session.event.task_group.failed",
             "session.event.run_heartbeat",
             "sessions.changed",
+            "task.queued",
+            "task.running",
+            "session.epoch_changed",
         ];
         for name in cross_engine {
             let subscription = format!("'{name}'");
@@ -242,5 +278,26 @@ mod tests {
         }
         assert!(PY_RPC_SESSIONS.contains("f\"session.event.{event_kind}\""));
         assert!(PY_TYPES.contains("Literal[\"state_change\"]"));
+
+        // 顶层白名单里的每一项都必须有真实发射点，否则就是「为不存在的事件
+        // 扩大可伪造面」；反过来，侧车新增顶层事件而白名单漏了，也会在这里红。
+        assert!(
+            PY_TASK_RUNTIME.contains("\"task.queued\""),
+            "task.queued 缺少真实发射点"
+        );
+        assert!(
+            PY_TASK_RUNTIME.contains("\"task.running\""),
+            "task.running 缺少真实发射点"
+        );
+        assert!(
+            PY_RPC_SESSIONS.contains("\"session.epoch_changed\""),
+            "session.epoch_changed 缺少真实发射点"
+        );
+        for name in PYENGINE_TOP_LEVEL_EVENTS {
+            assert!(
+                WEBUI_SUBSCRIPTIONS.contains(&format!("'{name}'")),
+                "顶层白名单 {name} 在前端没有订阅，放行它只会扩大伪造面"
+            );
+        }
     }
 }

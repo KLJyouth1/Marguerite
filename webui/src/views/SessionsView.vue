@@ -87,6 +87,7 @@
     <SessionsTaskInput @submit="startTask" />
 
     <SessionsAttentionStrip
+      v-if="!initialLoading"
       :approvals-count="pendingApprovals.length"
       :running-count="runningCount"
       :queued-count="queuedCount"
@@ -108,20 +109,24 @@
         <p class="control-empty__hint">{{ t('sessions.loading') }}</p>
       </div>
 
-      <div v-else-if="allSessions.length === 0" class="hub-state hub-state--empty control-empty">
-        <Icon name="sessions" :size="22" class="control-empty__icon" aria-hidden="true" />
-        <div class="hub-state__copy">
-          <div class="control-empty__title">{{ t('sessions.empty.title') }}</div>
-          <p class="control-empty__hint">{{ t('sessions.empty.body') }}</p>
-        </div>
-      </div>
+      <EmptyState
+        v-else-if="allSessions.length === 0"
+        icon="sessions"
+        :title="t('sessions.empty.title')"
+        :description="t('sessions.empty.body')"
+        test-id="sessions-empty"
+      />
 
-      <div v-else-if="ledgerEntries.length === 0" class="hub-state control-empty">
-        <Icon name="search" :size="32" class="control-empty__icon" aria-hidden="true" />
-        <div class="control-empty__title">{{ t('sessions.noMatches.title') }}</div>
-        <p class="control-empty__hint">{{ t('sessions.noMatches.body') }}</p>
-        <button class="btn btn--ghost" @click="clearFilters">{{ t('sessions.noMatches.clear') }}</button>
-      </div>
+      <EmptyState
+        v-else-if="ledgerEntries.length === 0"
+        icon="search"
+        :icon-size="32"
+        :title="t('sessions.noMatches.title')"
+        :description="t('sessions.noMatches.body')"
+        test-id="sessions-no-match"
+      >
+        <button class="btn btn--ghost btn--sm" @click="clearFilters">{{ t('sessions.noMatches.clear') }}</button>
+      </EmptyState>
 
       <SessionsLedger
         v-else
@@ -155,6 +160,7 @@ import { useRouter } from 'vue-router'
 import { useRpcStore } from '@/stores/rpc'
 import { readAuthToken } from '@/views/chat/read-auth-token'
 import Icon from '@/components/Icon.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import { useConfirm } from '@/composables/useConfirm'
@@ -175,7 +181,9 @@ import {
 } from '@/composables/useSessions'
 import {
   dispatchLocalSessionsDeleted,
+  localSessionResetDetail,
   localSessionsDeletedDetail,
+  LOCAL_SESSION_RESET_EVENT,
   LOCAL_SESSIONS_DELETED_EVENT,
 } from '@/utils/sessionSync'
 import { sessionAgentIdentity } from '@/components/sessions/sessionDisplay'
@@ -213,6 +221,15 @@ const router = useRouter()
 const rpc = useRpcStore()
 const { confirm } = useConfirm()
 const { sessionsList, allSessions, isLoading, sessionListError, loadSessions } = useSessions()
+
+/**
+ * 首屏「还没有任何会话数据、正在拉列表」的窗口期。
+ *
+ * 真机缺陷（08-sessions.png）：「一切正常」绿勾与「正在加载任务」转圈同时出现——
+ * 状态摘要把 `runningCount=0` 当成"确实没事"，但它此刻的语义只是"还没读到"。
+ * 这个窗口期不显示摘要，等列表落地后再给结论。
+ */
+const initialLoading = computed(() => isLoading.value && allSessions.value.length === 0)
 
 const filter = ref<FilterId>('all')
 const search = ref('')
@@ -540,6 +557,13 @@ function handleLocalSessionsDeleted(event: Event) {
   scheduleSessionRefresh()
 }
 
+// 清空不改会话存在性，但本表里的消息计数与更新时间都会变，所以只刷新数据，
+// 不动列表成员（也不关 inspect 抽屉 —— 会话还在）。
+function handleLocalSessionReset(event: Event) {
+  if (!localSessionResetDetail(event)) return
+  scheduleSessionRefresh()
+}
+
 function handleApprovalPush() {
   void refreshApprovals()
 }
@@ -635,12 +659,15 @@ function teardownLive() {
   if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   window.removeEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
+  window.removeEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
 }
 
 onActivated(() => {
   loadAll()
   window.removeEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
   window.addEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
+  window.removeEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
+  window.addEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
   unsubs = [
     rpc.on('sessions.changed', scheduleSessionRefresh),
     rpc.on('exec.approval.requested', handleApprovalPush),

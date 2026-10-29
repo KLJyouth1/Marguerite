@@ -36,6 +36,9 @@ const messages: Record<string, string> = {
   'team.board.refresh': '刷新',
   'team.board.toolCalls': '次工具调用',
   'team.board.lastActivity': '最近活动',
+  'team.board.viewGrid': '网格视图',
+  'team.board.viewKanban': '看板视图',
+  'team.board.colEmpty': '暂无成员',
   'team.board.status.running': '进行中',
   'team.board.status.waiting': '等待中',
   'team.board.status.finished': '已完成',
@@ -135,6 +138,7 @@ function member(overrides: Record<string, unknown> = {}) {
 const cards = (el: HTMLElement) => Array.from(el.querySelectorAll<HTMLElement>('.team-card'))
 
 beforeEach(() => {
+  localStorage.clear()
   rpcMock.methods.value = ['team.members']
   rpcMock.call.mockReset()
   rpcMock.call.mockResolvedValue({
@@ -269,7 +273,7 @@ describe('TeamBoardView honest empty states', () => {
     rpcMock.methods.value = []
 
     const el = await mountBoard()
-    const refreshButton = el.querySelector<HTMLButtonElement>('header button')
+    const refreshButton = el.querySelector<HTMLButtonElement>('[data-testid="board-refresh"]')
 
     expect(cards(el)).toHaveLength(0)
     expect(rpcMock.call).not.toHaveBeenCalled()
@@ -493,5 +497,106 @@ describe('TeamBoardView run bar', () => {
 
     expect(el.querySelector('[data-testid="team-run-bar"]')).toBeNull()
     expect(el.querySelector('[data-testid="team-run-bar-dropped"]')).toBeNull()
+  })
+})
+
+describe('TeamBoardView kanban lanes (A3)', () => {
+  const toggle = (el: HTMLElement, testid: string) =>
+    el.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`)!
+
+  it('defaults to the grid view so existing behaviour has zero regression', async () => {
+    const el = await mountBoard()
+
+    expect(el.querySelector('.team-board__grid')).not.toBeNull()
+    expect(el.querySelector('[data-testid="board-kanban"]')).toBeNull()
+  })
+
+  it('partitions members into honest status lanes and shows per-lane counts', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now(),
+      runId: 'run-1',
+      form: 'team',
+      members: [
+        member({ id: 'lead-1', status: 'running' }),
+        member({ id: 's-wait', label: 'Wait', status: 'waiting' }),
+        member({ id: 's-done', label: 'Done', status: 'finished' }),
+        member({ id: 's-bad', label: 'Bad', status: 'failed' }),
+        member({ id: 's-odd', label: 'Odd', status: 'queued' }),
+      ],
+    })
+    const el = await mountBoard()
+    toggle(el, 'board-view-kanban').click()
+    await flush()
+
+    const kanban = el.querySelector('[data-testid="board-kanban"]')
+    expect(kanban).not.toBeNull()
+    expect(el.querySelector('.team-board__grid')).toBeNull()
+
+    // 五条泳道固定列序：待命 → 进行中 → 已完成 → 异常 → 未报告
+    const columns = Array.from(el.querySelectorAll<HTMLElement>('.team-board__col'))
+    expect(columns.map((col) => col.dataset.column)).toEqual([
+      'waiting',
+      'running',
+      'finished',
+      'failed',
+      'other',
+    ])
+
+    const laneMembers = (id: string) =>
+      columns
+        .find((col) => col.dataset.column === id)!
+        .querySelectorAll<HTMLElement>('.team-card')
+
+    expect(laneMembers('waiting')).toHaveLength(1)
+    expect(laneMembers('running')).toHaveLength(1)
+    expect(laneMembers('finished')).toHaveLength(1)
+    expect(laneMembers('failed')).toHaveLength(1)
+    // 后端没声明的状态落「未报告」列，卡片上仍显示原值 —— 不冒充已知状态
+    const odd = laneMembers('other')
+    expect(odd).toHaveLength(1)
+    expect(odd[0].dataset.memberId).toBe('s-odd')
+    expect(odd[0].querySelector('.team-card__status')?.textContent?.trim()).toBe('queued')
+
+    // 计数徽章与桶内卡数一致
+    const counts = columns.map((col) => col.querySelector('.team-board__col-count')?.textContent?.trim())
+    expect(counts).toEqual(['1', '1', '1', '1', '1'])
+  })
+
+  it('shows the empty-lane copy instead of hiding empty columns', async () => {
+    rpcMock.call.mockResolvedValue({
+      ok: true,
+      session: 'agent:main:webchat:test',
+      updatedAt: Date.now(),
+      members: [member({ id: 'lead-1', status: 'running' })],
+    })
+    const el = await mountBoard()
+    toggle(el, 'board-view-kanban').click()
+    await flush()
+
+    const columns = Array.from(el.querySelectorAll<HTMLElement>('.team-board__col'))
+    expect(columns).toHaveLength(5)
+    const emptyLane = columns.find((col) => col.dataset.column === 'waiting')!
+    expect(emptyLane.querySelector('.team-board__col-empty')?.textContent?.trim()).toBe('暂无成员')
+    expect(emptyLane.querySelectorAll('.team-card')).toHaveLength(0)
+  })
+
+  it('persists the kanban preference and restores it on the next mount', async () => {
+    let el = await mountBoard()
+    toggle(el, 'board-view-kanban').click()
+    await flush()
+    expect(localStorage.getItem('marguerite.teamBoard.view.v1')).toBe('kanban')
+
+    app?.unmount()
+    document.body.innerHTML = ''
+    el = await mountBoard()
+    expect(el.querySelector('[data-testid="board-kanban"]')).not.toBeNull()
+
+    // 切回网格同样持久化
+    toggle(el, 'board-view-grid').click()
+    await flush()
+    expect(localStorage.getItem('marguerite.teamBoard.view.v1')).toBe('grid')
+    expect(el.querySelector('.team-board__grid')).not.toBeNull()
   })
 })

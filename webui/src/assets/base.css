@@ -303,6 +303,88 @@ pre {
     8px 0 48px rgba(0, 0, 0, 0.04);
 }
 
+/* ── Icon-rail mode ─────────────────────────────────────────────────────
+   Narrow icon-only strip. Labels/kbd hide, rows center, and grouped
+   sections collapse into icon anchors with hover flyouts (see App.vue).
+   Width is fixed: the resizable-width preference does not apply here. */
+.sidebar--icons {
+  width: 64px;
+}
+.sidebar--icons .sidebar-brand {
+  padding: 6px 6px 8px;
+  gap: var(--sp-1);
+}
+.sidebar--icons .sidebar-brand-lockup {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+}
+.sidebar--icons .sidebar-brand-text {
+  display: none;
+}
+.sidebar--icons .sidebar-new-session,
+.sidebar--icons .sidebar-fn-item {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+.sidebar--icons .sidebar-new-session {
+  margin: 0 var(--sp-2) var(--sp-1);
+}
+.sidebar--icons .sidebar-fn-item {
+  margin: 0 var(--sp-2);
+}
+.sidebar--icons .sidebar-fn-label,
+.sidebar--icons .sidebar-kbd {
+  display: none;
+}
+
+/* Group anchors: a centered icon button plus a flyout panel listing the
+   section's destinations. The flyout escapes the 64px strip via absolute
+   positioning; colors/geometry stay on tokens. */
+.sidebar-icon-anchor {
+  position: relative;
+  display: flex;
+}
+.sidebar-icon-anchor__btn {
+  width: 100%;
+}
+.sidebar-icon-flyout {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 8px);
+  z-index: 230;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+  max-height: min(420px, 70vh);
+  overflow-y: auto;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+}
+.sidebar-fn-item--flyout {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  justify-content: flex-start;
+}
+.sidebar--icons .sidebar-fn-item--flyout .sidebar-fn-label {
+  display: inline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The rail itself adds no animation of its own; keep the flyout from
+     inheriting any inherited transitions under reduced motion. */
+  .sidebar-icon-flyout,
+  .sidebar-icon-anchor__btn {
+    transition: none;
+  }
+}
+
 /* Sidebar header: brand + toggle */
 .sidebar-header {
   display: flex;
@@ -1686,6 +1768,11 @@ pre {
   margin-left: var(--sidebar-width);
 }
 
+/* Icon-rail dock: content hugs the 64px strip instead of the full width. */
+.main.main--sidebar-icons.docked {
+  margin-left: 64px;
+}
+
 .main.main--sidebar-drawer.docked {
   margin-left: 0;
 }
@@ -1985,6 +2072,13 @@ html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .content {
   transition: opacity var(--dur-fast);
 }
 .approval-inline:hover { opacity: 0.85; }
+
+/* P2-4：侧车离线待同步提示（黄色信号，不是「可裁决」的红色审批 badge）。 */
+.approval-inline--offline {
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-elevated));
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+}
 
 /* ── Mobile overrides (<=768px) ──────────────────────────────────────── */
 @media (max-width: 768px) {

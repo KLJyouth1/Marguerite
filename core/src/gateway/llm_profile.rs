@@ -128,20 +128,7 @@ pub(crate) fn llm_profile_upsert(params: &Value) -> Result<Value, RpcError> {
     // 协议声明：显式值优先；给错必须**响亮拒绝**（拼错回落 chat 会变成 404 之谜）。
     // 未给时沿用该档案已有取值（重配服务商不该把协议悄悄重置），再退到默认 chat。
     // 注意：`existing` 在上面凭据分支里被 move 过，故这里只用 `existing_wire`。
-    let wire_api = match params.get("wire_api") {
-        Some(Value::String(raw)) if !raw.trim().is_empty() => {
-            crate::model::wire::WireApi::from_key(raw).ok_or_else(|| {
-                RpcError::new(
-                    "INVALID_WIRE_API",
-                    format!(
-                        "未知 wire_api: {raw}（可选：chat / responses）。\
-                         若你的端点只提供 /chat/completions 请用 chat。"
-                    ),
-                )
-            })?
-        }
-        _ => existing_wire.unwrap_or_default(),
-    };
+    let wire_api = resolve_wire_api(params, &provider_id, existing_wire.unwrap_or_default())?;
 
     let profile = ModelProfile {
         id: profile_id,
@@ -379,6 +366,10 @@ fn mirror_active_into_config(
     cfg.model.provider = profile.provider.clone();
     cfg.model.model_name = profile.model.clone();
     cfg.model.base_url = profile.base_url.clone();
+    // 协议也属于「三要素」：漏镜像时，任何走 config.yaml 的构造路径
+    // （`LLMConfig::from_app_config`）都会拿到旧的 chat，而档案写的是
+    // responses —— 同一份配置两个真相源，正是本文件反复在修的那类缺陷。
+    cfg.model.wire_api = profile.wire_api;
     cfg.save()?;
     Ok(cfg)
 }
@@ -504,13 +495,54 @@ fn str_param(params: &Value, keys: &[&str]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 解析并校验请求协议（`wire_api`）。
+///
+/// 两件事在这里一次做对，缺一不可：
+/// 1. **两套命名都认**：控制台的 `buildProviderPayload` 会把字段名转成 camelCase
+///    （`wire_api` → `wireApi`），而此前只读 snake_case —— 用户在协议下拉框里
+///    选了 responses，保存照样成功，落盘的仍是 chat，请求打到老协议上。
+/// 2. **真正执行 [`crate::model::wire::validate`]**：该函数早已存在（含单测），
+///    但此前**没有任何调用点**，于是 `anthropic + responses` 这类不可能成功的
+///    组合能一路存进 models.json，最后表现为 404 而错误信息指向「模型名不对」。
+///
+/// `fallback` 也要过校验：历史档案可能已经带着坏组合，保存时顺手拦住。
+fn resolve_wire_api(
+    params: &Value,
+    provider_id: &str,
+    fallback: crate::model::wire::WireApi,
+) -> Result<crate::model::wire::WireApi, RpcError> {
+    let wire = match str_param(params, &["wire_api", "wireApi"]) {
+        Some(raw) => crate::model::wire::WireApi::from_key(&raw).ok_or_else(|| {
+            RpcError::new(
+                "INVALID_WIRE_API",
+                format!(
+                    "未知 wire_api: {raw}（可选：chat / responses）。\
+                     若你的端点只提供 /chat/completions 请用 chat。"
+                ),
+            )
+        })?,
+        None => fallback,
+    };
+    crate::model::wire::validate(
+        wire,
+        crate::model::provider_protocol::is_anthropic_family(provider_id),
+    )
+    .map_err(|e| RpcError::new("INVALID_WIRE_API", e))?;
+    Ok(wire)
+}
+
 /// 内置服务商的默认端点（自定义服务商返回空串，由调用方拒绝）。
+///
+/// id 口径以 `pyengine/provider/registry.py` 为准（`dashscope` 即为其中之一）。
+/// `qwen` 保留为**历史别名**：旧版离线目录曾用它落过档案，这些档案多数没写
+/// base_url，去掉兜底会让它们保存时报「必须提供 baseUrl」。
 fn default_base_url_for(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1".to_string(),
         "deepseek" => "https://api.deepseek.com".to_string(),
         "anthropic" => "https://api.anthropic.com".to_string(),
         "ollama" => "http://localhost:11434".to_string(),
+        "dashscope" | "qwen" => "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         _ => String::new(),
     }
 }
@@ -611,17 +643,15 @@ pub(crate) fn configure_primary_provider(
             .unwrap_or_else(|| primary_id.clone())
     };
 
-    // 新建档案时的协议校验（在闭包外，才能用 `?` 把错误抛给调用方）。
-    let new_profile_wire = match params.get("wire_api") {
-        Some(Value::String(raw)) if !raw.trim().is_empty() => {
-            crate::model::wire::WireApi::from_key(raw).ok_or_else(|| {
-                RpcError::new(
-                    "INVALID_WIRE_API",
-                    format!("未知 wire_api: {raw}（可选：chat / responses）"),
-                )
-            })?
-        }
-        _ => crate::model::wire::WireApi::default(),
+    // 协议校验（在闭包外，才能用 `?` 把错误抛给调用方）。
+    // 只解析**显式**传入的值：未传时保持既有声明（就地更新路径 clone 已有档案）。
+    let explicit_wire = match str_param(params, &["wire_api", "wireApi"]) {
+        Some(_) => Some(resolve_wire_api(
+            params,
+            &provider,
+            crate::model::wire::WireApi::default(),
+        )?),
+        None => None,
     };
 
     let mut profile = selector
@@ -643,10 +673,8 @@ pub(crate) fn configure_primary_provider(
             tier: crate::model::tier::ModelTier::Balanced,
             tier_caps: crate::model::tier::TierCaps::default(),
             tier_caps_declared: false,
-            // 新建档案时的协议：同样"显式优先、给错拒绝"。
-            // 就地更新路径不会走到这里（它 clone 已有档案，保住原协议）。
-            // 取值在闭包外算好：闭包里不能用 `?` 传播校验错误。
-            wire_api: new_profile_wire,
+            // 新建档案时的协议：显式传入才用，否则默认 chat。
+            wire_api: explicit_wire.unwrap_or_default(),
             // 新建档案走自动识别；就地更新路径 clone 已有档案，保住用户勾过的能力。
             capabilities: Default::default(),
         });
@@ -654,6 +682,12 @@ pub(crate) fn configure_primary_provider(
     profile.provider = provider.clone();
     profile.model = model.clone();
     profile.base_url = base_url.clone();
+    // 就地更新也必须吃下显式协议：旧实现只在「新建档案」分支使用解析结果，
+    // 于是用户在同一个服务商上从 chat 切到 responses —— 下拉框选了、提示保存成功，
+    // 落盘的却仍是 clone 来的旧值。协议是请求形状本身，静默丢失等于功能不存在。
+    if let Some(wire) = explicit_wire {
+        profile.wire_api = wire;
+    }
     // 多模态能力：显式传入则覆盖（就地更新与新建都适用）；未传保留原声明。
     if let Some(v) = params.get("capabilities") {
         profile.capabilities = crate::model::registry::ModelCapabilities::from_json(v);
@@ -1009,4 +1043,144 @@ mod tests {
         assert_eq!(active.kind, ProfileKind::Local, "回环端点必须是 Local: {active:?}");
     }
 
+    /// 控制台发的是 **camelCase**（`buildProviderPayload` 把 `wire_api` 转成
+    /// `wireApi`）。只认 snake_case 的旧实现会静默丢弃协议：用户在下拉框选了
+    /// responses、保存提示成功，落盘的仍是 chat，请求继续打 /chat/completions。
+    #[test]
+    fn upsert_accepts_camel_case_wire_api_and_persists_it() {
+        isolated_ctx();
+        let res = llm_profile_upsert(&json!({
+            "providerId": "custom",
+            "baseUrl": "https://gateway.example.com/v1",
+            "model": "gpt-4o",
+            "apiKey": "sk-x",
+            "wireApi": "responses",
+        }))
+        .expect("camelCase wireApi 必须被接受");
+        assert_eq!(res["ok"], true);
+
+        let reg = ModelRegistry::load(&crate::model::selector::models_path()).expect("registry");
+        let p = reg.profiles.get("custom-primary").expect("档案应已落盘");
+        assert_eq!(
+            p.wire_api,
+            crate::model::wire::WireApi::Responses,
+            "wireApi 必须真正写进 models.json，而不是被静默忽略"
+        );
+    }
+
+    /// `anthropic + responses` 是不可能成功的组合（Anthropic 只有 /messages），
+    /// 必须在保存时就**响亮拒绝**，而不是存进去等运行时 404。
+    #[test]
+    fn upsert_rejects_anthropic_family_with_responses_wire() {
+        isolated_ctx();
+        for provider in ["anthropic", "custom_anthropic"] {
+            let err = llm_profile_upsert(&json!({
+                "providerId": provider,
+                "baseUrl": "https://api.example.com",
+                "model": "claude-sonnet-4-20250514",
+                "apiKey": "sk-x",
+                "wireApi": "responses",
+            }))
+            .expect_err("anthropic 家族不能声明 responses 协议");
+            assert_eq!(err.code, "INVALID_WIRE_API", "{provider}: {}", err.message);
+            assert!(
+                err.message.contains("wire_api") && err.message.contains("anthropic"),
+                "{provider}: {}",
+                err.message
+            );
+        }
+        // 反例守卫：anthropic + chat 必须放行（chat 只表示"非 responses"）
+        let ok = llm_profile_upsert(&json!({
+            "providerId": "custom_anthropic",
+            "baseUrl": "https://api.example.com",
+            "model": "claude-sonnet-4-20250514",
+            "apiKey": "sk-x",
+            "wireApi": "chat",
+        }))
+        .expect("anthropic 家族 + chat 应放行");
+        assert_eq!(ok["ok"], true);
+    }
+
+    /// 重配服务商时**不能**把已声明的协议悄悄重置回 chat。
+    #[test]
+    fn upsert_without_wire_keeps_the_stored_protocol() {
+        isolated_ctx();
+        llm_profile_upsert(&json!({
+            "providerId": "custom",
+            "baseUrl": "https://gateway.example.com/v1",
+            "model": "gpt-4o",
+            "apiKey": "sk-x",
+            "wireApi": "responses",
+        }))
+        .expect("首存");
+
+        llm_profile_upsert(&json!({
+            "providerId": "custom",
+            "baseUrl": "https://gateway.example.com/v1",
+            "model": "gpt-4.1",
+            "keepCurrentSecret": true,
+        }))
+        .expect("重配");
+
+        let reg = ModelRegistry::load(&crate::model::selector::models_path()).expect("registry");
+        let p = reg.profiles.get("custom-primary").expect("档案");
+        assert_eq!(p.model, "gpt-4.1", "模型应更新");
+        assert_eq!(
+            p.wire_api,
+            crate::model::wire::WireApi::Responses,
+            "未显式给协议时必须保留既有声明"
+        );
+    }
+
+    /// 旧实现在「就地更新已存在档案」时丢弃显式协议（只 clone 旧值），
+    /// 于是同一个服务商上切换协议永远不生效 —— 选了、存了、还是老协议。
+    #[test]
+    fn provider_configure_applies_explicit_wire_on_in_place_update() {
+        let ctx = isolated_ctx();
+        let first = crate::gateway::onboarding::onboarding_provider_configure(
+            &ctx,
+            &json!({
+                "provider": "custom",
+                "model": "gpt-4o",
+                "baseUrl": "https://gateway.example.com/v1",
+                "apiKey": "sk-x",
+            }),
+        );
+        assert_eq!(first["ok"], true, "{first}");
+        let before = ModelRegistry::load(&crate::model::selector::models_path()).expect("registry");
+        let before_active = before.profiles.get(&before.active).expect("active").clone();
+        assert_eq!(
+            before_active.wire_api,
+            crate::model::wire::WireApi::Chat,
+            "首次保存缺省应为 chat"
+        );
+
+        // 同一 provider 就地更新，显式切到 responses
+        let second = crate::gateway::onboarding::onboarding_provider_configure(
+            &ctx,
+            &json!({
+                "provider": "custom",
+                "model": "gpt-4o",
+                "baseUrl": "https://gateway.example.com/v1",
+                "preserveApiKey": true,
+                "wireApi": "responses",
+            }),
+        );
+        assert_eq!(second["ok"], true, "{second}");
+        let after = ModelRegistry::load(&crate::model::selector::models_path()).expect("registry");
+        let active = after.profiles.get(&after.active).expect("active");
+        assert_eq!(
+            active.wire_api,
+            crate::model::wire::WireApi::Responses,
+            "就地更新必须吃下显式协议，而不是 clone 旧值"
+        );
+        assert_eq!(after.active, before.active, "就地更新不应换档案 id");
+        // 镜像也必须带上协议：否则走 config.yaml 的构造路径（from_app_config）
+        // 仍会拿到旧的 chat，与档案矛盾。
+        assert_eq!(
+            read_yaml_mirror().model.wire_api,
+            crate::model::wire::WireApi::Responses,
+            "config.yaml 镜像必须与档案的协议一致"
+        );
+    }
 }
