@@ -2010,6 +2010,7 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         "sessions.unsubscribe" => sessions::sessions_unsubscribe(ctx, params),
         // ── 会话分支 / 恢复 / 回放（M2 / P0-2：纯 Rust，读写 sessions.db + 本地台账）──
         "sessions.fork" => assistant::sessions_fork(ctx, params),
+        "sessions.forkThroughTurn" => assistant::sessions_fork_through_turn(ctx, params),
         "sessions.resume" => assistant::sessions_resume(ctx, params),
         "sessions.replay" => assistant::sessions_replay(ctx, params),
         // ── 两层助理（L1 全局 / L2 项目）：作用域 / 简报 / 钉住偏好 ──

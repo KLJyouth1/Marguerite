@@ -1,5 +1,5 @@
-//! 会话分支 / 恢复 / 回放（M2 / P0-2）：`sessions.fork` / `sessions.resume` / `sessions.replay`
-//! 的**纯 Rust 实现**。
+//! 会话分支 / 恢复 / 回放（M2 / P0-2）：`sessions.fork` / `sessions.forkThroughTurn` /
+//! `sessions.resume` / `sessions.replay` 的**纯 Rust 实现**。
 //!
 //! 数据源是既有真实存储，不新建并行库：
 //! - 会话转录（有序消息行）→ [`crate::persistence::session::SessionManager`]（`sessions.db`）
@@ -49,6 +49,12 @@ pub enum SessionError {
         requested: String,
         available: Vec<String>,
     },
+    /// `sessions.forkThroughTurn` 指定的 turn 换算不出任何消息边界。
+    TurnNotFound {
+        session: String,
+        turn: String,
+        available_turns: usize,
+    },
     /// 存储层失败（SQLite / 台账 JSON / 原子写）。
     Store { detail: String },
 }
@@ -61,6 +67,7 @@ impl SessionError {
             Self::EmptyParentSession { .. } => "SESSION_EMPTY",
             Self::ForkPointInvalid { .. } => "FORK_POINT_INVALID",
             Self::CheckpointInvalid { .. } => "CHECKPOINT_INVALID",
+            Self::TurnNotFound { .. } => "TURN_NOT_FOUND",
             Self::Store { .. } => "SESSION_STORE_ERROR",
         }
     }
@@ -86,6 +93,15 @@ impl std::fmt::Display for SessionError {
             Self::CheckpointInvalid { requested, .. } => write!(
                 f,
                 "checkpoint {requested} 不存在于该会话的预压缩快照（请先确认 resume 返回的 availableCheckpoints）"
+            ),
+            Self::TurnNotFound {
+                session,
+                turn,
+                available_turns,
+            } => write!(
+                f,
+                "会话 {session} 里没有 turn '{turn}'：该会话有 {available_turns} 条 assistant 消息，\
+                 turn 只接受 'turn-<k>'（k = assistant 消息的 0 基序号）"
             ),
             Self::Store { detail } => write!(f, "会话存储故障：{detail}"),
         }
@@ -124,12 +140,13 @@ pub struct ForkedSession {
     pub parent_key: String,
     /// 分支点 = 复制进子会话的消息条数（`1..=父会话消息数`）。
     pub fork_point: usize,
-    /// `full`（到末尾全量分支）或 `prefix`（前缀分支）。
-    ///
-    /// ⚠️ 接线 `sessions.forkThroughTurn` 时，调用方必须把该字段覆写为
-    /// `through_turn`（前端 `validatedForkChildKey` 会校验 `forkMode` 与
-    /// `throughTurnId`），本模块不持有 turn id。
+    /// `full`（到末尾全量分支）或 `prefix`（前缀分支）；`sessions.forkThroughTurn`
+    /// 走同一套复制逻辑，但把该字段覆写为 `through_turn`（前端 `validatedForkChildKey`
+    /// 会校验 `forkMode` 与 `throughTurnId`）。
     pub fork_mode: String,
+    /// `sessions.forkThroughTurn` 的分支边界 turn id；其它模式下不出现该键。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub through_turn_id: Option<String>,
     /// 实际复制进子会话的消息条数（= `fork_point`）。
     pub message_count: usize,
     /// 子会话消息的 token 估算（启发式，非 tokenizer 精确值）。
@@ -345,12 +362,100 @@ pub fn fork_session(
         parent_key: parent_key.to_string(),
         fork_point: point,
         fork_mode: fork_mode.to_string(),
+        through_turn_id: None,
         message_count: point,
         tokens_used,
         title: child_title,
         compact_state_copied,
         notes,
     })
+}
+
+/// `sessions.forkThroughTurn`：按「某一轮（turn）」的**末端**分支出子会话。
+///
+/// # turn → forkPoint 的换算口径（必须可自证）
+///
+/// `sessions.db` 的 `session_messages` **没有任何 turn 列**（见
+/// `persistence::session::SessionManager::init` 的表结构与全部迁移），所以这里不臆造
+/// turn id，只接受**能落到真实消息行**的序号写法：
+///
+/// - `turn-<k>`（或裸数字 `<k>`），`k` = 父会话里 **assistant 消息的 0 基序号**
+///   —— `turn-0` 即「第一条 assistant 消息所在的那一轮」，与前端
+///   `webui/src/composables/chat/useChatRenderedMessages.ts` 的 `turn-${turnIdx}` 同口径；
+/// - 分支边界 = 该 assistant 消息之后、**下一条 user 消息之前**的全部行（该轮的工具输出 /
+///   续写 assistant 行一并纳入），转录末尾则到末尾——下一轮的第一条 user 消息不纳入；
+/// - 解析不出序号、或序号超出 assistant 消息条数 → [`SessionError::TurnNotFound`]。
+///
+/// 换算口径会写进返回值的 `notes`，调用方必须原样展示（不同写法可能被用户理解成别的轮）。
+pub fn fork_through_turn(
+    store: &mut SessionManager,
+    parent_key: &str,
+    turn_id: &str,
+    title: Option<&str>,
+) -> Result<ForkedSession, SessionError> {
+    store
+        .get_session(parent_key)
+        .map_err(store_err)?
+        .ok_or_else(|| SessionError::SessionNotFound {
+            session: parent_key.to_string(),
+        })?;
+    let messages = store.restore_session(parent_key).map_err(store_err)?;
+    if messages.is_empty() {
+        return Err(SessionError::EmptyParentSession {
+            session: parent_key.to_string(),
+        });
+    }
+    let turn_id = turn_id.trim();
+    let available_turns = messages
+        .iter()
+        .filter(|message| matches!(message, Message::Assistant { .. }))
+        .count();
+    let fork_point =
+        turn_boundary(&messages, turn_id).ok_or_else(|| SessionError::TurnNotFound {
+            session: parent_key.to_string(),
+            turn: turn_id.to_string(),
+            available_turns,
+        })?;
+
+    let mut forked = fork_session(store, parent_key, Some(fork_point), title)?;
+    forked.fork_mode = "through_turn".to_string();
+    forked.through_turn_id = Some(turn_id.to_string());
+    forked.notes.push(format!(
+        "through_turn: '{turn_id}' 按「assistant 消息的 0 基序号」换算为 forkPoint={fork_point}；\
+         sessions.db 不存 turn id，边界含该轮的工具/续写行，止于下一条 user 消息或转录末尾"
+    ));
+    Ok(forked)
+}
+
+/// turn id → 复制进子会话的消息条数（`None` = 该 turn 在转录里不存在）。
+fn turn_boundary(messages: &[Message], turn_id: &str) -> Option<usize> {
+    let ordinal = turn_ordinal(turn_id)?;
+    let mut seen = 0usize;
+    let anchor = messages.iter().position(|message| {
+        if !matches!(message, Message::Assistant { .. }) {
+            return false;
+        }
+        let hit = seen == ordinal;
+        seen += 1;
+        hit
+    })?;
+    // 该轮末行 = 锚点之后第一条 user 消息的下标；没有下一轮则到转录末尾。
+    Some(
+        messages[anchor + 1..]
+            .iter()
+            .position(|message| matches!(message, Message::User { .. }))
+            .map(|offset| anchor + 1 + offset)
+            .unwrap_or(messages.len()),
+    )
+}
+
+/// `turn-<k>` / `<k>` → `k`（拒绝负数、空串、非数字，避免把任意 id 猜成某一轮）。
+fn turn_ordinal(turn_id: &str) -> Option<usize> {
+    let digits = turn_id.strip_prefix("turn-").unwrap_or(turn_id).trim();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
 }
 
 /// 按会话 key（+ 可选 checkpoint）恢复可继续状态。
@@ -1013,6 +1118,111 @@ mod tests {
 
         drop(store);
         cleanup(&[parent.as_str(), forked.key.as_str()], &dir);
+    }
+
+    /// forkThroughTurn：turn-0 必须换算到「第一轮末行」（含该轮工具行），
+    /// 返回 `through_turn` + `throughTurnId`，且下一轮的消息不进入子会话。
+    #[test]
+    fn fork_through_turn_maps_assistant_ordinal_to_message_boundary() {
+        let (mut store, dir) = temp_store("through-turn");
+        let parent = parent_key("through-turn");
+        seed(
+            &store,
+            &parent,
+            &[
+                user("Q1"),
+                assistant("A1"),
+                tool("read_file", "T1"),
+                assistant("A1 续写"),
+                user("Q2"),
+                assistant("A2"),
+            ],
+        );
+
+        let forked = fork_through_turn(&mut store, &parent, "turn-0", Some("第一轮分支")).unwrap();
+        assert_eq!(forked.fork_mode, "through_turn", "必须声明成 through_turn");
+        assert_eq!(
+            forked.through_turn_id.as_deref(),
+            Some("turn-0"),
+            "必须回带调用方的 turn id（前端 validatedForkChildKey 逐字比对）"
+        );
+        assert_eq!(
+            forked.fork_point, 4,
+            "边界应止于第一轮末行（Q1/A1/工具/A1 续写），不含 Q2"
+        );
+        assert_eq!(forked.message_count, forked.fork_point);
+        assert!(
+            forked
+                .notes
+                .iter()
+                .any(|note| note.contains("through_turn") && note.contains("forkPoint=4")),
+            "换算口径必须写进 notes：{:?}",
+            forked.notes
+        );
+
+        let child = frames_of(&store, &forked.key).unwrap();
+        assert_eq!(child.len(), 4);
+        let texts: Vec<&str> = child.iter().map(|frame| frame.text.as_str()).collect();
+        assert_eq!(texts, vec!["Q1", "A1", "T1", "A1 续写"]);
+        assert!(
+            !texts.contains(&"Q2"),
+            "分支点之后的消息不得进入新会话：{texts:?}"
+        );
+        assert_eq!(
+            store.restore_session(&parent).unwrap().len(),
+            6,
+            "父会话必须原封不动"
+        );
+
+        drop(store);
+        cleanup(&[parent.as_str(), forked.key.as_str()], &dir);
+    }
+
+    /// forkThroughTurn：最后一轮 = 全量语义（forkPoint == 消息数），仍必须报 through_turn。
+    #[test]
+    fn fork_through_turn_on_last_turn_copies_everything() {
+        let (mut store, dir) = temp_store("through-last");
+        let parent = parent_key("through-last");
+        seed(&store, &parent, &[user("Q1"), assistant("A1"), user("Q2"), assistant("A2")]);
+
+        let forked = fork_through_turn(&mut store, &parent, "turn-1", None).unwrap();
+        assert_eq!(forked.fork_mode, "through_turn");
+        assert_eq!(forked.fork_point, 4);
+        assert_eq!(frames_of(&store, &forked.key).unwrap().len(), 4);
+
+        drop(store);
+        cleanup(&[parent.as_str(), forked.key.as_str()], &dir);
+    }
+
+    /// 不存在的 turn（序号越界 / 非序号 id / 会话不存在）必须带码，不得静默降级成全量分支。
+    #[test]
+    fn fork_through_turn_missing_turn_is_turn_not_found() {
+        let (mut store, dir) = temp_store("through-missing");
+        let parent = parent_key("through-missing");
+        seed(&store, &parent, &[user("Q1"), assistant("A1")]);
+
+        for turn in ["turn-1", "turn-99", "turn-abc", "", "1761000000000"] {
+            let err = fork_through_turn(&mut store, &parent, turn, None).unwrap_err();
+            assert_eq!(err.code(), "TURN_NOT_FOUND", "turn='{turn}' 必须报 TURN_NOT_FOUND");
+            match err {
+                SessionError::TurnNotFound {
+                    available_turns, ..
+                } => assert_eq!(available_turns, 1, "错误里必须给出可选的轮数"),
+                other => panic!("错误类型不符：{other:?}"),
+            }
+        }
+        assert_eq!(
+            store.restore_session(&parent).unwrap().len(),
+            2,
+            "被拒的 turn 分支不得产生任何子会话行"
+        );
+
+        let missing = fork_through_turn(&mut store, "agent:main:webchat:missing", "turn-0", None)
+            .unwrap_err();
+        assert_eq!(missing.code(), "SESSION_NOT_FOUND");
+
+        drop(store);
+        cleanup(&[parent.as_str()], &dir);
     }
 
     /// replay：顺序稳定、只读、工具帧带工具名；会话不存在报 SESSION_NOT_FOUND。

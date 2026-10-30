@@ -172,6 +172,40 @@ pub fn sessions_fork(_ctx: &GatewayContext, params: &Value) -> Value {
     }
 }
 
+/// `sessions.forkThroughTurn`：入参 `{key, throughTurnId, title?}`
+/// （兼容 `turnId` 别名），按某一轮的末端分支，返回 `forkMode=through_turn` +
+/// `throughTurnId`（前端 `validatedForkChildKey` 会逐字校验这两个字段）。
+pub fn sessions_fork_through_turn(_ctx: &GatewayContext, params: &Value) -> Value {
+    let mut manager = match open_manager() {
+        Ok(manager) => manager,
+        Err(err) => return err,
+    };
+    let key = session_key(params);
+    // ⚠️ 两边的命名不同名：前端 `forkTransition.ts` 发的是 `throughTurnId`，
+    // 契约文档写的是 `turnId` —— 两个都收，绝不因别名缺失而降级成全量分支。
+    let turn_id = params
+        .get("throughTurnId")
+        .or_else(|| params.get("turnId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let title = params
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    match fork::fork_through_turn(&mut manager, &key, turn_id, title) {
+        Ok(result) => serde_json::to_value(&result).unwrap_or_else(|err| {
+            json!({
+                "success": false,
+                "code": "INTERNAL_ERROR",
+                "message": format!("序列化分支结果失败: {err}"),
+            })
+        }),
+        Err(err) => session_error_value(&err),
+    }
+}
+
 /// `sessions.resume`：入参 `{key, checkpoint?}`，恢复可继续状态（含消息帧与压缩交接）。
 pub fn sessions_resume(_ctx: &GatewayContext, params: &Value) -> Value {
     let manager = match open_manager() {
@@ -470,6 +504,74 @@ mod tests {
             value["code"], "FORK_POINT_INVALID",
             "forkPoint 写错类型不得静默当成全量分支"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `sessions.forkThroughTurn`：线上形状必须带 `forkMode=through_turn` +
+    /// 与入参逐字相同的 `throughTurnId`（前端 `validatedForkChildKey` 据此判定），
+    /// 未知 turn 必须 `TURN_NOT_FOUND` 而不是静默全量分支。
+    #[test]
+    fn fork_through_turn_confirms_turn_boundary_and_rejects_unknown_turn() {
+        let dir = isolated_dir("fork-through-turn");
+        let ctx = test_ctx();
+        let parent = format!("agent:main:webchat:parent-{}", uuid::Uuid::new_v4());
+        let mut manager = SessionManager::new(&dir.join("sessions.db"));
+        manager.init().expect("init");
+        manager
+            .save_snapshot(
+                &parent,
+                "idle",
+                &[
+                    crate::types::Message::User {
+                        content: "第一问".into(),
+                        timestamp: chrono::Utc::now(),
+                    },
+                    crate::types::Message::Assistant {
+                        content: "第一答".into(),
+                        timestamp: chrono::Utc::now(),
+                        thinking: None,
+                    },
+                    crate::types::Message::User {
+                        content: "第二问".into(),
+                        timestamp: chrono::Utc::now(),
+                    },
+                    crate::types::Message::Assistant {
+                        content: "第二答".into(),
+                        timestamp: chrono::Utc::now(),
+                        thinking: None,
+                    },
+                ],
+                0,
+            )
+            .expect("写入父会话");
+        drop(manager);
+
+        // 前端实际发的键名是 throughTurnId
+        let forked =
+            sessions_fork_through_turn(&ctx, &json!({ "key": parent, "throughTurnId": "turn-0" }));
+        assert_eq!(forked["forkMode"], "through_turn", "回包形状：{forked:?}");
+        assert_eq!(forked["throughTurnId"], "turn-0");
+        assert_eq!(forked["forkPoint"], 2, "第一轮边界应止于第一答");
+        let child = forked["key"]
+            .as_str()
+            .unwrap_or_else(|| panic!("必须返回子会话 key：{forked:?}"))
+            .to_string();
+        assert_ne!(child, parent);
+
+        let resumed = sessions_resume(&ctx, &json!({ "key": child }));
+        assert_eq!(resumed["frameCount"], 2, "分支点之后的消息不得进入新会话");
+        assert_eq!(resumed["frames"][1]["text"], "第一答");
+
+        let missing =
+            sessions_fork_through_turn(&ctx, &json!({ "key": child, "throughTurnId": "turn-9" }));
+        assert_eq!(missing["code"], "TURN_NOT_FOUND", "未知 turn 不得伪成功：{missing:?}");
+        assert_eq!(missing["key"], Value::Null);
+
+        // 契约里的 turnId 别名同样收
+        let alias = sessions_fork_through_turn(&ctx, &json!({ "key": parent, "turnId": "turn-1" }));
+        assert_eq!(alias["forkMode"], "through_turn");
+        assert_eq!(alias["throughTurnId"], "turn-1");
+        assert_eq!(alias["forkPoint"], 4);
         let _ = std::fs::remove_dir_all(dir);
     }
 

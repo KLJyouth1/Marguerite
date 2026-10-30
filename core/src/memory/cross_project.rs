@@ -10,6 +10,11 @@
 //! - [`cross_project_search`] 只返回标题级摘要（title + 截断 excerpt + 行号），防上下文爆炸；
 //! - 命中后由 [`cross_project_expand`] 按 `{project, file, line}` 展开该行 ±3 行上下文。
 //!
+//! 检索面有**两个来源**：其他 AI 工具写的 Markdown（上文），以及本引擎自己学到的事实
+//! （[`crate::memory::writeback`] 的事实库 —— `file` 固定为 `cross_project_facts.jsonl`、
+//! `kind` 标 `fact`、`line` 是记录 id）。两者共用同一套打分与截断口径，写回的事实
+//! 下一轮就能被召回。
+//!
 //! 返回形如：
 //! ```json
 //! { "items": [{ "project", "file", "kind", "title", "line", "excerpt", "score", "updated_at" }] }
@@ -280,6 +285,23 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+/// 写回层（[`crate::memory::writeback`]）的活跃事实 → 候选行。
+///
+/// 与 MD 文件同一套嵌入口径，但**单条事实本身就是一整段内容**：没有「整文件 vs 单行」
+/// 之分，所以调用方拿到的 `line_score` 就是它能拿到的全部证据（不需要再乘 0.7/0.3）。
+/// 返回 `(记录 id, 项目, 正文, 写入时刻毫秒, 行相似度)`。
+fn writeback_candidates(q_vec: &[f64]) -> Vec<(u64, String, String, u64, f64)> {
+    crate::memory::writeback::active_records()
+        .into_iter()
+        .filter(|r| is_informative_line(&r.text))
+        .map(|r| {
+            let line_score = EmbeddingProvider::global()
+                .cosine(q_vec, &EmbeddingProvider::global().embed(&r.text));
+            (r.id, r.project, r.text, r.created_at_ms, line_score)
+        })
+        .collect()
+}
+
 /// `memory.cross_project.search`：跨项目记忆向量语义检索（标题级摘要，渐进披露第 1 步）
 ///
 /// params: `{ query: string, limit?: number }`
@@ -337,6 +359,23 @@ pub fn cross_project_search(params: &Value) -> Value {
             });
         }
     }
+    // 写回层（本引擎自己学到的跨项目事实）：与 MD 文件同池排序，
+    // 但 `file` 固定为事实库文件名、`kind` 标 `fact`，出问题能一眼看出是哪一路。
+    for (id, project, text, created_ms, line_score) in writeback_candidates(&q_vec) {
+        if line_score < 0.12 {
+            continue;
+        }
+        hits.push(CrossProjectHit {
+            project: project.clone(),
+            file: crate::memory::writeback::FACT_FILE.to_string(),
+            kind: "fact".to_string(),
+            title: project,
+            line: id as usize,
+            excerpt: redact(&truncate_chars(&text, SNIPPET_CHARS)),
+            score: line_score,
+            updated_at: (created_ms / 1000).to_string(),
+        });
+    }
     // 按分数降序，去重（同 project+excerpt）
     hits.sort_by(|a, b| {
         b.score
@@ -374,6 +413,23 @@ pub fn cross_project_expand(params: &Value) -> Value {
     let line = params.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
     if project.is_empty() || file.is_empty() || line == 0 {
         return json!({ "expanded": false, "error": "需要 project/file/line" });
+    }
+    // 写回层的事实不是文件里的行：`line` 是记录 id，直接按 id 取正文。
+    if file == crate::memory::writeback::FACT_FILE {
+        return match crate::memory::writeback::record_by_id(line as u64) {
+            Some(record) => {
+                let text = redact(&record.text);
+                json!({
+                    "expanded": true,
+                    "project": record.project,
+                    "file": crate::memory::writeback::FACT_FILE,
+                    "line": record.id,
+                    "hit": text,
+                    "context": [{ "line": record.id, "text": text }],
+                })
+            }
+            None => json!({ "expanded": false, "error": "事实记录不存在或已被取代" }),
+        };
     }
     let root = memory_root();
     let path = root.join(project).join(file);
@@ -486,6 +542,27 @@ fn gather_recall_scored(query: &str, limit: usize) -> Vec<RecallScored> {
                 score: combined,
             });
         }
+    }
+    // 写回层（本引擎自己学过的事实）与 MD 文件**同一检索面**：
+    // 写入后下一轮就能被 `recall_stable_prefix` / `cross_project_recall_hint` 召回，
+    // 否则「学到的东西」只有显式 search 才看得见，等于没学会。
+    for (_id, project, text, _created_ms, line_score) in writeback_candidates(&q_vec) {
+        let overlap = keyword_overlap(query, &text);
+        if line_score < RECALL_LINE_SCORE_MIN && overlap < RECALL_KEYWORD_MIN {
+            continue;
+        }
+        let line_score = if overlap >= RECALL_KEYWORD_MIN {
+            line_score.max(0.25)
+        } else {
+            line_score
+        };
+        let snippet = redact(&truncate_chars(&text, RECALL_SNIPPET_CHARS));
+        hits.push(RecallScored {
+            id: recall_id(&project, &snippet),
+            project,
+            snippet,
+            score: line_score,
+        });
     }
     hits.sort_by(|a, b| {
         b.score

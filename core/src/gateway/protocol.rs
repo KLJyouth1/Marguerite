@@ -618,6 +618,7 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "assistant.prefs.unpin",
     // 会话分支 / 恢复 / 回放（只读写 `sessions.db` 与本地上下文台账）
     "sessions.fork",
+    "sessions.forkThroughTurn",
     "sessions.resume",
     "sessions.replay",
     // WP1 设备总线（devices.*：list/status/call；L2/L3 经审批队列抬升，fail-closed）

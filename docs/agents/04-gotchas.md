@@ -467,8 +467,8 @@
   ⚠️ **接线时踩到的三个测量坑（都是检查器自己的 bug，不是官网）**：
   ① **子进程中文输出按 UTF-8 解码得到乱码** —— `check-version-sync.py --print` 在 cp936 控制台下写 GBK 字节，
      正则永远匹配不上（§4「别用终端显示下结论」那条坑的变体）；给子进程 `PYTHONUTF8=1` 即可。
-  ② **`SUPPORTED_METHODS` 必须先剥行注释再取字面量** —— 不剥是 **463**，剥了才是守卫报的 **460**（口径要和
-     `webui/scripts/check-rpc-contract.mjs` 逐字一致，否则「460 条」这条宣传会被检查器判成漂移；
+  ② **`SUPPORTED_METHODS` 必须先剥行注释再取字面量** —— 不剥是 **464**，剥了才是守卫报的 **461**（口径要和
+     `webui/scripts/check-rpc-contract.mjs` 逐字一致，否则「461 条」这条宣传会被检查器判成漂移；
      这个数字随每次新增 RPC 变化，改方法数就必须同步这里与官网三处）。
   ③ **`49 控制台视图` 对应的是 `ls webui/src/views/*.vue`**（顶层），递归数会得到 50（多一个
      `views/web/SettingsView.vue`）—— 官网把命令印在数字旁边，测量就必须按那条命令来。

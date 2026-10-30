@@ -241,9 +241,9 @@ python scripts/check-website-claims.py
 |---|---|---|---|
 | P0-0 CI 转绿 | **完成** | 9 个测试文件平台化（`gateway/{workspace,workspaces,config,market_remote}`、`doctor/router_weights`、`kb/project_graph`、`plugins/mcp_launch`、`sandbox/{whitelist,policy_store}`）+ `.github/workflows/ci.yml` 显式装 numpy | `cargo test -p marguerite-core --lib` 4380 passed / 0 failed / 25 ignored；`clippy --all-targets -D warnings` exit 0 |
 | P0-2 会话分支 | **已上线（RPC + 库）** | `core/src/session/fork.rs` + `gateway/assistant.rs` 的 `sessions.fork/resume/replay` | 7 条库测试 + 3 条网关测试 |
-| P0-3 上下文接续 | **库级完成** | `core/src/context/continuity.rs` + `agent/role_context.rs` 增 `continuity` 段 | 4 条测试；`context::` 107 passed |
-| P1 两层助理 | **后端 + 设置面板已上线** | `core/src/assistant/{mod,scope,profile,brief}.rs` + `gateway/assistant.rs`（9 个 RPC）+ `webui/.../AssistantPanel.vue` | 5 条 brief + 3 条 scope + 2 条 profile + 12 条网关 + 6 条前端 |
-| P2-1 记忆闸门 | **库级完成** | `core/src/memory/promote.rs`（晋升/降级/取代/计数） | 4 条测试；`memory::` 203 passed |
+| P0-3 上下文接续 | **已上线（注入提示词）** | `context/continuity.rs` + `role_context.rs` 的 `continuity_block` / `assistant_block` | 4 条 continuity + 3 条 assistant_block 测试 |
+| P1 两层助理 | **后端 + 设置面板 + 聊天注入** | `assistant/{scope,profile,brief}.rs` + 10 条 RPC + `AssistantPanel.vue` + `role_context::assistant_block` | 5 条 brief + 3 条 scope + 2 条 profile + 13 条网关 + 6 条前端 + 3 条注入 |
+| P2-1 记忆闸门 | **已接生产写路径** | `memory/promote.rs` + `memory/writeback.rs::remember_fact`（先闸门后落盘） | 4 条闸门 + 4 条写回测试 |
 | P2-2 知识库增量 | **库级完成** | `kb/store.rs` `apply_changes`、`kb/graph.rs` `remove_document`、`kb/integrity.rs` `audit_sources` | 4 条测试；`kb::` 50 passed |
 | P3-1 长任务熔断 | **已接入运行时** | `agent/tool_cycle.rs`（CircuitBreaker）+ `agent/task_checkpoint.rs`（pause_for_rollback）+ `runtime.rs`/`stream_loop.rs` 收口点 | 3 条熔断单测 + 3 条接线单测 |
 | P3-2 辩论防极化 | **库级完成** | `agent/team.rs` `converge_debate`（附和降权 ×0.2、证据链定胜负、保留少数派） | 3 条测试 |
@@ -251,12 +251,10 @@ python scripts/check-website-claims.py
 
 **下一步（尚未做，别当成已完成）**：
 
-1. **`sessions.forkThroughTurn` 的 turn→forkPoint 换算**：`sessions.fork/resume/replay` 已上线，但按
-   turn id 分支还需要把 turn 换化成消息下标（前端 `forkTransition.ts` 会校验返回的 `forkMode` 与
-   `throughTurnId`，目前只有 `full` / `prefix` 两种）。
-2. **两层助理的「跨项目事实」目前只读不写**：`assistant.brief.get` 会调 `memory.cross_project.search`，
-   但还没有「这条事实值得进 L1」的写回路径（P2 的记忆闸门 `memory::promote` 已就绪，缺一个接线点）。
-3. **前端只有设置面板**：`AssistantPanel.vue` 能看/钉/取消钉，聊天界面还不会自动注入 `brief`。
-4. **CI 验证**：P0-0 的 9 处平台化只在 Windows 本地跑过；Linux/macOS 由 CI 独立验证（这正是 0.2.18 翻车过的地方）。
-5. **`docs/agents/04-gotchas.md` 的 RPC 计数**已随本次接线从 451 更新为 460（含未剥注释的 463），
-   后续每加一个 RPC 都要同步官网三处 + 该分册。
+1. **CI 验证**：P0-0 的 9 处平台化只在 Windows 本地跑过；Linux/macOS 由 CI 独立验证（这正是 0.2.18 翻车过的地方）。
+2. **`assistant.facts` 的删除入口**：写回闸门（`memory::remember_fact`）已就绪，但用户只能删
+   `pinned`，删不掉「自动学到的事实」—— 可撤销性还差这一环。
+3. **两层助理的 L1→L2 投影**：目前 L2 直接读同一份 brief；真正的「L1 只给不可推导的、L2 只回写可复用的」
+   去污染规则还没实现（现在靠预算裁剪近似）。
+4. **RPC 计数纪律**：`SUPPORTED_METHODS` 现为 **461**（未剥注释 464）。每加一条都要同步官网三处 +
+   `docs/agents/04-gotchas.md`，否则 `check-website-claims.py` 会判红。

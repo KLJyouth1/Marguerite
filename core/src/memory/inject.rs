@@ -67,6 +67,17 @@ pub(crate) fn reset_for_test() {
 ///
 /// 写入落在 `LongTerm`（语义长时层）——它是跨轮持久的那一层；
 /// `Sensory`/`Working` 由 `tiered` 内部按其 TTL 语义管理，本层不越权。
+///
+/// # 写回闸门（本函数是全仓**唯一**的自动写入入口）
+///
+/// 入 tiered 之前先过一次 [`crate::memory::writeback::remember_fact`]：它按
+/// [`crate::memory::promote`] 的阈值决定这条文本值不值得**落盘**、落跨项目层还是
+/// 项目局部层。`Drop` 时不产生任何磁盘记录（闸门有牙），但进程内的 tiered 缓存
+/// 行为保持不变 —— 那是**临时**层，与「值得长期记住」是两件事，不该被同一道闸门
+/// 顺带改掉（那是比本功能大得多的行为变更）。
+///
+/// `meta` 就是写回层的「项目」：会话键（`agent:main:webchat:…`）本身标识了这条事实
+/// 属于哪条工作流，写入后跨项目检索能按它标注来源。
 pub fn remember(text: &str, meta: &str) -> bool {
     let t = text.trim();
     // 太短的消息（"hi" / "继续"）没有检索价值，入库只会稀释近邻质量
@@ -84,6 +95,8 @@ pub fn remember(text: &str, meta: &str) -> bool {
     {
         return false;
     }
+    // 写回闸门：只有真正过闸的文本才会在磁盘上留下事实记录。
+    let _ = crate::memory::writeback::remember_fact(meta, t, "tiered", crate::cache::now_ms());
     g.insert(MemoryTierVariant::LongTerm, t, meta);
     true
 }
@@ -204,6 +217,36 @@ mod tests {
         let t = "同一条消息重复投递不应占多个槽位";
         assert!(remember(t, "s1"));
         assert!(!remember(t, "s1"), "第二次写入应被判重");
+    }
+
+    /// 写回闸门**真的接在写入路径上**：过闸的文本必须在事实库里留下记录
+    /// （只断言「调用了闸门」是不够的 —— 那正是本仓最典型的「有而不用」缺陷）。
+    #[test]
+    fn remembering_through_the_inject_path_leaves_a_fact_record() {
+        let _g = lock();
+        reset_for_test();
+        let dir = std::env::temp_dir().join(format!(
+            "mgt-inject-writeback-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+
+        let text = "记住：团队约定发布前必须先跑 verify.sh --clean --all（脚本在 /scripts/verify.sh）";
+        assert!(remember(text, "agent:main:webchat:1"));
+        let facts = crate::memory::writeback::active_records();
+        let hit = facts
+            .iter()
+            .find(|f| f.text == text)
+            .unwrap_or_else(|| panic!("过闸的文本必须落进事实库: {facts:?}"));
+        assert_eq!(hit.tier, "cross_project", "高分文本应进跨项目层: {hit:?}");
+        assert_eq!(
+            hit.project, "agent:main:webchat:1",
+            "会话键就是写回层的项目标识"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap_or(());
     }
 
     #[test]

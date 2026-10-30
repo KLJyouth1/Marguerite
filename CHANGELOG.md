@@ -11,6 +11,19 @@
 
 ## [Unreleased]
 
+**2026-10-30 · 第二批收尾（把「只读」补成「可写 / 可见」）**
+
+- **新增** `sessions.forkThroughTurn`（RPC 460 → **461**）：按 turn 换算出分支点，
+  返回 `forkMode: "through_turn"` + `throughTurnId`（前端 `forkTransition.ts` 校验的就是这两个字段）；
+  turn 不存在返回 `TURN_NOT_FOUND`，换算口径写进 `notes` 而不是让调用方猜。
+- **新增** 记忆写回闸门 `memory::remember_fact`：写跨项目层**必须先过** `promote::decide` ——
+  `Drop` 不落盘、`Promote` 才进跨项目层、同 key 冲突走 supersede。此前闸门建好却没有门，
+  「越用越懂你」只有读没有学。
+- **新增** 聊天提示词注入助理简报（`agent::role_context::assistant_block`）：
+  在 continuity 段之后追加 `pinned / preferences / facts（带来源）`，全空时**不注入**，
+  硬上限 800 字符，超限按 facts 尾部先砍并提示「其余条目因预算被省略」。
+- 同步官网与 `docs/agents/04-gotchas.md` 的 RPC 计数 461（未剥注释为 464）。
+
 **2026-10-30 · 同上批的接线收尾（RPC + 前端 + 运行时）**
 
 - **新增 9 条 RPC**（`SUPPORTED_METHODS` 451 → **460**）：`assistant.scope.get` /

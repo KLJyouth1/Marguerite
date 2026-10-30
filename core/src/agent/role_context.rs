@@ -8,14 +8,16 @@
 //! 调用链这四条路径既拿不到会话档位，也拿不到记忆召回——正是「不管怎么开关都要能
 //! 把任务做完、特别是产出质量」这条投诉的可测量根因。
 //!
-//! 本模块是那个缺失的桥，只做三件事：
+//! 本模块是那个缺失的桥，只做四件事：
 //! 1. **档位**：把「本轮显式档位 / 会话持久档位 / 角色覆盖」交给
 //!    [`crate::model::thinking::resolve_effort_for_role`]（优先级只在那一处定义），
 //!    并给出跨 `tokio::spawn` 的作用域入口 [`RoleContext::scope`]；
 //! 2. **记忆（只读）**：按楼层开关 [`ResolvedLayers`] 裁剪的召回文本
 //!    [`memory_block`]，关掉的楼层**连检索都不做**（不是「查了不用」）；
 //! 3. **开场简报（只读）**：最近 1–3 份压缩交接 + 现场 git 状态的
-//!    [`continuity_block`]（干净工作区不注入）。
+//!    [`continuity_block`]（干净工作区不注入）；
+//! 4. **助理简报（只读）**：两层助理的钉住条目 / 稳定偏好 / 跨项目事实渲染成的
+//!    [`assistant_block`]（没有任何稳定记忆时不注入）。
 //!
 //! # 硬边界（不可越线）
 //!
@@ -30,6 +32,8 @@
 
 use std::future::Future;
 
+use serde_json::Value;
+
 use crate::memory::layers::ResolvedLayers;
 use crate::model::thinking::{
     resolve_effort_for_role, scoped_effort, session_effort_or_persisted, RoleOverrides,
@@ -43,6 +47,16 @@ pub const MEMORY_HEADER: &str = "## 相关记忆（只读召回，仅供参考�
 /// 记忆是增强项，不得吃掉子任务本身的上下文）。
 const MEMORY_CHAR_BUDGET: usize = 1_200;
 
+/// 助理简报的固定标题（可观测锚点：请求体里出现它 = 这一路真的注入了）。
+pub const ASSISTANT_HEADER: &str = "## 助理简报（用户稳定偏好与跨项目事实，仅供参考）";
+
+/// 助理简报的**硬上限**：三段（pinned / preferences / facts）加起来不得超过它。
+const ASSISTANT_CHAR_BUDGET: usize = 800;
+
+/// 因预算省略条目时的提示行（省略必须说出来，不静默吞掉）。
+const ASSISTANT_TRUNCATED_NOTE: &str =
+    "（其余条目因预算被省略，可在设置 → 助理中查看）";
+
 /// 单次执行的角色上下文：已解析档位 + 已召回记忆块。
 #[derive(Debug, Clone, Default)]
 pub struct RoleContext {
@@ -53,6 +67,8 @@ pub struct RoleContext {
     pub memory: Option<String>,
     /// 开场简报文本（最近压缩交接 + 现场工作区）；`None` = 干净 / 无交接状态 → 不注入。
     pub continuity: Option<String>,
+    /// 助理简报文本（钉住条目 + 稳定偏好 + 跨项目事实）；`None` = 没有任何稳定记忆 → 不注入。
+    pub assistant: Option<String>,
 }
 
 impl RoleContext {
@@ -67,6 +83,7 @@ impl RoleContext {
             effort,
             memory: None,
             continuity: None,
+            assistant: None,
         }
     }
 
@@ -196,10 +213,14 @@ pub fn build_with_layers(
     query: &str,
     layers: &ResolvedLayers,
 ) -> RoleContext {
+    // 段落顺序即提示词里的顺序：既有段（记忆）→ continuity（开场简报）→ assistant（助理简报）。
+    let continuity = continuity_block(session);
+    let assistant = assistant_block(session);
     RoleContext {
         effort: resolve_effort(session, overrides),
         memory: memory_block(query, session, layers),
-        continuity: continuity_block(session),
+        continuity,
+        assistant,
     }
 }
 
@@ -210,6 +231,129 @@ pub fn build_with_layers(
 pub fn continuity_block(session: Option<&str>) -> Option<String> {
     let project = session.and_then(crate::context::session::session_project);
     crate::context::continuity::inject_block(project.as_deref())
+}
+
+/// 助理简报（只读）：把两层助理的稳定记忆压成一段紧凑文本，接在开场简报之后。
+///
+/// 作用域取自 `assistant_scope.json`（[`crate::assistant::scope::load_state`]），
+/// 简报由 [`crate::assistant::brief::build_brief`] 合成（`max_chars` 即本块的硬上限）。
+///
+/// `session` 只表示「这条路径属于哪个会话」，**不**当作检索查询：会话键是 id 而不是
+/// 语义查询，拿它去检索只会白扫一遍全部历史记忆（本机实测 79 个文件 / 230+ KB），
+/// 而效果与空串无异。传空串让 `build_brief` 在 `project` 作用域自动改用 workspace 名
+/// 检索，`global` 作用域则不做语义检索——不拖慢每一轮对话。
+///
+/// 返回 `None` = 没有任何稳定记忆（不注入空段落，避免污染提示词）。
+pub fn assistant_block(_session: Option<&str>) -> Option<String> {
+    let scope = crate::assistant::scope::load_state().scope();
+    let brief =
+        crate::assistant::brief::build_brief(&scope, "", Some(ASSISTANT_CHAR_BUDGET));
+    render_assistant_brief(&brief)
+}
+
+/// 把 [`crate::assistant::brief::build_brief`] 的结构化简报渲染成紧凑文本段。
+///
+/// * `pinned` 逐条 `- `，排最前（用户亲手钉住的偏好）；
+/// * `preferences` 一行一条（`key：value`）；
+/// * `facts` 带出处：`- 正文（来源：xxx）`（简报内已按分值降序，所以砍尾部 = 先砍低分）；
+/// * 三段全空（`budget.used == 0`）⇒ `None`，**不注入空段落**；
+/// * 总长硬上限 [`ASSISTANT_CHAR_BUDGET`]：放不下时从尾部让位，并补一行省略提示。
+fn render_assistant_brief(brief: &Value) -> Option<String> {
+    let used = brief
+        .get("budget")
+        .and_then(|b| b.get("used"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let items = |key: &str| {
+        brief
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (pinned, preferences, facts) = (items("pinned"), items("preferences"), items("facts"));
+    if used == 0 && pinned.is_empty() && preferences.is_empty() && facts.is_empty() {
+        return None;
+    }
+
+    let text_of = |v: &Value| {
+        v.get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for p in &pinned {
+        let text = text_of(p);
+        if !text.is_empty() {
+            lines.push(format!("- {text}"));
+        }
+    }
+    for p in &preferences {
+        let key = p.get("key").and_then(Value::as_str).unwrap_or("").trim();
+        let value = p.get("value").and_then(Value::as_str).unwrap_or("").trim();
+        if !key.is_empty() || !value.is_empty() {
+            lines.push(format!("- {key}：{value}"));
+        }
+    }
+    for f in &facts {
+        let text = text_of(f);
+        if text.is_empty() {
+            continue;
+        }
+        let source = f
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("cross_project");
+        lines.push(format!("- {text}（来源：{source}）"));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    // 按顺序装满：pinned → preferences → facts，装不下的尾部一律让位。
+    let mut kept = 0usize;
+    let mut used_chars = ASSISTANT_HEADER.chars().count();
+    for line in &lines {
+        let cost = line.chars().count() + 1; // '\n'
+        if used_chars + cost > ASSISTANT_CHAR_BUDGET {
+            break;
+        }
+        used_chars += cost;
+        kept += 1;
+    }
+    let mut dropped = kept < lines.len();
+    let note_cost = ASSISTANT_TRUNCATED_NOTE.chars().count() + 1;
+    let brief_truncated = brief
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if brief_truncated || dropped {
+        // 提示行必须放得下：不够就继续从尾部（低分事实）让位。
+        while kept > 0 && used_chars + note_cost > ASSISTANT_CHAR_BUDGET {
+            kept -= 1;
+            used_chars -= lines[kept].chars().count() + 1;
+            dropped = true;
+        }
+    }
+    if kept == 0 {
+        // 一条正文都放不下 → 不注入只剩标题的空块。
+        return None;
+    }
+
+    let mut out = String::from(ASSISTANT_HEADER);
+    for line in lines.iter().take(kept) {
+        out.push('\n');
+        out.push_str(line);
+    }
+    if brief_truncated || dropped {
+        out.push('\n');
+        out.push_str(ASSISTANT_TRUNCATED_NOTE);
+    }
+    Some(out)
 }
 
 /// 从 `Message` 里取正文文本（跨项目召回返回的是 System 消息）。
@@ -335,5 +479,129 @@ mod tests {
             block.chars().count()
         );
         crate::memory::inject::reset_for_test();
+    }
+
+    /// 隔离配置目录：助理的作用域 / 钉住 / 画像都落在临时目录里（不读真实用户数据）。
+    fn iso(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "marguerite_role_ctx_{}_{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::persistence::config::Config::set_config_dir_override(dir.clone());
+        dir
+    }
+
+    /// 没有任何稳定记忆 → 不注入空段落（否则每轮对话都被一段空标题污染）。
+    #[test]
+    fn assistant_block_is_absent_when_no_stable_memory() {
+        let _dir = iso("assist-empty");
+        assert!(
+            assistant_block(None).is_none(),
+            "无钉住 / 无偏好 / 无事实时不得注入助理简报"
+        );
+        assert!(assistant_block(Some("s-empty")).is_none());
+        // 纯渲染路径：`budget.used == 0` 且三段全空 ⇒ None。
+        let empty = crate::assistant::compose_brief(crate::assistant::BriefInput {
+            scope: "global".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            render_assistant_brief(&empty).is_none(),
+            "空简报不得渲染出只剩标题的段落"
+        );
+    }
+
+    /// pinned / preferences / facts 都要落地，且事实必须带出处。
+    #[test]
+    fn assistant_block_renders_pinned_preferences_and_facts_with_source() {
+        use crate::assistant::brief::{Fact, PinnedItem, Preference};
+        let _dir = iso("assist-render");
+        let brief = crate::assistant::compose_brief(crate::assistant::BriefInput {
+            scope: "project".to_string(),
+            pinned: vec![PinnedItem {
+                text: "所有文档用中文".to_string(),
+                source: "user".to_string(),
+                at: "2026-10-30T00:00:00Z".to_string(),
+            }],
+            preferences: vec![Preference {
+                key: "stack".to_string(),
+                value: "Rust".to_string(),
+                confidence: 0.9,
+                evidence: 1,
+            }],
+            facts: vec![Fact {
+                text: "0.2.19 修了启动 panic".to_string(),
+                source: "project:marguerite".to_string(),
+                score: 0.8,
+            }],
+            ..Default::default()
+        });
+        let block = render_assistant_brief(&brief).expect("有内容必须注入");
+        assert!(block.starts_with(ASSISTANT_HEADER), "{block}");
+        assert!(
+            block.contains("\n- 所有文档用中文"),
+            "钉住条目应逐条 `- ` 列出：{block}"
+        );
+        assert!(block.contains("\n- stack：Rust"), "偏好一行一条：{block}");
+        assert!(
+            block.contains("0.2.19 修了启动 panic（来源：project:marguerite）"),
+            "事实必须带出处：{block}"
+        );
+        assert!(
+            !block.contains(ASSISTANT_TRUNCATED_NOTE),
+            "没截断时不得出现省略提示：{block}"
+        );
+
+        // 生产路径（不是只测纯函数）：画像落盘后 assistant_block 必须真的读到它。
+        crate::assistant::UserProfile {
+            language: Some("中文".to_string()),
+            stacks: vec!["Rust".to_string()],
+            taboos: Vec::new(),
+        }
+        .save()
+        .expect("写入 user_profile.md 应成功");
+        let live = assistant_block(None).expect("有稳定偏好就该注入");
+        assert!(live.contains("\n- language：中文"), "{live}");
+    }
+
+    /// 超 800 字符：从 facts 尾部（低分项）砍起，并补一行省略提示。
+    #[test]
+    fn assistant_block_clips_facts_tail_to_hard_limit() {
+        use crate::assistant::brief::Fact;
+        let _dir = iso("assist-clip");
+        let facts: Vec<Fact> = (0..40)
+            .map(|i| Fact {
+                text: format!("第{i}条跨项目事实：{}", "很长的说明文字".repeat(4)),
+                source: format!("cross_project:notes-{i}.md"),
+                score: 1.0 - (i as f64) * 0.01,
+            })
+            .collect();
+        let brief = crate::assistant::compose_brief(crate::assistant::BriefInput {
+            scope: "global".to_string(),
+            facts,
+            max_chars: Some(4_000),
+            ..Default::default()
+        });
+        assert!(
+            !brief["truncated"].as_bool().unwrap(),
+            "compose 阶段预算给足，不该截断（要测的是渲染上限）"
+        );
+        let block = render_assistant_brief(&brief).expect("有事实必须注入");
+        assert!(
+            block.chars().count() <= ASSISTANT_CHAR_BUDGET,
+            "助理简报 {} 字符超过硬上限 {ASSISTANT_CHAR_BUDGET}",
+            block.chars().count()
+        );
+        assert!(
+            block.contains(ASSISTANT_TRUNCATED_NOTE),
+            "省略条目必须明说：{block}"
+        );
+        assert!(block.contains("第0条"), "高分事实优先保留：{block}");
+        assert!(
+            !block.contains("第39条"),
+            "尾部低分事实必须先被砍：{block}"
+        );
     }
 }

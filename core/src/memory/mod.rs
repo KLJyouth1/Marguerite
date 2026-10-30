@@ -26,6 +26,7 @@ pub mod sensory;
 pub mod short_term;
 pub mod synapse;
 pub mod tiered;
+pub mod writeback;
 pub mod inject;
 pub mod layers;
 
