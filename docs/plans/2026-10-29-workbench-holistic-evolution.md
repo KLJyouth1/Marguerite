@@ -240,18 +240,23 @@ python scripts/check-website-claims.py
 | 批次 | 状态 | 落点 | 证据 |
 |---|---|---|---|
 | P0-0 CI 转绿 | **完成** | 9 个测试文件平台化（`gateway/{workspace,workspaces,config,market_remote}`、`doctor/router_weights`、`kb/project_graph`、`plugins/mcp_launch`、`sandbox/{whitelist,policy_store}`）+ `.github/workflows/ci.yml` 显式装 numpy | `cargo test -p marguerite-core --lib` 4380 passed / 0 failed / 25 ignored；`clippy --all-targets -D warnings` exit 0 |
-| P0-2 会话分支 | **库级完成，RPC 未接线** | `core/src/session/fork.rs`（fork/resume/replay + 5 个错误码） | 7 条测试；`session::` 106 passed |
+| P0-2 会话分支 | **已上线（RPC + 库）** | `core/src/session/fork.rs` + `gateway/assistant.rs` 的 `sessions.fork/resume/replay` | 7 条库测试 + 3 条网关测试 |
 | P0-3 上下文接续 | **库级完成** | `core/src/context/continuity.rs` + `agent/role_context.rs` 增 `continuity` 段 | 4 条测试；`context::` 107 passed |
-| P1 两层助理 | **库级完成，RPC 未接线** | `core/src/assistant/{mod,scope,profile,brief}.rs` | 5 条 brief 测试 + 3 条 scope 测试 + 2 条 profile 测试 |
+| P1 两层助理 | **后端 + 设置面板已上线** | `core/src/assistant/{mod,scope,profile,brief}.rs` + `gateway/assistant.rs`（9 个 RPC）+ `webui/.../AssistantPanel.vue` | 5 条 brief + 3 条 scope + 2 条 profile + 12 条网关 + 6 条前端 |
 | P2-1 记忆闸门 | **库级完成** | `core/src/memory/promote.rs`（晋升/降级/取代/计数） | 4 条测试；`memory::` 203 passed |
 | P2-2 知识库增量 | **库级完成** | `kb/store.rs` `apply_changes`、`kb/graph.rs` `remove_document`、`kb/integrity.rs` `audit_sources` | 4 条测试；`kb::` 50 passed |
-| P3-1 长任务熔断 | **库级完成，调度层未自动调用** | `agent/tool_cycle.rs`（CircuitBreaker）+ `agent/task_checkpoint.rs`（pause_for_rollback） | 3 条测试；`agent::` 352 passed |
+| P3-1 长任务熔断 | **已接入运行时** | `agent/tool_cycle.rs`（CircuitBreaker）+ `agent/task_checkpoint.rs`（pause_for_rollback）+ `runtime.rs`/`stream_loop.rs` 收口点 | 3 条熔断单测 + 3 条接线单测 |
 | P3-2 辩论防极化 | **库级完成** | `agent/team.rs` `converge_debate`（附和降权 ×0.2、证据链定胜负、保留少数派） | 3 条测试 |
 | P3-3 任务树 | **库级完成** | `core/src/orchestration/task_state.rs`（就绪集/派发/失败只阻塞下游/并行批） | 5 条测试 |
 
 **下一步（尚未做，别当成已完成）**：
 
-1. **RPC 接线**：`assistant.scope.get/set`、`assistant.brief.get`、`sessions.fork/resume/replay`（含 `forkThroughTurn` 的 `forkMode` 覆写）—— 都要改 `gateway/protocol.rs` 与 `gateway/methods.rs`，并同步官网「RPC 方法 451 条」这个硬事实。
-2. **调度层接线**：熔断器需要运行时每步调 `observe` + `pause`，目前是独立组件。
-3. **前端**：设置页「助理」分区（钉住/查看/删除学到的偏好）——可撤销是硬要求。
+1. **`sessions.forkThroughTurn` 的 turn→forkPoint 换算**：`sessions.fork/resume/replay` 已上线，但按
+   turn id 分支还需要把 turn 换化成消息下标（前端 `forkTransition.ts` 会校验返回的 `forkMode` 与
+   `throughTurnId`，目前只有 `full` / `prefix` 两种）。
+2. **两层助理的「跨项目事实」目前只读不写**：`assistant.brief.get` 会调 `memory.cross_project.search`，
+   但还没有「这条事实值得进 L1」的写回路径（P2 的记忆闸门 `memory::promote` 已就绪，缺一个接线点）。
+3. **前端只有设置面板**：`AssistantPanel.vue` 能看/钉/取消钉，聊天界面还不会自动注入 `brief`。
 4. **CI 验证**：P0-0 的 9 处平台化只在 Windows 本地跑过；Linux/macOS 由 CI 独立验证（这正是 0.2.18 翻车过的地方）。
+5. **`docs/agents/04-gotchas.md` 的 RPC 计数**已随本次接线从 451 更新为 460（含未剥注释的 463），
+   后续每加一个 RPC 都要同步官网三处 + 该分册。

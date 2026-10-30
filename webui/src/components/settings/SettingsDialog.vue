@@ -123,6 +123,11 @@
             <SettingsMemoryPanel />
           </template>
 
+          <!-- Assistant memory scope, pinned items, and the preferences it learned
+               on its own. Like Memory & Profile this is an RPC action surface, not
+               a config form, so it renders outside readiness/dirty state. -->
+          <AssistantPanel v-else-if="section === 'assistant'" />
+
           <SandboxSettingsPanel v-else-if="section === 'sandbox'" />
 
           <!-- Doctor is a client-type read-only health surface (doctor.status).
@@ -305,6 +310,7 @@ import SettingsAdvancedPanel from '@/components/settings/SettingsAdvancedPanel.v
 import SettingsPlanPanel from '@/components/settings/SettingsPlanPanel.vue'
 import SettingsMemoryPanel from '@/components/settings/SettingsMemoryPanel.vue'
 import CrossProjectMemoryPanel from '@/components/settings/CrossProjectMemoryPanel.vue'
+import AssistantPanel from '@/components/settings/AssistantPanel.vue'
 import KnowledgeBasePanel from '@/components/settings/KnowledgeBasePanel.vue'
 import MemoryLayersPanel from '@/components/settings/MemoryLayersPanel.vue'
 import ProfileCard from '@/components/settings/ProfileCard.vue'

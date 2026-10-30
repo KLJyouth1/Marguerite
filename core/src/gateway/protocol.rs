@@ -608,6 +608,18 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "update.config.set",
     "update.check",
     "update.syncContent",
+    // 两层助理（L1/L2）：作用域、结构化简报、钉住与稳定偏好。
+    // 全部是**纯本地文件 + 本地记忆**，Rust 原生实现，不经 Python 侧车。
+    "assistant.scope.get",
+    "assistant.scope.set",
+    "assistant.brief.get",
+    "assistant.prefs.list",
+    "assistant.prefs.pin",
+    "assistant.prefs.unpin",
+    // 会话分支 / 恢复 / 回放（只读写 `sessions.db` 与本地上下文台账）
+    "sessions.fork",
+    "sessions.resume",
+    "sessions.replay",
     // WP1 设备总线（devices.*：list/status/call；L2/L3 经审批队列抬升，fail-closed）
     "devices.list",
     "devices.status",

@@ -410,6 +410,70 @@ impl CircuitBreaker {
     pub fn pause(&self, store: &CheckpointStore) -> Option<TaskCheckpoint> {
         store.pause_for_rollback(&self.task_id)
     }
+
+    /// 熔断后的运行时处置：把「可回滚点」真正落到磁盘，再返回该 checkpoint。
+    ///
+    /// 与 [`CircuitBreaker::pause`] 的区别：工具回路是**长任务**，往往在熔断前并未
+    /// 显式建立 checkpoint。此时 `pause` 会返回 `None` —— 等于对外宣称「有回滚点」
+    /// 却查无此项。这里先建一份再置为 `paused_for_rollback`，让返回的
+    /// `checkpoint_id` 真实可查、可回滚 / 可重放。
+    ///
+    /// 只在熔断时调用，正常回路零磁盘 IO。
+    pub fn pause_with_rollback_point(
+        &self,
+        store: &CheckpointStore,
+        session_id: &str,
+        title: &str,
+    ) -> Option<TaskCheckpoint> {
+        if store.get(&self.task_id).is_none() {
+            store
+                .record(TaskCheckpoint::new(self.task_id.clone(), session_id, title))
+                .ok()?;
+        }
+        store.pause_for_rollback(&self.task_id)
+    }
+}
+
+/// 工具回路「每执行一个工具调用后」的唯一收口：把 `(调用, 结果)` 按顺序喂给熔断器。
+///
+/// - 下标对齐：`results[i]` 必须是 `calls[i]` 的结果（两个回路都按同序收集）；
+/// - 命中即停：已判定熔断时后续步骤不再计入（避免同一条 turn 反复改写原因）；
+/// - `at_ms` 由调用方显式传入（生产传 `task_checkpoint::now_ms()`），离线单测可复现任意时间线。
+///
+/// 返回 `verdict.tripped == true` 时，调用方应落回滚点（
+/// [`CircuitBreaker::pause_with_rollback_point`]）并把「已暂停 + checkpoint_id + reason」
+/// 返回给上层，而不是继续跑或 abort 进程。
+pub fn observe_tool_steps(
+    breaker: &mut CircuitBreaker,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    at_ms: u64,
+) -> CircuitVerdict {
+    let mut verdict = breaker.verdict();
+    for (call, result) in calls.iter().zip(results.iter()) {
+        verdict = breaker.observe(call, result, at_ms);
+        if verdict.tripped {
+            break;
+        }
+    }
+    verdict
+}
+
+/// 熔断判定是否应让任务**真正停车**（暂停 + 落回滚点）。
+///
+/// 三条判定里只有「错误驱动」的两条（连续错误 / 窗口错误率）归熔断器裁决。
+/// 「同参数连续 3 步」在工具回路里**已由 `stream_loop` 的 doom-loop 两档机制负责**
+/// （3 步注入纠正提示、5 步才硬中止）——若熔断器也在 3 步停车，就把「纠错层」
+/// 变成死代码，并重演 v0.2.10 修过的缺陷（正常的同名同参连续调用被误杀）。
+///
+/// 故这里对 `RepeatedParameters` 返回 `false`：调用方应把该轨迹交回 doom-loop，
+/// 并复位熔断器（否则一次重复会永久占住熔断态，后面的错误驱动判定再也报不出来）。
+pub fn pauses_task(verdict: &CircuitVerdict) -> bool {
+    verdict.tripped
+        && !matches!(
+            verdict.reason.as_ref(),
+            Some(CircuitReason::RepeatedParameters { .. })
+        )
 }
 
 /// 工具参数指纹（确定性 FNV-1a 64，与进程/哈希种子无关）。
@@ -2136,5 +2200,164 @@ mod circuit_tests {
         // 操作员确认回滚后恢复度量。
         breaker.resume();
         assert!(!breaker.verdict().tripped, "resume 后应回到未熔断");
+    }
+
+    /// **接线验证①**：走收口函数 `observe_tool_steps`，连续 5 次工具错误 →
+    /// 返回暂停判定 + 真实可查的 checkpoint_id（回滚点已落盘为 `paused_for_rollback`）。
+    #[test]
+    fn circuit_wiring_pauses_with_checkpoint_id_on_consecutive_errors() {
+        let mut breaker = CircuitBreaker::new("task-wiring-five-errors");
+        let calls: Vec<ToolCall> = (0..CIRCUIT_MAX_CONSECUTIVE_ERRORS)
+            .map(|i| call("read_file", &format!("step-{i}")))
+            .collect();
+        let results: Vec<ToolResult> = calls.iter().map(|_| err()).collect();
+
+        let verdict = observe_tool_steps(&mut breaker, &calls, &results, 0);
+        assert!(verdict.tripped, "收口处必须判定熔断（暂停），而非继续空转");
+        assert_eq!(
+            verdict.reason,
+            Some(CircuitReason::ConsecutiveErrors { count: 5 }),
+            "熔断原因应是连续 5 次错误"
+        );
+        let checkpoint_id = verdict
+            .checkpoint_id
+            .clone()
+            .expect("熔断必须返回可回滚点 id");
+        assert_eq!(checkpoint_id, breaker.task_id());
+
+        // 回滚点必须真实存在：先建 checkpoint 再置为暂停态（不是只报一个 id）。
+        let store = CheckpointStore::open(unique_dir()).unwrap();
+        let paused = breaker
+            .pause_with_rollback_point(&store, "sess-wiring", "智能体工具回路")
+            .expect("熔断后必须能落回滚点");
+        assert_eq!(paused.status, PAUSED_FOR_ROLLBACK);
+        let loaded = store.get(&checkpoint_id).expect("回滚点必须可按 id 查回");
+        assert_eq!(loaded.status, PAUSED_FOR_ROLLBACK, "查回的回滚点应仍是暂停态");
+        assert_eq!(loaded.session_id, "sess-wiring");
+        assert!(
+            store.list_interrupted().is_empty(),
+            "暂停态不应混进「进程中断的在飞任务」清单"
+        );
+    }
+
+    /// **接线验证②**：成功一步即清零连续错误计数；命中后 `resume()` 复位，
+    /// 下一条任务（新熔断器）不继承上一条的错误计数。
+    #[test]
+    fn circuit_wiring_resumes_after_success_and_does_not_inherit_previous_task() {
+        // 3 连错 → 1 成功 → 1 错：连续计数必须清零，不得熔断。
+        let mut breaker = CircuitBreaker::new("task-wiring-resume");
+        let mut v = CircuitVerdict::ok();
+        for i in 0..3u64 {
+            v = observe_tool_steps(
+                &mut breaker,
+                &[call("read_file", &format!("r{i}"))],
+                &[err()],
+                i * 100,
+            );
+        }
+        assert!(!v.tripped, "3 连错不该熔断，实际 {v:?}");
+        v = observe_tool_steps(&mut breaker, &[call("read_file", "after-ok")], &[ok()], 300);
+        assert!(!v.tripped);
+        v = observe_tool_steps(
+            &mut breaker,
+            &[call("read_file", "after-ok-err")],
+            &[err()],
+            400,
+        );
+        assert!(!v.tripped, "成功之后连续错误计数应已清零，实际 {v:?}");
+
+        // 命中 → resume：熔断态与计数一并复位，重新度量时 4 连错仍不熔断。
+        for i in 0..CIRCUIT_MAX_CONSECUTIVE_ERRORS as u64 {
+            v = observe_tool_steps(
+                &mut breaker,
+                &[call("read_file", &format!("trip-{i}"))],
+                &[err()],
+                500 + i * 100,
+            );
+        }
+        assert!(v.tripped, "5 连错应熔断");
+        breaker.resume();
+        assert!(
+            !breaker.is_tripped() && !breaker.verdict().tripped,
+            "resume 后应回到未熔断"
+        );
+        let mut after = CircuitVerdict::ok();
+        for i in 0..4u64 {
+            after = observe_tool_steps(
+                &mut breaker,
+                &[call("read_file", &format!("reset-{i}"))],
+                &[err()],
+                2000 + i * 100,
+            );
+        }
+        assert!(
+            !after.tripped,
+            "resume 清空计数后 4 连错不得熔断，实际 {after:?}"
+        );
+
+        // 新任务的熔断器从零开始：上一条任务的 5 连错不会顺延。
+        let mut next = CircuitBreaker::new("task-wiring-next");
+        let mut nv = CircuitVerdict::ok();
+        for i in 0..4u64 {
+            nv = observe_tool_steps(
+                &mut next,
+                &[call("read_file", &format!("next-{i}"))],
+                &[err()],
+                i * 100,
+            );
+        }
+        assert!(
+            !nv.tripped,
+            "新任务不得继承上一条任务的错误计数，实际 {nv:?}"
+        );
+    }
+
+    /// **接线验证③**：正常路径（无错 + 低错误率）绝不误熔断。
+    #[test]
+    fn circuit_wiring_does_not_trip_on_normal_path() {
+        let mut breaker = CircuitBreaker::new("task-wiring-normal");
+        // 12 步全成功（参数各异，避开同参数 3 步的死循环判定）。
+        let calls: Vec<ToolCall> = (0..12)
+            .map(|i| call("read_file", &format!("n{i}")))
+            .collect();
+        let results: Vec<ToolResult> = calls.iter().map(|_| ok()).collect();
+        let verdict = observe_tool_steps(&mut breaker, &calls, &results, 0);
+        assert!(!verdict.tripped, "全成功路径不得熔断：{verdict:?}");
+        assert!(verdict.checkpoint_id.is_none(), "未熔断时不返回回滚点");
+
+        // 20 步里 2 次非连续错误（10% < 15% 阈值、最长连续 1）→ 仍不得熔断。
+        let mut noisy = CircuitBreaker::new("task-wiring-noisy");
+        let mut nv = CircuitVerdict::ok();
+        for i in 0..20u64 {
+            let failed = matches!(i, 4 | 13);
+            let result = if failed { err() } else { ok() };
+            nv = observe_tool_steps(
+                &mut noisy,
+                &[call("grep", &format!("q{i}"))],
+                &[result],
+                i * 1_000,
+            );
+        }
+        assert!(!nv.tripped, "10% 错误率低于阈值，不应熔断：{nv:?}");
+
+        // 正常任务里的同名同参连续 3 步（如对同一工具连按同参数调用）：熔断器会判重复，
+        // 但 `pauses_task` 必须为 false —— 该轨迹归 doom-loop 的纠错层（3 步提醒 / 5 步中止），
+        // 熔断器不得在 3 步就停车（否则正常任务被误杀）。
+        let mut legit = CircuitBreaker::new("task-wiring-legit-repeat");
+        let same = args(&[("path", "D:/w/report.md")]);
+        let mut lv = CircuitVerdict::ok();
+        for i in 0..CIRCUIT_MAX_REPEAT_STEPS as u64 {
+            lv = observe_tool_steps(
+                &mut legit,
+                &[ToolCall::new("read_file", same.clone())],
+                &[ok()],
+                i * 100,
+            );
+        }
+        assert!(lv.tripped, "同参数连续 3 步，熔断器本身应判定重复");
+        assert!(
+            !pauses_task(&lv),
+            "重复判定不得让任务停车（交由 doom-loop 纠错层）"
+        );
     }
 }

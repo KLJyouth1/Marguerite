@@ -23,7 +23,10 @@ use crate::agent::stream_loop::{
     detect_doom_loop, run_tool_loop_streaming_with_disclosure_and_session, AgentEvent,
     DOOM_LOOP_ABORT, DOOM_LOOP_THRESHOLD,
 };
-use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
+use crate::agent::tool_cycle::{
+    observe_tool_steps, pauses_task, CircuitBreaker, ToolCall as CycleToolCall, ToolCycle,
+    ToolResult,
+};
 use crate::agent::tool_schema::{
     discovery_query, SessionToolFace, ToolDisclosure, DISCOVER_TOOLS_NAME,
 };
@@ -1008,6 +1011,13 @@ impl AgentRuntime {
         // 每 turn 每能力只纠偏一次，第二次放行。放在 round 循环内会让模型每轮
         // 重试都再撞一次 CAPABILITY_MISROUTE，直到预算耗尽。
         let mut corrected_capabilities = std::collections::HashSet::new();
+        // P3-1 长任务熔断：每条 turn 一个熔断器（`task_id` 同时是可回滚点标识）。
+        // 每条 turn 新建 → 上一次任务的错误计数不会继承到下一次（状态有界）。
+        let mut breaker = CircuitBreaker::new(format!(
+            "tool-turn-{}-{}",
+            self.event_session.as_deref().unwrap_or("agent"),
+            crate::agent::task_checkpoint::now_ms()
+        ));
         for round in 0..max_rounds {
             // 每轮开头先做预算硬熔断（步数/时长/token），命中即返回可识别结果。
             if let Some(breach) = crate::agent::turn_budget::check_turn_budget(
@@ -1087,6 +1097,8 @@ impl AgentRuntime {
                     thinking: resp.thinking,
                     timestamp: Utc::now(),
                 });
+                // 成功收敛 = 本任务结束：熔断计数复位，下一次任务从零开始度量。
+                breaker.resume();
                 return Ok(text);
             }
 
@@ -1156,6 +1168,13 @@ impl AgentRuntime {
                 }
             }
             // W4.4：反脚本守卫（每 turn 每个能力只纠偏一次；集合在 round 循环外）。
+            // 熔断器按「调用 ↔ 结果」对齐喂入：先按模型返回顺序建好调用条目，
+            // 结果下标与 `cycle_calls` 下标一一对应（每个分支都只产出一条结果）。
+            let cycle_calls: Vec<CycleToolCall> = resp
+                .tool_calls
+                .iter()
+                .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
+                .collect();
             let mut results = Vec::with_capacity(resp.tool_calls.len());
             for (i, tc) in resp.tool_calls.iter().enumerate() {
                 // 矩阵拒绝 / 需确认但无宿主 → 不执行（fail-closed），结果里写明真实原因。
@@ -1213,9 +1232,71 @@ impl AgentRuntime {
                 ) {
                     results.push(blocked);
                 } else {
-                    let call = CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments));
-                    results.extend(cycle.execute_sequential(vec![call]).await?);
+                    results.extend(cycle.execute_sequential(vec![cycle_calls[i].clone()]).await?);
                 }
+            }
+            // P3-1 唯一收口：每执行一个工具调用后即喂给熔断器（调用 ↔ 结果同序对齐）。
+            // 命中即「暂停 + 回滚点」：把控制权交回操作员，不 abort 进程、不丢已完成步骤。
+            let circuit = observe_tool_steps(
+                &mut breaker,
+                &cycle_calls,
+                &results,
+                crate::agent::task_checkpoint::now_ms(),
+            );
+            if pauses_task(&circuit) {
+                let reason = circuit
+                    .reason
+                    .clone()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "未知原因".to_string());
+                let checkpoint_id = circuit
+                    .checkpoint_id
+                    .clone()
+                    .unwrap_or_else(|| breaker.task_id().to_string());
+                let paused = crate::agent::task_checkpoint::default_store()
+                    .ok()
+                    .and_then(|store| {
+                        breaker.pause_with_rollback_point(
+                            &store,
+                            self.event_session.as_deref().unwrap_or("agent"),
+                            "智能体工具回路",
+                        )
+                    });
+                let message = format!(
+                    "工具回路已暂停（可回滚）：checkpoint_id={checkpoint_id}；原因：{reason}"
+                );
+                // 沿用既有 Error 帧（稳定码 CIRCUIT_TRIPPED），前端即能看到暂停态与回滚点；
+                // 不新造事件类型、不新增 RPC。
+                if let Some((bus, sess)) = &event_sink {
+                    bus.publish(Envelope::error_structured(
+                        sess,
+                        "CIRCUIT_TRIPPED",
+                        &message,
+                        json!({
+                            "paused": true,
+                            "checkpoint_id": checkpoint_id.clone(),
+                            "checkpoint_status": paused
+                                .as_ref()
+                                .map(|c| c.status.clone())
+                                .unwrap_or_else(|| "unavailable".to_string()),
+                            "reason": reason.clone(),
+                        }),
+                    ));
+                }
+                tracing::warn!(
+                    checkpoint_id = %checkpoint_id,
+                    %reason,
+                    "工具回路熔断：已暂停并落回滚点，等待操作员回滚/重放"
+                );
+                return Err(anyhow!("circuit_tripped: {message}"));
+            } else if circuit.tripped {
+                // 同参数重复（RepeatedParameters）交由前面的 doom-loop 两档机制处理：
+                // 这里只复位熔断器，避免该判定永久占住熔断态、让错误驱动判定失效。
+                tracing::debug!(
+                    reason = %circuit.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+                    "同参数重复交由 doom-loop 处理，复位熔断器计数"
+                );
+                breaker.resume();
             }
             // P2-10/T14：整批实测耗时（单轮单工具时可精确归因）。
             let tool_batch_elapsed_ms = tool_batch_started.elapsed().as_millis() as u64;

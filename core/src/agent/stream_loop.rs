@@ -34,7 +34,10 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use crate::agent::runtime::parse_tool_args;
-use crate::agent::tool_cycle::{ToolCall as CycleToolCall, ToolCycle, ToolResult};
+use crate::agent::tool_cycle::{
+    observe_tool_steps, pauses_task, CircuitBreaker, ToolCall as CycleToolCall, ToolCycle,
+    ToolResult,
+};
 use crate::agent::tool_schema::{discovery_query, ToolDisclosure, DISCOVER_TOOLS_NAME};
 use crate::mcp::registry::ToolRegistry;
 use crate::model::llm::{LLMChunk, ToolCall as LlmToolCall, ToolDef};
@@ -352,6 +355,13 @@ where
     Fut: Future<Output = Result<StreamReceiver>>,
 {
     let cycle = ToolCycle::new(registry).with_session(session.clone());
+    // P3-1 长任务熔断：每条 turn 一个熔断器（`task_id` 同时是可回滚点标识）。
+    // 每条 turn 新建 → 上一次任务的错误计数不会继承到下一次（状态有界）。
+    let mut breaker = CircuitBreaker::new(format!(
+        "tool-turn-{}-{}",
+        session.as_deref().unwrap_or("agent"),
+        crate::agent::task_checkpoint::now_ms()
+    ));
     // 按时序累积的 `(工具名, 入参)`，仅用于 doom-loop 判定
     let mut call_log: Vec<(String, String)> = Vec::new();
     // P2-9：单 turn 预算硬熔断。
@@ -638,6 +648,49 @@ where
                     return Err(e);
                 }
             }
+        }
+        // P3-1 唯一收口：本批工具执行完后按「调用 ↔ 结果」同序对齐喂熔断器。
+        // 错误驱动命中即「暂停 + 落回滚点」，把控制权交回操作员：不 abort 进程、
+        // 不丢已完成步骤；「同参数连续 3 步」仍归下面 doom-loop 的两档机制裁决。
+        let cycle_calls: Vec<CycleToolCall> = tool_calls
+            .iter()
+            .map(|tc| CycleToolCall::new(&tc.name, parse_tool_args(&tc.arguments)))
+            .collect();
+        let circuit = observe_tool_steps(
+            &mut breaker,
+            &cycle_calls,
+            &results,
+            crate::agent::task_checkpoint::now_ms(),
+        );
+        if pauses_task(&circuit) {
+            let reason = circuit
+                .reason
+                .clone()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "未知原因".to_string());
+            let checkpoint_id = circuit
+                .checkpoint_id
+                .clone()
+                .unwrap_or_else(|| breaker.task_id().to_string());
+            let message = format!(
+                "工具回路已暂停（可回滚）：checkpoint_id={checkpoint_id}；原因：{reason}"
+            );
+            tracing::warn!(
+                checkpoint_id = %checkpoint_id,
+                %reason,
+                "工具回路熔断：已暂停并落回滚点，等待操作员回滚/重放"
+            );
+            let _ = events
+                .send(AgentEvent::Error {
+                    message: message.clone(),
+                    code: Some("CIRCUIT_TRIPPED".to_string()),
+                })
+                .await;
+            return Err(anyhow!("circuit_tripped: {message}"));
+        } else if circuit.tripped {
+            // 同参数重复已在上面交由 doom-loop 处理：复位熔断器，
+            // 否则一次重复会永久占住熔断态，让错误驱动判定再也报不出来。
+            breaker.resume();
         }
         let tool_batch_elapsed_ms = tool_batch_started.elapsed().as_millis() as u64;
 

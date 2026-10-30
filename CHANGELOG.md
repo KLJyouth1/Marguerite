@@ -11,9 +11,29 @@
 
 ## [Unreleased]
 
+**2026-10-30 · 同上批的接线收尾（RPC + 前端 + 运行时）**
+
+- **新增 9 条 RPC**（`SUPPORTED_METHODS` 451 → **460**）：`assistant.scope.get` /
+  `assistant.scope.set` / `assistant.brief.get` / `assistant.prefs.list` /
+  `assistant.prefs.pin` / `assistant.prefs.unpin` / `sessions.fork` / `sessions.resume` /
+  `sessions.replay`（handler 在 `core/src/gateway/assistant.rs`）。
+  写型方法一律用 `{success:false, code, message}` 表达拒绝（`ASSISTANT_SCOPE_NO_WORKSPACE` /
+  `ASSISTANT_SCOPE_INVALID` / `ASSISTANT_SCOPE_SAVE_FAILED` / `ASSISTANT_PIN_EMPTY` /
+  `SESSION_NOT_FOUND` / `FORK_POINT_INVALID` / `SESSION_STORE_ERROR`），不抛异常、不假成功；
+  `forkPoint` 传了非正整数直接判 `FORK_POINT_INVALID`，不静默降级成全量分支。
+- **新增** 设置页「助理」分区（`webui/src/components/settings/AssistantPanel.vue`）：作用域切换、
+  钉住清单（可逐条取消）、自动学到的偏好（显示置信度与证据条数，可一键钉住）。
+  **偏好本身没有删除按钮** —— 后端只有 pin/unpin，偏好来自用户画像文件，面板文案如实说明，不伪造删除。
+  6 语种共补 27 个 i18n 键。
+- **接线** 长任务熔断进运行时（`agent/runtime.rs` 的唯一工具收口点）：每执行完工具调用即喂
+  `CircuitBreaker`；命中后**暂停并落回滚点**，发 `CIRCUIT_TRIPPED` 结构化错误帧
+  （含 `checkpoint_id` / `reason` / `checkpoint_status`），**不 abort 进程、不丢已完成步骤**；
+  成功收敛时 `resume()` 复位，下一次任务不继承上一次的错误计数。
+- **同步** 官网与文档的 RPC 计数（451 → 460，`docs/agents/04-gotchas.md` 同时记录「不剥注释是 463」）。
+
 **2026-10-30 · 工作台整体性跃迁第一批（库级落地）** —— 计划见
-`docs/plans/2026-10-29-workbench-holistic-evolution.md`。本批全部为**引擎侧**能力，
-RPC 尚未接线（因此前端还看不到入口，别当成已上线）：
+`docs/plans/2026-10-29-workbench-holistic-evolution.md`。本批为**引擎侧**能力，
+RPC 与前端入口见上一节；仍未接线的部分在计划文档 §8「下一步」里逐条列明：
 
 - **新增** `session::fork`（`core/src/session/fork.rs`）：`fork_session` / `resume_session` /
   `replay_session`，带 `SESSION_NOT_FOUND` / `SESSION_EMPTY` / `FORK_POINT_INVALID` /

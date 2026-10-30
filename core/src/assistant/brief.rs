@@ -84,6 +84,21 @@ pub fn load_pins() -> Vec<PinnedItem> {
         .unwrap_or_default()
 }
 
+/// 写回钉住条目（原子写；`assistant.prefs.pin` / `unpin` 的落点）。
+///
+/// 去重按 `text` 精确匹配（同一句钉两次没有意义），保持插入顺序。
+pub fn save_pins(items: &[PinnedItem]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let deduped: Vec<PinnedItem> = items
+        .iter()
+        .filter(|p| seen.insert(p.text.clone()))
+        .cloned()
+        .collect();
+    let body = serde_json::to_string_pretty(&PinsFile { items: deduped })
+        .map_err(|e| format!("序列化失败: {e}"))?;
+    super::write_atomic_text(&pins_path(), &body)
+}
+
 /// 合成简报。`max_chars = None` 时用 [`DEFAULT_MAX_CHARS`]。
 pub fn compose_brief(input: BriefInput) -> Value {
     let max_chars = input.max_chars.unwrap_or(DEFAULT_MAX_CHARS);

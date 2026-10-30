@@ -13,6 +13,7 @@ pub mod _helpers;
 pub mod a2a;
 pub mod approvals;
 pub mod artifacts;
+pub mod assistant;
 pub mod auth;
 pub mod baota;
 pub mod cache;

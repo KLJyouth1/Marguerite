@@ -28,6 +28,10 @@ export const SETTINGS_SECTIONS = [
   { id: 'capabilities', label: 'Capabilities', icon: 'capabilities', client: false, desktopOnly: false, group: 'capabilities' },
   // --- Preferences: assistant behaviour + local app settings ---
   { id: 'behavior', label: 'Behavior', icon: 'sparkles', client: false, desktopOnly: false, group: 'preferences' },
+  // Assistant memory scope, pinned items, and the preferences it learned on its
+  // own. Client-like: it is an RPC action surface (no readiness form, never
+  // dirty), and every action in it is reversible.
+  { id: 'assistant', label: 'Assistant', icon: 'agents', client: true, desktopOnly: false, group: 'preferences' },
   { id: 'privacy', label: 'Privacy', icon: 'shield', client: false, desktopOnly: false, group: 'preferences' },
   // Sandbox policy is versioned independently from the main config form and
   // owns its own conflict-aware save controls.

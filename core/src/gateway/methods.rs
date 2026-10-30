@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use crate::aris_brain;
 use crate::events::{EventBus, EventType};
 use crate::gateway::artifacts;
+use crate::gateway::assistant;
 use crate::gateway::baota;
 use crate::gateway::cache;
 use crate::gateway::chat;
@@ -2007,6 +2008,19 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         "sessions.reset" => sessions::sessions_reset(ctx, params),
         "sessions.subscribe" => sessions::sessions_subscribe(ctx, params),
         "sessions.unsubscribe" => sessions::sessions_unsubscribe(ctx, params),
+        // ── 会话分支 / 恢复 / 回放（M2 / P0-2：纯 Rust，读写 sessions.db + 本地台账）──
+        "sessions.fork" => assistant::sessions_fork(ctx, params),
+        "sessions.resume" => assistant::sessions_resume(ctx, params),
+        "sessions.replay" => assistant::sessions_replay(ctx, params),
+        // ── 两层助理（L1 全局 / L2 项目）：作用域 / 简报 / 钉住偏好 ──
+        // 纯本地文件（assistant_scope.json / assistant_pins.json / user_profile.md），
+        // 不经 Python 侧车 —— 侧车离线时助理仍可用。
+        "assistant.scope.get" => assistant::scope_get(ctx, params),
+        "assistant.scope.set" => assistant::scope_set(ctx, params),
+        "assistant.brief.get" => assistant::brief_get(ctx, params),
+        "assistant.prefs.list" => assistant::prefs_list(ctx, params),
+        "assistant.prefs.pin" => assistant::prefs_pin(ctx, params),
+        "assistant.prefs.unpin" => assistant::prefs_unpin(ctx, params),
         "providers.status" => {
             // ⚠️ 形状契约：消费方 webui/src/views/OverviewView.vue:629 用
             // `Array.isArray(data?.providers)` 判别，返回**对象**会被直接丢弃 ⇒ 服务商表恒空。
