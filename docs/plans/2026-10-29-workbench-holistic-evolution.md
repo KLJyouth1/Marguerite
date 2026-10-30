@@ -230,3 +230,28 @@ python scripts/check-website-claims.py
 | 全局助理跨项目梳理历史 | §4.3（`memory.cross_project.*` 已存在，补 brief 契约） |
 | 项目助理精通项目、自动拆解、并行统筹 | §4.4 + §3.5 |
 | 两层协同、越用越懂你 | §4.2 `assistant.brief` + §4.5 协同表 |
+
+---
+
+## 8. 实施状态（2026-10-30）
+
+> 只记录**已落盘并跑过测试**的东西；RPC 尚未接线的部分单独标出，不混进「已完成」。
+
+| 批次 | 状态 | 落点 | 证据 |
+|---|---|---|---|
+| P0-0 CI 转绿 | **完成** | 9 个测试文件平台化（`gateway/{workspace,workspaces,config,market_remote}`、`doctor/router_weights`、`kb/project_graph`、`plugins/mcp_launch`、`sandbox/{whitelist,policy_store}`）+ `.github/workflows/ci.yml` 显式装 numpy | `cargo test -p marguerite-core --lib` 4380 passed / 0 failed / 25 ignored；`clippy --all-targets -D warnings` exit 0 |
+| P0-2 会话分支 | **库级完成，RPC 未接线** | `core/src/session/fork.rs`（fork/resume/replay + 5 个错误码） | 7 条测试；`session::` 106 passed |
+| P0-3 上下文接续 | **库级完成** | `core/src/context/continuity.rs` + `agent/role_context.rs` 增 `continuity` 段 | 4 条测试；`context::` 107 passed |
+| P1 两层助理 | **库级完成，RPC 未接线** | `core/src/assistant/{mod,scope,profile,brief}.rs` | 5 条 brief 测试 + 3 条 scope 测试 + 2 条 profile 测试 |
+| P2-1 记忆闸门 | **库级完成** | `core/src/memory/promote.rs`（晋升/降级/取代/计数） | 4 条测试；`memory::` 203 passed |
+| P2-2 知识库增量 | **库级完成** | `kb/store.rs` `apply_changes`、`kb/graph.rs` `remove_document`、`kb/integrity.rs` `audit_sources` | 4 条测试；`kb::` 50 passed |
+| P3-1 长任务熔断 | **库级完成，调度层未自动调用** | `agent/tool_cycle.rs`（CircuitBreaker）+ `agent/task_checkpoint.rs`（pause_for_rollback） | 3 条测试；`agent::` 352 passed |
+| P3-2 辩论防极化 | **库级完成** | `agent/team.rs` `converge_debate`（附和降权 ×0.2、证据链定胜负、保留少数派） | 3 条测试 |
+| P3-3 任务树 | **库级完成** | `core/src/orchestration/task_state.rs`（就绪集/派发/失败只阻塞下游/并行批） | 5 条测试 |
+
+**下一步（尚未做，别当成已完成）**：
+
+1. **RPC 接线**：`assistant.scope.get/set`、`assistant.brief.get`、`sessions.fork/resume/replay`（含 `forkThroughTurn` 的 `forkMode` 覆写）—— 都要改 `gateway/protocol.rs` 与 `gateway/methods.rs`，并同步官网「RPC 方法 451 条」这个硬事实。
+2. **调度层接线**：熔断器需要运行时每步调 `observe` + `pause`，目前是独立组件。
+3. **前端**：设置页「助理」分区（钉住/查看/删除学到的偏好）——可撤销是硬要求。
+4. **CI 验证**：P0-0 的 9 处平台化只在 Windows 本地跑过；Linux/macOS 由 CI 独立验证（这正是 0.2.18 翻车过的地方）。

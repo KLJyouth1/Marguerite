@@ -361,6 +361,16 @@ jobs:
           print(f"installed {len(deps)} declared dependencies")
           PY
 
+      # 套件里有模块在 **import 阶段**就 `import numpy`（本地 ML 路由相关）。
+      # numpy 虽已写进 `[project.optional-dependencies].dev`，但整包安装依赖 pip 缓存
+      # 与解析结果，缺项时只在 collection 阶段炸，报错离真因很远（实测
+      # `tests/test_gateway/test_rpc_selflearning_status.py` 直接 ImportError）。
+      # 这里显式装 + 显式断言：缺了就红在这一步，而不是红在 6 分钟后的 pytest。
+      - name: Ensure optional test dependencies (numpy)
+        run: |
+          python -m pip install "numpy>=1.26"
+          python -c "import numpy; print('numpy', numpy.__version__)"
+
       # `verify.sh` records a missing prerequisite as [SKIP] and still exits 0
       # ("skipped != passed", AGENTS.md §8). Without this step a broken
       # interpreter would let the job below go green having run nothing.

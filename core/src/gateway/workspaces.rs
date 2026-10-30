@@ -376,8 +376,13 @@ mod tests {
 
     #[test]
     fn test_default_name_from_path() {
-        assert_eq!(default_name(r"D:\work\my-app"), "my-app");
-        assert!(!default_name(r"D:\").is_empty());
+        // 用 MAIN_SEPARATOR 拼路径：写死 `\` 在 Unix 上不是分隔符，
+        // `Path::file_name()` 会把整串当成一个名字（这是 Linux CI 红的一条）。
+        let sep = std::path::MAIN_SEPARATOR;
+        let p = format!("D:{sep}work{sep}my-app");
+        assert_eq!(default_name(&p), "my-app");
+        let root = format!("D:{sep}");
+        assert!(!default_name(&root).is_empty());
     }
 
     #[test]

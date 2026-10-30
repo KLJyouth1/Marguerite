@@ -304,6 +304,8 @@ mod tests {
     fn entry_must_stay_relative_and_inside() {
         assert!(entry_is_contained(&json!({})).is_ok());
         assert!(entry_is_contained(&json!({"entry": "index.js"})).is_ok());
+        // `C:\...` 只在 Windows 上是绝对路径；Unix 上由下一行的 `/usr/bin/sh` 覆盖。
+        #[cfg(windows)]
         assert!(entry_is_contained(&json!({"entry": "C:\\Windows\\System32\\calc.exe"})).is_err());
         assert!(entry_is_contained(&json!({"entry": "../../evil.exe"})).is_err());
         assert!(entry_is_contained(&json!({"entry": "/usr/bin/sh"})).is_err());

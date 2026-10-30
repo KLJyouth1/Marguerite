@@ -24,6 +24,13 @@ use serde_json::Value;
 /// 重启后仍视为「在飞」的状态。
 pub const INTERRUPTED_STATUSES: &[&str] = &["running", "queued_for_replay"];
 
+/// 熔断后的「可回滚暂停」态（P3-1）。
+///
+/// 与 [`INTERRUPTED_STATUSES`] 刻意区分：那些是「进程被杀/未跑完的在飞任务」，
+/// 这里是熔断器**主动暂停**、等操作员决定回滚或重放——不直接 abort 整个任务，
+/// 已完成步骤与副作用都留在 checkpoint 里作为回滚点。
+pub const PAUSED_FOR_ROLLBACK: &str = "paused_for_rollback";
+
 /// 单个长任务的 checkpoint（JSON 字段与 Python 侧逐字对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskCheckpoint {
@@ -168,6 +175,14 @@ impl CheckpointStore {
     /// 完成（默认 succeeded，也可传 failed / cancelled 等）。
     pub fn finalize(&self, task_id: &str, status: &str) -> Option<TaskCheckpoint> {
         self.change_status(task_id, status)
+    }
+
+    /// 熔断暂停（P3-1）：把 checkpoint 标记为 [`PAUSED_FOR_ROLLBACK`]，即「可回滚点」。
+    ///
+    /// 任务尚未建立 checkpoint 时返回 `None`，不凭空造一份（伪造回滚点比没有更糟）。
+    /// 恢复语义由操作员决定：`mark_for_replay` 重发，或 `abandon` 放弃。
+    pub fn pause_for_rollback(&self, task_id: &str) -> Option<TaskCheckpoint> {
+        self.change_status(task_id, PAUSED_FOR_ROLLBACK)
     }
 }
 

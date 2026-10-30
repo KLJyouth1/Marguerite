@@ -44,6 +44,8 @@ pub struct KnowledgeGraph {
     entities: HashSet<String>,
     edges: Vec<Edge>,
     doc_entities: HashMap<String, HashSet<String>>,
+    /// 每篇文档抽到的定型关系：`remove_document` 据此重放剩余文档，避免留下悬空边。
+    doc_relations: HashMap<String, Vec<(String, String, RelationKind)>>,
 }
 
 const IGNORE_SUBJECTS: &[&str] = &[
@@ -219,10 +221,15 @@ impl KnowledgeGraph {
     /// 索引一篇文档，抽取实体与关系。
     pub fn index_document(&mut self, doc_id: &str, text: &str) {
         let entities = extract_entities(text);
+        let relations = extract_relations(text);
         self.doc_entities
             .entry(doc_id.to_string())
             .or_default()
             .extend(entities.iter().cloned());
+        self.doc_relations
+            .entry(doc_id.to_string())
+            .or_default()
+            .extend(relations.iter().cloned());
         for e in &entities {
             self.entities.insert(e.clone());
         }
@@ -238,10 +245,59 @@ impl KnowledgeGraph {
             }
         }
         // 定型关系边
-        for (from, to, kind) in extract_relations(text) {
+        for (from, to, kind) in relations {
             self.entities.insert(from.clone());
             self.entities.insert(to.clone());
             self.add_or_update_edge(&from, &to, kind, 2.0);
+        }
+    }
+
+    /// 摘掉一篇文档并重放剩余文档：只属于它的实体与边（含悬空边）全被清掉。
+    ///
+    /// 返回 `false` 表示图谱里没有这篇文档（没有做任何改动）。
+    pub fn remove_document(&mut self, doc_id: &str) -> bool {
+        if self.doc_entities.remove(doc_id).is_none() {
+            return false;
+        }
+        self.doc_relations.remove(doc_id);
+        self.rebuild_from_documents();
+        true
+    }
+
+    /// 按 `doc_entities` / `doc_relations` 重建实体集与边集（确定性：文档 id 升序）。
+    fn rebuild_from_documents(&mut self) {
+        self.entities.clear();
+        self.edges.clear();
+        let mut doc_ids: Vec<String> = self.doc_entities.keys().cloned().collect();
+        doc_ids.sort();
+        for doc_id in doc_ids {
+            let mut ents: Vec<String> = self
+                .doc_entities
+                .get(&doc_id)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            ents.sort();
+            self.entities.extend(ents.iter().cloned());
+            for i in 0..ents.len() {
+                for j in (i + 1)..ents.len() {
+                    let (a, b) = if ents[i] <= ents[j] {
+                        (ents[i].clone(), ents[j].clone())
+                    } else {
+                        (ents[j].clone(), ents[i].clone())
+                    };
+                    self.add_or_update_edge(&a, &b, RelationKind::CoOccurs, 1.0);
+                }
+            }
+            let relations = self
+                .doc_relations
+                .get(&doc_id)
+                .cloned()
+                .unwrap_or_default();
+            for (from, to, kind) in relations {
+                self.entities.insert(from.clone());
+                self.entities.insert(to.clone());
+                self.add_or_update_edge(&from, &to, kind, 2.0);
+            }
         }
     }
 

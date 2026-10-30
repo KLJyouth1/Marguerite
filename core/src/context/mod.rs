@@ -5,6 +5,7 @@
 pub mod budget;
 pub mod cache;
 pub mod compact_state;
+pub mod continuity;
 pub mod middle_truncate;
 pub mod optimize;
 pub mod paging;

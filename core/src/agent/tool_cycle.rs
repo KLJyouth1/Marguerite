@@ -3,13 +3,14 @@
 //! 管理工具调用的生命周期，支持顺序执行和并行执行，
 //! 提供超时控制、并发限制和结果收集能力。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::Semaphore;
 
+use crate::agent::task_checkpoint::{CheckpointStore, TaskCheckpoint};
 use crate::agent::tool_cache::ToolCache;
 use crate::agent::tool_compress::ToolCompressor;
 use crate::mcp::registry::ToolRegistry;
@@ -181,6 +182,260 @@ pub fn default_timeout_for(name: &str) -> Duration {
         // 录制只做启动/停止（真正的录制在后台进程里），无需放宽。
         _ => Duration::from_secs(30),
     }
+}
+
+// ---------------------------------------------------------------------------
+// P3-1 长任务熔断：命中即「暂停 + 给出可回滚点」，不直接 abort 整个任务
+// ---------------------------------------------------------------------------
+//
+// 三条判定（确定性、纯内存，不依赖模型/网络）：
+// 1. 连续 5 次工具错误（`Error` 与 `Timeout` 都算失败）；
+// 2. 60 秒窗口内错误率 > 15%（且窗口样本数 ≥ [`CIRCUIT_MIN_WINDOW_SAMPLES`]，
+//    单点噪声不判熔断——连续错另有第 1 条的 5 连门槛）；
+// 3. 同参数连续 3 步（参数指纹相同）判死循环。
+//
+// 命中后熔断器**只暂停**：返回 [`CircuitVerdict`]，其中 `checkpoint_id` 指向该任务的
+// checkpoint（回滚点）；配合 [`CircuitBreaker::pause`] 把 checkpoint 状态置为
+// `paused_for_rollback`，由操作员决定回滚 / 重放。已完成步骤不丢弃，任务不整单作废。
+
+/// 连续工具错误触发阈值。
+pub const CIRCUIT_MAX_CONSECUTIVE_ERRORS: usize = 5;
+/// 错误率统计窗口（毫秒）。
+pub const CIRCUIT_ERROR_WINDOW_MS: u64 = 60_000;
+/// 窗口内错误率阈值（严格大于才触发）。
+pub const CIRCUIT_ERROR_RATE: f64 = 0.15;
+/// 窗口统计的最小样本数：低于此数不按错误率判定（太少样本的比率没有统计意义）。
+pub const CIRCUIT_MIN_WINDOW_SAMPLES: usize = 8;
+/// 同参数连续步数阈值。
+pub const CIRCUIT_MAX_REPEAT_STEPS: usize = 3;
+
+/// 熔断原因（三选一，可诊断、可审计）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum CircuitReason {
+    /// 连续工具错误
+    ConsecutiveErrors {
+        /// 连续错误数（≥ [`CIRCUIT_MAX_CONSECUTIVE_ERRORS`]）
+        count: usize,
+    },
+    /// 窗口内错误率超阈值
+    ErrorRate {
+        /// 窗口内错误次数
+        errors: usize,
+        /// 窗口内调用次数
+        calls: usize,
+        /// 实际错误率
+        rate: f64,
+    },
+    /// 同参数连续重复（疑似死循环）
+    RepeatedParameters {
+        /// 参数指纹
+        fingerprint: String,
+        /// 连续步数（≥ [`CIRCUIT_MAX_REPEAT_STEPS`]）
+        steps: usize,
+    },
+}
+
+impl std::fmt::Display for CircuitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CircuitReason::ConsecutiveErrors { count } => {
+                write!(f, "连续 {count} 次工具错误（阈值 {CIRCUIT_MAX_CONSECUTIVE_ERRORS}）")
+            }
+            CircuitReason::ErrorRate { errors, calls, rate } => write!(
+                f,
+                "60 秒窗口错误率 {:.2}%（{errors}/{calls}），阈值 {:.0}%",
+                rate * 100.0,
+                CIRCUIT_ERROR_RATE * 100.0
+            ),
+            CircuitReason::RepeatedParameters { fingerprint, steps } => write!(
+                f,
+                "同参数连续 {steps} 步（指纹 {fingerprint}），阈值 {CIRCUIT_MAX_REPEAT_STEPS}"
+            ),
+        }
+    }
+}
+
+/// 熔断判定结果。
+///
+/// `tripped == true` 表示「暂停」：`checkpoint_id` 是可回滚点（任务 checkpoint 标识），
+/// 调用方应中断当前回合、把控制权交回操作员；**不得**直接丢弃任务。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CircuitVerdict {
+    /// 是否熔断
+    pub tripped: bool,
+    /// 熔断原因（未熔断时为 `None`）
+    pub reason: Option<CircuitReason>,
+    /// 可回滚点（任务 checkpoint 标识；未熔断时为 `None`）
+    pub checkpoint_id: Option<String>,
+}
+
+impl CircuitVerdict {
+    /// 未熔断。
+    pub fn ok() -> Self {
+        Self::default()
+    }
+}
+
+/// 长任务熔断器（每条任务一个；观察工具回路的逐步结果）。
+///
+/// 用法（工具回路每步调用一次）：
+/// ```ignore
+/// let verdict = breaker.observe(&call, &result, task_checkpoint::now_ms());
+/// if verdict.tripped {
+///     breaker.pause(&store);          // 落盘可回滚点
+///     // 暂停本任务、把 verdict 交给 UI / 操作员，而不是 abort
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct CircuitBreaker {
+    task_id: String,
+    consecutive_errors: usize,
+    /// 窗口样本：`(发生时刻 ms, 是否成功)`
+    window: VecDeque<(u64, bool)>,
+    last_fingerprint: Option<String>,
+    repeated_steps: usize,
+    tripped: Option<CircuitReason>,
+}
+
+impl CircuitBreaker {
+    /// 为某任务创建熔断器（`task_id` 同时是 checkpoint 标识）。
+    pub fn new(task_id: impl Into<String>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            consecutive_errors: 0,
+            window: VecDeque::new(),
+            last_fingerprint: None,
+            repeated_steps: 0,
+            tripped: None,
+        }
+    }
+
+    /// 所属任务（= checkpoint 标识 / 可回滚点）。
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// 是否已熔断（暂停中）。
+    pub fn is_tripped(&self) -> bool {
+        self.tripped.is_some()
+    }
+
+    /// 记录一步工具调用结果并返回当前判定。
+    ///
+    /// `at_ms` 由调用方显式传入（一般取 `task_checkpoint::now_ms()`），便于离线单测
+    /// 复现任意时间线，不读系统时钟。
+    pub fn observe(
+        &mut self,
+        call: &ToolCall,
+        result: &ToolResult,
+        at_ms: u64,
+    ) -> CircuitVerdict {
+        let failed = result.is_error() || result.is_timeout();
+        self.consecutive_errors = if failed { self.consecutive_errors + 1 } else { 0 };
+
+        let fingerprint = tool_fingerprint(&call.name, &call.arguments);
+        if self.last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+            self.repeated_steps += 1;
+        } else {
+            self.last_fingerprint = Some(fingerprint);
+            self.repeated_steps = 1;
+        }
+
+        self.window.push_back((at_ms, !failed));
+        // 只保留最近 60 秒的样本：更早的错误不得计入当前错误率（否则一次历史抖动会永久拉高）。
+        let cutoff = at_ms.saturating_sub(CIRCUIT_ERROR_WINDOW_MS);
+        while let Some(&(ts, _)) = self.window.front() {
+            if ts < cutoff {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.tripped.is_none() {
+            if self.consecutive_errors >= CIRCUIT_MAX_CONSECUTIVE_ERRORS {
+                self.tripped = Some(CircuitReason::ConsecutiveErrors {
+                    count: self.consecutive_errors,
+                });
+            } else {
+                let calls = self.window.len();
+                let errors = self.window.iter().filter(|(_, ok)| !ok).count();
+                let rate = if calls == 0 {
+                    0.0
+                } else {
+                    errors as f64 / calls as f64
+                };
+                if calls >= CIRCUIT_MIN_WINDOW_SAMPLES && rate > CIRCUIT_ERROR_RATE {
+                    self.tripped = Some(CircuitReason::ErrorRate {
+                        errors,
+                        calls,
+                        rate,
+                    });
+                } else if self.repeated_steps >= CIRCUIT_MAX_REPEAT_STEPS {
+                    self.tripped = Some(CircuitReason::RepeatedParameters {
+                        fingerprint: self.last_fingerprint.clone().unwrap_or_default(),
+                        steps: self.repeated_steps,
+                    });
+                }
+            }
+        }
+
+        self.verdict()
+    }
+
+    /// 当前判定（不推进状态）。
+    pub fn verdict(&self) -> CircuitVerdict {
+        match &self.tripped {
+            Some(reason) => CircuitVerdict {
+                tripped: true,
+                reason: Some(reason.clone()),
+                checkpoint_id: Some(self.task_id.clone()),
+            },
+            None => CircuitVerdict::ok(),
+        }
+    }
+
+    /// 操作员确认回滚 / 重放后恢复：清空计数、窗口与熔断态，重新度量。
+    pub fn resume(&mut self) {
+        self.consecutive_errors = 0;
+        self.window.clear();
+        self.last_fingerprint = None;
+        self.repeated_steps = 0;
+        self.tripped = None;
+    }
+
+    /// 把回滚点落盘：checkpoint 状态置为 `paused_for_rollback`。
+    ///
+    /// 任务尚未建立 checkpoint 时返回 `None`（不凭空造一份，避免伪造回滚点）。
+    pub fn pause(&self, store: &CheckpointStore) -> Option<TaskCheckpoint> {
+        store.pause_for_rollback(&self.task_id)
+    }
+}
+
+/// 工具参数指纹（确定性 FNV-1a 64，与进程/哈希种子无关）。
+///
+/// 键排序后拼接，故 `HashMap` 插入顺序不影响结果；同「工具名 + 参数集合」恒等。
+/// 只用于判「同参数连续重复」，不承担安全职责（不替代审批/沙箱）。
+pub fn tool_fingerprint(name: &str, arguments: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<(&str, &str)> = arguments
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    let mut canonical = String::with_capacity(name.len() + 1);
+    canonical.push_str(name);
+    for (k, v) in pairs {
+        canonical.push('\u{1e}');
+        canonical.push_str(k);
+        canonical.push('=');
+        canonical.push_str(v);
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -1694,5 +1949,192 @@ mod approval_gate_tests {
             0,
             "未获批准的 `rm -rf` 绝不能落到真实执行"
         );
+    }
+}
+
+/// P3-1 长任务熔断（暂停 + 回滚点）的回归守卫。
+///
+/// 全部用例显式传入 `at_ms` 时间线，不读系统时钟：同一用例可复现任意时间序。
+#[cfg(test)]
+mod circuit_tests {
+    use super::*;
+    use crate::agent::task_checkpoint::{CheckpointStore, TaskCheckpoint, PAUSED_FOR_ROLLBACK};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    fn args(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn call(tool: &str, arg: &str) -> ToolCall {
+        ToolCall::new(tool, args(&[("arg", arg)]))
+    }
+
+    fn ok() -> ToolResult {
+        ToolResult::Success {
+            data: "ok".to_string(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn err() -> ToolResult {
+        ToolResult::Error {
+            message: "boom".to_string(),
+            code: "E_TOOL".to_string(),
+        }
+    }
+
+    static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_dir() -> PathBuf {
+        let n = DIR_SEQ.fetch_add(1, AtomicOrdering::SeqCst);
+        std::env::temp_dir().join(format!("marg-circuit-{}-{n}", std::process::id()))
+    }
+
+    /// 连续 5 次工具错误 → 熔断（暂停）并给出可回滚点；4 连错不提前判。
+    #[test]
+    fn circuit_trips_after_five_consecutive_tool_errors() {
+        let mut breaker = CircuitBreaker::new("task-five-errors");
+        let mut last = CircuitVerdict::ok();
+        for i in 0..CIRCUIT_MAX_CONSECUTIVE_ERRORS {
+            last = breaker.observe(
+                &call("read_file", &format!("file-{i}")),
+                &err(),
+                i as u64 * 100,
+            );
+        }
+        assert!(last.tripped, "连续 5 次工具错误必须熔断（暂停），而非继续空转");
+        match last.reason.clone() {
+            Some(CircuitReason::ConsecutiveErrors { count }) => assert_eq!(count, 5),
+            other => panic!("熔断原因应是连续错误，实际 {other:?}"),
+        }
+        assert_eq!(
+            last.checkpoint_id.as_deref(),
+            Some("task-five-errors"),
+            "熔断必须返回可回滚点（checkpoint 标识）"
+        );
+
+        // 可回滚点真的落盘：checkpoint 进入 paused_for_rollback，已完成步骤不被丢弃。
+        let store = CheckpointStore::open(unique_dir()).unwrap();
+        store
+            .record(TaskCheckpoint::new("task-five-errors", "sess", "长任务"))
+            .unwrap();
+        let paused = breaker.pause(&store).expect("已建 checkpoint 的任务应能暂停");
+        assert_eq!(paused.status, PAUSED_FOR_ROLLBACK, "应进入可回滚暂停态");
+        assert_eq!(
+            store.list_interrupted().len(),
+            0,
+            "暂停态不是「进程中断的在飞任务」，不应混进中断清单"
+        );
+
+        // 四连错（窗口样本数不足）不得熔断：证据驱动，不反应过敏。
+        let mut short = CircuitBreaker::new("task-four-errors");
+        let mut v = CircuitVerdict::ok();
+        for i in 0..4u64 {
+            v = short.observe(&call("read_file", &format!("f{i}")), &err(), i * 100);
+        }
+        assert!(!v.tripped, "4 连错不应提前熔断，实际 {v:?}");
+    }
+
+    /// 60 秒窗口内错误率 > 15% → 熔断；窗口外的历史错误不得计入。
+    #[test]
+    fn circuit_trips_on_error_rate_inside_sixty_second_window() {
+        let mut breaker = CircuitBreaker::new("task-error-rate");
+        let mut verdict = CircuitVerdict::ok();
+        for i in 0..14u64 {
+            // 非连续错误：2、6、11，最长连续 1（不会命中 5 连门槛）
+            let failed = matches!(i, 2 | 6 | 11);
+            let result = if failed { err() } else { ok() };
+            verdict = breaker.observe(&call("read_file", &format!("p{i}")), &result, i * 100);
+        }
+        assert!(verdict.tripped, "2/8 = 25% 错误率（非连续）应熔断");
+        match verdict.reason.clone() {
+            Some(CircuitReason::ErrorRate {
+                errors,
+                calls,
+                rate,
+            }) => {
+                assert_eq!(errors, 2, "窗口内 2 次错误");
+                assert_eq!(
+                    calls, 8,
+                    "第 2 次错误后的第 8 个窗口样本触发（2/8 = 25%），而非累计到人手"
+                );
+                assert!(rate > CIRCUIT_ERROR_RATE, "实际错误率 {rate} 应超阈值");
+            }
+            other => panic!("熔断原因应是错误率，实际 {other:?}"),
+        }
+
+        // 窗口剪枝：7 个旧样本（4 错 = 57%）因不足最小样本数不判熔断；
+        // 120 秒后追加成功样本，旧错误必须被剪掉，否则 4/8 = 50% 会被误判熔断。
+        let mut stale = CircuitBreaker::new("task-window-prune");
+        let mut v = CircuitVerdict::ok();
+        for i in 0..7u64 {
+            let result = if i < 4 { err() } else { ok() };
+            v = stale.observe(&call("read_file", &format!("old{i}")), &result, i * 100);
+        }
+        assert!(!v.tripped, "样本数不足最小窗口样本，不得按错误率熔断");
+        for i in 0..8u64 {
+            v = stale.observe(&call("read_file", &format!("fresh{i}")), &ok(), 120_000 + i * 10);
+        }
+        assert!(!v.tripped, "60 秒窗口外的历史错误不得计入当前错误率");
+    }
+
+    /// 同参数连续 3 步 → 判循环并熔断；2 步不判；参数变化打断循环；回滚后恢复。
+    #[test]
+    fn circuit_trips_when_same_parameters_repeat_three_steps() {
+        let same = args(&[("path", "D:/w/report.md"), ("limit", "100")]);
+        let mut breaker = CircuitBreaker::new("task-same-params");
+        let mut verdict = CircuitVerdict::ok();
+        for i in 0..CIRCUIT_MAX_REPEAT_STEPS {
+            verdict = breaker.observe(
+                &ToolCall::new("read_file", same.clone()),
+                &ok(),
+                i as u64 * 50,
+            );
+        }
+        assert!(verdict.tripped, "同参数连续 3 步应判循环并熔断");
+        match verdict.reason.clone() {
+            Some(CircuitReason::RepeatedParameters {
+                fingerprint,
+                steps,
+            }) => {
+                assert_eq!(steps, 3);
+                assert_eq!(fingerprint, tool_fingerprint("read_file", &same));
+            }
+            other => panic!("熔断原因应是同参数循环，实际 {other:?}"),
+        }
+        assert_eq!(verdict.checkpoint_id.as_deref(), Some("task-same-params"));
+
+        // 指纹与 HashMap 插入顺序无关（确定性、跨进程稳定）。
+        let mut reversed = HashMap::new();
+        reversed.insert("limit".to_string(), "100".to_string());
+        reversed.insert("path".to_string(), "D:/w/report.md".to_string());
+        assert_eq!(
+            tool_fingerprint("read_file", &same),
+            tool_fingerprint("read_file", &reversed),
+            "参数指纹必须与插入顺序无关"
+        );
+
+        // 同参数 2 步不判循环；第 3 步换参数即打断连续计数。
+        let mut two = CircuitBreaker::new("task-two-steps");
+        let mut v = CircuitVerdict::ok();
+        for i in 0..2u64 {
+            v = two.observe(&ToolCall::new("read_file", same.clone()), &ok(), i * 50);
+        }
+        assert!(!v.tripped, "同参数 2 步不应判循环");
+        v = two.observe(
+            &ToolCall::new("read_file", args(&[("path", "D:/w/other.md")])),
+            &ok(),
+            150,
+        );
+        assert!(!v.tripped, "参数变化应打断连续计数");
+
+        // 操作员确认回滚后恢复度量。
+        breaker.resume();
+        assert!(!breaker.verdict().tripped, "resume 后应回到未熔断");
     }
 }

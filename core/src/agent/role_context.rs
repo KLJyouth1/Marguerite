@@ -8,12 +8,14 @@
 //! 调用链这四条路径既拿不到会话档位，也拿不到记忆召回——正是「不管怎么开关都要能
 //! 把任务做完、特别是产出质量」这条投诉的可测量根因。
 //!
-//! 本模块是那个缺失的桥，只做两件事：
+//! 本模块是那个缺失的桥，只做三件事：
 //! 1. **档位**：把「本轮显式档位 / 会话持久档位 / 角色覆盖」交给
 //!    [`crate::model::thinking::resolve_effort_for_role`]（优先级只在那一处定义），
 //!    并给出跨 `tokio::spawn` 的作用域入口 [`RoleContext::scope`]；
 //! 2. **记忆（只读）**：按楼层开关 [`ResolvedLayers`] 裁剪的召回文本
-//!    [`memory_block`]，关掉的楼层**连检索都不做**（不是「查了不用」）。
+//!    [`memory_block`]，关掉的楼层**连检索都不做**（不是「查了不用」）；
+//! 3. **开场简报（只读）**：最近 1–3 份压缩交接 + 现场 git 状态的
+//!    [`continuity_block`]（干净工作区不注入）。
 //!
 //! # 硬边界（不可越线）
 //!
@@ -49,6 +51,8 @@ pub struct RoleContext {
     pub effort: Option<ThinkingEffort>,
     /// 只读记忆块文本（`None` = 无命中或对应楼层被关闭 → 完全不注入）。
     pub memory: Option<String>,
+    /// 开场简报文本（最近压缩交接 + 现场工作区）；`None` = 干净 / 无交接状态 → 不注入。
+    pub continuity: Option<String>,
 }
 
 impl RoleContext {
@@ -59,7 +63,11 @@ impl RoleContext {
 
     /// 只带档位（调用方自己完成记忆读取，或该路径不需要记忆）。
     pub fn effort_only(effort: Option<ThinkingEffort>) -> Self {
-        Self { effort, memory: None }
+        Self {
+            effort,
+            memory: None,
+            continuity: None,
+        }
     }
 
     /// 把已解析档位作为作用域套到 future 上——**跨 `tokio::spawn` 传递档位的唯一入口**。
@@ -191,7 +199,17 @@ pub fn build_with_layers(
     RoleContext {
         effort: resolve_effort(session, overrides),
         memory: memory_block(query, session, layers),
+        continuity: continuity_block(session),
     }
+}
+
+/// 开场简报（只读）：最近 1–3 份压缩交接 + 现场 git 状态。
+///
+/// 项目根取自会话台账（[`crate::context::session::session_project`]）；工作区干净
+/// 或没有任何交接状态时返回 `None`（不注入空块）。不写任何账本。
+pub fn continuity_block(session: Option<&str>) -> Option<String> {
+    let project = session.and_then(crate::context::session::session_project);
+    crate::context::continuity::inject_block(project.as_deref())
 }
 
 /// 从 `Message` 里取正文文本（跨项目召回返回的是 System 消息）。

@@ -217,6 +217,10 @@ mod tests {
         assert_eq!(s2.read()["policyVersion"], 2);
     }
 
+    /// Windows 专属：`builtin_deny_write_paths()` 按 `USERPROFILE` 拼 Windows 相对路径，
+    /// 且用 `exists()` 过滤 —— 在 Unix 上 USERPROFILE 不存在、这些路径也不存在，
+    /// 函数合法地返回空表，因此**没有**可在 Unix 上断言的对应行为。
+    #[cfg(windows)]
     #[test]
     fn test_builtin_deny_write_paths_non_empty_on_windows() {
         let paths = builtin_deny_write_paths();

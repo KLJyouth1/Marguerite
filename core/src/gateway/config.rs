@@ -19,6 +19,22 @@ use crate::persistence::config::Config;
 /// 后者能看到前者的结果，不再互相覆盖。
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// 改写**进程级全局**配置目录的用例必须串行。
+///
+/// `Config::set_config_dir_override` 是全局状态，而 libtest 默认多线程并行：
+/// 本文件有 8 个用例都会调它，互相覆盖后 `config_get()` 读到的是**别人的**目录，
+/// 于是 `api_key_configured` 在 Linux 上恒为 false（Windows 上碰巧调度顺序合适）。
+/// 这类失败是测试隔离缺陷，不是产品缺陷 —— 用一把锁让它确定。
+#[cfg(test)]
+static CONFIG_DIR_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+fn lock_config_dir_for_test() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_DIR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// `config.get`（Rust 离线回退）：返回当前配置快照。
 ///
 /// 每次读取都从磁盘重载，保证 `config.patch.safe` 落盘后立即可见。
@@ -607,7 +623,20 @@ mod tests {
         let tmp_dir =
             std::env::temp_dir().join(format!("mgt_get_sec_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
+        let _cfg_dir_guard = lock_config_dir_for_test();
         Config::set_config_dir_override(tmp_dir.clone());
+
+        // 必须在**磁盘上**放一份带 key 的 config.yaml：`config_get` 的口径是
+        // `Config::load().unwrap_or_else(|_| ctx.config.clone())`，而 `Config::load()`
+        // 在「目录存在但无 config.yaml」时返回 `Ok(default)`（不是 Err）—— 那样它根本
+        // 不会回退到 `ctx.config`，`api_key_configured` 恒 false。
+        // 旧写法只设 `ctx.config.model.api_key`，在 Windows 上碰巧过、Linux 上红：
+        // 根因是它依赖了 load() 的错误分支，与平台无关。
+        std::fs::write(
+            tmp_dir.join("config.yaml"),
+            "model:\n  api_key: sk-secret-p0test-abcdef123456\n",
+        )
+        .expect("写测试用 config.yaml");
 
         let mut ctx = test_ctx();
         ctx.config.model.api_key = "sk-secret-p0test-abcdef123456".to_string();
@@ -632,6 +661,7 @@ mod tests {
     fn test_config_patch_api_key_goes_to_env_not_yaml() {
         let tmp_dir = std::env::temp_dir().join(format!("mgt_patch_sec_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
+        let _cfg_dir_guard = lock_config_dir_for_test();
         Config::set_config_dir_override(tmp_dir.clone());
 
         let ctx = test_ctx();
@@ -668,6 +698,7 @@ mod tests {
     fn test_config_patch_persists_control_ui_default_locale() {
         let tmp_dir = std::env::temp_dir().join(format!("mgt_patch_loc_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
+        let _cfg_dir_guard = lock_config_dir_for_test();
         Config::set_config_dir_override(tmp_dir.clone());
 
         let ctx = test_ctx();
@@ -714,6 +745,7 @@ mod tests {
         let tmp_dir =
             std::env::temp_dir().join(format!("mgt_patch_plan_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
+        let _cfg_dir_guard = lock_config_dir_for_test();
         Config::set_config_dir_override(tmp_dir.clone());
 
         let ctx = test_ctx();
@@ -764,6 +796,7 @@ mod tests {
     fn test_config_plan_get_set_roundtrip_is_rust_first() {
         let tmp_dir = std::env::temp_dir().join(format!("mgt_plan_rpc_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
+        let _cfg_dir_guard = lock_config_dir_for_test();
         Config::set_config_dir_override(tmp_dir.clone());
 
         let ctx = test_ctx();
@@ -891,6 +924,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let _ = std::fs::create_dir_all(&dir);
+        let _cfg_dir_guard = lock_config_dir_for_test();
         crate::persistence::config::Config::set_config_dir_override(dir.clone());
         let ctx = GatewayContext {
             config: crate::persistence::config::Config::default(),

@@ -19,6 +19,7 @@ pub mod home_memory;
 pub mod lexical;
 pub mod long_term;
 pub mod pages;
+pub mod promote;
 pub mod recall;
 pub mod scoring;
 pub mod sensory;

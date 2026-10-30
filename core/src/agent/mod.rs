@@ -46,8 +46,14 @@ pub use stream_loop::{
     DOOM_LOOP_THRESHOLD,
 };
 pub use subagent::{SubAgent, SubAgentConfig, SubAgentManager, SubAgentStatus};
-pub use team::{Team, TeamMember, TeamOutcome};
+pub use team::{
+    converge_debate, ArgumentEvaluation, DebateArgument, DebateOutcome, MinorityOpinion,
+    SycophancySignal, Team, TeamMember, TeamOutcome,
+};
 pub use tool_cache::{default_is_idempotent, ToolCache, ToolCacheStats};
-pub use tool_cycle::{ToolCall, ToolCycle, ToolResult};
+pub use tool_cycle::{
+    tool_fingerprint, CircuitBreaker, CircuitReason, CircuitVerdict, ToolCall, ToolCycle,
+    ToolResult,
+};
 pub use trellis::{trellis_wait_all, trellis_wait_any, TrellisDone};
 pub use worktree::{WorktreeHandle, WorktreeInfo, WorktreeManager};

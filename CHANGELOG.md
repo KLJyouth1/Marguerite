@@ -11,6 +11,32 @@
 
 ## [Unreleased]
 
+**2026-10-30 · 工作台整体性跃迁第一批（库级落地）** —— 计划见
+`docs/plans/2026-10-29-workbench-holistic-evolution.md`。本批全部为**引擎侧**能力，
+RPC 尚未接线（因此前端还看不到入口，别当成已上线）：
+
+- **新增** `session::fork`（`core/src/session/fork.rs`）：`fork_session` / `resume_session` /
+  `replay_session`，带 `SESSION_NOT_FOUND` / `SESSION_EMPTY` / `FORK_POINT_INVALID` /
+  `CHECKPOINT_INVALID` / `SESSION_STORE_ERROR` 五个错误码；前缀分支不复制末尾 `CompactState`、
+  `overheadTokens` 归零等边界写进 `notes` 而不是伪造成功。
+- **新增** `context::continuity`（`core/src/context/continuity.rs`）：新会话载入最近 1–3 份
+  `CompactState`，并对 git 仓库注入 `status --short` / `diff --stat`；**干净工作区不注入**，
+  超 1200 字符按 branch→git→目标 截断并置 `truncated`。
+- **新增** `assistant` 模块（`core/src/assistant/{scope,profile,brief}.rs`）：两层助理的后端骨架。
+  `brief` 是结构化简报（`pinned → preferences → facts(按 score) → open_loops` 预算裁剪，
+  `pinned` 永不参与截断，每条事实带 `source`/`score`）；`user_profile.md` 只存稳定偏好。
+- **新增** `memory::promote`：记忆写入闸门（晋升 / 衰减降级（不删除）/ 同 key 取代 + 计数）。
+- **新增** `kb::store::apply_changes` + `kb::graph::remove_document` + `kb::integrity::audit_sources`：
+  增量索引、删除时清节点与悬空边、mtime/size 漂移自检。
+- **新增** `agent::tool_cycle` 熔断器（连续 5 错 / 60s 错率 >15% / 同参数 3 步 → 暂停 + 回滚点，
+  不 abort 整个任务）与 `agent::team::converge_debate`（附和降权 ×0.2、按证据链强度收敛、保留少数派）。
+- **新增** `orchestration::task_state`：任务树运行态（就绪集 / 派发 / 完成 / **失败只阻塞下游** / 并行批）。
+- **修复** 9 处「只在 Windows 成立」的单测断言（`\` 当分隔符、`C:/…` 当绝对路径、进程级配置目录
+  override 的并发写），并把 `config_get` 用例改成**在磁盘上**放 fixture（它依赖 `Config::load()`
+  的错误分支，而 Linux 上该分支不会触发 —— 这是「Windows 绿 / Linux 红」的真因）。
+- **修复** CI `pyengine` job 缺 `numpy`：显式安装 + 断言，缺项当场红，而不是 6 分钟后在 collection 阶段红。
+
+
 按 `docs/plans/2026-10-26-capability-cache-computer-use-remediation.md` 推进 W0–W12：门禁复位、双引擎事件契约、占位清理、安全边界、能力路由与缓存口径。
 
 ### Added

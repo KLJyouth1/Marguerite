@@ -3,6 +3,7 @@
 //! 提供 CLI 路由、配置管理、Agent 运行时、模型路由、工具循环、MCP 客户端等核心功能。
 
 pub mod agent;
+pub mod assistant;
 /// v3.4 PSI 意识引擎（Aris Brain）：量子认知循环 + 八维情感 + GWT 广播
 pub mod rules;
 pub mod aris_brain;

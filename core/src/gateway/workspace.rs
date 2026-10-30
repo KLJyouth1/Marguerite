@@ -523,7 +523,12 @@ mod file_access_tests {
     #[test]
     fn write_must_not_escape_via_parent_dir() {
         let f = WsFixture::new("escape");
-        for evil in ["../escape.txt", "..\\escape.txt", "a/../../escape.txt"] {
+        // `..\escape.txt` 只在 Windows 上是「上一级」；Unix 上它是一个合法文件名
+        // （含反斜杠），不构成越界 —— 断言它「必须被拒绝」等于断言了错的行为。
+        let mut evil: Vec<&str> = vec!["../escape.txt", "a/../../escape.txt"];
+        #[cfg(windows)]
+        evil.push("..\\escape.txt");
+        for evil in evil {
             let w = workspace_file_write(&f.params(json!({
                 "path": evil,
                 "content": "pwned",

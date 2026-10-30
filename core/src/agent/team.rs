@@ -12,10 +12,12 @@
 use crate::agent::prefix_scope::SharedPrefixCache;
 use crate::agent::subagent::{SubAgentManager, SubAgentStatus};
 use crate::cache::PrefixCache;
+use crate::e::nlp::{cosine, jaccard, tokenize_zh};
 use crate::model::prefetch::PrefetchDedup;
 use crate::model::router::{Complexity, IntentType};
 use crate::types::Message;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 团队成员：一个角色专精的子 Agent 规格。
@@ -472,6 +474,354 @@ impl Team {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P3-2 辩论防极化：论点独立性校验 + 按证据链强度收敛 + 保留少数派
+// ---------------------------------------------------------------------------
+//
+// 要防的反模式：团队里多人复述同一条结论，人头越多声音越响，而真正带新证据的
+// 少数派被淹掉。判定全部用**确定性文本指纹**（粗分词 + 词频余弦 / 引用 Jaccard /
+// 推理链 shingle Jaccard），不引入任何模型或网络依赖：同样输入恒得同样权重与结论。
+//
+// 规则：
+// - 与历史论点的余弦 > 0.85、引用 Jaccard > 0.6、推理链近似 > 0.8 → 判「附和」，
+//   权重 ×0.2（同一角色的多条论点按 `Σ 权重 × 证据分` 汇总）；
+// - 收敛按证据链强度（`Σ 权重 × 证据分`）而非人头：证据变强的少数派可以赢；
+// - 输出保留全部少数派意见与置信度（置信度 = 该角色强度 / 总强度）。
+
+/// 论点与历史论点的余弦阈值（严格大于即判附和）。
+pub const SYCOPHANCY_COSINE_THRESHOLD: f64 = 0.85;
+/// 引用集合 Jaccard 阈值（严格大于即判附和）。
+pub const SYCOPHANCY_CITATION_JACCARD: f64 = 0.6;
+/// 推理链近似阈值（3-gram shingle Jaccard，严格大于即判附和）。
+pub const SYCOPHANCY_CHAIN_THRESHOLD: f64 = 0.8;
+/// 附和的权重惩罚（×0.2）。
+pub const SYCOPHANCY_PENALTY: f64 = 0.2;
+/// 独立论点的权重。
+pub const ARGUMENT_WEIGHT: f64 = 1.0;
+/// 收敛所需的最低支持占比（证据链强度占比）。
+pub const CONVERGENCE_MIN_SHARE: f64 = 0.5;
+
+/// 附和信号（三种确定性相似度之一命中即判附和）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SycophancySignal {
+    /// 与历史论点余弦过高（换皮复述）
+    ClaimCosine,
+    /// 引用集合 Jaccard 过高（引用同一批来源，无新证据）
+    CitationJaccard,
+    /// 推理链近似（3-gram shingle 重合）
+    ReasoningChain,
+}
+
+impl std::fmt::Display for SycophancySignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            SycophancySignal::ClaimCosine => "论点余弦近似",
+            SycophancySignal::CitationJaccard => "引用高度重合",
+            SycophancySignal::ReasoningChain => "推理链近似",
+        };
+        write!(f, "{label}")
+    }
+}
+
+/// 一条辩论论点：结论 + 证据引用 + 推理链 + 证据分。
+#[derive(Debug, Clone, Default)]
+pub struct DebateArgument {
+    /// 发言人角色
+    pub role: String,
+    /// 结论（本轮主张）
+    pub claim: String,
+    /// 证据引用（文档 / 用例 / 数据来源标识），用于算引用 Jaccard
+    pub citations: Vec<String>,
+    /// 推理链文本，用于算「推理链近似」
+    pub reasoning: String,
+    /// 证据分（0..=1，由调用方按可验证证据强弱给分；会被夹紧到该区间）
+    pub evidence: f64,
+}
+
+impl DebateArgument {
+    pub fn new(role: impl Into<String>, claim: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            claim: claim.into(),
+            citations: Vec::new(),
+            reasoning: String::new(),
+            evidence: 0.0,
+        }
+    }
+
+    /// 设定证据分（0..=1，越界自动夹紧）。
+    pub fn with_evidence(mut self, evidence: f64) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    /// 设定证据引用。
+    pub fn with_citations(mut self, citations: &[&str]) -> Self {
+        self.citations = citations.iter().map(|c| (*c).to_string()).collect();
+        self
+    }
+
+    /// 设定推理链文本。
+    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        self.reasoning = reasoning.into();
+        self
+    }
+}
+
+/// 单条论点的评分结果（权重已被附和判定修正）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArgumentEvaluation {
+    /// 发言人角色
+    pub role: String,
+    /// 结论
+    pub claim: String,
+    /// 权重（独立论点 1.0；附和 0.2）
+    pub weight: f64,
+    /// 证据分
+    pub evidence: f64,
+    /// 证据链强度 = 权重 × 证据分
+    pub score: f64,
+    /// 附和判定（`None` = 独立论点）
+    pub sycophancy: Option<SycophancySignal>,
+    /// 被附和的原角色（命中附和信号时记录）
+    pub echo_of: Option<String>,
+}
+
+/// 少数派意见（结论与置信度一并保留，不因落败被丢弃）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MinorityOpinion {
+    /// 少数派角色
+    pub role: String,
+    /// 该角色的结论（原文保留）
+    pub claim: String,
+    /// 该角色的证据分
+    pub evidence: f64,
+    /// 置信度 = 该角色强度 / 总强度（0..=1）
+    pub confidence: f64,
+    /// 附和判定（`None` = 独立论点）
+    pub sycophancy: Option<SycophancySignal>,
+}
+
+/// 一轮辩论的收敛结果。
+#[derive(Debug, Clone, Default)]
+pub struct DebateOutcome {
+    /// 每条论点的评分
+    pub evaluations: Vec<ArgumentEvaluation>,
+    /// 按角色的证据链强度汇总（`角色, Σ 权重×证据分`），按首次出现顺序
+    pub support: Vec<(String, f64)>,
+    /// 收敛胜出的角色（无有效论点时为 `None`）
+    pub winner: Option<String>,
+    /// 是否收敛（胜者证据链强度占比 ≥ [`CONVERGENCE_MIN_SHARE`]）
+    pub converged: bool,
+    /// 少数派意见（含置信度，按支持顺序）
+    pub minority: Vec<MinorityOpinion>,
+    /// 供 lead 综合的确定性摘要（含少数派）
+    pub summary: String,
+}
+
+fn term_counts(tokens: &[String]) -> HashMap<String, f64> {
+    let mut counts: HashMap<String, f64> = HashMap::new();
+    for token in tokens {
+        *counts.entry(token.clone()).or_insert(0.0) += 1.0;
+    }
+    counts
+}
+
+/// 论点余弦相似度：粗分词后的词频向量余弦（确定性，无模型/网络）。
+fn claim_cosine(a: &str, b: &str) -> f64 {
+    let ca = term_counts(&tokenize_zh(a));
+    let cb = term_counts(&tokenize_zh(b));
+    if ca.is_empty() || cb.is_empty() {
+        return 0.0;
+    }
+    // 词表排序后再取向量：不依赖 HashMap 迭代顺序，保证跨进程可复现。
+    let mut vocab: Vec<&String> = ca.keys().chain(cb.keys()).collect();
+    vocab.sort_unstable();
+    vocab.dedup();
+    let va: Vec<f64> = vocab.iter().map(|k| *ca.get(*k).unwrap_or(&0.0)).collect();
+    let vb: Vec<f64> = vocab.iter().map(|k| *cb.get(*k).unwrap_or(&0.0)).collect();
+    cosine(&va, &vb)
+}
+
+/// 引用集合（去空白、统一小写、去重）。
+fn citation_set(citations: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = citations
+        .iter()
+        .map(|c| c.trim().to_lowercase())
+        .filter(|c| !c.is_empty())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// 引用集合 Jaccard；任一方无引用即 0.0（无引用不构成「引用重合」证据）。
+fn citation_jaccard(a: &[String], b: &[String]) -> f64 {
+    let sa = citation_set(a);
+    let sb = citation_set(b);
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
+    jaccard(&sa, &sb)
+}
+
+/// 推理链 3-gram shingle 集合（token 不足 3 时整链作一个 shingle）。
+fn chain_shingles(reasoning: &str) -> Vec<String> {
+    let tokens = tokenize_zh(reasoning);
+    let n = 3.min(tokens.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    tokens.windows(n).map(|w| w.join("\u{1f}")).collect()
+}
+
+/// 推理链近似度（shingle Jaccard，确定性近似 ROUGE）。
+fn chain_similarity(a: &str, b: &str) -> f64 {
+    jaccard(&chain_shingles(a), &chain_shingles(b))
+}
+
+/// 判本条论点相对某条历史论点是否「附和」（三种信号按 余弦 → 引用 → 推理链 顺序）。
+fn sycophancy_signal(arg: &DebateArgument, prev: &DebateArgument) -> Option<SycophancySignal> {
+    if claim_cosine(&arg.claim, &prev.claim) > SYCOPHANCY_COSINE_THRESHOLD {
+        return Some(SycophancySignal::ClaimCosine);
+    }
+    if citation_jaccard(&arg.citations, &prev.citations) > SYCOPHANCY_CITATION_JACCARD {
+        return Some(SycophancySignal::CitationJaccard);
+    }
+    if chain_similarity(&arg.reasoning, &prev.reasoning) > SYCOPHANCY_CHAIN_THRESHOLD {
+        return Some(SycophancySignal::ReasoningChain);
+    }
+    None
+}
+
+/// 一轮辩论的收敛：先做论点独立性校验（附和降权），再按证据链强度定胜负。
+///
+/// 「历史」= 本条之前提交的论点（按提交顺序），故第一条论点天然独立。
+pub fn converge_debate(arguments: &[DebateArgument]) -> DebateOutcome {
+    let mut evaluations: Vec<ArgumentEvaluation> = Vec::with_capacity(arguments.len());
+    for (i, arg) in arguments.iter().enumerate() {
+        let mut signal = None;
+        let mut echo_of = None;
+        for prev in arguments.iter().take(i) {
+            if let Some(hit) = sycophancy_signal(arg, prev) {
+                signal = Some(hit);
+                echo_of = Some(prev.role.clone());
+                break;
+            }
+        }
+        let weight = if signal.is_some() {
+            SYCOPHANCY_PENALTY
+        } else {
+            ARGUMENT_WEIGHT
+        };
+        let evidence = arg.evidence.clamp(0.0, 1.0);
+        evaluations.push(ArgumentEvaluation {
+            role: arg.role.clone(),
+            claim: arg.claim.clone(),
+            weight,
+            evidence,
+            score: weight * evidence,
+            sycophancy: signal,
+            echo_of,
+        });
+    }
+
+    // 按角色汇总证据链强度（同一角色多条论点累加：Σ 权重 × 证据分）。
+    let mut support: Vec<(String, f64)> = Vec::new();
+    for ev in &evaluations {
+        match support.iter_mut().find(|(role, _)| role == &ev.role) {
+            Some((_, sum)) => *sum += ev.score,
+            None => support.push((ev.role.clone(), ev.score)),
+        }
+    }
+    let total: f64 = support.iter().map(|(_, score)| *score).sum();
+
+    // 胜者按强度（首个严格最大者），不按人头。
+    let mut best: Option<(usize, f64)> = None;
+    for (idx, (_, score)) in support.iter().enumerate() {
+        let stronger = match best {
+            Some((_, top)) => *score > top,
+            None => true,
+        };
+        if stronger {
+            best = Some((idx, *score));
+        }
+    }
+    let converged = match best {
+        Some((_, score)) => total > 0.0 && score / total >= CONVERGENCE_MIN_SHARE,
+        None => false,
+    };
+    let winner = best.map(|(idx, _)| support[idx].0.clone());
+
+    // 少数派：每个落败角色的最强论点原样保留 + 置信度。
+    let mut minority: Vec<MinorityOpinion> = Vec::new();
+    if let Some((winner_idx, _)) = best {
+        for (idx, (role, score)) in support.iter().enumerate() {
+            if idx == winner_idx {
+                continue;
+            }
+            let mut strongest: Option<&ArgumentEvaluation> = None;
+            for ev in &evaluations {
+                if &ev.role != role {
+                    continue;
+                }
+                let better = match strongest {
+                    Some(top) => ev.score > top.score,
+                    None => true,
+                };
+                if better {
+                    strongest = Some(ev);
+                }
+            }
+            if let Some(ev) = strongest {
+                minority.push(MinorityOpinion {
+                    role: role.clone(),
+                    claim: ev.claim.clone(),
+                    evidence: ev.evidence,
+                    confidence: if total > 0.0 { score / total } else { 0.0 },
+                    sycophancy: ev.sycophancy,
+                });
+            }
+        }
+    }
+
+    let mut summary = String::new();
+    match best {
+        Some((idx, score)) => {
+            let share = if total > 0.0 { score / total } else { 0.0 };
+            let tag = if converged { "[收敛]" } else { "[未收敛]" };
+            summary.push_str(&format!(
+                "{tag} 胜出：{}（证据链强度 {score:.2}，占比 {:.0}%，阈值 {:.0}%）",
+                support[idx].0,
+                share * 100.0,
+                CONVERGENCE_MIN_SHARE * 100.0
+            ));
+        }
+        None => summary.push_str("[未收敛] 本轮无有效论点"),
+    }
+    for opinion in &minority {
+        let mark = match opinion.sycophancy {
+            Some(signal) => format!("，附和降权（{signal}）"),
+            None => String::new(),
+        };
+        summary.push_str(&format!(
+            "\n[少数派] {}：{}（置信度 {:.0}%{mark}）",
+            opinion.role,
+            opinion.claim,
+            opinion.confidence * 100.0
+        ));
+    }
+
+    DebateOutcome {
+        evaluations,
+        support,
+        winner,
+        converged,
+        minority,
+        summary,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,5 +1201,119 @@ mod tests {
                 role
             );
         }
+    }
+}
+
+/// P3-2 辩论防极化的回归守卫（纯逻辑，无 LLM / 无网络）。
+#[cfg(test)]
+mod debate_tests {
+    use super::*;
+
+    /// 附和（换皮复述）必须被降权到 ×0.2，并记录被附和的来源角色。
+    #[test]
+    fn debate_penalizes_sycophantic_restatement_weight() {
+        let original = DebateArgument::new("架构", "应引入本地缓存层以降低读延迟")
+            .with_evidence(0.5)
+            .with_citations(&["bench-2026-10"]);
+        let echo = DebateArgument::new("后端", "应引入本地缓存层，可降低读延迟")
+            .with_evidence(0.5)
+            .with_citations(&["bench-2026-10"]);
+
+        let outcome = converge_debate(&[original, echo]);
+        let first = &outcome.evaluations[0];
+        let second = &outcome.evaluations[1];
+
+        assert_eq!(first.weight, ARGUMENT_WEIGHT, "第一条论点无历史可比，应视为独立");
+        assert_eq!(first.sycophancy, None);
+        assert_eq!(
+            second.weight, SYCOPHANCY_PENALTY,
+            "换皮复述必须被降权到 ×{}",
+            SYCOPHANCY_PENALTY
+        );
+        assert_eq!(second.sycophancy, Some(SycophancySignal::ClaimCosine));
+        assert_eq!(second.echo_of.as_deref(), Some("架构"), "应记录被附和的角色");
+        assert!(
+            (second.score - SYCOPHANCY_PENALTY * 0.5).abs() < 1e-9,
+            "降权后强度 = 权重 × 证据分，实际 {}",
+            second.score
+        );
+    }
+
+    /// 收敛按证据链强度而非人头：两人复述旧结论，仍输给一个带新证据的少数派。
+    #[test]
+    fn debate_converges_by_evidence_strength_not_headcount() {
+        let majority_a = DebateArgument::new("架构", "应引入本地缓存层以降低读延迟")
+            .with_evidence(0.5)
+            .with_citations(&["bench-2026-10"]);
+        let majority_b = DebateArgument::new("性能", "应引入本地缓存层，可降低读延迟")
+            .with_evidence(0.5)
+            .with_citations(&["bench-2026-10"]);
+        let dissenter = DebateArgument::new("安全", "本地缓存会暴露陈旧凭据，应改用短期令牌")
+            .with_evidence(1.0)
+            .with_citations(&["cve-2024-1234"]);
+
+        let outcome = converge_debate(&[majority_a, majority_b, dissenter]);
+
+        // 人头 2:1 站在「本地缓存」一边，但证据链强度：0.5 + 0.1 < 1.0。
+        let support: Vec<(&str, f64)> = outcome
+            .support
+            .iter()
+            .map(|(role, score)| (role.as_str(), *score))
+            .collect();
+        let score_of = |role: &str| {
+            support
+                .iter()
+                .find(|(r, _)| *r == role)
+                .map(|(_, s)| *s)
+                .unwrap_or(f64::NAN)
+        };
+        assert_eq!(score_of("架构"), 0.5);
+        assert_eq!(score_of("性能"), SYCOPHANCY_PENALTY * 0.5);
+        assert_eq!(score_of("安全"), 1.0);
+
+        assert_eq!(
+            outcome.winner.as_deref(),
+            Some("安全"),
+            "胜者应由证据链强度决定，而非人头"
+        );
+        assert!(outcome.converged, "1.0/(1.6) 超过收敛阈值，应判收敛");
+        assert!(
+            outcome.summary.contains("[收敛]") && outcome.summary.contains("安全"),
+            "摘要应给出收敛胜者，实际 {}",
+            outcome.summary
+        );
+    }
+
+    /// 落败的少数派意见与置信度必须被保留（不被胜者吞掉）。
+    #[test]
+    fn debate_keeps_minority_opinion_with_confidence() {
+        let gate = DebateArgument::new("发布", "应把发布门禁前置到提交前")
+            .with_evidence(1.0)
+            .with_citations(&["ci-log-1"]);
+        let canary = DebateArgument::new("运维", "应增加灰度发布窗口")
+            .with_evidence(0.6)
+            .with_citations(&["ops-runbook-2"]);
+        let docs = DebateArgument::new("文档", "应先在文档补齐再发版")
+            .with_evidence(0.3)
+            .with_citations(&["doc-audit-3"]);
+
+        let outcome = converge_debate(&[gate, canary, docs]);
+        assert_eq!(outcome.winner.as_deref(), Some("发布"));
+        assert_eq!(outcome.minority.len(), 2, "两名少数派都应被保留");
+        assert_eq!(outcome.minority[0].role, "运维");
+        assert_eq!(
+            outcome.minority[0].claim, "应增加灰度发布窗口",
+            "少数派结论必须原文保留"
+        );
+        assert_eq!(outcome.minority[1].role, "文档");
+        // 置信度 = 该角色强度 / 总强度（1.0 + 0.6 + 0.3 = 1.9）
+        let total = 1.0 + 0.6 + 0.3;
+        assert!((outcome.minority[0].confidence - 0.6 / total).abs() < 1e-9);
+        assert!((outcome.minority[1].confidence - 0.3 / total).abs() < 1e-9);
+        assert!(
+            outcome.summary.contains("[少数派] 运维") && outcome.summary.contains("[少数派] 文档"),
+            "摘要必须带上少数派意见，实际 {}",
+            outcome.summary
+        );
     }
 }

@@ -353,10 +353,15 @@ mod tests {
         let bundle = temp_dir("escape");
         std::fs::create_dir_all(bundle.join("runtime_src")).expect("建 runtime_src");
         std::fs::write(bundle.join("router.runtime.yaml"), "v4: {}\n").expect("写 yaml");
+        // 绝对路径要按平台给：`C:/...` 在 Unix 上不是绝对路径，会被当成普通相对名。
+        #[cfg(windows)]
+        let abs = "C:/Windows/System32/config";
+        #[cfg(not(windows))]
+        let abs = "/etc/passwd";
         let manifest = serde_json::json!({
             "files": [
                 { "path": "../../etc/passwd", "size_bytes": 1 },
-                { "path": "C:/Windows/System32/config", "size_bytes": 1 },
+                { "path": abs, "size_bytes": 1 },
             ]
         });
         std::fs::write(

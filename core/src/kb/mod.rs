@@ -1,9 +1,9 @@
 //! 知识库模块（KB / RAG-lite + 质量层）
 //!
-//! - `store`：文档分块 + BM25 关键词检索（零外部模型依赖）。
-//! - `graph`：实体-关系知识图谱（Exclusive 能力 `kb.graph`）。
+//! - `store`：文档分块 + BM25 关键词检索（零外部模型依赖）+ **文件增量索引**。
+//! - `graph`：实体-关系知识图谱（Exclusive 能力 `kb.graph`），支持按文档摘除节点。
 //! - `denoiser`：索引前去噪（rag_denoiser）。
-//! - `integrity`：索引后完整性审计（rag_integrity）。
+//! - `integrity`：索引后完整性审计（rag_integrity）+ **启动自检**（索引记录 vs 磁盘）。
 //!
 //! 三者构成「KB 2.0」质量闭环：去噪 → 索引 → 图谱增强 → 审计。
 
@@ -18,8 +18,10 @@ pub mod store;
 pub use denoiser::{filter_documents, noise_reason, NoiseReport};
 pub use graph::{Edge, KnowledgeGraph, RelationKind};
 pub use hybrid::{HybridResult, HybridRetriever};
-pub use integrity::{audit, IntegrityReport};
-pub use store::{KnowledgeBase, RetrievalResult};
+pub use integrity::{
+    audit, audit_sources, IntegrityReport, SourceAuditReport, SourceDrift, SourceVerdict,
+};
+pub use store::{apply_changes, ApplyReport, KbSource, KnowledgeBase, RetrievalResult};
 
 #[cfg(test)]
 mod tests {

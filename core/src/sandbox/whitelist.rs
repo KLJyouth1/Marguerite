@@ -268,7 +268,10 @@ mod tests {
     #[test]
     fn test_basename_strips_path() {
         assert_eq!(basename("./rm"), "rm");
-        assert_eq!(basename("C:\\Windows\\System32\\net.exe"), "net.exe");
+        // 用本机分隔符拼：`basename` 走 `Path::file_name()`，`\` 在 Unix 上不是分隔符。
+        let sep = std::path::MAIN_SEPARATOR;
+        let nested = format!("C:{sep}Windows{sep}System32{sep}net.exe");
+        assert_eq!(basename(&nested), "net.exe");
         assert_eq!(basename("ls"), "ls");
     }
 

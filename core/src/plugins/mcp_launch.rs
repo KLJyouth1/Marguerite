@@ -403,9 +403,17 @@ mod tests {
             resolve_command("./bin/server", base),
             base.join("./bin/server")
         );
+        // 「是否绝对路径」由平台决定：`C:/...` 只在 Windows 上是绝对路径，
+        // Unix 上它会被当成相对路径拼到 base 后面（Linux CI 曾因此判红）。
+        #[cfg(windows)]
         assert_eq!(
             resolve_command("C:/abs/server.exe", base),
             PathBuf::from("C:/abs/server.exe")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_command("/abs/server.exe", base),
+            PathBuf::from("/abs/server.exe")
         );
     }
 

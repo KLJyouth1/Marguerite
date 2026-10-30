@@ -15,6 +15,7 @@
 pub mod cancel;
 pub mod member_registry;
 pub mod dag;
+pub mod task_state;
 pub mod deliverable;
 
 use chrono::{DateTime, Utc};

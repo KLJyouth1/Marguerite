@@ -479,9 +479,11 @@ mod tests {
 
     #[test]
     fn key_for_is_stable_and_normalizes() {
-        let bs = std::char::from_u32(92).unwrap().to_string(); // 反斜杠
-        let win = format!("D:{bs}a{bs}b");
-        assert_eq!(key_for("D:/a/b"), key_for(&win), "分隔符归一化后键相同");
+        // `key_for` 只把**本机分隔符**归一化成 `/`：Unix 上 `\` 是普通字符，
+        // 拿它当分隔符断言会得到两个不同的键（Linux CI 曾因此判红）。
+        let sep = std::path::MAIN_SEPARATOR;
+        let native = format!("D:{sep}a{sep}b");
+        assert_eq!(key_for("D:/a/b"), key_for(&native), "分隔符归一化后键相同");
         assert_eq!(key_for("D:/a/b"), key_for("D:/a/b"), "同路径键稳定");
         assert_ne!(key_for("D:/a/b"), key_for("D:/a/c"));
     }
