@@ -411,6 +411,18 @@
           "markdownDescription": "Enables the sidecar_stop command without any pre-configured scope."
         },
         {
+          "description": "Enables the task_overlay_hide command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-task-overlay-hide",
+          "markdownDescription": "Enables the task_overlay_hide command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the task_overlay_move command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-task-overlay-move",
+          "markdownDescription": "Enables the task_overlay_move command without any pre-configured scope."
+        },
+        {
           "description": "Denies the autostart_set command without any pre-configured scope.",
           "type": "string",
           "const": "deny-autostart-set",
@@ -475,6 +487,18 @@
           "type": "string",
           "const": "deny-sidecar-stop",
           "markdownDescription": "Denies the sidecar_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the task_overlay_hide command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-task-overlay-hide",
+          "markdownDescription": "Denies the task_overlay_hide command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the task_overlay_move command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-task-overlay-move",
+          "markdownDescription": "Denies the task_overlay_move command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

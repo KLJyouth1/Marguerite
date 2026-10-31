@@ -95,7 +95,7 @@ marguerite mcp list      # 列出 config.yaml 中已配置的 MCP 服务器
 
 | 项 | 路径 |
 |----|------|
-| MCP 服务入口 | `C:\Users\Administrator\WorkBuddy\xiaoyuangou\tools\baota_bridge\mcp_server.py` |
+| MCP 服务入口 | `<你的工作目录>\tools\baota_bridge\mcp_server.py` |
 | 底层 API 封装 | 同目录 `baota_api.py`（`BaotaAPI`，已处理 auth/CSRF/Playwright 登录） |
 | 凭据模板 | 同目录 `.env.example` → 复制为 `.env` |
 
@@ -120,7 +120,7 @@ BAOTA_CONFIRM_EXEC=true                  # true=baota_exec_shell 必须显式 co
 ### 3. 启动服务
 
 ```bash
-cd C:\Users\Administrator\WorkBuddy\xiaoyuangou\tools\baota_bridge
+cd <你的工作目录>\tools\baota_bridge
 .venv\Scripts\python.exe mcp_server.py --host 127.0.0.1 --port 18799
 ```
 

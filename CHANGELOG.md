@@ -11,6 +11,82 @@
 
 ## [Unreleased]
 
+**2026-10-31 · R-02 可撤销性闭环 + 简报事实恒空的真缺陷**
+
+- **修复（真缺陷，不是新功能）** `assistant.brief.get` 的 `facts` 在生产路径上**恒为空**：
+  `cross_project_search` 返回 `{"items": […], "root": …}`，而 `collect_facts` 只认
+  `hits / results / data` —— 键名不匹配不 panic、不报错，只是静默返回空表。后果是
+  投影（`projection`）与预算裁剪两条分支在线上全是死代码，单测因为直接构造 `BriefInput`
+  而一直没抓到。现在 `items` 排首位（旧键名保留兼容），解析逻辑拆成可单测的
+  `parse_facts`，并用**真实响应形状**做回归（`assistant::brief::tests::parse_facts_*` 4 条）。
+- **新增** `assistant.facts.delete`：可撤销性的最后一环。入参 `{id: "fact:<n>"}`（也接受裸数字），
+  对本引擎写回层的事实做**硬删除**（不打墓碑 —— 留一条 `superseded_by` 意味着正文仍在磁盘上，
+  与「忘掉」相悖），幂等（重复删除返回 `deleted:false` 而非报错）。
+  外部 AI 工具写的 Markdown 记忆**不提供**删除入口：那不在本应用写权限内，删别人的文件是越权。
+- **新增** 溯源抽屉里的事实「忘掉」按钮（仅 `deletable:true` 才渲染）+ `useProvenance.deleteFact`：
+  删除成功后**重新拉取简报**而不是本地删数组（否则 `budget.used` 与 `projection` 会变旧）；
+  后端 `{success:false}` 走正常 resolve，必须显式判，否则会把「没删掉」显示成删掉了。6 语言文案齐平。
+- **收口** P0-2 开关组合矩阵：`run_p2p` 的单成员预算从 200ms 收到 25ms 后，**108 个组合全部**
+  跑真实 spawn/wait 端到端（此前为控时长只保留 1 个代表性子集）。同一条用例实测
+  **2.63s**（旧全组合 356s），矩阵不再需要「子集」这种诚实的妥协。
+- **验证** `cargo test -p marguerite-core --lib -- assistant:: memory::writeback gateway::assistant`
+  → **49 passed / 0 failed**；全库 `--lib`（跳过受沙箱限制的 PTY 用例）→ **4503 passed / 0 failed / 25 ignored**；
+  `check-rpc-contract.mjs` → 471 条声明、幽灵 0；`check-version-sync.py` → 15 处一致。
+
+- **修复** `scripts/package_app.cmd` 被 cmd.exe 解析错乱：文件先前被存成 UTF-8（含 1958 处
+  不可恢复的替换字符），而 cmd.exe 按字节窗口读批处理，半个多字节字符会被切成假命令并执行。
+  已从干净的 `package_app.cmd.pre-gbk.bak` 按 ASCII 骨架逐行找回 76 行注释/`echo` 文案、
+  重写顶部编码约定说明，并以 **GBK(cp936)+CRLF** 落盘；`check-batch-parse.py` 三个脚本全部
+  `parse clean`（此前 `package_app.cmd` 吐 24 行 stderr）。
+- **修复** pyengine 两处 Windows 并发缺陷（真实偶发失败，不是测试问题）：
+  ① `windows_default_capability.py` 的锁文件 `open()` / `msvcrt.locking()` 把杀软与索引器
+  造成的瞬时占用当致命错误直接抛 `PermissionError` → 改为**有界退避重试**（只对 winerror 5/32/33，
+  预算 10s，其余错误照旧上抛）；② `recovery/locking.py` 的 `NtCreateFile(FILE_OPEN_IF)` 在
+  并发创建同一目录时，输家可能拿到 `ACCESS_DENIED / SHARING_VIOLATION` 而非 `NAME_COLLISION`，
+  旧实现据此判「路径不安全」并 fail-closed 得太早 → 只对这两个 NTSTATUS 有界重试（2s），
+  预算耗尽仍 fail-closed。对应用例连跑 **5/5** 与 **4/4** 全绿；`tests/test_sandbox` 1746 passed、
+  `tests/test_recovery` 445 passed。
+- **同步** 质量基线：core **4532 / 25 ignored**（+8 条新测试）、webui **5085 / 516 files**（+6 条），
+  README×2 / `docs/agents/02` / 官网计数（Rust 300,404 行、前端 355,638 行、Python 463,769 行、RPC 471）全部对齐，
+  `check-readme-claims.py` 与 `check-website-claims.py` 均 PASS。
+
+**2026-10-31 · 记忆溯源抽屉（把「它为什么记得」变成可检查的一等公民）**
+
+- **新增** `assistant.brief.get` 出参 `projection`：`{policy, droppedCount, dropped:[{key, reason}]}`，
+  只在真的做过投影时出现（`projection_policy=None` 时整字段缺席，不把「没投影」伪装成「投影过且零丢弃」）。
+  `budget.notes` 的中文诊断保持原样：机器读结构，人读备注。落点 `core/src/assistant/brief.rs`，
+  新增 4 条测试（`cargo test -p marguerite-core --lib assistant::` → 36 passed）。
+- **新增** 记忆溯源抽屉（`webui/src/components/shell/ProvenanceDrawer.vue` ·
+  `composables/shell/useProvenance.ts` · `registerProvenance.ts`）：右侧 360px 非模态抽屉，
+  `Alt+P` 切换、`Esc` 关闭，分区展示钉住 / 偏好 / 事实 / 被投影丢弃的事实与原因；
+  `<900px` 不渲染；动效只碰 `transform/opacity`，时长缓动全走 token，`prefers-reduced-motion` 改纯淡入。
+  **不做**就地删除事实——后端当时没有删除自动事实的 RPC，伪造删除按钮等于假完成
+  （该限制已于本轮解除，见上方「R-02 可撤销性闭环」：`assistant.facts.delete` 落地后按钮才出现，
+  且只对 `deletable:true` 的事实渲染）。
+- **约束** 不新增任何 RPC 方法、不新增依赖；注册进既有 `shell.overlay` append-only 插槽，
+  不改 `ChatView.vue` / `App.vue`（零回归面）。13 条前端测试（8 + 5）。
+- **同步** 官网 `website/index.html` 的代码台账计数（Rust 300,046 行 / 591 文件、前端 355,386 行 / 1,277 文件）
+  与近两日交付条目；`docs/agents/04-gotchas.md` 的 RPC 实测快照更新为「剥后 470、不剥 473」。
+- **验证** `bash scripts/verify.sh --clean --all` → **26/26 PASS，exit 0**（core lib 4524 passed / webui 5079 passed / e2e 97 passed）；
+  同时修复 P0-2 开关矩阵用例的「假死」：`spawn_with_spec` 走分钟级预算、忽略 `default_timeout`，
+  两条矩阵用例会串行叠加到 356s —— 给 `SubAgentManager` 加显式 `timeout_cap`（生产默认 `None`，行为不变），
+  两条用例从 356s 降到 **0.82s**。
+
+**2026-10-31 · 注意力优先工作台（桌面端第一个「按紧迫度分配屏幕」的子系统）**
+
+- **新增** 注意力货架（`webui/src/components/ui/AttentionShelf.vue` · `composables/ui/attentionQueue.ts` ·
+  `styles/attention-system.css`）：待裁决的审批不再随聊天记录滚出视野，而是沉淀到**左下角**一枚胶囊；
+  **无待办时零渲染、零定时器**（左下是唯一没被输入框/桌宠/悬浮球/顶栏占用、且处于余光的位置）。
+  排序不变量 `RECENCY_MAX(99) < 任意两个类别基座之差(≥250)` 由单测**直接断言基座间隔**——
+  保证「搁置两小时的审批永远压过刚出现的次要选项」，否则货架会退化成通知流。
+- **新增** 因果动效语态 `motionGrammar`：四个 cue（`arrive` / `settle` / `yield` / `refuse`）全部绑定**状态跃迁**，
+  `cueFromCounts(prev, next)` 在数量不变时返回 `null`（无跃迁不播）；刻意**没有** `success`——成功就是 `settle`。
+  `prefers-reduced-motion` 降级为**纯透明度**而非关闭反馈；时长/缓动只走 `--dur-*` / `--ease-*` token。
+- **新增** `shell.overlay` UI 插槽（`webui/src/shell/slots/types.ts`）：复用仓库既有 append-only 扩展缝，
+  `App.vue` 只增加一行 `<SlotHost slot="shell.overlay" />`；注册侧 `globalThis` 幂等，HMR 重跑不会重复注册。
+- **约束** 不新增任何 RPC 方法（新增方法要在 Rust 与 Python 各实现一次，正是本仓最高频的「双实现漂移」）；
+  货架**不做**就地批准/拒绝——340px 角落没有命令全文、权限矩阵与 diff，在那里批准工具执行是安全倒退。
+
 **2026-10-30 · 第二批收尾（把「只读」补成「可写 / 可见」）**
 
 - **新增** `sessions.forkThroughTurn`（RPC 460 → **461**）：按 turn 换算出分支点，

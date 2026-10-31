@@ -90,7 +90,12 @@ impl GuardrailVerdict {
     }
 }
 
-/// 受保护（禁止越界写/删）的系统目录前缀（绝对路径，用 `Path::starts_with` 判定）
+/// 受保护（禁止越界写/删）的系统目录前缀（绝对路径）
+///
+/// 判定不能只用 [`Path::starts_with`]：Windows 风格路径（`C:\Windows`）在非 Windows
+/// 宿主上只是**一个组件名**，`starts_with` 永远不成立 —— 同一份守卫会在不同平台
+/// 给出不同结论（CI 的 ubuntu 作业就是这么漏判的）。判定统一走
+/// [`is_under_protected_prefix`]。
 const SYSTEM_PREFIXES: &[&str] = &[
     "/etc",
     "/usr",
@@ -229,7 +234,7 @@ impl GuardrailScanner {
         // 4) 绝对系统目录保护
         if writing {
             for pfx in &self.system_prefixes {
-                if target.starts_with(pfx) {
+                if is_under_protected_prefix(target, pfx) {
                     return GuardrailVerdict::deny(&format!(
                         "target under protected system path: {}",
                         pfx.display()
@@ -326,6 +331,35 @@ const ESCAPE_PATTERNS: &[&str] = &[
     "docker run --privileged",
 ];
 
+/// 判断 `target` 是否落在 `prefix` 之下（含自身），**与宿主平台无关**。
+///
+/// 规则：
+/// 1. 先试 [`Path::starts_with`]（POSIX 上最准确，也最快）；
+/// 2. 再按「分隔符归一 + 目录边界」比较字符串，于是 Windows 路径在 Linux 宿主上
+///    仍能被判定（安全守卫不该因为跑在哪个 CI 上而改变结论）；
+/// 3. 只对**带盘符**的前缀做大小写折叠（`C:\Windows` ≡ `c:\windows`）；
+///    POSIX 路径大小写敏感，折叠会把 `/ETC` 也当成系统目录 —— 判定口径会变糊。
+fn is_under_protected_prefix(target: &Path, prefix: &Path) -> bool {
+    if target.starts_with(prefix) {
+        return true;
+    }
+    let target_s = target.to_string_lossy().replace('\\', "/");
+    let prefix_s = prefix.to_string_lossy().replace('\\', "/");
+    if prefix_s.is_empty() {
+        return false;
+    }
+    let windows_style = prefix_s.len() >= 2 && prefix_s.as_bytes()[1] == b':';
+    let (target_s, prefix_s) = if windows_style {
+        (target_s.to_lowercase(), prefix_s.to_lowercase())
+    } else {
+        (target_s, prefix_s)
+    };
+    target_s == prefix_s
+        || target_s
+            .strip_prefix(&prefix_s)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +389,34 @@ mod tests {
             p("D:\\proj"),
         );
         assert_eq!(v.severity, GuardrailSeverity::Deny);
+    }
+
+    /// 同一份判定必须**在 Linux 宿主上也成立**（CI 的 ubuntu 作业曾因此判红）：
+    /// `C:\Windows` 在 POSIX 上只是一个组件名，`Path::starts_with` 永远不匹配。
+    #[test]
+    fn windows_system_prefix_matches_regardless_of_host() {
+        assert!(is_under_protected_prefix(
+            Path::new("C:\\Windows\\System32\\x.dll"),
+            Path::new("C:\\Windows")
+        ));
+        // 盘符大小写不敏感；目录边界必须成立（`C:\Windows10` 不是 `C:\Windows`）
+        assert!(is_under_protected_prefix(
+            Path::new("c:\\windows\\system32\\x.dll"),
+            Path::new("C:\\Windows")
+        ));
+        assert!(!is_under_protected_prefix(
+            Path::new("C:\\Windows10\\x.dll"),
+            Path::new("C:\\Windows")
+        ));
+        // POSIX 前缀保持大小写敏感（别把 `/ETC` 也当系统目录）
+        assert!(is_under_protected_prefix(
+            Path::new("/etc/passwd"),
+            Path::new("/etc")
+        ));
+        assert!(!is_under_protected_prefix(
+            Path::new("/ETC/passwd"),
+            Path::new("/etc")
+        ));
     }
 
     #[test]

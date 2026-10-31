@@ -70,6 +70,43 @@ SHIPPED_DOCS = {
 BANNED_PATH_NAMES = {"__pycache__", ".pytest_cache", ".DS_Store"}
 BANNED_SUFFIXES = {".pyc", ".pyo"}
 
+# ---------------------------------------------------------------------------
+# Machine-specific personal paths must never reach the shipped manuals.
+#
+# The filename allowlist (SHIPPED_DOCS) only asks *which* document ships; it is
+# blind to *what a line says*. Measured 2026-10-29: `docs/mcp.md` and its bundled
+# twin `resources/docs/mcp.md` both carried `C:\Users\Administrator\WorkBuddy\
+# xiaoyuangou\tools\baota_bridge\mcp_server.py` — a personal username plus a
+# private project name — and `tauri.conf.json` bundles `resources/docs`, so that
+# string landed on every user's disk. AGENTS.md §4 had documented the leak for
+# months without a single guard ever reading a byte of file content.
+#
+# Scope: only the first-party manuals. The vendored interpreter under
+# `resources/python/**` and third-party packages legitimately contain thousands of
+# `C:\Users\<user>`, `/home/…` and `%USERPROFILE%\Documents` examples; scanning
+# them would bury the real finding in noise, so this rule reads `resources/docs/**`
+# and the SHIPPED_DOCS source copies instead.
+# ---------------------------------------------------------------------------
+MACHINE_PATH_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    # A concrete Windows user home: <drive>:\Users\<name>\<rest> (either slash).
+    # The trailing separator + character is required, so a bare "C:\Users" mention
+    # or a documented placeholder like `C:\Users\<user>\AppData` (the `<` is not a
+    # legal username byte here) does not fire.
+    ("windows-user-home",
+     re.compile(r"[A-Za-z]:[\\/]{1,2}[Uu][Ss][Ee][Rr][Ss][\\/][^\\/\s\"'`<>|]{1,64}?[\\/]+\S")),
+    # A concrete POSIX home `/home/<name>/<rest>`; angle-bracket templates and a
+    # trailing-slash-less `/home/user` do not fire.
+    ("posix-home", re.compile(r"/home/[^/\s\"'`<>|]{1,64}/\S+")),
+    # PowerShell expansion that resolves to the author's own profile.
+    ("powershell-env-profile", re.compile(r"\$env:(?i:username|userprofile)\b")),
+    # `%USERPROFILE%` glued to a concrete directory (a bare token is a template).
+    ("win-userprofile-var", re.compile(r"%USERPROFILE%[\\/][^\\/\s\"'`<>|]{2,64}")),
+    # Strings unique to the author's machine layout — never legitimate in a manual.
+    ("private-workspace", re.compile(r"WorkBuddy")),
+    ("private-project", re.compile(r"xiaoyuangou")),
+]
+MACHINE_PATH_SUFFIXES = {".md", ".txt"}
+
 # The bundled interpreter is the sidecar's first-choice runtime
 # (`core/src/pyengine/sidecar.rs`: `<exe>/resources/python/python.exe`). It is not
 # in git — `scripts/fetch_python_runtime.ps1` materializes it — so nothing else
@@ -155,6 +192,56 @@ def internal_content_violations(resources: Path) -> list[str]:
             doc = Path(*rel.parts[1:]).as_posix()
             if doc not in SHIPPED_DOCS:
                 found.append(f"resources/docs/{doc}: internal documentation shipped")
+    return found
+
+
+def machine_path_hits(path: Path, label: str) -> list[str]:
+    """Match one shipped manual against `MACHINE_PATH_PATTERNS`.
+
+    An unreadable manual is reported as a violation, not skipped: "I could not
+    read it" and "it is clean" are different answers, and only one of them is
+    safe to ship.
+    """
+    if not path.is_file() or path.suffix.lower() not in MACHINE_PATH_SUFFIXES:
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return [f"{label}: unreadable ({error}) — cannot rule out a personal path"]
+    found: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for reason, pattern in MACHINE_PATH_PATTERNS:
+            if pattern.search(line):
+                found.append(f"{label}:{lineno}: {reason}")
+                break
+    return found
+
+
+def machine_path_violations(resources: Path) -> list[str]:
+    """Content rule for the staged manuals.
+
+    The allowlist decides *which* documents ship; this decides what they may
+    say. Keeping them apart is the point: `docs/mcp.md` passed the allowlist
+    for months while quoting the author's home directory.
+    """
+    found: list[str] = []
+    docs = resources / "docs"
+    if not docs.is_dir():
+        return found
+    for _, path in walk(docs):
+        found.extend(
+            machine_path_hits(path, f"resources/docs/{path.relative_to(docs).as_posix()}")
+        )
+    return found
+
+
+def repo_doc_violations() -> list[str]:
+    """Same rule against the source copies, which the staged tree only mirrors
+    after `scripts/package_full.cmd` has run. Catching it here means the leak
+    fails at the desk, not after a release."""
+    found: list[str] = []
+    for name in sorted(SHIPPED_DOCS):
+        found.extend(machine_path_hits(REPO_ROOT / "docs" / name, f"docs/{name}"))
     return found
 
 
@@ -369,6 +456,7 @@ def violations(roots: list[tuple[str, Path]]) -> list[str]:
         if prefix == "resources":
             resources = root
             found.extend(internal_content_violations(resources))
+            found.extend(machine_path_violations(resources))
             found.extend(runtime_violations(resources))
             found.extend(native_violations(resources))
     return found
@@ -417,6 +505,30 @@ def self_test() -> int:
         for reason, needle in expectations.items():
             hits = [item for item in dirty if reason in item and needle in item]
             checks.append((f"detects {reason}", True, bool(hits), hits, dirty))
+
+        # 1b. Content rule: a shipped manual that names the author's machine is
+        # named by cause, and a documented placeholder is not a leak.
+        (resources / "docs" / "mcp.md").write_text(
+            "cd C:\\Users\\Alice\\proj\\tools\r\n", encoding="utf-8"
+        )
+        content = machine_path_violations(resources)
+        hits = [item for item in content if "windows-user-home" in item and "mcp.md" in item]
+        checks.append(
+            ("detects a personal home path in a shipped manual", True, bool(hits), hits, content)
+        )
+        (resources / "docs" / "mcp.md").write_text(
+            "cd C:\\Users\\<user>\\proj\\tools\r\n", encoding="utf-8"
+        )
+        placeholders = machine_path_violations(resources)
+        checks.append(
+            (
+                "a documented placeholder is not a leak",
+                False,
+                not placeholders,
+                [],
+                placeholders,
+            )
+        )
 
         # 2. Clean tree: no rule may fire.
         shutil.rmtree(cache)
@@ -654,7 +766,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    found = violations(roots)
+    found = violations(roots) + repo_doc_violations()
     if found:
         by_reason: dict[str, int] = {}
         for item in found:

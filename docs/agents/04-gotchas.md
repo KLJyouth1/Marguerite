@@ -438,7 +438,8 @@
   行标题（`webui unit tests` vs `webui 单测`）不参与比对，否则全是假阳性。
 - **🌐 官网印了几十个「硬事实」，而 `check-readme-claims.py` 只看两份 README —— 网站从来没有任何核对**（2026-10-28 实测）。
   首次逐条对账当场查出**七类**漂移，全部是用户可见的宣传口径：
-  1. **内置工具写 85，页脚又写 67，而注册表实测 74**。`85` 是 `marguerite-core capabilities --json` 的
+  1. **内置工具写 85，页脚又写 67，而注册表实测 74**（2026-10-28 快照；此数随注册表变化，
+     唯一口径是 `agent.selfcheck` 的 `tools.count`，页面里那条 `data-count` 必须跟着它改）。`85` 是 `marguerite-core capabilities --json` 的
      `real` 计数（`total 97 / real 85 / partial 11`），**不是** `register_builtin_tools` 的条目数；而它当时引用的
      命令 `marguerite-core serve --health` **根本不返回工具数**。⇒ 口径必须挂在那条真会打印该数字的命令上，
      否则数字迟早变成别人的数字。
@@ -467,11 +468,13 @@
   ⚠️ **接线时踩到的三个测量坑（都是检查器自己的 bug，不是官网）**：
   ① **子进程中文输出按 UTF-8 解码得到乱码** —— `check-version-sync.py --print` 在 cp936 控制台下写 GBK 字节，
      正则永远匹配不上（§4「别用终端显示下结论」那条坑的变体）；给子进程 `PYTHONUTF8=1` 即可。
-  ② **`SUPPORTED_METHODS` 必须先剥行注释再取字面量** —— 不剥是 **464**，剥了才是守卫报的 **461**（口径要和
-     `webui/scripts/check-rpc-contract.mjs` 逐字一致，否则「461 条」这条宣传会被检查器判成漂移；
-     这个数字随每次新增 RPC 变化，改方法数就必须同步这里与官网三处）。
-  ③ **`49 控制台视图` 对应的是 `ls webui/src/views/*.vue`**（顶层），递归数会得到 50（多一个
-     `views/web/SettingsView.vue`）—— 官网把命令印在数字旁边，测量就必须按那条命令来。
+  ② **`SUPPORTED_METHODS` 必须先剥行注释再取字面量** —— 注释里出现的方法名会被当成声明，不剥会多出十几条
+     （2026-10-31 实测：剥后 471；不剥注释会多出十几条，且多出来的数量随注释增删漂移，故不写死）；口径要和 `webui/scripts/check-rpc-contract.mjs` 与
+     `scripts/check-website-claims.py` 逐字一致，否则「N 条」这条宣传会被检查器判成漂移。
+     这个数字随每次新增 RPC 变化 —— 改方法数就**同时**改官网三处（正文 / `data-count` / 页脚），
+     本节不再写死当前值（只留带日期的实测快照），避免每加一条方法就漂移一次。
+  ③ **`控制台视图` 对应的是 `ls webui/src/views/*.vue`**（顶层；2026-10-30 实测 50），递归数会多 1
+     （多一个 `views/web/SettingsView.vue`，实测 51）—— 官网把命令印在数字旁边，测量就必须按那条命令来。
   **变异实测（五条都有牙）**：把 webui 基线改回 4816 → `webui_tests: 官网宣称 4,816 · 实测 4,898`；
   注入 `core/src/provider` → `死路径`；把安装包外链换成源码仓库外链 → `不应外链到源码仓库`；
   把「25 项发版门禁」改成「若干」 → `官网里找不到这条数字（结构变了，检查器需要跟着改）`；
@@ -939,4 +942,70 @@
   安装时进程里可能还没有任何编译模块可供取类型。万一 Cython 改名，症状会退回「端点收到三个位置参数」，由侧车启动冒烟兜住。
   **通用判据：让编译产物直接跑一遍真实请求，别只 import。** 任何依赖 `inspect.isfunction/ismethod/isclass` 做分发的地方
   （框架路由、序列化器、插件注册）在 Cython 下都要按这条核一遍。
+- **🌐 `webui 依赖审计` 会在门禁中途因为网络不可用而假红，且报错只有一行 `undefined`**（2026-10-30 闸门实测）。
+  `verify.sh` 的 `check_dependency_audit` 走 `npm run --silent security:audit` → `npm audit --audit-level=moderate`，
+  而 `npm audit` **必须**访问 registry 的 audit 端点：离线时它不是"跳过"而是 rc=1，且 `--silent` 把真实错误吞掉，
+  stdout 只剩一行 `undefined` —— 看起来像"有漏洞但没打印出来"，很容易被误读成漏洞回归。
+  ⚠️ 它还有两个**故意**的 SKIP 分支（`npm` 不可用 / `node_modules` 不存在），所以 `[SKIP]` 与 `[FAIL]` 谁都不能当通过，
+  但含义完全不同：SKIP 是"没装依赖"，FAIL+`undefined` 大概率是"装了的但打不到 registry"。
+  ✅ 判别法（12 秒，不碰 cargo）：单独 `cd webui && npm audit --audit-level=moderate` 再跑一次；
+  rc=0 且 `found 0 vulnerabilities` ⇒ 门禁那次是环境抖动，重跑门禁即可；仍 rc=1 ⇒ 真实公告，按 §8 铁律先修再声称通过。
+  实测：`all-2026-10-30-r3.log` 汇总 25 通过 / 1 失败就是这一条，单独重跑 rc=0。
 
+- **📡 复用别人家的 `kind` 发事件，必须同时带「我是谁」的标记**（2026-10-31 产线接线实测 + 已修）。
+  `line.run` 为了**不新增事件名**（新增要先补进 `types/rpc.ts` 的 `RpcEventMap`，那里已落后于真实订阅面），
+  直接复用了编排的 `kind:"orchestration"` + 同一套相位词表。后果不是报错而是**双重呈现 + 标签说谎**：
+  `composables/chat/useOrchestrationRuns.ts` 只看 `kind`，`run_started` 就建一条泳道，且
+  `form` 缺省兜底成 `'swarm'` ⇒ 一条 panel 产线在对话流里同时长出「表单=swarm 的编排卡」和它自己的回执卡。
+  ✅ 后端在 `publish_frame` 里钉 `engine:"line"`，前端在**入口**（`handleFrame`）按引擎排除，
+  不在渲染层猜 `runId` 前缀（前缀是会改的字符串，引擎归属是契约）。
+  ⚠️ 反过来 `useTeamBoard` **故意不过滤**：同一批帧也喂进 `member_registry::observe`，
+  只滤事件流会让实时看板比它的快照还空 —— 过滤与否取决于两侧是否同源，不是"能滤就滤"。
+  **通用判据：任何"借用既有事件 kind"的实现，落地前先问消费方有几个、各自的缺省兜底会把这个新形状解释成什么。**
+
+- **🔓 权限矩阵的 `Confirm` 格必须吃 RPC 层的 `confirmed=true`，否则确认弹窗是安慰剂**（2026-10-31 产线真机 + 已修）。
+  `gate_form`（`gateway/orchestrate.rs`）把形态映射成授权等级后交给 `PermissionMatrix::check(user_mode, autonomy, confirmed)`，
+  但矩阵里 **`Plan × Mutating` 和 `MinimalDoIt × Mutating` 两格无视 `trusted`**（只有 `DoIt × HighAutonomy` 认这把钥匙），
+  于是它们恒回 `Confirm`。产线阶段 → 形态的映射把 `solo` 判成 `SubAgent` = `Mutating` ⇒
+  **默认档位 `standard_plan` 下任何产线永远发不出去**：用户点了「确认派单」，弹窗关闭、回执不出、
+  只把闸门理由当 toast 弹回来（重复追问叠了三层 toast）。这不是"确认流程没做好"，是**没有任何用户动作能满足的判据**。
+  ✅ 已修：`gate_form` 增加 `MatrixDecision::Confirm { .. } if confirmed => Ok(())` ——
+  钥匙落在 **RPC 边界**而不是矩阵内部：矩阵的 `trusted` 语义是 `guard::trust` 的会话级记忆，
+  改它会把工具派发的授权面一起放宽（同型先例见 `guard/permission_matrix.rs` 里"参数级信任静默失效"那条注释）。
+  `Deny` 格**不吃**这把钥匙（档位纪律不由一次确认改写），由 `gate_form_confirmation_is_a_key_not_a_placebo`
+  与 `line.rs::confirmation_opens_the_confirm_cells_but_never_a_deny` 分别钉住"确认有效"和"确认不改纪律"。
+  ⚠️ **新增任何"需要人工确认"的 RPC 时，实测路径必须走完确认之后那一步**：只看"弹窗出现"就签收，
+  等于把安慰剂当药。判据：同一个请求 `confirmed=true` 发两次，第二次必须落到真实执行（或真实执行失败的理由），
+  不能落回 `*_CONFIRM_REQUIRED`。
+
+- **🎯 校验器要求的字段若没有编辑器，功能就永久不可武装**（2026-10-31 产线第一轮真机 + 已修）。
+  后端 `line/mod.rs::validate` 第一条就是 `goal 不可为空：产线没有目标就退化成文字流`（:400，守卫在 :875），
+  而 `spec.goal` 只有在**派单成功后**才被写回；对话输入框里那句话此前**根本不进校验**——
+  于是 `canRun` 恒为 false，「挂线」后无论怎么摆阶段都发不出去，且界面不告诉你为什么。
+  ✅ 已修：`useLineWorkflow.ts` 引入 `draftGoal`（:163，永不落盘）+ `specWithDraft`（:164），
+  让 `validateLocal`/`blockingErrors`/`refreshPreflight` 全部改读"形状 + 本轮草稿"这个合成视图，
+  派出后再把目标写回 `spec`（:412，输入框清空时回落到已存形状，预演数字不会突然归零）。
+  ⚠️ 通用判据：**每加一条校验，问"这个字段在 UI 里有几处能写"**。零处 ⇒ 那条错误文案是死路，
+  用户只会看到"永远灰的按钮"；这类缺陷门禁测不出（单测里夹具总是手填了 goal），只有真机走一遍能撞出来。
+
+- **🧪 只设 `MARGUERITE_DATA_DIR` 的"隔离"探针仍会写真实 `~/.marguerite`**（2026-10-31 实测）。
+  隔离位是**两个**且互不覆盖：`config_dir()` 认 `MARGUERITE_CONFIG_DIR`、`data_dir()` 认 `MARGUERITE_DATA_DIR`
+  （`persistence/config.rs:654,699`；分工见 `persistence/safe_mode.rs:13-15`，Safe Mode 启动时两个都设）。
+  `usage/mod.rs:989` 的 `usage.db` 属于 **config_dir** 侧，所以只带 `MARGUERITE_DATA_DIR` 起的网关，
+  产线记录老老实实落在临时目录（`<data>/line/line-*.json`），**用量台账却写进了真实主目录**——
+  实测 `~/.marguerite/usage.db` mtime 与那次跑同步变成 10-31 10:53，而探针目录里没有 `usage.db`。
+  ⚠️ 手工探针/冒烟起网关**两个 env 都要带**（或走 `safe_mode`），否则就是「用用户真实数据做实验」；
+  这与本节开头那条「Windows 上改 `HOME`/`USERPROFILE` 无效」是同一族缺陷：**隔离必须由被调用的解析函数承认，
+  不是由调用方设了某个变量就算成立**。
+
+- **🤝 setup 期同步读 `supportsMethod` ⇒ hello 帧晚到就永久空目录**（2026-10-31 产线真机 + 已修）。
+  `stores/rpc.ts` 的 `_state` 处理器把 `state` 置为 `connected` 时先清 `methods=[]`，真正的方法表要等
+  **随后一帧 hello** 的 `features.methods` 才填上；`gateway/protocol.rs` 那侧也是连上后分帧下发。
+  `catalog.ts` 的 `available = computed(() => rpc.supportsMethod('line.catalog'))` 若没有任何响应式依赖
+  被后续写过（computed 无依赖 ⇒ **永久缓存第一次的值**），setup 期那一次 `store.load()` 扑空就再不会重来：
+  同一条产线刷新两次，一次形状与预设齐全、一次整套目录空掉还挂着"目录不可用"，
+  而 `line.preflight`/`line.run` 照常工作 —— 局部可用掩盖了整块缺失，最难查的那种。
+  ✅ 已修：`useLineWorkflow.ts:527` 补 `watch(catalogAvailable, …)`，可用性翻正且目录仍空时重载一次并补预演。
+  ⚠️ 两条可复用的：① 依赖"能力是否被声明"的 store 加载，**必须挂在可用性翻转上重试**，不能只做 setup 期一次；
+  ② 写这类单测时 mock 的 `supportsMethod` 必须**返回真响应式源**（`ref`），返回 `vi.fn()` 常量会让 computed
+  缓存成常量，测试"永远通过"却什么都没测（本轮把 `useLineWorkflow.test.ts` 的 rpc mock 改成共享 `ref` 才测出这条）。

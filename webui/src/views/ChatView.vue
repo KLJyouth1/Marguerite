@@ -65,6 +65,13 @@
     <!-- Thread -->
     <div class="chat-body">
       <ParticleField />
+      <!-- 指挥台：相位只由既有网关信号推导（不新增 RPC），动作只来自本视图
+           真实存在的能力；没有可做的事时组件自身整块不渲染。 -->
+      <CommandDeck
+        :phase="workPhase"
+        :actions="commandDeckActions"
+        @activate="onCommandDeckActivate"
+      />
       <!-- Share-mode banner stays pinned above the scrolling thread. -->
       <div
         v-if="shareMode"
@@ -250,6 +257,13 @@
             :now="orchestrationNow"
           />
         </div>
+
+        <!-- 产线回执：一条产线跑完后**唯一**可对账的那一份记录，与上面的编排泳道
+             同居消息流末尾（同一条理由：执行属于这一轮对话，不是输入区的附属控件）。
+             它刻意不复用 OrchestrationRunCard —— 编排卡讲的是"成员在干什么"，
+             回执讲的是"预测 vs 实测、哪一段没跑、这次能不能复盘"。两者的数字
+             口径不同（一个数成员，一个乘阶段），合成一张卡必然有一边说谎。 -->
+        <LineRunPanel v-if="lineRunVisible" :line="line" />
         </div>
 
         <!-- Manual or turn-boundary compaction has no assistant turn to own
@@ -621,6 +635,22 @@
       @stats="turnChangeStats = $event"
     />
 
+    <!-- 对话产线装配台：贴在输入框正上方，折叠态是一行的"形状 + 闸门"状态条，
+         展开才是一整套装配台（形状轨 / 预演 / 名册 / 判据）。放在队列与编排状态
+         之后、输入框之前，是因为它决定的不是"这一条消息长什么样"，而是"这一条
+         消息由谁去跑"——那是发送语义，越靠近发送按钮越不容易被读漏。
+         网关没有 line.catalog 时组件自身渲染空（不出现一套假控件）。 -->
+    <LineDock
+      :line="line"
+      :gear-key="gearKey"
+      :legacy-form="orchestration.form"
+      :legacy-knobs="{
+        agents: orchestration.agents,
+        teams: orchestration.teams,
+        swarmSize: orchestration.swarmSize,
+      }"
+    />
+
     <ChatComposer
       ref="composerRef"
       v-model="inputText"
@@ -876,6 +906,7 @@ import ChatHeaderActions from '@/components/chat/ChatHeaderActions.vue'
 import ChatModelIndicator from '@/components/chat/ChatModelIndicator.vue'
 import ChatContextPressureChip from '@/components/chat/ChatContextPressureChip.vue'
 import ModeHintBar from '@/components/ModeHintBar.vue'
+import CommandDeck from '@/components/shell/CommandDeck.vue'
 import PromptCacheKeepaliveDialog from '@/components/chat/PromptCacheKeepaliveDialog.vue'
 import DeliverablesDrawer from '@/components/chat/DeliverablesDrawer.vue'
 import FileChangesDrawer from '@/components/chat/FileChangesDrawer.vue'
@@ -887,6 +918,11 @@ import type { RsArtifact } from '@/components/chat/RightSidebar.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatOrchestrationStatus from '@/components/chat/ChatOrchestrationStatus.vue'
 import OrchestrationRunCard from '@/components/chat/OrchestrationRunCard.vue'
+import LineDock from '@/components/chat/line/LineDock.vue'
+import LineRunPanel from '@/components/chat/line/LineRunPanel.vue'
+import { useLineWorkflow } from '@/composables/line/useLineWorkflow'
+import { lineCodeText } from '@/composables/line/lineCode'
+import { formatMs, formatPct } from '@/utils/tactics/model'
 import { useOrchestrationActivity } from '@/composables/chat/useOrchestrationActivity'
 import { useOrchestrationRuns } from '@/composables/chat/useOrchestrationRuns'
 import { activeUserMode } from '@/composables/useActiveMode'
@@ -998,6 +1034,7 @@ import { useChatStream } from '@/composables/chat/useChatStream'
 import { useComposerFloatingPreference } from '@/composables/useComposerFloatingPreference'
 import { useChatTextRendering } from '@/composables/chat/useChatTextRendering'
 import { useChatUsageWidget } from '@/composables/chat/useChatUsageWidget'
+import { useWorkPhase } from '@/composables/shell/useWorkPhase'
 import { useSessionArtifacts } from '@/composables/chat/useSessionArtifacts'
 import { useArtifactActions } from '@/composables/chat/useArtifactActions'
 import { useChatSidebarPanels } from '@/composables/chat/useChatSidebarPanels'
@@ -2466,6 +2503,15 @@ watch(activeWorkspaceStatus, (status, previousStatus) => {
 /** 编排（蜂群 / 专家团 / 子智能体）是否仍在跑：决定「停止」按钮是否可用。 */
 const orchestrationRunningCount = ref(0)
 
+/**
+ * 产线一次发送会等到最后一个阶段回来（超时由预演算出，最长 30 分钟），
+ * 这期间它和蜂群一样是「本会话正在干的活」：不给它计入忙碌，用户就能在
+ * 一条产线跑过半时再按一次发送，两条产线写同一个会话。
+ * 与 `orchestrationRunningCount` 同款：`line` 在下方才实例化，这里放一个
+ * 由 watch 回填的 ref，避免 computed 提前引用未初始化的绑定。
+ */
+const lineRunningCount = ref(0)
+
 const sessionHasActiveWork = computed(() => (
   isStreaming.value
   || activeTaskGroups.value.size > 0
@@ -2476,6 +2522,7 @@ const sessionHasActiveWork = computed(() => (
   // 编排跑在独立后台任务里，不能因为「对话流没在推送」就隐藏停止按钮 ——
   // 否则蜂群/专家团执行期间用户没有任何中止入口（真机反馈）。
   || orchestrationRunningCount.value > 0
+  || lineRunningCount.value > 0
   || pendingQueueOwnerContext.value?.sessionKey === sessionKey.value
 ))
 const canStop = computed(() => !isSessionHydrating.value && sessionHasActiveWork.value)
@@ -3156,6 +3203,30 @@ const target = replanTarget.value
     // P2·E：编排形态（子智能体/团队/专家/蜂群）走 orchestrate.run 统一入口；
     // single 保持原 chat.send 路径，零额外开销。
     const orch = orchestration.value
+    // 产线上膛优先于旧五挡：它带的信息更多（形状、名册、判据、预演、闸门），
+    // 同一轮两个入口都接必然出现"界面显示产线、后端跑蜂群"的双头裁决。
+    if (line.armed.value) {
+      const message = inputText.value.trim()
+      if (!message) return
+      if (line.running.value) {
+        // 一条产线正在跑：既不重发，也不降级成普通对话 —— 同一会话里两条
+        // 产线并发会互相写坏同一份台账，而普通对话插进去只会让这轮对不上账。
+        pushToast(t('chat.line.compose.dispatched'), { tone: 'warn', duration: 6000 })
+        return
+      }
+      const reason = lineDegradationReason()
+      if (reason) {
+        // 说出来再回落：不写这条，用户会以为刚才那一句跑了一条产线。
+        pushToast(t('chat.line.send.degraded', { reason }), { tone: 'warn', duration: 9000 })
+      } else {
+        if (!rpc.isConnected || hostProcessDown.value) {
+          pushToast(t('chat.orchestration.offline'), { tone: 'warn', duration: 6000 })
+          return
+        }
+        await dispatchLineSend(message)
+        return
+      }
+    }
     if (orch.form !== 'single' && rpc.supportsMethod('orchestrate.run')) {
       const message = inputText.value.trim()
       if (!message) return
@@ -3669,6 +3740,196 @@ watch(
   { deep: true },
 )
 
+/* ── 对话产线（Line）：形状规格 → 预演 → 闸门 → 回执 ──────────────────────
+ *
+ * 与上面的 `orchestration`（旧五挡：single/subagent/team/expert/swarm）**并存而不是
+ * 替换**。理由不是保守：产线的六个 RPC 是新增方法组，旧网关上一个都没有；把
+ * 发送直接接到产线上，等于让一半用户按了发送没反应。所以接管条件是
+ * 「用户明确上膛 + 网关确实支持 + 形状此刻真能发」，三者缺一律**说出来**再回落。
+ *
+ * 第一定理层面：产线卖的是"这一轮由几段、几路、什么名册去跑，跑完能对账"。
+ * 一旦界面在跑不了的时候装作在跑，或者跑失败了报一个数字，卖点就变成谎言，
+ * 所以降级路径的文案与回执卡同样受"不得把缺席写成零"的约束。
+ */
+const line = useLineWorkflow(sessionKey, gearKey)
+// 回执只在本次会话实例真的发出过一条产线后出现。
+const lineRunVisible = computed(() => line.lastRun.value !== null)
+
+/**
+ * 输入框那句话就是这一轮的目标 —— 产线没有第二个目标输入框。
+ *
+ * 不接这一根线，`spec.goal` 就永远是空的：本地校验拦下 → `canRun` 永远 false →
+ * 挂线开关按不动（2026-10-31 真机实测：折叠条上一直写着「还不能派单：goal 不可为
+ * 空」，而界面上没有任何一处能填 goal）。切会话也要重报，因为草稿是按会话存的。
+ */
+watch(
+  [inputText, sessionKey],
+  ([text]) => {
+    line.setDraftGoal(text)
+  },
+  { immediate: true },
+)
+
+/**
+ * 回执属于跑它的那一段对话。
+ *
+ * ChatView 实例在切换会话时**不重挂载**（会话事件要跨路由活着），所以 `line`
+ * 也是同一个实例：不清空就把上一段对话的产线摆进这一段对话，等于伪造对账证据。
+ * 但草稿→正式会话的重绑不算切换：那条产线确实是这一段刚跑的，把唯一一份
+ * 回执抹掉比留着更糟。于是发送时记下"当时在不在草稿路由"，只豁免这一次跳变。
+ */
+const lineReceiptKey = ref<string | null>(null)
+let lineReceiptOnDraftRoute = false
+
+/**
+ * 忙碌态必须按会话算。
+ *
+ * `line.running` 是整个工作台的事实（产线只有一份工作流实例），但「这一段对话在忙」
+ * 只应当由**属于这一段**的那次运行决定：在 A 会话跑产线时切到 B，B 不该被
+ * `sessionHasActiveWork` 锁住挡位、也不该冒出中止按钮（中止会把 B 的普通对话一起掐掉）。
+ */
+const lineRunOwnerKey = ref<string | null>(null)
+
+function syncLineBusyCount(): void {
+  lineRunningCount.value =
+    line.running.value && lineRunOwnerKey.value === sessionKey.value ? 1 : 0
+}
+
+watch(sessionKey, (next) => {
+  syncLineBusyCount()
+  if (lineReceiptOnDraftRoute && line.lastRun.value) {
+    lineReceiptKey.value = next
+    lineReceiptOnDraftRoute = isDraftRoute()
+    return
+  }
+  if (next === lineReceiptKey.value) return
+  line.lastRun.value = null
+  line.retro.value = null
+  lineReceiptKey.value = null
+})
+
+watch(
+  line.running,
+  (value) => {
+    // 起跑那一刻的 sessionKey 就是这条产线的归属；同步触发，切走后再由上面的
+    // sessionKey 观察者重算。
+    lineRunOwnerKey.value = value ? sessionKey.value : null
+    syncLineBusyCount()
+  },
+  { flush: 'sync' },
+)
+
+/**
+ * 上膛 ≠ 能发。返回"为什么这一轮走不成产线"的**可读原因**，null 才代表可以发。
+ * 返回原因时调用方必须把它说出来 —— 静默降级是这套界面最不能犯的错。
+ */
+function lineDegradationReason(): string | null {
+  // 目录不可用时 `canRun` 也是 false，但那不是"形状有问题"：方法组缺失与形状
+  // 被拦是两件事，混成一句"还拦着 0 条"就等于把原因说反了。
+  if (!rpc.supportsMethod('line.run') || !line.catalogAvailable.value) {
+    return t('chat.line.send.degradedNoMethod')
+  }
+  if (!line.canRun.value) {
+    return t('chat.line.send.degradedBlocked', { count: line.blockingErrors.value.length })
+  }
+  return null
+}
+
+/**
+ * 闸门要确认就先问，问完才带上 `confirmed`。
+ *
+ * 后端 `line_run` 在**任何执行之前**过权限门：confirm 档直接回
+ * `ORCHESTRATE_CONFIRM_REQUIRED`，deny 档回 `ORCHESTRATE_DENIED`。旧编排把
+ * "先拒再让用户重发"当成正常流程（真机反馈：「要我再次确认，但我没看见确认框」），
+ * 产线不再重走那条路 —— 前端先判，确认框里的数字全部来自预演，一个都不现编。
+ */
+async function confirmLineDispatch(): Promise<boolean> {
+  if (line.gateDecision.value !== 'confirm') return true
+  // 只在预演真的成功时读它的数字：`ok:false` 的回包里 total 是全零占位，
+  // 拿它去写确认框等于用"0 ms / 0% 成功"给用户做批准。
+  const preview = line.preflight.value
+  const total = preview && preview.ok === true ? preview.total : null
+  return confirm({
+    title: t('chat.line.send.confirmTitle'),
+    body: t('chat.line.send.confirmBody', {
+      stages: line.spec.value.stages.length,
+      p90: total ? formatMs(total.p90Ms) : '—',
+      success: total ? formatPct(total.successRate, 1) : '—',
+    }),
+    primaryLabel: t('chat.line.send.confirmPrimary'),
+    primaryClass: 'btn--primary',
+  })
+}
+
+/**
+ * 产线发送：成功 → 清输入、回执进对话流；失败 → 输入原样留着，原因说出来。
+ * 返回 true 表示这一轮已被产线消费（调用方不得再走 chat.send / orchestrate.run）。
+ */
+function settleLineReceipt(): void {
+  lineReceiptKey.value = sessionKey.value
+  lineReceiptOnDraftRoute = isDraftRoute()
+  inputText.value = ''
+  autoResizeTextarea()
+  pushToast(t('chat.line.send.submitted'), { duration: 8000 })
+}
+
+/**
+ * 跑完了但用户已经切到别的对话：这一份回执属于上一段对话，摆在这一段里就是伪造
+ * 对账证据（产线的正文与运行记录已经分别落进台账和 `line/` 目录，切回去重载看得到）。
+ * 也不能清输入框——那是这一段正在写的草稿。
+ */
+function discardForeignLineReceipt(): void {
+  line.lastRun.value = null
+  line.retro.value = null
+  lineReceiptKey.value = null
+}
+
+async function dispatchLineSend(goal: string): Promise<boolean> {
+  if (!(await confirmLineDispatch())) return true
+  markProvisionalDraftUsed()
+  // 起跑前记下归属会话：`line.running` 的同步观察者取的也是这个值，这里再存一份
+  // 是为了在 await 之后还能比对（切走时不能清输入、不能摆回执）。
+  const ownerKey = sessionKey.value
+  const outcome = await line.dispatch(goal, { confirmed: line.gateDecision.value === 'confirm' })
+  if (outcome.status === 'ok') {
+    if (ownerKey !== sessionKey.value) {
+      discardForeignLineReceipt()
+      return true
+    }
+    settleLineReceipt()
+    return true
+  }
+  if (outcome.status === 'needs-confirm') {
+    // 闸门本地判为 allow/unknown、后端却要求确认：只补问一次，不静默重发。
+    if (!(await confirmLineDispatch())) return true
+    const retried = await line.dispatch(goal, { confirmed: true })
+    if (retried.status === 'ok') {
+      if (ownerKey !== sessionKey.value) {
+        discardForeignLineReceipt()
+        return true
+      }
+      settleLineReceipt()
+      return true
+    }
+    pushToast(lineCodeText(retried.status === 'error' ? retried.message : retried.reason, t), {
+      tone: 'warn',
+      duration: 10_000,
+    })
+    return true
+  }
+  if (outcome.status === 'invalid') {
+    pushToast(lineCodeText(outcome.reason, t), { tone: 'warn', duration: 10_000 })
+    return true
+  }
+  // denied / error：`dispatch` 已把原因写进 lastRunError，装配台会同步显示；
+  // 这里再补一条 toast，因为用户此刻的注意力在输入框，不在上方的折叠面板。
+  pushToast(lineCodeText(outcome.status === 'error' ? outcome.message : outcome.reason, t), {
+    tone: 'warn',
+    duration: 10_000,
+  })
+  return true
+}
+
 // 调度简报回填：把用户当前选择（档位 + 子智能体 + 团队 + 蜂群 + 能力）同步到一个
 // 纯数据 ref，供每轮 chat.send 上行。缺省字段不写（后端按缺席处理，不猜）。
 //
@@ -3944,6 +4205,70 @@ watch(showTurnSuggestions, async (visible) => {
 
 const turnChangeSummaryRef = ref<{ requestRevert: () => void } | null>(null)
 
+/* ── 指挥台（CommandDeck）：工作相位 + 下一步动作 ──────────────────────
+   相位只由**已有**信号推导（是否有活动会话 / 在跑的工具任务组 / 待确认事项），
+   不新增任何 RPC；信号缺失时 useWorkPhase 已经落到 idle，不在这里猜。
+   动作同样只给本视图真实存在的能力（停止 / 聚焦待确认 / 打开改动抽屉 /
+   打开设置）—— 没有对应能力就不放按钮，也不放一个点了没反应的占位。 */
+const workPhaseSessions = computed(() =>
+  isNewChatLanding.value || !sessionKey.value ? [] : [{ key: sessionKey.value }],
+)
+const workPhase = useWorkPhase({
+  sessions: workPhaseSessions,
+  activeToolCount: computed(() => activeTaskGroups.value.size),
+  pendingConfirmationCount: computed(
+    () => approvalEntries.value.filter(entry => !entry.resolution).length
+      + (pendingClarify.value ? 1 : 0),
+  ),
+})
+
+function focusOldestPendingApproval() {
+  const pending = approvalEntries.value.find(entry => !entry.resolution)
+  if (!pending) return
+  // 复用既有审批聚焦链路（与侧栏 AttentionLayer 同一条），不在这里滚动 DOM。
+  appStore.requestApprovalFocus({
+    approvalId: pending.approval.id,
+    sessionKey: pending.approval.sessionKey || sessionKey.value,
+  })
+}
+
+const commandDeckActions = computed<Array<{ id: string; label: string }>>(() => {
+  const actions: Array<{ id: string; label: string }> = []
+  if (canStop.value) {
+    actions.push({ id: 'stop-turn', label: t('shell.commandDeck.actions.stopTurn') })
+  }
+  if (approvalEntries.value.some(entry => !entry.resolution) || pendingClarify.value) {
+    actions.push({ id: 'review-pending', label: t('shell.commandDeck.actions.reviewPending') })
+  }
+  if (lastTurnChangeSince.value !== null) {
+    actions.push({ id: 'view-diff', label: t('shell.commandDeck.actions.viewDiff') })
+  }
+  // 没有更具体的下一步时才给设置入口：它是"兜底去处"，不是常驻按钮。
+  if (actions.length === 0) {
+    actions.push({ id: 'open-settings', label: t('shell.commandDeck.actions.openSettings') })
+  }
+  return actions
+})
+
+function onCommandDeckActivate(actionId: string) {
+  if (actionId === 'stop-turn') {
+    onComposerStop()
+    return
+  }
+  if (actionId === 'review-pending') {
+    focusOldestPendingApproval()
+    return
+  }
+  if (actionId === 'view-diff') {
+    fileChangesOpen.value = true
+    return
+  }
+  if (actionId === 'open-settings') {
+    router.push('/settings').catch(() => {})
+  }
+}
+
+
 
 const historyRecoveryState = computed(() => {
   return resolveChatHistoryRecoveryState({
@@ -4156,6 +4481,11 @@ const composerSendBlockedMessage = computed(() =>
 const sendButtonTitle = computed(() => {
   if (replanActive.value) return t('chat.plan.reviseSend')
   if (composerSendBlockedMessage.value) return composerSendBlockedMessage.value
+  // 发送按钮是这一屏唯一必按的东西：产线挂着时让它的 tooltip 说出真实语义，
+  // 而不是让用户去上方找一条可能收起的窄条。正在派单时说"在等回"，
+  // 派不出去时**不**改这里（改了就等于宣称一个不会发生的派单），走降级 toast。
+  if (line.armed.value && line.running.value) return t('chat.line.compose.dispatched')
+  if (line.armed.value && !lineDegradationReason()) return t('chat.line.compose.armExplain')
   if (isCompactInFlightForCurrentSession()) return t('chat.sendQueuesUntilCompaction')
   if (isStreaming.value) {
     return busySendMode.value === 'steer' && composerSameTurnSteerAvailable.value

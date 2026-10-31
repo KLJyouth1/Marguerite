@@ -8,6 +8,8 @@ import { router } from './router'
 import i18n from './i18n'
 import { migrateLegacyStorageKeys } from './utils/storageMigration'
 import { installAppControl } from './utils/appControl'
+import { installAttentionLayer } from './components/ui/registerAttentionLayer'
+import { installProvenanceDrawer } from './components/shell/registerProvenance'
 import { useAppStore } from './stores/app'
 import { useRpcStore } from './stores/rpc'
 import { startBootWatchdog } from './shell/boot/watchdog'
@@ -21,6 +23,8 @@ import './styles/chat-markdown.css'
 import './styles/ink-typeset.css' // Track F: ink/CLReq typography layer (ink theme only)
 import './styles/chat-shared.css'
 import './styles/apple-modern.css'
+// 注意力系统：货架的布局 + 因果动效语态（tokens 全走 foundation.css）。
+import './styles/attention-system.css'
 
 // 桌面桥已在首个 import（desktopBridgeBoot）中安装完毕，此处不再重复。
 
@@ -36,6 +40,11 @@ app.use(i18n)
 // 应用自控：把「枚举/点击/填写/按键/逐路由巡检」挂到 window.MargueriteAppControl，
 // 供页面内面板与外部浏览器自动化共用（router 就绪后安装，避免循环依赖）。
 installAppControl(router)
+
+// 注意力货架：注册进 shell.overlay 插槽（幂等，HMR 重跑不会重复注册）。
+installAttentionLayer()
+// 记忆溯源抽屉：同一个 shell.overlay 插槽，独立的 append-only 贡献（幂等）。
+installProvenanceDrawer()
 
 const appStore = useAppStore()
 appStore.initTheme()

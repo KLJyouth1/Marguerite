@@ -309,12 +309,9 @@ pub(crate) fn system_control_tool() -> Box<dyn ToolExecutor> {
         },"required":["action"]}),
         Arc::new(move |args| {
             Box::pin(async move {
-                if cfg!(not(target_os = "windows")) {
-                    return err(
-                        "system_control 当前仅支持 Windows（user32 系统级输入）".into(),
-                        "NOT_AVAILABLE",
-                    );
-                }
+                // 先校验参数，再判平台可用性。顺序有实际后果：缺参数在**任何**宿主上
+                // 都是 `INVALID_PARAMS`（调用方能据此改正），而不是被平台门挡成
+                // `NOT_AVAILABLE`（那条错误会让人以为换个平台就能用）。
                 let action = args.get("action").cloned().unwrap_or_default();
                 if action.trim().is_empty() {
                     return err("system_control 需要非空 action".into(), "INVALID_PARAMS");
@@ -323,6 +320,12 @@ pub(crate) fn system_control_tool() -> Box<dyn ToolExecutor> {
                     Ok(p) => p,
                     Err(e) => return err(format!("{e}"), "INVALID_PARAMS"),
                 };
+                if cfg!(not(target_os = "windows")) {
+                    return err(
+                        "system_control 当前仅支持 Windows（user32 系统级输入）".into(),
+                        "NOT_AVAILABLE",
+                    );
+                }
                 let ps_ref = ps.as_str();
                 let mut pscmd = tokio::process::Command::new("powershell");
                 pscmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_ref]);

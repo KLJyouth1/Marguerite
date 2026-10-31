@@ -3028,7 +3028,7 @@ fn clip_text(text: &str, max: usize) -> String {
 ///
 /// 切面是确定性的（不额外花一次模型调用），并允许成员在「切面不适用」时说明并改做
 /// 自己判断更需要的切面 —— 这样既不假装智能体自己规划过，也不会把分工钉死成噪音。
-const SWARM_FACETS: [(&str, &str); 8] = [
+pub(crate) const SWARM_FACETS: [(&str, &str); 8] = [
     (
         "事实核查",
         "只核对事实：读代码/文档/配置/日志，列出与目标直接相关的事实、文件路径与行号；不做方案设计。",
@@ -5732,18 +5732,17 @@ mod tests {
                             auto.len(),
                             "build_team 不得合并/丢弃成员"
                         );
-                        // `run_p2p` 是真实 spawn/wait 链路（离线也会走一次注定失败的模型调用），
-                        // 取代表性子集执行，避免 100+ 组合把测试拖成数分钟：
-                        // agents 不影响成员规格；members=2 与 8 的行为已由 8/17 覆盖。
-                        if agents == 0 && members != 2 {
-                            let outcome = team.run_p2p(&offline_subagents_wide(), &goal).await;
-                            assert_eq!(
-                                outcome.member_results.len(),
-                                auto.len(),
-                                "form={form} teams={teams} agents={agents} members={members} \
-                                 run_p2p 不得吞掉成员"
-                            );
-                        }
+                        // `run_p2p` 是真实 spawn/wait 链路（离线也会走一次注定失败的模型调用）。
+                        // 全矩阵 108 组合都跑端到端：`with_timeout_cap` 把单成员预算压到
+                        // 25ms，连接被拒立即失败 —— 旧实现走分钟级 budget_policy，全矩阵
+                        // 实测 356s，才被迫退化成「一个代表性子集」。封顶后 108 组仍全跑。
+                        let outcome = team.run_p2p(&offline_subagents_wide(), &goal).await;
+                        assert_eq!(
+                            outcome.member_results.len(),
+                            auto.len(),
+                            "form={form} teams={teams} agents={agents} members={members} \
+                             run_p2p 不得吞掉成员"
+                        );
                     }
                 }
             }
@@ -5912,13 +5911,18 @@ mod tests {
                 );
                 let team = build_team(&specs);
                 assert_eq!(team.members.len(), specs.len());
-                let outcome = team.run_p2p(&offline_subagents(), "目标").await;
-                assert_eq!(
-                    outcome.member_results.len(),
-                    specs.len(),
-                    "roster={} members={members} 不得吞掉成员",
-                    roster.len()
-                );
+                // 结构断言（不丢成员）在每个 roster × members 组合上都跑；
+                // 真实 spawn 只取 `members == 0`（4 个 roster 各一次，最多 4 名成员），
+                // 否则 12 组合 × 默认长超时会把单测拖成数分钟（实测 45s 仍未退出）。
+                if members == 0 {
+                    let outcome = team.run_p2p(&offline_subagents_wide(), "目标").await;
+                    assert_eq!(
+                        outcome.member_results.len(),
+                        specs.len(),
+                        "roster={} members={members} 不得吞掉成员",
+                        roster.len()
+                    );
+                }
             }
         }
     }
@@ -5985,12 +5989,18 @@ mod tests {
         SubAgentManager::new(
             SubAgentConfig {
                 max_concurrent: 64,
-                default_timeout: std::time::Duration::from_secs(2),
+                // 看门狗兜底；真正的快失败由 `with_timeout_cap` 把单成员预算压到 25ms。
+                default_timeout: std::time::Duration::from_millis(25),
                 model: None,
             },
             reg,
             router,
         )
+        // `spawn_with_spec` 走的是 `budget_policy` 的分钟级预算，`default_timeout`
+        // 管不到它；离线矩阵必须显式封顶，否则全矩阵实测 356s。
+        // 25ms 足够覆盖「连 127.0.0.1:1 → 立刻 connection refused」这条失败路径，
+        // 又短到能让 108 个组合全跑端到端（见 full_switch_matrix_*）。
+        .with_timeout_cap(std::time::Duration::from_millis(25))
     }
 
     #[test]

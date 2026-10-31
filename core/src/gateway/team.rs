@@ -165,6 +165,30 @@ fn expert_roster(id: &str) -> Option<&'static [(&'static str, &'static str)]> {
         .map(|(_, roster)| *roster)
 }
 
+/// 内建专家团目录（`id` + 角色标签），供对话产线的名册候选使用。
+///
+/// 为什么导出而不是让产线自己列一份：名册一旦有两份，就会出现「UI 能选、执行不认识」
+/// 的漂移（DEF-10 同族）。这里返回 `&'static str`，调用方不可能改写它。
+pub fn builtin_rosters() -> Vec<(&'static str, Vec<&'static str>)> {
+    EXPERT_ROSTERS
+        .iter()
+        .map(|(id, roster)| (*id, roster.iter().map(|(role, _)| *role).collect()))
+        .collect()
+}
+
+/// 内建角色标签全集（去重、保序）——产线 `fanout`/`relay` 阶段的候选名册。
+pub fn builtin_role_labels() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for entry in EXPERT_ROSTERS {
+        for (role, _) in entry.1 {
+            if !out.contains(role) {
+                out.push(*role);
+            }
+        }
+    }
+    out
+}
+
 // ── 开工前澄清问卷（团队启动前；由 gateway/clarify.rs 装载进 QuestionQueue）──
 
 /// deck_craft 开工问卷导语。必须如实写明「会员状态未自动探测」，

@@ -1047,6 +1047,34 @@ fn retrieve_tool_reports_failure_rather_than_empty_string() {
 
 变异：把 Step 5 的 `history_output` 换回 `raw_output` ⇒ E12 用例的 ①（`[已截断`）红；把 `retrieve` 改成 `Some(String::new())` ⇒ Step 7 红。还原后复跑 PASS。
 
+**落地偏差（2026-10-30 回填，以代码为准）** —— 四条，都是被现网事实逼出来的，不是偷懒：
+
+1. **截流入口不是新建的，是既有的**。本仓在 Task 3 开工前**已经有** D11 中间截断：
+   `context::middle_truncate::truncate_for_context(tool, output)`，三条工具回路
+   （`stream_loop` / `runtime` / `multi_strategy`）共用。所以没有再引入
+   `spool_and_truncate(...)` 第二份策略，而是把留底**接在这个唯一入口内部**：
+   超预算 → 先 `spool(output)` 拿指纹 → 再 `middle_truncate_with_hint(..., hint)`
+   把「真能取回」的指纹写进标注。改一处，三条回路同时生效（这正是 D11 当初拆出
+   统一入口的理由 —— 若这里再分叉就把它白建了）。
+2. **开关默认从 `false` 翻成 `true`**。原计划写「默认关 ⇒ 现网行为零变化」，前提是
+   「本 Task 新引入截流」。前提不成立：D11 现网**已经在无条件截断**，默认关等于
+   悄悄关掉一条已上线的行为（且 `entry_truncation=false` 会让历史里的 `[中间省略]`
+   标注消失，模型与用户同时失去线索）。因此 `default_entry_truncation() -> true`，
+   Task 2 的零迁移测试同步改为 `assert!(cfg.context.entry_truncation)` 并注明理由。
+   磁盘抖动仍按 fail-open（`unwrap_or(true)`）：截断是**保护**上下文窗口不炸的那一侧。
+3. **工具名不能是点号名**。原计划的 `tool_output.retrieve` 会被 `register_local` 的
+   `^[a-zA-Z0-9_-]+$` 清洗成 `legacy_alias`，而 P1-E 回归
+   `all_builtin_tool_names_are_legal_at_registration` 断言别名表**必须为空** ——
+   用点号名要么红那条守卫，要么模型看到的面包屑（`tool_output_retrieve("…")`）和
+   工具真实名不一致，等于给了个取不回的承诺。实际落地 `tool_output_retrieve`，
+   截断标注、E12 断言、文档注释同步。
+4. **取回工具只注册在 `tools/builtin.rs`，不进 `chain/builtin.rs`**（计划本就如此要求，
+   代码注释已写明理由：链式执行器不做截流，没有可取回的东西）。
+
+**证据状态**：spool 五条 + `middle_truncate` 两条 + `builtin/tests.rs` 两条 +
+`stream_loop` 的 E12 三向分裂用例已写；权威全绿随 Task 6 的统一门禁给出（本 Task
+未单独跑门禁，遵用户「先把所有改动任务完成再跑门禁」）。
+
 ---
 
 ## Task 4：结构化 `CompactState`（只填真能导出的，导不出的显式 `null`）
@@ -1166,6 +1194,31 @@ pub struct CompactState {
 
 Run: `env -u NO_COLOR cargo test -p marguerite-core --lib context:: && env -u NO_COLOR cargo clippy -p marguerite-core --all-targets -- -D warnings`
 Expected: PASS，零 warning。
+
+**落地偏差（2026-10-30 回填，以代码为准）**：
+
+1. **`collect_for` 的签名不是 `(session)`，而是 `(session, project_path, snapshot_count)`**。
+   计划里写 `CompactState::collect_for(session)`，内部再去读 `context_status(session)`。
+   这条**会自死锁**：`compact()` 是拿着 `ledger()` 互斥锁调用的（`session.rs:1585` 附近），
+   而 `context_status()` / `session_project()` 各自再取一次同一把锁。改成由调用方把
+   已经持有的 `ctx.project_path` / `ctx.snapshot_count` 显式传进来，`collect_for` 内部
+   **只**再碰 `tools::git` 与 `tools::file_change`（后者用自己的 ledger，不同锁，安全）。
+2. **`stash` 不导出**：按表格判定改导出 `dirty_files` + `snapshot_count`，并在
+   `source_gaps` 写明「本引擎不使用 git stash（回滚走 tar+sha256 预压缩快照）」。
+3. **`test_status` / `active_plan` / `last_user_confirm` / `unresolved_questions` 当前恒为
+   `None`/空 + `source_gaps` 点名**。核实过程推翻了表格里两个「✅ 可导出」的判断：
+   - `last_user_confirm`：`pending_snapshots()` 只有**尚未裁决**的项，且 `PendingApproval`
+     带**明文参数**（与「只导出指纹」纪律冲突）；信任表 `args_fingerprint` 有指纹但没有
+     「本次会话最近一次裁决」的时间与工具归因 → 拿不到就不填；
+   - `active_plan`：`plans.json` 的 `PlanRevision` / `PlanRun` **都没有 session 键**，
+     无法诚实回答「这个会话当前在跑哪个计划」。
+4. **写回点在 `Ledger::compact()` 内、`self.persist(&ctx)` 之前**（`session.rs:662`），
+   不是 `context_compact()` 里 —— 这样自动压缩与手动压缩都留下一样的交接状态；
+   `context_status()` 只负责把它原样吐给前端。
+5. 新增回归 `test_compact_writes_structured_state_with_explainable_gaps`（`session.rs`）：
+   未绑定项目的会话压缩后 `branch` 必须是 `None`（不是 `""`/`"main"`）、`source_gaps`
+   必须点名 `branch`，并换一个**全新 `ContextLedger` 实例**从磁盘读回 —— 内存缓存里
+   有、落盘没有，是这个字段最容易出的假绿。
 
 ---
 

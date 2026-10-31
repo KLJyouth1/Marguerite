@@ -526,6 +526,11 @@
 
   <!-- 应用级右键菜单：桌面端不再弹 Chromium 默认菜单（重新加载/另存为/检查） -->
   <AppContextMenu />
+
+  <!-- Shell overlay seam: contributions that own a corner of the screen rather
+       than a row in a bar (the Attention Shelf lives here). Renders nothing at
+       all while the slot is empty, so this line cannot shift the layout. -->
+  <SlotHost slot="shell.overlay" />
 </template>
 
 <script setup lang="ts">
@@ -1806,6 +1811,20 @@ function scheduleSessionRefresh() {
   }, 150)
 }
 
+/**
+ * 轮询止血（R-17，照 Trae v3.4.1「后台已关闭即停止轮询减少请求」）。
+ *
+ * 30 s 这一档并不是数据新鲜度所需的：侧栏本来由 `sessions.changed` 事件驱动
+ * （见 `sessionListSubscription`），定时器只是「事件漏了」的兜底。标签页在后台时
+ * 没有人看侧栏，这个兜底就只是在烧请求和网关日志；但**切回前台必须立刻补一次**，
+ * 否则用户回来先读到一份过期列表 —— 那比少打一次请求更糟。
+ * 口径与 `LocalModelsView` 的 Ollama 复探一致（后台不探、回前台即探）。
+ */
+function refreshSidebarOnReturnToForeground() {
+  if (document.visibilityState !== 'visible') return
+  if (rpcStore.isConnected) scheduleSessionRefresh()
+}
+
 function flushScheduledSidebarRefresh() {
   if (
     !sidebarRefreshPending
@@ -2156,6 +2175,8 @@ onMounted(() => {
   window.addEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
   window.addEventListener('focus', markCurrentSessionReadIfVisible)
   document.addEventListener('visibilitychange', markCurrentSessionReadIfVisible)
+  // 后台不轮询 ⇒ 回前台补一次（见 refreshSidebarOnReturnToForeground 的注释）。
+  document.addEventListener('visibilitychange', refreshSidebarOnReturnToForeground)
   sessionListSubscription.subscribe()
   resumeAutomaticAppRpc()
   // Keep the approval badge/count live app-wide, not just on the Approvals page.
@@ -2170,8 +2191,9 @@ onMounted(() => {
   // Publish the topbar app cluster's live width as --topbar-right-reserve
   // (see publishTopbarRightReserve).
   void nextTick(observeTopbarRight)
-  // 每 30 秒刷新会话列表，更新运行状态和闲置时间
+  // 每 30 秒刷新会话列表，更新运行状态和闲置时间（后台标签页不刷，见上）
   sessionStatusTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return
     if (rpcStore.isConnected) scheduleSessionRefresh()
   }, 30000)
 })
@@ -2185,6 +2207,7 @@ onUnmounted(() => {
   window.removeEventListener(LOCAL_SESSION_RESET_EVENT, handleLocalSessionReset)
   window.removeEventListener('focus', markCurrentSessionReadIfVisible)
   document.removeEventListener('visibilitychange', markCurrentSessionReadIfVisible)
+  document.removeEventListener('visibilitychange', refreshSidebarOnReturnToForeground)
   if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer)
   if (sessionStatusTimer) { clearInterval(sessionStatusTimer); sessionStatusTimer = null }
   sessionListSubscription.cleanup()

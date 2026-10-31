@@ -118,6 +118,7 @@ const TOOL_GROUPS: &[(&str, &[&str])] = &[
         "协作与计划",
         &[
             "todo_write",
+            "tactics",
             "research",
             "automation",
             "auto_record",

@@ -74,6 +74,9 @@ _tak*/
 # 本机打包输出目录（体积大，非源码）
 # 带后缀的快照（`marguerite_build_target.keep/` 等）同样排除：曾出现 6.3 GB
 # 快照未被忽略、`git add -A` 直接撞 GitHub 100 MB 单文件上限的情况。
+# 必须是 `**/`：实测 `core/marguerite_build_target/`（0.7 GB）在 core/ 下，
+# 根锚定的 `/marguerite_build_target*` 匹配不到它（`git check-ignore` 返回 1）。
+**/marguerite_build_target*
 /marguerite_build_target*
 
 # 桌面端打包资源（模型权重等二进制，体积大，非源码）
@@ -248,3 +251,7 @@ vitest-report.json
 /installer/**/bin/
 /installer/**/obj/
 /installer/**/.vs/
+
+# .NET 工具脚本的构建产物（skills 下随仓库分发，但不带 obj/bin）
+/skills/**/dotnet/**/obj/
+/skills/**/dotnet/**/bin/

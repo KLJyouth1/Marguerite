@@ -62,7 +62,9 @@
 import { ref, onMounted } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
+import { useConfirm } from '@/composables/useConfirm'
 const rpc = useRpcStore()
+const { confirm } = useConfirm()
 interface Host { name: string; host: string; port: number; user: string; key?: string | null }
 interface Hosts { ok: boolean; entries: Host[]; error?: string }
 interface Probe { ok: boolean; message?: string; error?: string }
@@ -83,6 +85,14 @@ async function add() {
   busy.value = false
 }
 async function remove(name: string) {
+  const target = hosts.value.find(h => h.name === name)
+  const where = target ? `（${target.user}@${target.host}:${target.port}）` : ''
+  const approved = await confirm({
+    title: '删除 SSH 主机',
+    body: `将从主机台账删除「${name}」${where}。仅移除本地台账记录，不会改动远端主机本身。`,
+    primaryLabel: '删除',
+  })
+  if (!approved) return
   busy.value = true
   const r = await safe(() => rpc.call<Hosts>('collab.ssh.remove', { name }))
   if (r) hosts.value = r.entries || []
@@ -98,11 +108,25 @@ interface ExecResult { ok: boolean; exitCode?: number | null; stdout?: string; s
 const execHost = ref('')
 const execCmd = ref('')
 const execResult = ref<ExecResult | null>(null)
+/** 确认框里的命令压成单行并截断，避免超长命令撑爆弹窗。 */
+function clipCommand(text: string, max = 160): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
 async function runExec() {
   if (!execHost.value || !execCmd.value.trim()) return
+  const command = execCmd.value.trim()
+  const target = hosts.value.find(h => h.name === execHost.value)
+  const where = target ? `${target.name}（${target.user}@${target.host}:${target.port}）` : execHost.value
+  const approved = await confirm({
+    title: '确认远程执行',
+    body: `将在 ${where} 上执行命令：\n${clipCommand(command)}\n命令会直接在远端主机运行。`,
+    primaryLabel: '执行',
+  })
+  if (!approved) return
   busy.value = true
   execResult.value = null
-  const r = await safe(() => rpc.call<ExecResult>('collab.ssh.exec', { name: execHost.value, command: execCmd.value.trim() }))
+  const r = await safe(() => rpc.call<ExecResult>('collab.ssh.exec', { name: execHost.value, command }))
   if (r) execResult.value = r
   busy.value = false
 }

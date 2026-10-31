@@ -99,6 +99,14 @@ const SLOGAN = '让思考 成为你的工作台';
         lmRows: document.querySelectorAll('#local-model .lm__row').length,
         lmBars: document.querySelectorAll('#local-model .lm__bar').length,
         lmCards: document.querySelectorAll('#local-model .lm__dlc[href]').length,
+        // 2026-10-31 创新轮：战术推演 5 拓扑 / 7 战术 / 5-Why 链 / 原生硬化台账 4 数 / 证据模式
+        tacTabs: document.querySelectorAll('.tac__tab').length,
+        tacChips: document.querySelectorAll('.tac__chip').length,
+        whySteps: document.querySelectorAll('.why .why__step').length,
+        nativeStats: document.querySelectorAll('.native__stat').length,
+        proofToggle: !!document.querySelector('#proofToggle'),
+        proofPanel: !!document.querySelector('#proofPanel'),
+        proofMarked: document.querySelectorAll('[data-proof]').length,
         // bento 尾行不得留空缺：6 列网格下每张卡的跨列总和必须是 6 的整数倍
         // ⚠️ `grid-column: span N` 简写的值落在 gridColumnStart 上，gridColumnEnd 是 "auto"
         //    （2026-10-27 第一版读了 End，把每张卡当 span 1，制造出假红）
@@ -165,13 +173,15 @@ const SLOGAN = '让思考 成为你的工作台';
     });
 
     const structureOk = m.player && m.acts === 7 && m.demo && m.compare && m.scene && m.bpm === 56 &&
-      m.notice && m.ask && m.faq === 7 && m.dl === 3 && m.bar && m.dock &&
+      m.notice && m.ask && m.faq === 8 && m.dl === 3 && m.bar && m.dock &&
       m.entryTabs === 4 && m.entryPanels === 4 && m.entryActive === 1 && m.tuiImgLoaded &&
       m.loopback && m.trustCards === 3 && m.counters === 8 && m.gateLines === 7 &&
-      m.navLinks === 14 && m.navOrderAscending && m.secTakes === 14 && m.bento === 8 && m.honestCards === 4 && m.bentoRowsFull &&
+      m.navLinks === 15 && m.navOrderAscending && m.secTakes === 15 && m.bento === 9 && m.honestCards === 4 && m.bentoRowsFull &&
       m.caseCards === 6 && m.caseOpen === 1 &&
       m.storyChaps === 4 && m.storyBars === 24 && m.storyLedger === 6 && m.storyScene &&
-      m.lmRows === 6 && m.lmBars === 4 && m.lmCards === 3;
+      m.lmRows === 6 && m.lmBars === 4 && m.lmCards === 3 &&
+      m.tacTabs === 5 && m.tacChips === 7 && m.whySteps === 5 && m.nativeStats === 4 &&
+      m.proofToggle && m.proofPanel && m.proofMarked >= 8;
     if (!structureOk) {
       allPass = false;
       errors.push(s.name + ' structure: ' + JSON.stringify(m));
@@ -215,7 +225,7 @@ const SLOGAN = '让思考 成为你的工作台';
     console.log('  排版可读    : ' + (typographyOk ? 'PASS（导航单行 · 终端块不裁切）'
       : 'FAIL（导航逐字换行 ' + m.navWrapped + ' 项 / 终端块裁切 ' + m.termClipped + ' 处）'));
     console.log('  事实条目    : ' + m.facts + (m.facts === 4 ? ' OK' : ' *** 期望 4 ***'));
-    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 7 · 下载 3 · 导航顺序=文档顺序 · 每节一句话结论 14）' : 'FAIL ' + JSON.stringify(m)));
+    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 8 · 下载 3 · 15 项导航顺序=文档顺序 · 每节一句话结论 15 · 推演 5/7 · 5-Why 5 · 证据标记 ' + m.proofMarked + '）' : 'FAIL ' + JSON.stringify(m)));
     console.log('  社交卡片/图片格式: ' + (seoOk
       ? 'PASS（og+twitter+canonical · WebP 生效 ' + m.webpServed + '/' + m.pictureCount + '）'
       : 'FAIL'));
@@ -269,6 +279,111 @@ const SLOGAN = '让思考 成为你的工作台';
     await bandCtx.close();
   }
 
+  // ── 2026-10-31 新增：证据模式 / 战术推演的可操作守卫 ─────────────────────
+  // 静态计数只能证明「按钮在」，不能证明「按下去有反应」。这里真的点：
+  // ① 证据模式要在页面上亮出标记、打开证据表、条数够、关闭能复原；
+  // ② 战术推演要能切拓扑、真的画出节点与连线、点「跑一次」写日志。
+  {
+    const ictx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const ip = await ictx.newPage();
+    ip.on('console', (m) => { if (m.type() === 'error') errors.push('interaction: ' + m.text()); });
+    ip.on('pageerror', (e) => errors.push('interaction pageerror: ' + e.message));
+    await ip.goto(URL, { waitUntil: 'load' });
+    await ip.waitForTimeout(500);
+
+    await ip.click('#proofToggle');
+    await ip.waitForTimeout(200);
+    const proofOn = await ip.evaluate(() => ({
+      on: document.body.classList.contains('proof-on'),
+      pressed: document.getElementById('proofToggle').getAttribute('aria-pressed'),
+      dialog: !!document.getElementById('proofPanel').open,
+      rows: document.querySelectorAll('.proof__row').length,
+      bar: !!document.querySelector('[data-proof-bar]') && !document.querySelector('[data-proof-bar]').hidden,
+      count: (document.querySelector('[data-proof-count]') || {}).textContent,
+      marked: document.querySelectorAll('[data-proof]').length,
+      // 证据表里的值必须等于台账目标值：计数动画的中间帧不算证据。
+      mismatches: Array.from(document.querySelectorAll('[data-proof]')).map((el) => {
+        const target = el.querySelector('.stat__n [data-count]');
+        if (!target) return null;
+        const key = el.getAttribute('data-proof');
+        const go = document.querySelector('.proof__row [data-proof-go="' + key + '"]');
+        const val = go ? go.parentElement.querySelector('.proof__rv') : null;
+        const want = target.getAttribute('data-count');
+        const got = val ? val.textContent.trim() : 'missing';
+        return got === want ? null : key + ':' + got + '≠' + want;
+      }).filter(Boolean),
+    }));
+    const proofOnOk = proofOn.on && proofOn.pressed === 'true' && proofOn.dialog &&
+      proofOn.rows >= 8 && proofOn.bar && Number(proofOn.count) === proofOn.rows &&
+      proofOn.mismatches.length === 0;
+    if (!proofOnOk) { allPass = false; errors.push('证据模式开启: ' + JSON.stringify(proofOn)); }
+    console.log('--- 证据模式 ---');
+    console.log('  开启并生成证据表: ' + (proofOnOk
+      ? 'PASS（' + proofOn.rows + ' 条 / 标记 ' + proofOn.marked + ' 处）'
+      : 'FAIL ' + JSON.stringify(proofOn)));
+
+    await ip.keyboard.press('Escape');
+    await ip.waitForTimeout(150);
+    const proofClosed = await ip.evaluate(() => ({
+      dialog: document.getElementById('proofPanel').open,
+      on: document.body.classList.contains('proof-on'),
+    }));
+    // Esc 只关对话框，不退出证据模式 —— 这是设计：标记与常驻证据条应保留。
+    const proofClosedOk = !proofClosed.dialog && proofClosed.on;
+    if (!proofClosedOk) { allPass = false; errors.push('证据模式 Esc: ' + JSON.stringify(proofClosed)); }
+
+    await ip.click('[data-proof-open]');
+    await ip.waitForTimeout(150);
+    const proofReopen = await ip.evaluate(() => document.getElementById('proofPanel').open);
+    if (!proofReopen) { allPass = false; errors.push('证据条「查看证据表」未能重开对话框'); }
+
+    await ip.click('[data-proof-close]');
+    await ip.waitForTimeout(100);
+    await ip.click('#proofToggle');
+    await ip.waitForTimeout(150);
+    const proofOff = await ip.evaluate(() => ({
+      on: document.body.classList.contains('proof-on'),
+      pressed: document.getElementById('proofToggle').getAttribute('aria-pressed'),
+      bar: document.querySelector('[data-proof-bar]').hidden,
+      dialog: document.getElementById('proofPanel').open,
+    }));
+    const proofOffOk = !proofOff.on && proofOff.pressed === 'false' && proofOff.bar && !proofOff.dialog;
+    if (!proofOffOk) { allPass = false; errors.push('证据模式关闭: ' + JSON.stringify(proofOff)); }
+    console.log('  关闭并复原: ' + (proofOffOk ? 'PASS（Esc 保留模式 · 证据条可重开 · 再按关闭清标记）' : 'FAIL ' + JSON.stringify(proofOff)));
+
+    await ip.locator('#tactics').scrollIntoViewIfNeeded();
+    await ip.click('.tac__tab[data-topo="swarm"]');
+    await ip.waitForTimeout(150);
+    const sw = await ip.evaluate(() => {
+      const svg = document.querySelector('[data-tac-svg]');
+      return {
+        nodes: svg.querySelectorAll('.tac__node').length,
+        edges: svg.querySelectorAll('.tac__edge').length,
+        selected: document.querySelector('.tac__tab[data-topo="swarm"]').getAttribute('aria-selected'),
+        label: svg.getAttribute('aria-label') || '',
+      };
+    });
+    // 蜂群是 1 分片器 + 6 并行子 + 1 聚合器 = 8 节点；选中态与 aria-label 必须同步。
+    const swOk = sw.nodes === 8 && sw.edges > 0 && sw.selected === 'true' && sw.label.indexOf('蜂群') >= 0;
+    if (!swOk) { allPass = false; errors.push('战术推演切换拓扑: ' + JSON.stringify(sw)); }
+
+    await ip.click('[data-tac-run]');
+    await ip.waitForTimeout(1500);
+    const ran = await ip.evaluate(() => ({
+      logLines: document.querySelectorAll('[data-tac-log] > *').length,
+      status: (document.querySelector('[data-tac-status]') || {}).textContent || '',
+      marked: document.querySelectorAll('[data-tac-svg] .tac__node.is-run, [data-tac-svg] .tac__node.is-fail, [data-tac-svg] .tac__node.is-caught').length,
+      running: document.querySelector('[data-tac-run]').disabled,
+    }));
+    const ranOk = ran.logLines >= 1 && ran.status.length > 4 && ran.marked >= 1 && !ran.running;
+    if (!ranOk) { allPass = false; errors.push('战术推演跑一次: ' + JSON.stringify(ran)); }
+    console.log('  切换拓扑 + 跑一次: ' + (swOk && ranOk
+      ? 'PASS（蜂群 8 节点 / ' + sw.edges + ' 条边 · 日志 ' + ran.logLines + ' 行 · 状态：' + ran.status.trim() + '）'
+      : 'FAIL ' + JSON.stringify({ sw, ran })));
+
+    await ictx.close();
+  }
+
   const ctx2 = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
   const p2 = await ctx2.newPage();
   await p2.goto(URL, { waitUntil: 'load' });
@@ -305,8 +420,12 @@ const SLOGAN = '让思考 成为你的工作台';
         og: !!document.querySelector('meta[property="og:image"]'),
         hreflang: document.querySelectorAll('link[rel="alternate"][hreflang]').length,
         webpServed: Array.from(document.images).filter((i) => (i.currentSrc || '').endsWith('.webp')).length,
+        // 2026-10-29：英文精简页四节也各需一句电梯结论，与中文页设计语言一致。
+        secTakes: Array.from(document.querySelectorAll('.sec-take'))
+          .filter((el) => el.getBoundingClientRect().height > 8 && (el.textContent || '').trim().length >= 8)
+          .length,
       }));
-      const ok = !r.overflowX && r.og && r.hreflang >= 3 && r.webpServed > 0 && enErrors.length === 0;
+      const ok = !r.overflowX && r.og && r.hreflang >= 3 && r.webpServed > 0 && r.secTakes === 4 && enErrors.length === 0;
       if (!ok) {
         allPass = false;
         errors.push('index.en.html@' + w + ': ' + JSON.stringify(r) + ' console=' + enErrors.join('|'));

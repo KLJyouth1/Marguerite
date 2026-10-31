@@ -26,6 +26,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 import { SESSION_LIST_VIEW, sessionRunStatus } from '@/composables/useSessions'
+import { nextOverlayPollMs } from '@/utils/chat/overlayPoll'
 import type { SessionsListResponse } from '@/types/rpc'
 
 const { t } = useI18n()
@@ -33,15 +34,26 @@ const rpc = useRpcStore()
 
 // 网关 run-status 词表里的「活动」态（单一事实源：utils/chat/runStatus.ts）。
 const ACTIVE_RUN_STATUSES = new Set(['running', 'queued', 'approval_pending'])
-const POLL_MS = 15_000
 const EVENT_DEBOUNCE_MS = 400
 
 const count = ref(0)
 const running = computed(() => count.value > 0)
 
-let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let unsubs: Array<() => void> = []
+
+/**
+ * 兜底轮询自我续期：间隔按「有没有任务在跑 / 连没连上」现算，
+ * 空闲时放慢到 60 s 而不是撤掉（理由与数字见 `utils/chat/overlayPoll`）。
+ */
+function schedulePoll(): void {
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = setTimeout(() => {
+    pollTimer = null
+    void refresh().finally(schedulePoll)
+  }, nextOverlayPollMs(running.value, rpc.isConnected))
+}
 
 /**
  * 统计运行中的任务：只读 `sessions.list`（SUPPORTED_METHODS 已声明），
@@ -107,8 +119,7 @@ onMounted(() => {
   html.style.overflow = 'hidden'
   body.style.overflow = 'hidden'
 
-  void refresh()
-  pollTimer = setInterval(() => void refresh(), POLL_MS)
+  void refresh().finally(schedulePoll)
   unsubs = [
     rpc.on('sessions.changed', scheduleRefresh),
     rpc.on('task.queued', scheduleRefresh),
@@ -121,7 +132,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
   if (debounceTimer) clearTimeout(debounceTimer)
   unsubs.forEach((off) => off())
   unsubs = []

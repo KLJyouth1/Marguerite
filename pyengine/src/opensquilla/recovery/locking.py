@@ -43,6 +43,14 @@ _WINDOWS_FILE_SHARE_DELETE = 0x00000004
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_OPEN_ALWAYS = 4
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+
+# `NtCreateFile(FILE_OPEN_IF)` 的两种**瞬时**失败：并发创建同名目录时，输家可能
+# 拿到 ACCESS_DENIED 或 SHARING_VIOLATION，而不是语义上更准确的 NAME_COLLISION。
+# 只对这两个状态退避重试；其余状态码（真·路径不安全）立即 fail-closed。
+_NT_CREATE_TRANSIENT_STATUSES = frozenset({0xC0000022, 0xC0000043})
+_NT_CREATE_RETRY_BUDGET_SECS = 2.0
+_NT_CREATE_RETRY_FIRST_DELAY = 0.005
+_NT_CREATE_RETRY_MAX_DELAY = 0.05
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_ERROR_FILE_NOT_FOUND = 2
 _WINDOWS_ERROR_PATH_NOT_FOUND = 3
@@ -420,11 +428,40 @@ def _windows_nt_create_relative(
     status_value = int(status)
     handle_value = getattr(handle, "value", None)
     invalid_handle = ctypes.c_void_p(-1).value
-    if status_value < 0 or status_value & 0x80000000 or handle_value in {None, 0, invalid_handle}:
-        raise UnsafePathError(
-            "cannot create profile lock component safely "
-            f"(NTSTATUS 0x{status_value & 0xFFFFFFFF:08x}): {name}"
+    # 瞬时争用重试：`FILE_OPEN_IF` 在**两个线程同时创建同一目录**时，输家拿到的
+    # 可能是 `STATUS_ACCESS_DENIED (0xc0000022)` 或 `STATUS_SHARING_VIOLATION
+    # (0xc0000043)`，而不是 `STATUS_OBJECT_NAME_COLLISION`。这不是路径不安全，
+    # 只是对手刚把目录建好；直接抛 `UnsafePathError` 会让并发的迁移用例偶发失败
+    # （实测 test_concurrent_direct_update_migrations_serialize_on_profile_lock）。
+    # 只对这两个状态**有界**退避重试，预算耗尽仍然 fail-closed —— 安全语义不变。
+    deadline = time.monotonic() + _NT_CREATE_RETRY_BUDGET_SECS
+    delay = _NT_CREATE_RETRY_FIRST_DELAY
+    while status_value < 0 or status_value & 0x80000000 or handle_value in {None, 0, invalid_handle}:
+        status_bits = status_value & 0xFFFFFFFF
+        if status_bits not in _NT_CREATE_TRANSIENT_STATUSES or time.monotonic() >= deadline:
+            raise UnsafePathError(
+                "cannot create profile lock component safely "
+                f"(NTSTATUS 0x{status_bits:08x}): {name}"
+            )
+        time.sleep(delay)
+        delay = min(delay * 2, _NT_CREATE_RETRY_MAX_DELAY)
+        io_status = _WindowsIoStatusBlock()
+        handle = ctypes.c_void_p()
+        status = nt_create_file(
+            ctypes.byref(handle),
+            desired_access,
+            ctypes.byref(object_attributes),
+            ctypes.byref(io_status),
+            None,
+            file_attributes,
+            share_access,
+            create_disposition,
+            create_options,
+            None,
+            0,
         )
+        status_value = int(status)
+        handle_value = getattr(handle, "value", None)
     if not isinstance(handle_value, int):
         raise UnsafePathError("Windows returned an invalid profile lock component handle")
     return handle_value

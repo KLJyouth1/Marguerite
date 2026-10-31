@@ -12,7 +12,7 @@ memory. No account, no cloud relay, no telemetry.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-4341%20passing-brightgreen.svg)](#-quality-gates)
+[![Tests](https://img.shields.io/badge/core%20tests-4508%20passing-brightgreen.svg)](#-quality-gates)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-security-model)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-recursive-self-improvement)
 
@@ -377,19 +377,19 @@ bash scripts/verify.sh --release      # adds the Tauri release bundle
 ```
 
 Current baseline — the full gate dispatches 26 checks, and the last complete run that
-recorded **26/26** was on 2026-10-29; every number in the table below comes from that run. Every layer
+recorded **26/26** was on 2026-10-31; every number in the table below comes from that run. Every layer
 below runs in CI (`.github/workflows/ci.yml`) except the web e2e layer, which is
 **local-gate-only for now**: CI would need a Playwright browser cache and a
 Rust-built gateway in the same job (tracked as follow-up, not silently claimed).
 
 | Gate | Result |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 4341 passed / 0 failed / 25 ignored |
+| `cargo test -p marguerite-core --lib` | 4533 passed / 0 failed / 25 ignored |
 | core integration tests (`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`) | offline and deterministic; `third_party_integration` is `[SKIP]` when `third_party/` is absent (a skip is never counted as a pass) |
-| `webui` unit tests (Vitest) | 4927 passed / 0 failed (500 files) |
+| `webui` unit tests (Vitest) | 5085 passed / 0 failed (516 files) |
 | `pyengine` unit tests (pytest, `tests/unit`) | 823 passed / 0 failed / 7 skipped |
 | `pyengine` gateway contracts (pytest, `tests/test_gateway`) | 2956 passed / 0 failed / 11 skipped |
-| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4446 passed / 0 failed / 390 skipped |
+| `pyengine` contract family (pytest, `tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`) | 4387 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero warnings |
 | `npm run check:architecture` | 13 architecture guards green |
 | `scripts/check-doc-cli-drift.py` | every documented CLI token resolves to real code |

@@ -97,6 +97,19 @@ fn write_into(dir: &Path, fp: &str, output: &str) -> bool {
     let Some(path) = spool_path(dir, fp) else {
         return false;
     };
+    // W5（2026-10-30）：内容寻址 ⇒ 已经存在的这份留底**就是**要写的内容，
+    // 再走一遍 tmp 写 + rename 是零信息量的整档重写（长任务里同一份工具输出会被
+    // 反复截断反复留底）。直接短路。
+    //
+    // 判定安全的前提：写入是 rename 原子完成的 —— 存在的 `.txt` 一定是完整文件，
+    // 半截只可能是 `.tmp`，而 `.tmp` 不在这条命中路径上。
+    //
+    // ⚠️ 淘汰照跑：预算回收只发生在这里，重复内容多的负载如果连 `evict_in` 一起跳过，
+    // 目录就会长期超限（那是「省写入」省成了「不清理」）。
+    if path.is_file() {
+        evict_in(dir);
+        return true;
+    }
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
@@ -112,6 +125,9 @@ fn write_into(dir: &Path, fp: &str, output: &str) -> bool {
             return false;
         }
     }
+    // W7：只有真写了才计数（上面那条 exists 短路分支不计数，否则「写入次数」
+    // 会把「一次都没写」也报成写了）。
+    crate::observability::io_report::tally_write(output.len() as u64);
     evict_in(dir);
     true
 }
@@ -205,6 +221,61 @@ mod tests {
         let n = list_in(&dir).len();
         assert!(n <= MAX_FILES, "留底数量必须封顶，否则长任务把盘写满：{n}");
         assert!(n > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W5：同一份内容重复留底**不得**再走一遍 tmp 写 + rename。
+    /// 用哨兵字节验证「有没有碰盘」，比看返回值严格得多（两条路径返回值都是 true）。
+    #[test]
+    fn a_duplicate_spool_does_not_rewrite_the_file() {
+        let dir = std::env::temp_dir().join(format!("mgt-spool-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = format!("重复留底-{}", "w".repeat(5_000));
+        let fp = fingerprint(&body);
+        // 先在命中路径上放一份**不同**的字节：短路生效的话它一定原样保留。
+        let path = spool_path(&dir, &fp).unwrap();
+        std::fs::write(&path, b"SENTINEL").unwrap();
+
+        assert!(write_into(&dir, &fp, &body), "命中已存在的留底仍要报告成功");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SENTINEL",
+            "内容寻址命中后不得整档重写 —— 同形缺陷见 Codex #35401（全量重写、64% 字节相同）"
+        );
+        assert!(
+            !dir.join(format!("{fp}.tmp")).exists(),
+            "残留的 .tmp 说明真的走了写入路径"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 短路只省「写」，不省「清」：淘汰必须照跑，
+    /// 否则重复内容多的负载永远不回收预算 —— 把「省写入」省成了「不清理」。
+    #[test]
+    fn a_duplicate_spool_still_evicts_to_budget() {
+        let dir = std::env::temp_dir().join(format!("mgt-spool-dupevict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 绕过 write_into 直接铺文件，人为造出「超过条数上限」的状态
+        // （正常写入边写边淘汰，永远超不了，于是证明不了这一条）。
+        let mut planted = Vec::new();
+        for i in 0..(MAX_FILES + 4) {
+            let body = format!("plant-{i}");
+            let fp = fingerprint(&body);
+            std::fs::write(spool_path(&dir, &fp).unwrap(), body.as_bytes()).unwrap();
+            planted.push(fp);
+        }
+        assert!(
+            list_in(&dir).len() > MAX_FILES,
+            "前置条件不成立：目录没有铺超限"
+        );
+
+        assert!(write_into(&dir, &planted[0], "plant-0"), "走的是短路分支");
+        assert!(
+            list_in(&dir).len() <= MAX_FILES,
+            "短路把淘汰一起跳过了 —— 目录仍然超限"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

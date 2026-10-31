@@ -1,0 +1,19 @@
+{
+  "identifier": "com.marguerite.workbench.task-overlay",
+  "description": "任务悬浮球：隐藏自身与拖动；显隐由主窗口/托盘菜单的 task_overlay_show/toggle 驱动",
+  "windows": [
+    "task-overlay"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "allow-task-overlay-move",
+    "allow-task-overlay-hide"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:18790/*",
+      "http://127.0.0.1:18790/*"
+    ]
+  }
+}

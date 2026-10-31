@@ -33,6 +33,8 @@ pub mod fleet;
 pub mod goal;
 pub mod harness_rpc;
 pub mod kb;
+/// 对话产线 RPC（`line.*`）：形状规格 → 预演 → 逐阶段执行 → 复盘
+pub mod line;
 pub mod llm_profile;
 pub mod local_models;
 pub mod long_running;
@@ -77,6 +79,7 @@ pub mod session_changes;
 pub mod sessions_portability;
 pub mod skills;
 pub mod system;
+pub mod tactics_rpc;
 pub mod task_receipt;
 pub mod team;
 pub mod tools;

@@ -373,6 +373,36 @@ pub fn record_by_id(id: u64) -> Option<FactRecord> {
         .find(|r| r.id == id && r.superseded_by.is_none())
 }
 
+/// 用户主动「忘掉」一条写回事实（R-02 可撤销性的最后一环）。
+///
+/// **是硬删除，不是打墓碑**：用户说「忘掉这条」时，留一条 `superseded_by` 记录
+/// 意味着正文仍留在磁盘上 —— 那与「忘掉」相悖。
+///
+/// 返回 `Ok(true)` 表示确实删了；`Ok(false)` 表示没有这条 id（幂等：重试删除不报错）。
+/// 落盘失败返回 `Err` 且**不改动磁盘** —— 调用方据此告诉用户删除没生效。
+pub fn forget_fact(id: u64) -> Result<bool, String> {
+    let path = store_path();
+    let records = load_from(&path);
+    // 先把日志要用的字段拷出来：`records` 随后会被 `into_iter()` 移走。
+    let Some((key, project)) = records
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| (r.key.clone(), r.project.clone()))
+    else {
+        return Ok(false);
+    };
+    let keep: Vec<FactRecord> = records.into_iter().filter(|r| r.id != id).collect();
+    save_to(&path, &keep).map_err(|e| format!("落盘失败: {e}"))?;
+    tracing::info!(
+        target: "memory.writeback",
+        id,
+        key = %key,
+        project = %project,
+        "用户删除了一条写回事实"
+    );
+    Ok(true)
+}
+
 /// 读整个事实库（含被取代的留痕）。坏行跳过而不是整体失败：
 /// 一条被手改坏的记录不该让整个记忆库消失。
 fn load_from(path: &Path) -> Vec<FactRecord> {
@@ -616,5 +646,57 @@ mod tests {
             build_key("other", "同一句话"),
             "不同来源不得共用一个 key"
         );
+    }
+
+    /// R-02：用户删除写回事实 —— 真删正文（磁盘上不得残留），且幂等。
+    #[test]
+    fn forget_fact_removes_text_from_disk_and_is_idempotent() {
+        let dir = isolated_dir("forget");
+        let text = "记住：所有回答先给结论";
+        let outcome = remember_fact("app", text, "test", 1_700_000_000_000);
+        assert!(outcome.written, "前置：事实必须写进去：{outcome:?}");
+        let id = active_records()
+            .into_iter()
+            .find(|r| r.text == text)
+            .expect("刚写入的事实应可读回")
+            .id;
+
+        assert_eq!(forget_fact(id), Ok(true));
+        assert!(
+            active_records().iter().all(|r| r.id != id),
+            "删除后不得再出现在有效事实里"
+        );
+        let raw = std::fs::read_to_string(store_path()).unwrap_or_default();
+        assert!(
+            !raw.contains(text),
+            "硬删除必须把正文从磁盘上抹掉（打墓碑会留下正文）：{raw}"
+        );
+
+        // 幂等：再删一次返回 false，不报错、不破坏文件。
+        assert_eq!(forget_fact(id), Ok(false));
+        // 不存在的 id 同理。
+        assert_eq!(forget_fact(9_999_999), Ok(false));
+        std::fs::remove_dir_all(&dir).unwrap_or(());
+    }
+
+    /// 删除一条不得连带删掉别的（事实库是全量重写，最容易在这里写错）。
+    #[test]
+    fn forget_fact_keeps_other_records_intact() {
+        let dir = isolated_dir("forget_keep");
+        remember_fact("app", "记住第一条：用 Rust 写核心", "test", 1_700_000_000_000);
+        remember_fact("app", "记住第二条：前端只用 Vue3 控制台", "test", 1_700_000_001_000);
+        let all = active_records();
+        assert!(all.len() >= 2, "前置：两条都应落盘，实际 {all:?}");
+        let victim = all[0].id;
+        let survivor = all[1].clone();
+
+        assert_eq!(forget_fact(victim), Ok(true));
+        let after = active_records();
+        assert!(
+            after.iter().any(|r| r.id == survivor.id && r.text == survivor.text),
+            "删除一条不得连带删掉其它记录"
+        );
+        assert!(after.iter().all(|r| r.id != victim));
+        std::fs::remove_dir_all(&dir).unwrap_or(());
     }
 }

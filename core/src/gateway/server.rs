@@ -353,6 +353,17 @@ pub async fn run(state: Arc<GatewayState>, port: u16) -> anyhow::Result<()> {
     // 否则用量页在首次对话前查 usage.status 会拿到全零。
     crate::usage::init();
 
+    // KB 启动自检：索引里的文件来源记录 vs 磁盘现状，漂移则写重建标记（不自动重建）。
+    // 后台任务 + 2s 超时：自检只是增强，超时即放弃并告警，绝不阻塞启动。
+    tokio::spawn(async {
+        let handle = tokio::task::spawn_blocking(crate::kb::gateway::startup_source_audit);
+        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(err = %e, "KB 启动自检任务异常，本次跳过"),
+            Err(_) => tracing::warn!("KB 启动自检超过 2s，已放弃（不阻塞启动）"),
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let addr = listener.local_addr()?;
     tracing::info!(

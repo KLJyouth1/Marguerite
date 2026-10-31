@@ -768,6 +768,9 @@ mod tests {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
+        // Windows 会复用 PID：同名目录可能留着几天前另一个进程的 models.json
+        // （2026-10-30 实测复用 PID 21912 命中 10-24 的档案，三例「档案已存在」）。
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         Config::set_config_dir_override(dir);
         GatewayContext {

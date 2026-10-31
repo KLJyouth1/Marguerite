@@ -185,7 +185,7 @@
               class="btn btn--ghost btn--sm"
               @click="toggleStart(e.id)"
             >{{ startedIds.has(e.id) ? t('localModels.stop') : t('localModels.start') }}</button>
-            <button v-if="managedIds.has(e.id)" class="btn btn--ghost btn--sm lm-danger" @click="remove(e.id)">{{ t('localModels.remove') }}</button>
+            <button v-if="managedIds.has(e.id)" class="btn btn--ghost btn--sm lm-danger" @click="remove(e)">{{ t('localModels.remove') }}</button>
           </div>
           <!-- 未校验时必须显式传 null：GateReport 的 prop 是 `GateReport | null`，
                传 undefined 会在每次渲染时刷 Vue 的 prop 类型告警。 -->
@@ -254,9 +254,11 @@ import GateReport from '@/components/model/GateReport.vue'
 import type { GateReport as GateReportData } from '@/components/model/gateTypes'
 import { useRpcStore } from '@/stores/rpc'
 import { useCandidateModelsStore } from '@/stores/candidateModels'
+import { useConfirm } from '@/composables/useConfirm'
 
 const rpc = useRpcStore()
 const { t } = useI18n()
+const { confirm } = useConfirm()
 const candidateStore = useCandidateModelsStore()
 let candidateUnsub: (() => void) | null = null
 
@@ -568,8 +570,14 @@ async function toggleStart(id: string) {
     await loadStatus()
   } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
-async function remove(id: string) {
-  try { await rpc.call('models.local.remove', { id, removeProfile: true }); await loadStatus() } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+async function remove(entry: CatalogEntry) {
+  const approved = await confirm({
+    title: '移除本地模型',
+    body: `将删除本地模型「${entry.label}」的台账记录，并同时移除其路由档案（removeProfile: true）。\n若它是当前主力模型，删除后主路由会失去该模型，当前会话可能当场脱路由。此操作不可撤销。`,
+    primaryLabel: '删除并移除档案',
+  })
+  if (!approved) return
+  try { await rpc.call('models.local.remove', { id: entry.id, removeProfile: true }); await loadStatus() } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
 
 async function loadFinetunes() {

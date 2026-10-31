@@ -9,7 +9,7 @@
 //! `KB_QUOTA_EXCEEDED` / `KB_DOC_TOO_LARGE` / `KB_FILE_TOO_LARGE` /
 //! `KB_INVALID_PARAMS` / `PATH_OUTSIDE_ROOTS` / `RBAC_FORBIDDEN`。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 #[cfg(not(test))]
 use crate::context::session::SessionContext;
 use crate::kb::denoiser::filter_documents;
-use crate::kb::integrity::audit;
-use crate::kb::store::{document_hash, KnowledgeBase};
+use crate::kb::integrity::{audit, audit_sources, SourceAuditReport, SourceVerdict};
+use crate::kb::store::{document_hash, mtime_ms, KnowledgeBase};
 use crate::persistence::config::Config;
 use crate::rbac::policy::Policy;
 use crate::rbac::roles::Role;
@@ -117,6 +117,114 @@ fn persist(st: &mut KbState) {
             st.last_error = Some(format!("写入索引失败: {e}"));
         }
     }
+}
+
+/// 启动自检发现漂移时写下的重建标记文件名（与索引文件同目录）。
+///
+/// 标记是给**运维/下次自检**看的证据：漂移未被静默吞掉，也没有在启动时
+/// 擅自重建（重建会阻塞启动且可能覆盖用户正在编辑的索引）。
+pub const REBUILD_MARKER_FILE: &str = "rebuild_required.json";
+
+/// 启动自检：把索引里的文件来源记录与磁盘现状逐条对账。
+///
+/// 由 `gateway::server::run` 在后台任务里调用（调用方负责 2s 超时）；
+/// 无漂移则清掉陈旧标记，有漂移则写下 [`REBUILD_MARKER_FILE`] 并 `warn`。
+///
+/// **不自动重建**：重建属于 `KnowledgeBase::apply_changes` 的显式调用，
+/// 启动阶段只做「发现并标记」，避免启动耗时被索引规模放大。
+pub fn startup_source_audit() {
+    let st = lock_state();
+    let marker = st.path.with_file_name(REBUILD_MARKER_FILE);
+    audit_sources_and_mark(&st.kb, &marker);
+}
+
+/// 对账 + 落标记（纯函数式入口：不读时钟以外的外部状态，测试可直接驱动）。
+fn audit_sources_and_mark(kb: &KnowledgeBase, marker: &Path) -> SourceAuditReport {
+    let report = audit_sources(kb);
+    if !report.verified {
+        tracing::info!(
+            checked = report.checked,
+            "KB 启动自检：索引里没有文件来源记录，无法对账（不得当成已通过）"
+        );
+        return report;
+    }
+    if !report.needs_rebuild() {
+        // 干净：清掉上一次留下的陈旧标记（陈旧标记会冒充「当前仍需重建」）。
+        if marker.exists() {
+            if let Err(e) = std::fs::remove_file(marker) {
+                tracing::warn!(
+                    err = %e,
+                    path = %marker.display(),
+                    "清理陈旧的 KB 重建标记失败"
+                );
+            }
+        }
+        tracing::info!(
+            checked = report.checked,
+            up_to_date = report.up_to_date,
+            "KB 启动自检通过：来源记录与磁盘一致"
+        );
+        return report;
+    }
+
+    let needs_rebuild = report
+        .drifts
+        .iter()
+        .filter(|d| d.verdict == SourceVerdict::NeedsRebuild)
+        .count();
+    let missing = report.drifts.len() - needs_rebuild;
+    let payload = json!({
+        "ok": false,
+        "checked": report.checked,
+        "upToDate": report.up_to_date,
+        "needsRebuild": needs_rebuild,
+        "missing": missing,
+        "drifts": report.drifts.iter().map(|d| json!({
+            "path": d.path,
+            "docId": d.doc_id,
+            "verdict": source_verdict_label(d.verdict),
+            "detail": d.detail,
+        })).collect::<Vec<_>>(),
+        "generatedAtMs": crate::cache::now_ms(),
+    });
+    let write_result = (|| -> std::io::Result<()> {
+        if let Some(dir) = marker.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let body = serde_json::to_string_pretty(&payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(marker, body)
+    })();
+    match write_result {
+        Ok(()) => tracing::warn!(
+            drifts = report.drifts.len(),
+            needs_rebuild,
+            missing,
+            marker = %marker.display(),
+            "KB 启动自检发现来源漂移：已写重建标记（本次不自动重建）"
+        ),
+        Err(e) => tracing::warn!(
+            err = %e,
+            drifts = report.drifts.len(),
+            marker = %marker.display(),
+            "KB 启动自检发现来源漂移，但重建标记写入失败"
+        ),
+    }
+    report
+}
+
+fn source_verdict_label(verdict: SourceVerdict) -> &'static str {
+    match verdict {
+        SourceVerdict::UpToDate => "up_to_date",
+        SourceVerdict::NeedsRebuild => "needs_rebuild",
+        SourceVerdict::Missing => "missing",
+    }
+}
+
+/// 测试用：读取进程级单例库的来源记录快照（验证 `ingest_file` 真的登记了来源）。
+#[cfg(test)]
+fn sources_snapshot() -> Vec<crate::kb::store::KbSource> {
+    lock_state().kb.sources().to_vec()
 }
 
 /// 种子灌入标记（进程内只执行一次）
@@ -679,6 +787,20 @@ pub fn ingest_file(params: &Value) -> Value {
         }
     };
     let mut result = ingest_gated(&title, &text);
+    // 登记文件来源记录：启动自检（`startup_source_audit`）要靠它与磁盘 mtime/字节数对账。
+    // 没有这一步，索引里的文档永远「没有来源」，自检恒为「不可校验」。
+    // 仅当确实有文档落库（新入库或命中去重）时登记；被拒/判噪时没有 doc_id，不登记。
+    if let Some(doc_id) = result
+        .get("doc_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let key = p.display().to_string();
+        let mut st = lock_state();
+        st.kb
+            .record_source(&key, doc_id, mtime_ms(&metadata), metadata.len());
+        persist(&mut st);
+    }
     if let Some(obj) = result.as_object_mut() {
         obj.insert("title".to_string(), json!(title));
         obj.insert("path".to_string(), json!(p.display().to_string()));
@@ -907,5 +1029,83 @@ mod tests {
                 .is_some_and(|p| p.ends_with("store.json")),
             "storePath 必须指向持久化文件: {v}"
         );
+    }
+
+    /// 启动自检的**真实副作用**：无漂移不留标记；mtime 漂移必须落下重建标记
+    /// （标记内容与报告自洽）；恢复一致后陈旧标记被清掉。
+    #[test]
+    fn startup_audit_writes_and_clears_the_rebuild_marker() {
+        use std::time::{Duration, SystemTime};
+
+        let dir = std::env::temp_dir().join(format!(
+            "mgt-kb-startup-audit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("src.md");
+        std::fs::write(&path, "启动自检的对账源文件：索引记录 mtime 与字节数。").unwrap();
+
+        let mut kb = KnowledgeBase::new();
+        let rep = kb.apply_changes(std::slice::from_ref(&path));
+        assert_eq!(rep.rebuilt.len(), 1, "{rep:?}");
+
+        let marker = dir.join(REBUILD_MARKER_FILE);
+        let clean = audit_sources_and_mark(&kb, &marker);
+        assert!(clean.verified && clean.ok, "{clean:?}");
+        assert!(!marker.exists(), "无漂移不得留下重建标记");
+
+        // 只改 mtime（正文与字节数不变）→ 必须写标记
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        file.set_times(std::fs::FileTimes::new().set_modified(later))
+            .expect("设置 mtime");
+        drop(file);
+
+        let dirty = audit_sources_and_mark(&kb, &marker);
+        assert!(dirty.needs_rebuild(), "{dirty:?}");
+        assert!(marker.is_file(), "漂移必须落标记文件: {}", marker.display());
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(payload["needsRebuild"].as_u64(), Some(1), "{payload}");
+        assert_eq!(payload["drifts"][0]["path"], path.display().to_string());
+        assert_eq!(payload["drifts"][0]["verdict"], "needs_rebuild");
+
+        // 重新对账一致后，陈旧标记必须被清掉
+        let again_apply = kb.apply_changes(std::slice::from_ref(&path));
+        assert_eq!(again_apply.rebuilt.len(), 1, "{again_apply:?}");
+        let again = audit_sources_and_mark(&kb, &marker);
+        assert!(again.ok, "{again:?}");
+        assert!(!marker.exists(), "恢复一致后陈旧标记不得残留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `kb.ingest_file` 必须登记来源记录，否则启动自检对生产流量恒为「不可校验」。
+    #[test]
+    fn ingest_file_registers_a_source_record_for_startup_audit() {
+        let dir =
+            std::env::temp_dir().join(format!("mgt-kb-ingest-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.md");
+        let body = format!(
+            "文件入库必须留下来源记录：记录入库时的 mtime 与字节数，重启后才能判断是否需要重建。{}",
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(&file, &body).unwrap();
+
+        let res = ingest_file(&json!({
+            "path": file.display().to_string(),
+            "root": dir.display().to_string(),
+        }));
+        assert_eq!(res["ingested"], true, "{res}");
+        let doc_id = res["doc_id"].as_str().expect("入库应有 doc_id").to_string();
+        let key = file.display().to_string();
+        let sources = sources_snapshot();
+        let hit = sources
+            .iter()
+            .find(|s| s.path == key)
+            .unwrap_or_else(|| panic!("ingest_file 必须登记来源记录: {sources:?}"));
+        assert_eq!(hit.doc_id, doc_id);
+        assert_eq!(hit.size, std::fs::metadata(&file).unwrap().len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

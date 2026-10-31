@@ -9,6 +9,7 @@
 //
 // 契约（与 core/src/agent/subagent.rs::ProgressReporter 对齐）：
 //   { kind: "orchestration", phase, runId, memberId?, role?, ... }
+// 产线帧同形状但带 `engine: "line"`，在 `handleFrame` 入口被排除（见该处注释）。
 // 事件归因用 meta.session（WS 帧的 meta 字段），而不是 payload.sessionKey ——
 // 后者只在部分 RPC 响应里出现。
 import { computed, getCurrentInstance, onBeforeUnmount, ref, watch } from 'vue'
@@ -392,6 +393,12 @@ export function useOrchestrationRuns(sessionKey: { readonly value: string }) {
   function handleFrame(frame: OrchestrationProgressFrame) {
     const payload = frame.payload
     if (!payload || payload.kind !== 'orchestration') return
+    // 产线（`line.run`）复用同一套相位词表发布进度，但它在对话流里有**自己的**
+    // 回执面（LineRunPanel）。这里的泳道卡是「一次编排 = 一条泳道，标签是表单」，
+    // 而 `form` 缺省会兜底成 `swarm` —— 拿它呈现一条 solo/panel/relay 产线就是说谎。
+    // 后端为此在帧上钉了 `engine: "line"`（不新造事件名，见计划 §7.1），所以在这
+    // 个入口按引擎归属分流，而不是在渲染层猜 runId 前缀。
+    if (payload.engine === 'line') return
     const current = sessionKey.value
     const frameSession = str(frame.meta?.session) || current
     if (!frameSession) return

@@ -287,6 +287,26 @@ pub fn find_profile<'a>(list: &'a [ShellProfile], id: &str) -> Option<&'a ShellP
     list.iter().find(|p| p.kind == kind)
 }
 
+/// 按**目标平台**判断绝对路径，而不是按当前宿主。
+///
+/// `Path::is_absolute()` 看的是宿主语义：在 Linux 上 `C:\Windows\...` 会被当成
+/// 一个普通文件名，于是「Windows 候选路径」直接掉进 PATH 搜索分支，结论从
+/// 「命中已知路径」变成「找不到」—— 同一份发现逻辑在两套 CI 上给出两套结果。
+/// 探测的是**哪个平台**的 shell，就按哪个平台的绝对路径规则来判。
+fn is_absolute_for(platform: Platform, path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    if platform != Platform::Windows {
+        return false;
+    }
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    let drive_absolute =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    drive_absolute || s.starts_with("\\\\")
+}
+
 /// 解析一条候选：`%VAR%` 展开 → 绝对路径直查 → 裸名走 PATH。
 fn resolve_candidate(
     kind: ShellKind,
@@ -311,7 +331,7 @@ fn resolve_candidate(
     }
     let expanded = expand_windows_env(raw, probe);
     let path = Path::new(&expanded);
-    if path.is_absolute() {
+    if is_absolute_for(probe.platform, path) {
         return (probe.exists)(path).then(|| (expanded.clone(), format!("known:{expanded}")));
     }
     // 裸程序名：Windows 补 PATHEXT，Unix 直接查。
@@ -327,13 +347,19 @@ fn resolve_candidate(
         ':'
     };
     for dir in path_var.split(sep).filter(|d| !d.trim().is_empty()) {
+        // 用**目标平台**的分隔符拼字符串，不要用 `Path::join`：后者在 Linux 上会拼成
+        // `C:\Tools/pwsh.exe`（正斜杠），既不符合 Windows 的真实路径形状，也让
+        // 「拼出来的 program 字符串」随宿主漂移（同一条断言在两套 CI 上不一样）。
+        let sep_char = if probe.platform == Platform::Windows {
+            '\\'
+        } else {
+            '/'
+        };
+        let dir_trimmed = dir.trim_end_matches(['\\', '/']);
         for suffix in suffixes {
-            let candidate = Path::new(dir).join(format!("{expanded}{suffix}"));
-            if (probe.exists)(&candidate) {
-                return Some((
-                    candidate.to_string_lossy().to_string(),
-                    format!("path:{}", Path::new(dir).display()),
-                ));
+            let candidate = format!("{dir_trimmed}{sep_char}{expanded}{suffix}");
+            if (probe.exists)(Path::new(&candidate)) {
+                return Some((candidate, format!("path:{dir_trimmed}")));
             }
         }
     }

@@ -22,6 +22,8 @@ pub mod patch;
 pub mod skill_tools;
 pub mod ssh;
 pub mod structured_output;
+/// 协作战术推演工具（tactics）：与 `tactics.*` RPC 同一批处理函数，不写第二套逻辑。
+pub mod tactics_tool;
 pub mod terminal;
 pub mod terminal_backend;
 pub mod trash;

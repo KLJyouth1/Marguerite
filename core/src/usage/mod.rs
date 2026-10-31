@@ -126,7 +126,9 @@ impl UsageLedger {
     /// 复现：流式 usage 记账随机丢失）。等待而非立即失败，保证台账必被点亮。
     pub fn new(db_path: &std::path::Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(db_path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // W3：三件套里含 busy_timeout=5s，口径与本函数原来那句一致。
+        // 用量台账是**每轮至少一条**的写入，DELETE+FULL 下每条都是一次 fsync。
+        crate::persistence::apply_sqlite_write_pragmas(&conn, "usage.db", "NORMAL");
         init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1695,7 +1697,13 @@ mod tests {
     }
 
     /// 预算「已用」必须由**真实台账事件**算出，且计量起点 = 预算设定时刻
-    /// （审计：SessionBudget 的已用字段全仓无人写入 ⇒ 剩余恒 100% 的假读数）。
+    /// （闭区间，与本模块其它窗口查询的 `created_ms >= ?` 口径一致）。
+    /// 审计背景：SessionBudget 的已用字段全仓无人写入 ⇒ 剩余恒 100% 的假读数。
+    ///
+    /// ⚠️ 闭区间的代价：与设定**同一毫秒**写入的事件会被算进「已用」。
+    /// 所以时距必须架在「事件 → 设定」之间；原先睡在设定之后根本保护不到这条边界，
+    /// W3（WAL+NORMAL）让两次写入快得能落进同一毫秒后，本仓 2026-10-30 闸门
+    /// 就以 `4000 != 3000` 红过一次。
     #[test]
     fn budget_snapshot_counts_only_events_after_budget_set() {
         let ledger = tmp_db("budget-since");
@@ -1703,8 +1711,8 @@ mod tests {
         ledger
             .record_attributed(None, "s1", "deepseek-v4-pro", &usage(1_000, 0))
             .unwrap();
-        ledger.set_session_budget("s1", Some(100_000), None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(3));
+        ledger.set_session_budget("s1", Some(100_000), None).unwrap();
         ledger
             .record_attributed(None, "s1", "deepseek-v4-pro", &usage(2_000, 1_000))
             .unwrap();

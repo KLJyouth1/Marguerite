@@ -77,9 +77,14 @@ impl AuditStore {
             }
         }
         let conn = Connection::open(&path)?;
+        // W3（2026-10-30）：**只借 WAL，不降 synchronous**。
+        // WAL 省掉的是「每条语句建一个 journal、提交后再删掉」这一整轮额外写，
+        // 而 FULL 保留的是「最后一条已提交的审计不能在掉电时消失」——那是安全属性，
+        // 不是性能参数，所以这里刻意不与 sessions/usage 两处对齐。
+        // 下面两个 RAISE(ABORT) 触发器（禁 UPDATE / 禁 DELETE）同样**不动**。
+        crate::persistence::apply_sqlite_write_pragmas(&conn, "audit.db", "FULL");
         conn.execute_batch(
-            "PRAGMA synchronous=FULL;
-             CREATE TABLE IF NOT EXISTS audit_log (
+            "CREATE TABLE IF NOT EXISTS audit_log (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  timestamp TEXT NOT NULL,
                  actor TEXT NOT NULL,

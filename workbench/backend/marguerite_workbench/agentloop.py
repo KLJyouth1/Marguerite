@@ -323,3 +323,7 @@ class AgentLoop:
                 "steps": len(result.steps),
             },
         })
+        # W8: the transcript handle stays open across a run (one open, not one
+        # per event); release it at the run boundary so long-lived servers do
+        # not accumulate fds.  A late append simply reopens — nothing is lost.
+        self.log.close()

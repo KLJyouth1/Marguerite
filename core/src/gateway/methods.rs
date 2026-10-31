@@ -52,6 +52,8 @@ use crate::gateway::sessions;
 use crate::gateway::shipped_gate;
 use crate::gateway::skills;
 use crate::gateway::system;
+use crate::gateway::tactics_rpc;
+use crate::gateway::line as line_rpc;
 use crate::gateway::team;
 use crate::gateway::tools;
 use crate::gateway::update;
@@ -321,6 +323,9 @@ pub(crate) const ASYNC_ONLY_METHODS: &[&str] = &[
     // 对话编排统一入口（P2·E）：single/subagent/team/expert/swarm 分发走 async
     // （subagent spawn、team.run、team.run.background 均需 async 上下文）
     "orchestrate.run",
+    // 对话产线派单：阶段串行执行、每阶段打模型，与 orchestrate.run 同一族；
+    // 其余 `line.*` 都是只读预演，走同步分派。
+    "line.run",
     // 编排终态对账：返回每会话最后一条进度帧（断线/丢帧后由前端拉取纠正状态）
     "orchestration.status",
     // 会话实时快照 / 延迟水合：在线走侧车（Rust 无流缓冲），离线返回诚实降级；
@@ -1008,6 +1013,8 @@ pub async fn dispatch(
         "orchestration.status" => {
             return crate::gateway::orchestrate::status(ctx, &params).await;
         }
+        // 对话产线派单：阶段串行、每阶段打模型，只能异步（见 ASYNC_ONLY_METHODS）。
+        "line.run" => return crate::gateway::line::line_run(ctx, &params).await,
         _ => {}
     }
     // 澄清问卷由 Rust 网关自己服务（见 gateway/clarify.rs）：必须在下方
@@ -2022,6 +2029,8 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         "assistant.prefs.list" => assistant::prefs_list(ctx, params),
         "assistant.prefs.pin" => assistant::prefs_pin(ctx, params),
         "assistant.prefs.unpin" => assistant::prefs_unpin(ctx, params),
+        // R-02：写回事实的真删除（外部工具的 Markdown 记忆不在此列，见 fn 文档）
+        "assistant.facts.delete" => assistant::facts_delete(ctx, params),
         "providers.status" => {
             // ⚠️ 形状契约：消费方 webui/src/views/OverviewView.vue:629 用
             // `Array.isArray(data?.providers)` 判别，返回**对象**会被直接丢弃 ⇒ 服务商表恒空。
@@ -2296,6 +2305,21 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         "harness.ledger.verdict" => harness_rpc::harness_ledger_verdict(params),
         // harness 运行面快照（只读；不构造模型、不落盘写业务数据）
         "harness.status" => harness_rpc::harness_status(),
+        // ── 战术推演（协作战术的确定性蒙特卡洛 + 可推翻的裁决）──
+        // `tactics.` 是新前缀，必须走 Rust 分支，绝不代理到 Python 侧车。
+        "tactics.catalog" => tactics_rpc::tactics_catalog(),
+        "tactics.simulate" => tactics_rpc::tactics_simulate(params),
+        // 回放要读 harness 台账；台账不可用时如实报 LEDGER_UNAVAILABLE，不编造场景。
+        "tactics.replay" => tactics_rpc::tactics_replay(params),
+        // ── 对话产线（形状规格 → 预演 → 计划 → 复盘）──
+        // `line.` 是新前缀，必须走 Rust 分支，绝不代理到 Python 侧车。
+        // 四个同步方法全是只读预演；唯一会真正派单的 `line.run` 只在异步分派注册
+        // （见 ASYNC_ONLY_METHODS）—— 阶段串行执行会打模型，同步路径没有这个能力。
+        "line.catalog" => line_rpc::line_catalog(),
+        "line.compile" => line_rpc::line_compile(params),
+        "line.preflight" => line_rpc::line_preflight(params),
+        "line.plan" => line_rpc::line_plan(params),
+        "line.retro" => line_rpc::line_retro(params),
         // ── 项目工作区（新建任务引导打开/创建项目文件夹；会话绑定项目根目录）──
         "workspaces.list" => crate::gateway::workspaces::list(params),
         "workspaces.open" => crate::gateway::workspaces::open(params),
@@ -2739,13 +2763,14 @@ mod local_hub_contract_tests {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
+        // Windows 会复用 PID：只删 models.json / pet_state.json 挡不住残留的
+        // config.yaml —— 2026-10-30 实测复用 PID 21912 后 memory.dream.auto_schedule
+        // 已是 true，镜像用例得不到 false→true 变更，恒假红。整目录重建。
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         // 线程局部覆盖须在**每个**用例线程生效，否则非首个线程会回落到真实 ~/.marguerite，
         // 既造成跨用例串扰，也会把用户的桌宠状态写坏。
         Config::set_config_dir_override(dir.clone());
-        // 目录是全新的；这两行保留是为了防御「目录名被复用」的情况。
-        let _ = std::fs::remove_file(dir.join("models.json"));
-        let _ = std::fs::remove_file(dir.join("pet_state.json"));
         GatewayContext {
             config: Config::default(),
             token: "t".into(),
@@ -3190,5 +3215,99 @@ mod desktop_rpc_contract_tests {
             let err = dispatch_sync(&ctx(), method, &json!({})).expect_err("sync 路径必须拒绝");
             assert_eq!(err.code, "ASYNC_ONLY", "{method} 的 sync 拒绝码不对: {err:?}");
         }
+    }
+}
+
+/// 对话产线 RPC 的分派契约守卫（设计文档 §4 的三同步口径）。
+///
+/// 五个只读预演：① `SUPPORTED_METHODS` ② `dispatch_rust` 同步臂 ③ 不落在 async-only。
+/// 一个真派单：`line.run` 必须是 async-only 且**没有**同步副本 —— 阶段串行会打模型，
+/// 留在同步路径上就是把整条 WS 通道押给一次 LLM 往返。
+#[cfg(test)]
+mod line_rpc_contract_tests {
+    use super::*;
+    use crate::gateway::protocol::SUPPORTED_METHODS;
+
+    const LINE_SYNC_METHODS: &[&str] = &[
+        "line.catalog",
+        "line.compile",
+        "line.preflight",
+        "line.plan",
+        "line.retro",
+    ];
+
+    fn ctx() -> GatewayContext {
+        GatewayContext {
+            config: Config::default(),
+            token: String::new(),
+            started_at: Instant::now(),
+            bus: Arc::new(EventBus::default()),
+        }
+    }
+
+    #[test]
+    fn line_read_only_rpcs_are_declared_and_reachable_sync() {
+        let src = include_str!("methods.rs");
+        for method in LINE_SYNC_METHODS {
+            assert!(
+                SUPPORTED_METHODS.contains(method),
+                "{method} 未在 SUPPORTED_METHODS 声明（前端 supportsMethod 会判 false）"
+            );
+            assert!(
+                !ASYNC_ONLY_METHODS.contains(method),
+                "{method} 是只读预演，不该被赶进 async-only"
+            );
+            let arm = format!("\"{method}\" => line_rpc::");
+            assert!(
+                src.contains(&arm),
+                "{method} 在 dispatch_rust 缺少同步臂（宣称≠可达）"
+            );
+        }
+    }
+
+    #[test]
+    fn line_run_is_async_only_with_a_single_implementation() {
+        let src = include_str!("methods.rs");
+        assert!(
+            SUPPORTED_METHODS.contains(&"line.run"),
+            "line.run 未声明 → 对话页的产线按钮永远是灰的"
+        );
+        assert!(
+            ASYNC_ONLY_METHODS.contains(&"line.run"),
+            "line.run 未列入 ASYNC_ONLY_METHODS（同步路径会阻塞在模型往返上）"
+        );
+        assert!(
+            src.contains("\"line.run\" => return crate::gateway::line::line_run("),
+            "line.run 缺少异步 dispatch 臂"
+        );
+        assert!(
+            dispatch_rust(&ctx(), "line.run", &json!({})).is_null(),
+            "line.run 不得再有同步副本（两处实现必然漂移）"
+        );
+        let err = dispatch_sync(&ctx(), "line.run", &json!({}))
+            .expect_err("sync 路径必须拒绝产线派单");
+        assert_eq!(err.code, "ASYNC_ONLY");
+    }
+
+    /// 六条一个不能少：前端契约里出现但网关没声明的方法 = 幽灵声明。
+    #[test]
+    fn line_method_surface_is_exactly_six() {
+        let declared: Vec<&str> = SUPPORTED_METHODS
+            .iter()
+            .copied()
+            .filter(|m| m.starts_with("line."))
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                "line.catalog",
+                "line.compile",
+                "line.preflight",
+                "line.plan",
+                "line.run",
+                "line.retro"
+            ],
+            "产线方法面必须与设计文档 §4 逐字对齐"
+        );
     }
 }

@@ -132,6 +132,25 @@ pub fn prune_dir_to_budget(dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// [`prune_dir_to_budget`] 的显式预算版本（供单测用小预算驱动）。
 pub fn prune_dir_to_budget_with(dir: &Path, budget: u64) -> io::Result<Vec<PathBuf>> {
+    prune_dir_matching_to_budget(dir, budget, &|name| name.starts_with(LOG_NAME_PREFIX))
+}
+
+/// 通用版：**由调用方判定哪些文件属于自己**，把目录总量压回 `budget`，
+/// 按 mtime 删最旧、永不删最新那一份。返回被删的路径。
+///
+/// 为什么要抽这一层：`context/` 台账目录与路由决策日志（W4）需要的正是同一套
+/// 「从最旧开始删到预算内」的逻辑，而本仓已经有两份各自实现的轮转，不该再来第三份。
+/// 判定条件用闭包而不是前缀：台账目录认的是 `.json` 后缀，而且要**排除**
+/// `*.corrupt-*.json` 那份隔离件 —— 它是损坏台账唯一的人工恢复凭据，
+/// 不该在预算压力下被静默回收。
+///
+/// ⚠️ 与侧车版同样的取舍：**mtime 最新的一份永不删**。对台账目录来说「最新」
+/// 极可能就是正在被这个进程读写的那份会话，删掉它等于把历史就地抹掉。
+pub fn prune_dir_matching_to_budget(
+    dir: &Path,
+    budget: u64,
+    belongs: &dyn Fn(&str) -> bool,
+) -> io::Result<Vec<PathBuf>> {
     let mut candidates: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(Vec::new());
@@ -145,7 +164,7 @@ pub fn prune_dir_to_budget_with(dir: &Path, budget: u64) -> io::Result<Vec<PathB
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.starts_with(LOG_NAME_PREFIX) {
+        if !belongs(name) {
             continue;
         }
         let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -307,6 +326,53 @@ mod tests {
         let path = dir.join("sidecar-4.err.log");
         fs::write(&path, "x".repeat(10)).unwrap();
         assert!(prune_dir_to_budget_with(&dir, 1_000_000).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// W4：判定条件由调用方给 ⇒ 台账目录可以只认 `.json`，而侧车规则不会误伤它。
+    /// 两侧都要断言：既不能被侧车口径捞走，也不能反过来误删侧车文件。
+    #[test]
+    fn prune_with_custom_predicate_scopes_to_that_namespace() {
+        let dir = temp_dir("prefix");
+        let ledger_old = dir.join("sess-a.json");
+        let ledger_new = dir.join("sess-b.json");
+        let sidecar = dir.join("sidecar-1.err.log");
+        fs::write(&ledger_old, "a".repeat(1000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&ledger_new, "b".repeat(1000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&sidecar, "c".repeat(1000)).unwrap();
+
+        // 只算 `.json`：总量 2000，预算 1500 ⇒ 删最旧那一份就达标。
+        let is_ledger = |n: &str| n.ends_with(".json");
+        let removed = prune_dir_matching_to_budget(&dir, 1_500, &is_ledger).unwrap();
+        assert_eq!(removed.len(), 1, "预算内只需删最旧一份: {removed:?}");
+        assert!(!ledger_old.exists(), "命名空间内最旧的一份必须被回收");
+        assert!(ledger_new.exists(), "最新一份永不删");
+        assert!(sidecar.exists(), "不属于这个命名空间的文件不得被波及");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 台账命名空间的真实口径：认 `.json`，但**排除** `*.corrupt-*.json` 隔离件 ——
+    /// 那是损坏台账唯一的人工恢复凭据，不该在预算压力下被静默回收。
+    #[test]
+    fn ledger_predicate_skips_quarantined_copies() {
+        let dir = temp_dir("quarantine");
+        let ledger_old = dir.join("sess-a.json");
+        let ledger_new = dir.join("sess-b.json");
+        let corrupt = dir.join("sess-z.corrupt-1730000000000.json");
+        fs::write(&ledger_old, "a".repeat(1000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&corrupt, "c".repeat(1000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&ledger_new, "b".repeat(1000)).unwrap();
+
+        let is_ledger = |n: &str| n.ends_with(".json") && !n.contains(".corrupt-");
+        let removed = prune_dir_matching_to_budget(&dir, 100, &is_ledger).unwrap();
+        assert_eq!(removed.len(), 1, "只有真台账参与回收: {removed:?}");
+        assert!(!ledger_old.exists(), "最旧的一份台账必须被回收");
+        assert!(corrupt.exists(), "隔离件必须活过预算回收");
+        assert!(ledger_new.exists(), "最新一份仍受保护");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -19,7 +19,7 @@ import type { Component } from 'vue'
  * `PluginSlot` (core/src/plugins/slot.rs), which models tool/skill/MCP capability
  * slots rather than UI surfaces; the two only agree on the id namespace idea.
  */
-export type UiSlotId = 'sidebar.nav' | 'sidebar.footer' | 'topbar.actions'
+export type UiSlotId = 'sidebar.nav' | 'sidebar.footer' | 'topbar.actions' | 'shell.overlay'
 
 /** Reserved id namespace — owned by the host. */
 export const HOST_ID_NAMESPACE = 'core'

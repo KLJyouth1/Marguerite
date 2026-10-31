@@ -172,6 +172,8 @@ pub fn register_builtin_tools_with_roots(
         // `artifacts.*` 与 `team.members` RPC 处理函数，界面与工具面共用同一份数据。
         crate::tools::workbench::artifacts_tool(),
         crate::tools::workbench::team_board_tool(),
+        // 协作战术推演：纯计算、只读，与 `tactics.*` RPC 共用处理函数。
+        crate::tools::tactics_tool::tactics_tool(),
         crate::tools::code::code_exec_tool(),
         crate::tools::structured_output::structured_output_tool(),
         web_fetch_tool(ssrf.clone()),

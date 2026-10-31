@@ -107,6 +107,7 @@
       <header class="sec-head">
         <p class="sec-index">ONE ENGINE · FOUR ENTRIES</p>
         <h2 class="sec-title" id="entriesTitle">Same core, four ways in</h2>
+        <p class="sec-take">Four surfaces on one binary — pick the entry, not the engine.</p>
       </header>
       <div class="cards">
         <article class="card">
@@ -142,6 +143,7 @@
       <header class="sec-head">
         <p class="sec-index">VERIFIABLE, NOT ADJECTIVAL</p>
         <h2 class="sec-title" id="proofTitle">Every number below can be re-run from the repo</h2>
+        <p class="sec-take">These are exit codes and checksums, not adjectives — run the commands and see.</p>
       </header>
       <div class="cards">
         <article class="card">
@@ -149,7 +151,7 @@
           <p class="card__body"><code>bash scripts/verify.sh --clean --all</code> runs the whole matrix. A skipped check is never counted as a pass — this repo treats “silent green” as a defect.</p>
         </article>
         <article class="card">
-          <h3 class="card__title">451 RPC methods, 0 phantom</h3>
+          <h3 class="card__title">470 RPC methods, 0 phantom</h3>
           <p class="card__body">Every declared method has an implementation, and the contract guard fails the build when a front-end calls a method the gateway never declared.</p>
         </article>
         <article class="card">
@@ -157,9 +159,35 @@
           <p class="card__body">The gateway binds <code>127.0.0.1</code> only. LAN requests are refused; there is no “enable remote” switch hidden in settings.</p>
         </article>
         <article class="card">
-          <h3 class="card__title">MIT, no telemetry</h3>
-          <p class="card__body">Source is MIT. The app ships no analytics endpoint; the only outbound calls are the model provider you configure yourself.</p>
+          <h3 class="card__title">No telemetry, no account</h3>
+          <p class="card__body">The app ships no analytics endpoint and requires no sign-in. The only outbound calls are the model provider you configure yourself.</p>
         </article>
+        <article class="card">
+          <h3 class="card__title">7 tactics, 5 team topologies</h3>
+          <p class="card__body"><code>tactics.simulate</code> rehearses solo, star, panel, swarm and relay before a real run. Each tactic gets 2,000 seeded trials; insufficient priors go to <code>unknowns</code> instead of being counted as zero.</p>
+        </article>
+        <article class="card">
+          <h3 class="card__title">858 native-hardened Python modules</h3>
+          <p class="card__body">Of 1,018 sidecar modules, 858 compile to native <code>.pyd</code>. The remaining 160 are plaintext entry points and shims listed in the release manifest — disclosed, not hidden, and checked for stray source before packaging.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band--alt" id="recent" aria-labelledby="recentTitle">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="sec-index">RECENT WORK · 30–31 OCTOBER</p>
+        <h2 class="sec-title" id="recentTitle">What shipped in the last two days</h2>
+      </header>
+      <div class="chg">
+        <ul class="chg__notes">
+          <li><b>Attention-first workbench</b> — <code>webui/src/composables/ui/attentionQueue.ts</code> folds approvals, blockers, failures and pending choices into one composite score (recency bonus inside 30 minutes, stable tie-break by time then id); <code>webui/src/components/ui/AttentionShelf.vue</code> renders nothing when no human is needed, and motion fires only on state changes, degrading to opacity-only under reduced motion.</li>
+          <li><b>Command deck and work phase</b> — <code>webui/src/components/shell/CommandDeck.vue</code> shows the current phase, its reason and the next actions, with actions supplied only by the caller and an empty list rendering nothing; <code>webui/src/composables/shell/useWorkPhase.ts</code> derives the phase (review &gt; execute &gt; explore &gt; idle) and falls back to idle whenever a signal is missing.</li>
+          <li><b>Desktop title bar</b> — <code>webui/src/components/shell/TitleBarControls.vue</code> renders minimise, maximise, close and the drag region only inside the Tauri shell; a plain browser pointed at the gateway gets no dead controls.</li>
+          <li><b>Two-layer assistant projection</b> — <code>core/src/assistant/projection.rs</code> gives L1 only facts that cannot be derived from the current workspace and gives L2 only this project's sources and profile, while pinned facts survive both layers; before this, both layers read the same brief with only a different character budget.</li>
+          <li><b>Knowledge-base drift audit on startup</b> — <code>core/src/kb/gateway.rs</code> reconciles indexed source records against disk in a background task, writes <code>rebuild_required.json</code> plus a warning on drift and clears a stale marker when everything matches, without rebuilding implicitly.</li>
+        </ul>
       </div>
     </div>
   </section>
@@ -169,6 +197,7 @@
       <header class="sec-head">
         <p class="sec-index">SCREENSHOTS</p>
         <h2 class="sec-title" id="screensTitle">Real UI, not renders</h2>
+        <p class="sec-take">Captured from a live session, so your screen should match ours pixel for pixel.</p>
       </header>
       <div class="shots">
         <figure class="shot">
@@ -186,6 +215,7 @@
       <header class="sec-head">
         <p class="sec-index">DOWNLOAD</p>
         <h2 class="sec-title" id="downloadTitle">Windows x64</h2>
+        <p class="sec-take">Offline installers with a published SHA256 — verify the hash before you trust the bytes.</p>
       </header>
       <p class="hero__lede">
         The installer bundles an offline WebView2 runtime (~205 MB) and a bundled Python 3.12 (~210 MB),
@@ -213,7 +243,7 @@
     <nav class="foot__col" aria-label="Repository">
       <h2 class="foot__h">Repository</h2>
       <ul>
-        <li><a href="https://github.com/KLJyouth1/Marguerite" rel="noopener">Source (MIT)</a></li>
+        <li><span class="foot__soon">Source · Marguerite (coming soon)</span></li>
         <li><a href="https://github.com/KLJyouth1/Marguerite-Releases/releases" rel="noopener">Releases</a></li>
       </ul>
     </nav>

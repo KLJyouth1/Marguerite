@@ -78,17 +78,41 @@ def next_seq() -> int:
 
 
 class SessionLog:
-    """Append-only JSONL transcript for one session id."""
+    """Append-only JSONL transcript for one session id.
+
+    Durability is unchanged from the original per-event implementation: every
+    ``append`` still lands on disk before returning.  What changed (W8, the
+    SSD write-amplification item) is *how* it gets there: the file handle used
+    to be opened and closed for every single event, which on Windows costs a
+    path re-resolution plus a sharing/AV check per event on top of the write
+    itself.  The handle is now opened once, kept in append mode, and flushed
+    per line, so the transcript keeps its "never rewritten" invariant while
+    the syscall count drops from ``2 * events`` to ``O(1)``.
+    """
 
     def __init__(self, sessions_dir: Path, session_id: str | None = None) -> None:
         self.session_id = session_id or f"s_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self.path = Path(sessions_dir) / f"{self.session_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._fh = None
+        self.appends = 0
+        self.opens = 0
+
+    def _handle(self) -> Any:
+        """Return the shared append handle, opening it on first use or after close."""
+        if self._fh is None:
+            self._fh = self.path.open("a", encoding="utf-8")
+            self.opens += 1
+        return self._fh
 
     def append(self, record: dict[str, Any]) -> dict:
-        line = json.dumps(record, ensure_ascii=False, default=str)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        with self._lock:
+            fh = self._handle()
+            fh.write(line)
+            fh.flush()
+            self.appends += 1
         return record
 
     def read_all(self) -> list[dict]:
@@ -101,6 +125,28 @@ class SessionLog:
                 if line:
                     out.append(json.loads(line))
         return out
+
+    def close(self) -> None:
+        """Release the handle; a later ``append`` transparently reopens it."""
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.flush()
+                finally:
+                    self._fh.close()
+                    self._fh = None
+
+    def __enter__(self) -> "SessionLog":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover — safety net, not a contract
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 — interpreter teardown must not raise
+            pass
 
 
 class PollingTap:

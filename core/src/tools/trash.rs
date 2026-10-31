@@ -399,11 +399,13 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 目录占用的字节数 = **递归累加其中文件的大小**。
+///
+/// 不要把目录自身的 `metadata.len()` 加进来：Windows 上目录恒为 0，Linux/ext4 上是
+/// 4096 —— 同一个目录在两套宿主上会给出两个数（实测 `8195` vs `3`，CI 的 ubuntu
+/// 作业因此判红）。「目录多大」在回收站语境下只有一个有意义的口径：**里面的内容多大**。
 fn dir_size(p: &Path) -> u64 {
     let mut total = 0u64;
-    if let Ok(meta) = std::fs::symlink_metadata(p) {
-        total = total.saturating_add(meta.len());
-    }
     if let Ok(entries) = std::fs::read_dir(p) {
         for e in entries.flatten() {
             let path = e.path();

@@ -245,6 +245,115 @@ fn t11_decision_log_format_and_hashing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// W4③：决策日志必须**有上限**，而且轮转在 Windows 上真的跑得起来。
+///
+/// 这条同时钉住两个坑：
+/// 1. 它原本是纯 append、永不轮转 —— 每行还带完整 `steps` 轨迹，长任务下只增不减；
+/// 2. 写句柄 `f` 若没在轮转之前释放，`fs::rename` 在 Windows 上会因共享冲突失败。
+///    而失败是被 `warn` 吞掉的，所以断言看的是「`.1` 真的出现了」，
+///    不是「调用没报错」—— 后者在句柄泄漏时照样成立，正是假绿。
+#[test]
+fn t13_decision_log_rotation_caps_generations() {
+    let dir = std::env::temp_dir().join(format!(
+        "marg_router_rot_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("创建临时日志目录");
+
+    let model = "deepseek-v4-pro";
+    // 阈值给小：真实门槛是 10 MB，让单测先写满 10 MB 是在制造体积而不是验证语义。
+    const ROTATE_AT: u64 = 2048;
+    let mut d = classify(&input("用 cargo 重构这段代码"));
+    d.steps = vec![
+        PipelineStepRecord {
+            step_name: "rule_match".to_string(),
+            applied: true,
+            routing_source: "Rule".to_string(),
+            fallback_reason: None,
+        };
+        6
+    ];
+    let turns = 30usize;
+    for i in 0..turns {
+        DecisionLog::record_to_dir_with_rotation(
+            &d,
+            "sess-1",
+            &format!("turn-{i}"),
+            model,
+            &dir,
+            ROTATE_AT,
+        )
+        .unwrap();
+    }
+
+    let path = dir.join("router_decision_log.jsonl");
+    let rotated = dir.join("router_decision_log.jsonl.1");
+    assert!(
+        rotated.exists(),
+        "超过阈值必须切出 .1 一代（未切出=轮转没生效，多为写句柄未在 rename 前释放）"
+    );
+
+    // 单代封顶：写入返回后当前代必须回到阈值以下。
+    // 最后一次 append 若正好触发轮转，当前代此刻是被切走的状态（下一次写才新建）⇒ 视作 0。
+    let cur_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    assert!(
+        cur_bytes < ROTATE_AT,
+        "当前代必须小于阈值，实测 {cur_bytes} ≥ {ROTATE_AT}"
+    );
+
+    // 代数封顶：只允许 .1 / .2 两代历史，不得出现 .3。
+    assert!(
+        !dir.join("router_decision_log.jsonl.3").exists(),
+        "历史代数必须封顶（保留 {} 代含当前代）",
+        crate::observability::rotation::KEEP_GENERATIONS
+    );
+
+    // 存活内容仍是合法 JSONL，且明文模型名红线跨代同样成立。
+    let mut surviving: Vec<String> = vec![];
+    let mut total_bytes = 0u64;
+    for name in [
+        "router_decision_log.jsonl",
+        "router_decision_log.jsonl.1",
+        "router_decision_log.jsonl.2",
+    ] {
+        let p = dir.join(name);
+        let Ok(mut f) = std::fs::File::open(&p) else { continue };
+        let mut content = String::new();
+        f.read_to_string(&mut content).unwrap();
+        total_bytes += content.len() as u64;
+        assert!(!content.contains(model), "{name} 不得含明文模型名");
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("{name} 轮转后应逐行可解析: {e}"));
+            assert_eq!(v["schema_version"], 1, "{name} 应含 schema_version=1");
+            surviving.push(v["turn_id"].as_str().unwrap_or_default().to_string());
+        }
+    }
+
+    assert!(
+        surviving.contains(&"turn-29".to_string()),
+        "轮转后最新一次写入仍须落盘（append 语义不能因轮转而断掉）"
+    );
+    assert!(
+        !surviving.contains(&"turn-0".to_string()),
+        "有界保留必须真的丢最老的一代，否则只是把无限增长换了个名字"
+    );
+    assert!(
+        (surviving.len() as u64) < turns as u64,
+        "总量必须小于未轮转的 {} 行，实测存活 {} 行",
+        turns,
+        surviving.len()
+    );
+    assert!(
+        total_bytes < ROTATE_AT * crate::observability::rotation::KEEP_GENERATIONS as u64 + 4096,
+        "合起来的体积必须有界，实测 {total_bytes}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── P1-4：复杂任务不应被压到 General/T0 ──
 
 #[test]

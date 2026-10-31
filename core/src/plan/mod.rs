@@ -9,7 +9,7 @@
 //! 借鉴 TUI 工作台 `update_plan` 的 PlanStep 状态机 + Marguerite `session/plans.py`
 //! 的 revision/run 分离（不可变修订 + 运行实例）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -237,9 +237,10 @@ pub struct PlanRun {
 
 /// plans.json 专用写线程（惰性启动）。
 ///
-/// 计划执行路径上 `PlanStore::save()` 被高频调用，而 plans.json 随历史运行
-/// 无界增长（实测 463KB / 194 runs）。同步 `std::fs::write` 会把 tokio worker
-/// 占住，连带同 runtime 的 WebSocket 事件循环停摆——用户侧就是「一跑任务
+/// 计划执行路径上 `PlanStore::save()` 被高频调用，而每次都是整份 JSON 重写
+/// （历史曾无界增长，实测 463KB / 194 runs；现由 `prune_runs` 封顶，见 W4②）。
+/// 同步 `std::fs::write` 会把 tokio
+/// worker 占住，连带同 runtime 的 WebSocket 事件循环停摆——用户侧就是「一跑任务
 /// 就和后端断连」（tick 停发 → 前端心跳超时 → 被动重连）。
 ///
 /// 这里用一条专用线程做磁盘 IO，并**合并连续快照**（只落最后一份），
@@ -281,12 +282,22 @@ fn plan_write_tx() -> Option<&'static std::sync::mpsc::Sender<String>> {
     }))
 }
 
+/// 终态运行实例的保留条数（W4②；非终态一律保留，不受此数约束）。
+const RUN_HISTORY_KEEP: usize = 200;
+
 /// 计划存储（单例 + 落盘 `data_dir/plans.json`）
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlanStore {
     pub revisions: Vec<PlanRevision>,
     pub runs: Vec<PlanRun>,
     next_generation: u32,
+    /// 历史运行实例被回收的累计条数（W4②）。旧文件缺字段 ⇒ `default` 为 0。
+    ///
+    /// 这不是装饰：删掉用户的历史却不留任何可查的痕迹，界面就只能把
+    /// 「已经裁了 800 条」显示成「你一共只有 200 条运行记录」——
+    /// 本项目明令禁止这种「不知道/不存在」冒充（见 R57）。
+    #[serde(default)]
+    pub runs_pruned: u64,
 }
 
 impl PlanStore {
@@ -295,10 +306,88 @@ impl PlanStore {
     }
 
     fn load() -> Self {
-        std::fs::read_to_string(Self::path())
+        let mut store: Self = std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // W4②：启动即把历史 run 裁进窗口（只动内存；磁盘等下一次 save 顺带收敛，
+        // 不专门多写一遍 —— 那次「为了变小而写」正是本轮要消灭的多余写入）。
+        store.prune_runs();
+        store
+    }
+
+    /// 裁剪历史运行实例（W4②），返回本次被回收的条数，并把累计写进 `runs_pruned`。
+    ///
+    /// 为什么必须裁：`save()` 是**全量 pretty 重写**（见上面写线程的注释），
+    /// 实测 463 KB / 194 runs，而计划执行路径上每步会 save 多次 ⇒ 每步都把整份
+    /// 历史重抄一遍到盘上。这既是本轮 SSD 写入放大的主项，也让文件本身无界增长。
+    /// 封顶条数后，单次重写成本同时封顶。
+    ///
+    /// 保留口径（两条红线）：
+    /// - **只裁终态**（Completed / Cancelled / Superseded）。Running / Queued / Paused /
+    ///   Blocked 一条都不删 —— 删掉没跑完的 run 会让 `run_id` 查不到、状态机断线，
+    ///   那是数据损坏，不是清理。
+    /// - 按结束时间倒序留最新 [`RUN_HISTORY_KEEP`] 条，其余回收并留痕。
+    ///
+    /// 已知代价（刻意接受）：极老的 Completed run 被裁后，
+    /// [`Self::find_latest_by_fingerprint`] 不再把对应修订当「继续上次计划」的候选。
+    /// 窗口取 200 条运行，正常机器上远不到达；真的到了，也宁可有界而留计数痕迹。
+    fn prune_runs(&mut self) -> usize {
+        let key = |r: &PlanRun| {
+            (
+                r.finished_at.unwrap_or(r.created_at),
+                r.created_at,
+                r.run_id.clone(),
+            )
+        };
+        // 排序键带 run_id 兜底：同一毫秒结束的多条 run 也得有确定先后，
+        // 否则「保留哪 200 条」随到达顺序漂移 —— 同一份文件两次启动裁掉不同批次，
+        // 用户视角就是随机失忆。
+        let mut terminal: Vec<usize> = self
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                matches!(
+                    r.status,
+                    RunStatus::Completed | RunStatus::Cancelled | RunStatus::Superseded
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if terminal.len() <= RUN_HISTORY_KEEP {
+            return 0;
+        }
+        terminal.sort_by(|&a, &b| key(&self.runs[b]).cmp(&key(&self.runs[a])));
+        let drop: HashSet<usize> = terminal[RUN_HISTORY_KEEP..].iter().copied().collect();
+
+        // 选完「丢哪些」再回到**原顺序**做 retain：直接 sort self.runs 会改写 run 的
+        // 相对顺序，而 `plans.list` 正是按这个顺序喂给前端的 —— 清理不该顺手把
+        // 列表排序也改了（那是用户看得见的行为变化，不在本次范围内）。
+        let before = self.runs.len();
+        let mut idx = 0usize;
+        self.runs.retain(|_| {
+            let keep = !drop.contains(&idx);
+            idx += 1;
+            keep
+        });
+        let removed = before - self.runs.len();
+        if removed > 0 {
+            self.runs_pruned += removed as u64;
+            tracing::info!(
+                removed,
+                retained = self.runs.len(),
+                total_pruned = self.runs_pruned,
+                keep = RUN_HISTORY_KEEP,
+                "plans.json 历史运行实例已裁剪（只裁终态；累计计数落盘，界面可如实显示）"
+            );
+        }
+        removed
+    }
+
+    /// 当前保留的 run 条数（单测与 W7 存储面板用）。
+    pub fn retained_runs(&self) -> usize {
+        self.runs.len()
     }
 
     /// 落盘（见 `save` 的说明：序列化后投递给专用写线程，避免同步磁盘 IO
@@ -308,11 +397,13 @@ impl PlanStore {
             return;
         };
         // 落盘卸载到专用线程：`save()` 在计划执行的关键路径上被高频调用
-        // （每步多次），而 plans.json 随历史运行无界增长（实测 463KB/194 runs）。
+        // （每步多次），而每次都是整文件重写。
         // 同步 `std::fs::write` 会把 tokio worker 占住数十毫秒到数秒，
         // 连带同 runtime 的 WS 事件循环停摆——表现为长任务期间 tick 停发、
         // 前端心跳超时后被动重连（「运行任务就和后端断连」的根因之一）。
         // 这里只做序列化 + 投递，磁盘 IO 与并发合并在写线程里完成。
+        // 文件本体已由 `prune_runs` 封顶在 `200 条终态 run + 未跑完的` 量级
+        // （W4②）；单次重写的成本随窗口封顶，不再随历史长度线性增长。
         if let Some(tx) = plan_write_tx() {
             let _ = tx.send(raw);
         } else {
@@ -468,6 +559,9 @@ impl PlanStore {
             terminal_reason: None,
         };
         self.runs.push(run.clone());
+        // W4②：新建运行是 runs 唯一的增量入口 ⇒ 裁剪挂在这里，`save()` 的
+        // 全量重写成本随窗口封顶（不为了立刻收敛磁盘另开一次写）。
+        self.prune_runs();
         self.save();
         Some(run)
     }
@@ -1972,6 +2066,7 @@ mod tests {
             revisions: vec![rev],
             runs: Vec::new(),
             next_generation: 1,
+            runs_pruned: 0,
         };
         let run = s.start_run("rev-fixed").expect("受控修订应能开跑");
         (s, run)
@@ -2588,5 +2683,165 @@ mod tests {
             edit_steps_on_store(&mut s, &rev.revision_id, StepEditAction::Update, &json!({}))
                 .is_none()
         );
+    }
+
+    // ── W4②（2026-10-30）：plans.json 历史运行实例必须有界 ──
+
+    /// 造一条只填「裁剪看得见」字段的运行实例（避免每个用例重复 14 行构造）。
+    fn run_of(id: &str, status: RunStatus, finished_at: Option<u64>) -> PlanRun {
+        PlanRun {
+            run_id: id.to_string(),
+            plan_id: "plan-1".to_string(),
+            revision_id: "rev-1".to_string(),
+            status,
+            current_step_id: None,
+            steps: vec![],
+            checklist: vec![],
+            parallel_batch: None,
+            replan: None,
+            created_at: finished_at.unwrap_or(0),
+            started_at: None,
+            finished_at,
+            terminal_reason: None,
+        }
+    }
+
+    fn ids(store: &PlanStore) -> Vec<String> {
+        store.runs.iter().map(|r| r.run_id.clone()).collect()
+    }
+
+    #[test]
+    fn terminal_run_history_is_capped_but_live_runs_are_never_pruned() {
+        // 250 条终态 + 3 条没跑完的（故意给最老的 created_at）。
+        let mut runs: Vec<PlanRun> = (0..250)
+            .map(|i| run_of(&format!("run-{i:03}"), RunStatus::Completed, Some(i as u64)))
+            .collect();
+        runs.push(run_of("live-a", RunStatus::Running, None));
+        runs.push(run_of("live-b", RunStatus::Paused, None));
+        runs.push(run_of("live-c", RunStatus::Queued, None));
+        let mut store = PlanStore {
+            revisions: vec![],
+            runs,
+            next_generation: 0,
+            runs_pruned: 0,
+        };
+
+        let removed = store.prune_runs();
+        assert_eq!(
+            removed,
+            250 - RUN_HISTORY_KEEP,
+            "终态超出窗口的部分才该被回收"
+        );
+        assert_eq!(store.retained_runs(), RUN_HISTORY_KEEP + 3, "窗口 + 全部非终态");
+
+        let left = ids(&store);
+        assert!(left.contains(&"run-249".to_string()), "最新一条必须留下");
+        assert!(
+            left.contains(&format!("run-{:03}", 250 - RUN_HISTORY_KEEP)),
+            "窗口边界那条刚好在界内，不该被裁"
+        );
+        assert!(!left.contains(&"run-000".to_string()), "最老的终态应被回收");
+        for live in ["live-a", "live-b", "live-c"] {
+            assert!(
+                left.contains(&live.to_string()),
+                "{live} 还没跑完就被裁 = 丢状态，那是数据损坏不是清理"
+            );
+        }
+        assert_eq!(store.runs_pruned, removed as u64, "回收数必须累计进计数");
+
+        // 裁剪只删不改序：`plans.list` 按 runs 的相对顺序喂前端，
+        // 顺带把列表排序改掉是用户看得见的行为变化，不属于「清理」。
+        // 保留的是**最新** `RUN_HISTORY_KEEP` 条终态 ⇒ 窗口起点是 `250 - RUN_HISTORY_KEEP`，
+        // 与本用例前面「窗口边界那条刚好在界内」那条断言同一个口径。
+        assert_eq!(
+            ids(&store),
+            (250 - RUN_HISTORY_KEEP..250)
+                .map(|i| format!("run-{i:03}"))
+                .chain(["live-a", "live-b", "live-c"].map(str::to_string))
+                .collect::<Vec<String>>(),
+            "留下的应该就是窗口内那批 + 全部非终态，且相对顺序与输入一致"
+        );
+    }
+
+    #[test]
+    fn pruning_is_a_no_op_until_the_window_is_exceeded() {
+        let runs: Vec<PlanRun> = (0..RUN_HISTORY_KEEP)
+            .map(|i| run_of(&format!("run-{i:03}"), RunStatus::Completed, Some(i as u64)))
+            .collect();
+        let mut store = PlanStore {
+            revisions: vec![],
+            runs,
+            next_generation: 0,
+            runs_pruned: 0,
+        };
+        assert_eq!(store.prune_runs(), 0, "刚好在窗口内不该动手");
+        assert_eq!(store.retained_runs(), RUN_HISTORY_KEEP);
+        assert_eq!(store.runs_pruned, 0, "没裁过就不能凭空记一笔");
+
+        store.runs.push(run_of("over", RunStatus::Completed, Some(999)));
+        assert_eq!(store.prune_runs(), 1, "超一条就裁一条");
+        assert_eq!(store.retained_runs(), RUN_HISTORY_KEEP);
+    }
+
+    #[test]
+    fn pruning_the_same_history_is_deterministic_regardless_of_arrival_order() {
+        // 同一毫秒结束的 run：保留哪几条不能取决于它们以什么顺序进来，
+        // 否则「重启后加载的顺序」会决定历史被裁掉哪些（用户视角是随机失忆）。
+        let n = RUN_HISTORY_KEEP + 3;
+        let make = |reverse: bool| -> PlanStore {
+            let mut runs: Vec<PlanRun> = (0..n)
+                .map(|i| run_of(&format!("run-{i:03}"), RunStatus::Completed, Some(100)))
+                .collect();
+            if reverse {
+                runs.reverse();
+            }
+            PlanStore {
+                revisions: vec![],
+                runs,
+                next_generation: 0,
+                runs_pruned: 0,
+            }
+        };
+        let (mut a, mut b) = (make(false), make(true));
+        a.prune_runs();
+        b.prune_runs();
+        let mut got = ids(&a);
+        let mut other = ids(&b);
+        got.sort();
+        other.sort();
+        assert_eq!(got, other, "同一份历史两种到达顺序必须裁出同一批");
+        assert_eq!(got.len(), RUN_HISTORY_KEEP);
+        assert!(got.contains(&format!("run-{:03}", n - 1)));
+        assert!(!got.contains(&"run-000".to_string()), "最旧的运行实例应被裁掉");
+    }
+
+    #[test]
+    fn pruning_leaves_a_trace_that_survives_the_roundtrip() {
+        // R57：删用户历史必须留痕。留痕要能落盘、能被旧文件兼容读回。
+        let runs: Vec<PlanRun> = (0..(RUN_HISTORY_KEEP + 7))
+            .map(|i| run_of(&format!("run-{i:03}"), RunStatus::Completed, Some(i as u64)))
+            .collect();
+        let mut store = PlanStore {
+            revisions: vec![],
+            runs,
+            next_generation: 0,
+            runs_pruned: 0,
+        };
+        let removed = store.prune_runs();
+        assert_eq!(removed, 7);
+
+        let raw = serde_json::to_value(&store).unwrap();
+        assert_eq!(raw["runs_pruned"], 7, "计数必须进文件，不然界面无从显示");
+        assert_eq!(
+            raw["runs"].as_array().map(|a| a.len()).unwrap_or(0),
+            RUN_HISTORY_KEEP,
+            "落盘的 runs 就是裁剪后的那一份"
+        );
+
+        // 老版本 plans.json 没有这个字段 ⇒ 缺省 0、不得报错（零迁移）。
+        let legacy = json!({ "revisions": [], "runs": [], "next_generation": 3 });
+        let back: PlanStore = serde_json::from_value(legacy).unwrap();
+        assert_eq!(back.runs_pruned, 0, "旧文件缺字段应回落到 0");
+        assert_eq!(back.next_generation, 3, "其余字段照旧读回");
     }
 }

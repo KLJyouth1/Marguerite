@@ -53,6 +53,9 @@ pub mod guard;
 pub mod harness;
 pub mod intent;
 pub mod kb;
+/// 对话产线（Conversation Line）：把「蜂群/专家团/子智能体/主智能体」从互斥挡位
+/// 改造成可编译、可组合的阶段规格。契约见 `docs/plans/2026-10-30-conversation-line-workflow.md`。
+pub mod line;
 pub mod mcp;
 pub mod memory;
 pub mod mode;
@@ -97,6 +100,7 @@ pub mod security;
 pub mod serve;
 pub mod session;
 pub mod skills;
+pub mod tactics;
 pub mod terminal;
 pub mod tools;
 pub mod tui;

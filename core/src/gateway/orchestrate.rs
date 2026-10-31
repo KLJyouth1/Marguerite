@@ -133,6 +133,8 @@ pub fn route_meta(
 ///   极简锁（需显式授权），标准 / 极致需显式授权后才放行。
 ///
 /// `confirmed` 即 RPC 层的显式授权（无宿主审批链，ApprovalGate 另走 security_seam）。
+/// 它同时是**所有 Confirm 格的钥匙**：矩阵说「需人工确认」时，`confirmed=true` 就是
+/// 那次确认已经发生；Deny 格不吃这把钥匙（档位纪律不由确认改写）。
 pub fn gate_form(
     form: OrchestrateForm,
     user_mode: UserMode,
@@ -147,6 +149,13 @@ pub fn gate_form(
     };
     match PermissionMatrix::new().check(user_mode, autonomy, confirmed) {
         MatrixDecision::Allow { .. } => Ok(()),
+        // 「需人工确认」这一格的放行条件就是确认本身，而 RPC 层的 `confirmed` 正是用户
+        // 刚在界面上点下去的那一次。矩阵只在「高自主 × 执行档」读取 `trusted`，写档的两格
+        // （方案×写、极简×写）无论 `trusted` 都返回 Confirm —— 于是确认成了永远满足不了的
+        // 条件。真机复现（2026-10-31）：产线在 standard_plan 档弹窗「派单这条产线？」，点完
+        // 仍回 ORCHESTRATE_CONFIRM_REQUIRED，前端按契约补问第二次再发，同样被拒，用户看到的
+        // 是「确认了两次，然后一条错误」。Deny 不走这条路：档位纪律不是确认能改的。
+        MatrixDecision::Confirm { .. } if confirmed => Ok(()),
         MatrixDecision::Confirm { reason } => Err(RpcError::new(
             "ORCHESTRATE_CONFIRM_REQUIRED",
             format!("{reason}（形态={}，档位={}）", form.as_key(), user_mode.as_key()),
@@ -366,19 +375,21 @@ session_key.to_string()
 ///
 /// 独立成结构体而不是继续加形参：并行规模这类档位字段还会增加，8 个裸参数既过不了
 /// clippy（too_many_arguments），也容易在调用处错位。
-struct OrchestrationRequest<'a> {
-    message: &'a str,
-    session: &'a str,
-    agents: &'a [String],
+///
+/// `pub(crate)`：对话产线（`gateway::line`）逐阶段复用它，而不是再造一套分发。
+pub(crate) struct OrchestrationRequest<'a> {
+    pub(crate) message: &'a str,
+    pub(crate) session: &'a str,
+    pub(crate) agents: &'a [String],
     /// 用户选定的团队 / 专家团 id（多选）。
-    teams: &'a [String],
-    capabilities: &'a [String],
-    swarm_on: bool,
-    swarm_size: usize,
+    pub(crate) teams: &'a [String],
+    pub(crate) capabilities: &'a [String],
+    pub(crate) swarm_on: bool,
+    pub(crate) swarm_size: usize,
 }
 
 /// 按形态真实分发到对应 backend。
-async fn dispatch_form(
+pub(crate) async fn dispatch_form(
     ctx: &GatewayContext,
     form: OrchestrateForm,
     req: &OrchestrationRequest<'_>,
@@ -679,6 +690,31 @@ mod tests {
         // DoIt 档：放行
         assert!(gate_form(OrchestrateForm::SubAgent, UserMode::StandardDoIt, false).is_ok());
         assert!(gate_form(OrchestrateForm::SubAgent, UserMode::ExtremeDoIt, false).is_ok());
+    }
+
+    #[test]
+    fn gate_form_confirmation_is_a_key_not_a_placebo() {
+        // 回归守卫（真机 2026-10-31）：Confirm 格必须吃 `confirmed`。此前矩阵只在高自主×执行档
+        // 读 trusted，写档的 Confirm 格无论确认多少次都原样返回，于是「弹窗 → 点派单 → 同样
+        // 被拒 → 补问第二次 → 还是被拒」，产线在 Plan 档一条也发不出去。
+        for mode in [
+            UserMode::MinimalPlan,
+            UserMode::StandardPlan,
+            UserMode::ExtremePlan,
+            UserMode::MinimalDoIt,
+        ] {
+            assert!(
+                gate_form(OrchestrateForm::SubAgent, mode, true).is_ok(),
+                "{:?} 已确认仍被拒",
+                mode
+            );
+        }
+        // 未确认时结论不变，错误码仍是前端补问逻辑依赖的那个
+        let err = gate_form(OrchestrateForm::SubAgent, UserMode::StandardPlan, false).unwrap_err();
+        assert_eq!(err.code, "ORCHESTRATE_CONFIRM_REQUIRED");
+        // Deny 不吃这把钥匙：只读档的纪律不由确认改写
+        assert!(gate_form(OrchestrateForm::SubAgent, UserMode::StandardAsk, true).is_err());
+        assert!(gate_form(OrchestrateForm::Team, UserMode::StandardPlan, true).is_err());
     }
 
     #[test]

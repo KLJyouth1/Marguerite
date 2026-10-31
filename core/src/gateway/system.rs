@@ -8,7 +8,10 @@ use crate::gateway::methods::GatewayContext;
 use crate::gateway::protocol::PROTOCOL_VERSION;
 use crate::persistence::config::Config;
 
-/// `health`：网关健康探针（最轻量，供前端心跳）。
+/// `health`：网关健康探针。
+///
+/// 自 W7 起带 `io` 段（三次只读 SQLite open + 三个平铺目录扫描），因此
+/// **不适合秒级轮询**；WS 心跳请走协议层 ping，不要改调本方法。
 pub fn health(ctx: &GatewayContext) -> Value {
     // 侧车依赖预检结论：只增字段，不改既有键（前端按可选处理）。
     // 为什么放进 health 而不是只写日志：真机审计 2026-10-29 的 P1-2 里，
@@ -26,6 +29,10 @@ pub fn health(ctx: &GatewayContext) -> Value {
         "data_dir": Config::data_dir().to_string_lossy(),
         "api_key_configured": !ctx.config.model.api_key.is_empty(),
         "sidecar": sidecar,
+        // W7：写入量自观测。放在 health 而不是心跳上 —— 它要开三个只读库连接
+        // 回读 journal 模式，秒级轮询它本身就是新的噪声。
+        // ⚠️ 前端心跳若改成调用本方法，必须把 `io` 做成可关的。
+        "io": crate::observability::io_report::report(),
     })
 }
 

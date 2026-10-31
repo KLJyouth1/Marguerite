@@ -7,12 +7,31 @@ import ntpath
 import os
 import re
 import secrets
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 _RESTRICTING_SID_RE = re.compile(r"^S-1-5-21-(\d+)-(\d+)-(\d+)-(\d+)$")
+
+# Windows 上「打开锁文件」与「加锁」都可能瞬时失败，这不是逻辑错误：
+#   - 杀软 / 搜索索引器 / 备份代理会在文件刚创建时短暂独占句柄；
+#   - 另一线程正用 `os.replace` 换同一目录下的文件时，句柄共享也会被拒。
+# 之前的实现把这种瞬时争用当成致命错误直接抛出，于是并发写能力库的用例在
+# 真实机器上偶发 `PermissionError: [Errno 13]`（实测约 1/5 概率）。
+# 这里改成**有界重试**：只在瞬时错误（winerror 5/32/33）上重试，其余照旧上抛 ——
+# 不能把「路径真的没权限」这种真错误也拖成 10 秒再报。
+_LOCK_RETRY_BUDGET_SECS = 10.0
+_LOCK_RETRY_FIRST_DELAY = 0.005
+_LOCK_RETRY_MAX_DELAY = 0.05
+_LOCK_TRANSIENT_WINERRORS = (5, 32, 33)  # ACCESS_DENIED / SHARING_VIOLATION / LOCK_VIOLATION
+
+
+def _is_transient_lock_error(exc: BaseException) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    return getattr(exc, "winerror", None) in _LOCK_TRANSIENT_WINERRORS
 
 
 @dataclass(frozen=True)
@@ -90,7 +109,9 @@ def capability_sid_for_root(
 def _capability_store_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
-    with lock_path.open("a+b") as stream:
+    # ① 打开：单独重试（这一步最容易被杀软/索引器瞬时占用）。
+    stream = _open_lock_stream(lock_path)
+    with stream:
         if os.name == "nt":
             import msvcrt
 
@@ -99,9 +120,22 @@ def _capability_store_lock(path: Path) -> Iterator[None]:
                 stream.flush()
             stream.seek(0)
             locking = getattr(msvcrt, "locking")
-            lock_mode = getattr(msvcrt, "LK_LOCK")
             unlock_mode = getattr(msvcrt, "LK_UNLCK")
-            locking(stream.fileno(), lock_mode, 1)
+            # ② 加锁：`LK_LOCK` 自带 ~10s 阻塞重试，但句柄被外部干扰时仍会抛
+            #    `OSError(EACCES)`；用 `LK_NBLCK` + 有界退避把控制权拿回自己手里，
+            #    这样「等多久」是我们说了算，也不会在日志里变成一次无解释的失败。
+            nonblocking = getattr(msvcrt, "LK_NBLCK")
+            deadline = time.monotonic() + _LOCK_RETRY_BUDGET_SECS
+            delay = _LOCK_RETRY_FIRST_DELAY
+            while True:
+                try:
+                    locking(stream.fileno(), nonblocking, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2, _LOCK_RETRY_MAX_DELAY)
             try:
                 yield
             finally:
@@ -115,6 +149,20 @@ def _capability_store_lock(path: Path) -> Iterator[None]:
                 yield
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _open_lock_stream(lock_path: Path):
+    """打开锁文件；只对 Windows 的瞬时共享冲突重试。"""
+    deadline = time.monotonic() + _LOCK_RETRY_BUDGET_SECS
+    delay = _LOCK_RETRY_FIRST_DELAY
+    while True:
+        try:
+            return lock_path.open("a+b")
+        except OSError as exc:
+            if not _is_transient_lock_error(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _LOCK_RETRY_MAX_DELAY)
 
 
 def capability_sids_for_command(

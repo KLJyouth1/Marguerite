@@ -144,6 +144,54 @@ pub fn prefs_unpin(_ctx: &GatewayContext, params: &Value) -> Value {
     json!({ "success": true, "pinned": brief::load_pins() })
 }
 
+/// `assistant.facts.delete`：让用户**真的忘掉**一条写回事实（R-02 可撤销性最后一环）。
+///
+/// 入参 `{ "id": "fact:<记录 id>" }`（也接受裸数字 / 纯数字串，便于脚本调用）。
+/// `id` 的形状由 `assistant.brief.get` 的 `facts[].id` 决定 —— 前端只回传它拿到的字符串，
+/// 不需要自己拼。
+///
+/// **只删本引擎写回层的事实**（`cross_project_facts.jsonl`）。外部 AI 工具写的
+/// Markdown 记忆不在本应用的写权限内：删别人的文件是越权，所以那里既不发 id
+/// 也不提供删除入口 —— 前端不会显示按钮，直接调用会在这里被明确拒绝。
+///
+/// 幂等：同一个 id 删两次，第二次返回 `deleted: false` 而不是报错。
+pub fn facts_delete(_ctx: &GatewayContext, params: &Value) -> Value {
+    let raw = params
+        .get("id")
+        .or_else(|| params.get("factId"))
+        .or_else(|| params.get("memoryId"));
+    // 接受 `fact:12` / `"12"` / 数字 12 三种写法（前端用第一种，脚本常用后两种）。
+    let parsed = match raw {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s
+            .trim()
+            .strip_prefix("fact:")
+            .unwrap_or(s.trim())
+            .parse::<u64>()
+            .ok(),
+        _ => None,
+    };
+    let Some(id) = parsed else {
+        return json!({
+            "success": false,
+            "code": "ASSISTANT_FACT_ID_INVALID",
+            "message": "facts.delete 需要 id（形如 \"fact:12\"）",
+        });
+    };
+    match crate::memory::writeback::forget_fact(id) {
+        Ok(deleted) => json!({
+            "success": true,
+            "deleted": deleted,
+            "id": format!("fact:{id}"),
+        }),
+        Err(message) => json!({
+            "success": false,
+            "code": "ASSISTANT_FACT_DELETE_FAILED",
+            "message": format!("删除事实失败: {message}"),
+        }),
+    }
+}
+
 /// `sessions.fork`：入参 `{key, forkPoint?, title?}`，父会话只读、子会话返回新 key。
 pub fn sessions_fork(_ctx: &GatewayContext, params: &Value) -> Value {
     let mut manager = match open_manager() {
@@ -628,6 +676,56 @@ mod tests {
         assert_eq!(replayed["readOnly"], true, "回放必须只读");
         assert_eq!(replayed["frameCount"], 1);
         assert_eq!(replayed["frames"][0]["role"], "user");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// R-02：`assistant.facts.delete` 端到端 —— 写入 → 简报可见 → 删除 → 简报不可见。
+    #[test]
+    fn facts_delete_removes_fact_end_to_end() {
+        let dir = isolated_dir("facts-delete");
+        let text = "记住：不要在提交里写 emoji";
+        let outcome = crate::memory::writeback::remember_fact("app", text, "test", 1_700_000_000_000);
+        assert!(outcome.written, "前置：事实必须写进去：{outcome:?}");
+        let id = crate::memory::writeback::active_records()
+            .into_iter()
+            .find(|r| r.text == text)
+            .expect("事实应可读回")
+            .id;
+
+        // 非法 id 必须被拒，且给出稳定错误码（前端据此本地化）。
+        let bad = facts_delete(&test_ctx(), &json!({}));
+        assert_eq!(bad["success"], false);
+        assert_eq!(bad["code"], "ASSISTANT_FACT_ID_INVALID");
+
+        // 正常删除：接受前端回传的 `fact:<id>` 字符串。
+        let ok = facts_delete(&test_ctx(), &json!({ "id": format!("fact:{id}") }));
+        assert_eq!(ok["success"], true, "{ok:?}");
+        assert_eq!(ok["deleted"], true);
+        assert_eq!(ok["id"], format!("fact:{id}"));
+
+        // 幂等：再删一次是 false，不是错误。
+        let again = facts_delete(&test_ctx(), &json!({ "id": format!("fact:{id}") }));
+        assert_eq!(again["success"], true);
+        assert_eq!(again["deleted"], false);
+        assert!(
+            crate::memory::writeback::active_records()
+                .iter()
+                .all(|r| r.id != id),
+            "删除后不得仍可读回"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 脚本调用形状：裸数字 / 纯数字串都能删（前端之外的调用方不必拼 `fact:`）。
+    #[test]
+    fn facts_delete_accepts_bare_numeric_id() {
+        let dir = isolated_dir("facts-delete-num");
+        crate::memory::writeback::remember_fact("app", "记住：数字 id 的事实", "test", 1_700_000_000_000);
+        let id = crate::memory::writeback::active_records()[0].id;
+        for raw in [json!(id), json!(id.to_string())] {
+            let out = facts_delete(&test_ctx(), &json!({ "id": raw }));
+            assert_eq!(out["success"], true, "{out:?}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }

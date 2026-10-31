@@ -183,6 +183,18 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     // harness 运行面快照：钩子注册情况 / 能力成熟度 / 路由策略 / 子代理预算 /
     // 工作区与数据目录可用性 / 台账健康 + problems[]（只读，不触发任何模型调用）
     "harness.status",
+    // 战术推演：协作战术的确定性蒙特卡洛 / 裁决 / 台账反事实回放（Rust 原生）
+    "tactics.catalog",
+    "tactics.simulate",
+    "tactics.replay",
+    // 对话产线：把蜂群/专家团/子智能体/主智能体从互斥挡位改造成可编译的阶段规格。
+    // `line.run` 是唯一会真正派单的方法（异步 + 权限门），其余全是只读预演。
+    "line.catalog",
+    "line.compile",
+    "line.preflight",
+    "line.plan",
+    "line.run",
+    "line.retro",
     // 3×3 权限矩阵只读观测面（W-O3）
     "guard.permission_matrix.status",
     // 上下文管理 / 压缩（compact 走 async LLM 分支；rollback 恢复预压缩快照）
@@ -616,6 +628,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "assistant.prefs.list",
     "assistant.prefs.pin",
     "assistant.prefs.unpin",
+    // R-02：写回事实的删除入口（硬删除，仅限本引擎事实库）
+    "assistant.facts.delete",
     // 会话分支 / 恢复 / 回放（只读写 `sessions.db` 与本地上下文台账）
     "sessions.fork",
     "sessions.forkThroughTurn",

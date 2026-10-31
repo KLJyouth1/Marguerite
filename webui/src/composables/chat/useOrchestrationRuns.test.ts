@@ -274,4 +274,24 @@ describe('useOrchestrationRuns', () => {
       'shared.storage.orchestrationRunsReadFailed',
     )
   })
+
+  it('产线帧（engine:"line"）不进编排泳道：它有自己的回执面', () => {
+    // 后端 `line.run` 复用同一套相位词表（run_started / run_completed …），只是多钉
+    // 一个 `engine:"line"`。这里的 `form` 缺省兜底是 `swarm`，所以一条 panel 产线
+    // 若被收进来，用户就会在回执卡旁边再看到一张「表单=swarm」的泳道卡 —— 双呈现
+    // 且标签说谎。这条用例锁的就是「按引擎归属在入口分流」，不是渲染层猜前缀。
+    const model = useOrchestrationRuns(ref(SESSION))
+
+    model.handleFrame({
+      payload: { kind: 'orchestration', engine: 'line', phase: 'run_started', runId: 'line-abc', shape: '1×panel → 1×solo' },
+      meta: { session: SESSION },
+    })
+    model.handleFrame({
+      payload: { kind: 'orchestration', engine: 'line', phase: 'run_completed', runId: 'line-abc', ok: true },
+      meta: { session: SESSION },
+    })
+
+    expect(model.runs.value).toEqual([])
+    expect(model.activeCount.value).toBe(0)
+  })
 })

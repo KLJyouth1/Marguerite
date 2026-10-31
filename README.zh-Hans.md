@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](rust-toolchain.toml)
 [![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-green.svg)](webui/.node-version)
-[![Tests](https://img.shields.io/badge/core%20tests-4341%20passing-brightgreen.svg)](#-质量门禁)
+[![Tests](https://img.shields.io/badge/core%20tests-4508%20passing-brightgreen.svg)](#-质量门禁)
 [![Web UI: loopback only](https://img.shields.io/badge/web%20UI-loopback%20only-critical.svg)](#-安全模型)
 [![Self-improvement: gated](https://img.shields.io/badge/self--improvement-gated%20%C2%B7%20never%20auto--shipped-blueviolet.svg)](#-递归自我改进)
 
@@ -336,7 +336,7 @@ bash scripts/verify.sh --workbench    # 只跑 workbench 子项目（71 个离�
 bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 ```
 
-当前基线 —— 整道闸门调度 26 项检查，最近一次完整跑到 **26/26 全绿**是 2026-10-29；
+当前基线 —— 整道闸门调度 26 项检查，最近一次完整跑到 **26/26 全绿**是 2026-10-31；
 下表每一行数字都来自那次运行。其余每一层都在 CI
 （[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）里跑，**只有新增的 web e2e
 层暂时只在本机闸门里跑**：CI 需要把 Playwright 浏览器缓存与 Rust 构建出的网关放进
@@ -344,12 +344,12 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 4341 passed / 0 failed / 25 ignored |
+| `cargo test -p marguerite-core --lib` | 4533 passed / 0 failed / 25 ignored |
 | core 集成测试（`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`） | 离线且确定性；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过） |
-| `webui` 单测（Vitest） | 4927 passed / 0 failed（500 个文件） |
+| `webui` 单测（Vitest） | 5085 passed / 0 failed（516 个文件） |
 | `pyengine` 单测（pytest，`tests/unit`） | 823 passed / 0 failed / 7 skipped |
 | `pyengine` 网关契约（pytest，`tests/test_gateway`） | 2956 passed / 0 failed / 11 skipped |
-| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4446 passed / 0 failed / 390 skipped |
+| `pyengine` 契约族（pytest，`tests/test_{ci,migrations,sandbox,onboarding,tools,recovery}`） | 4387 passed / 0 failed / 390 skipped |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 零告警 |
 | `npm run check:architecture` | 13 项架构守卫全绿 |
 | `scripts/check-doc-cli-drift.py` | 文档里的每个 CLI 记号都能解析到真实代码 |

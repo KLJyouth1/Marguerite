@@ -311,12 +311,14 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import { useRpcStore } from '@/stores/rpc'
+import { useConfirm } from '@/composables/useConfirm'
 // 主智能体头像来自专家包 `senior-dev-engineer/avatars/expert.png`（10 KB）。
 // 载入失败时自动退回首字标记，不出现破图。
 import mainAvatar from '@/assets/agents/senior-dev-engineer.png'
 
 const rpc = useRpcStore()
 const router = useRouter()
+const { confirm } = useConfirm()
 const expertOrbit = ['Lead', 'Architect', 'Builder', 'Reviewer', 'Memory', 'Tools', 'Knowledge']
 
 /**
@@ -474,6 +476,12 @@ async function saveSwarm() {
 }
 
 async function resetSwarm() {
+  const approved = await confirm({
+    title: '恢复内置默认',
+    body: '将把蜂群分片上限与子专家上限写回 0（即使用内置默认值），并立即保存到 swarm_config.json；后续蜂群扇出的数量上限随之变化。',
+    primaryLabel: '恢复并保存',
+  })
+  if (!approved) return
   swarmShards.value = 0
   swarmSubExperts.value = 0
   await saveSwarm()
@@ -589,6 +597,12 @@ async function saveComp() {
 }
 
 async function removeComp(name: string) {
+  const approved = await confirm({
+    title: '删除团队组合',
+    body: `将删除已保存的团队组合「${name}」，其目标与成员清单会一并移除，此操作不可撤销。`,
+    primaryLabel: '删除',
+  })
+  if (!approved) return
   compBusy.value = true
   try {
     const r = await rpc.call<{ ok: boolean; items: Composition[] }>('team.compositions.remove', { name })

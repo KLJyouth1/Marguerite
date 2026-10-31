@@ -243,10 +243,12 @@ python scripts/check-website-claims.py
 | P0-2 会话分支 | **已上线（RPC + 库）** | `core/src/session/fork.rs` + `gateway/assistant.rs` 的 `sessions.fork/resume/replay` | 7 条库测试 + 3 条网关测试 |
 | P0-3 上下文接续 | **已上线（注入提示词）** | `context/continuity.rs` + `role_context.rs` 的 `continuity_block` / `assistant_block` | 4 条 continuity + 3 条 assistant_block 测试 |
 | P1 两层助理 | **后端 + 设置面板 + 聊天注入** | `assistant/{scope,profile,brief}.rs` + 10 条 RPC + `AssistantPanel.vue` + `role_context::assistant_block` | 5 条 brief + 3 条 scope + 2 条 profile + 13 条网关 + 6 条前端 + 3 条注入 |
+| P1.1 L1→L2 投影 | **已落地（RPC 简报 + 聊天注入同一路径）** | `assistant/projection.rs`（`project` 纯函数）；`brief::build_brief` 先投影再进 `compose_brief` 预算；丢弃明细进 `budget.notes` | 8 条投影测试 + 2 条预算备注测试（`cargo test -p marguerite-core --lib assistant::`） |
 | P2-1 记忆闸门 | **已接生产写路径** | `memory/promote.rs` + `memory/writeback.rs::remember_fact`（先闸门后落盘） | 4 条闸门 + 4 条写回测试 |
 | P2-2 知识库增量 | **库级完成** | `kb/store.rs` `apply_changes`、`kb/graph.rs` `remove_document`、`kb/integrity.rs` `audit_sources` | 4 条测试；`kb::` 50 passed |
 | P3-1 长任务熔断 | **已接入运行时** | `agent/tool_cycle.rs`（CircuitBreaker）+ `agent/task_checkpoint.rs`（pause_for_rollback）+ `runtime.rs`/`stream_loop.rs` 收口点 | 3 条熔断单测 + 3 条接线单测 |
 | P3-2 辩论防极化 | **库级完成** | `agent/team.rs` `converge_debate`（附和降权 ×0.2、证据链定胜负、保留少数派） | 3 条测试 |
+| P4 桌面端双轨（注意力 + 溯源） | **已落地（前端；零新增 RPC）** | `components/ui/AttentionShelf.vue` + `composables/ui/{attentionQueue,motionGrammar}.ts` + `components/shell/{CommandDeck,ProvenanceDrawer}.vue`；设计见 `docs/design/2026-10-31-attention-first-workbench.md`、`docs/design/2026-10-31-memory-provenance.md` | 注意力 33 例 + 命令台 3 例 + 溯源 13 例；`vue-tsc` / motion / i18n 守卫 exit 0 |
 | P3-3 任务树 | **库级完成** | `core/src/orchestration/task_state.rs`（就绪集/派发/失败只阻塞下游/并行批） | 5 条测试 |
 
 **下一步（尚未做，别当成已完成）**：
@@ -254,7 +256,6 @@ python scripts/check-website-claims.py
 1. **CI 验证**：P0-0 的 9 处平台化只在 Windows 本地跑过；Linux/macOS 由 CI 独立验证（这正是 0.2.18 翻车过的地方）。
 2. **`assistant.facts` 的删除入口**：写回闸门（`memory::remember_fact`）已就绪，但用户只能删
    `pinned`，删不掉「自动学到的事实」—— 可撤销性还差这一环。
-3. **两层助理的 L1→L2 投影**：目前 L2 直接读同一份 brief；真正的「L1 只给不可推导的、L2 只回写可复用的」
-   去污染规则还没实现（现在靠预算裁剪近似）。
-4. **RPC 计数纪律**：`SUPPORTED_METHODS` 现为 **461**（未剥注释 464）。每加一条都要同步官网三处 +
-   `docs/agents/04-gotchas.md`，否则 `check-website-claims.py` 会判红。
+3. **RPC 计数纪律**：`SUPPORTED_METHODS` 的当前值以 `node webui/scripts/check-rpc-contract.mjs`
+   的输出为准（2026-10-31：**470** 条；未剥注释 473）。每加一条都要同步官网三处，
+   否则 `check-website-claims.py` 会判红。

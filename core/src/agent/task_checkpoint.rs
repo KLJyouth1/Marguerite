@@ -249,7 +249,10 @@ mod tests {
     static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
     fn unique_dir() -> PathBuf {
         let n = DIR_SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        std::env::temp_dir().join(format!("marg-cp-{}-{n}", std::process::id()))
+        let dir = std::env::temp_dir().join(format!("marg-cp-{}-{n}", std::process::id()));
+        // Windows 会复用 PID：残留的 y.json 会让 record 撞上旧任务（2026-10-30 实测）。
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
     }
 
     #[test]

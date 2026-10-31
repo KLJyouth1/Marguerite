@@ -142,6 +142,11 @@ impl SessionManager {
     /// 初始化数据库
     pub fn init(&mut self) -> Result<()> {
         let db = Connection::open(&self.db_path)?;
+        // W3（2026-10-30）：这个库每轮至少写 2 条（会话快照 + 消息行），工具回合再各加
+        // 1–2 条，全部走 autocommit。默认的 DELETE+FULL 意味着每条语句一次 fsync ——
+        // 与 long_running 当年「8279 条后全量重写 49.5 s」同一类病灶，只是这里单次更小、
+        // 次数更多，用户感知从「卡住」变成「SSD 一直在写」。
+        crate::persistence::apply_sqlite_write_pragmas(&db, "sessions.db", "NORMAL");
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,

@@ -39,6 +39,7 @@ const ExpertCenterView = () => import('@/views/ExpertCenterView.vue')
 const LocalModelsView = () => import('@/views/LocalModelsView.vue')
 const OpsView = () => import('@/views/OpsView.vue')
 const HarnessView = () => import('@/views/HarnessView.vue')
+const TacticsView = () => import('@/views/TacticsView.vue')
 const RulesView = () => import('@/views/RulesView.vue')
 const MemoryView = () => import('@/views/MemoryView.vue')
 const ArtifactsView = () => import('@/views/ArtifactsView.vue')
@@ -156,6 +157,11 @@ export const sharedRoutes: RouteRecordRaw[] = [
   // 只读呈现真实运行证据：KPI / 条目时间线 / replay 摘要 / 技能覆盖。
   // 归入 Observe 观测诊断分组（回答「这些运行为什么这么慢、成功率如何」）。
   { path: '/harness', name: 'harness', component: HarnessView, meta: { title: 'Harness', titleKey: 'harness.title', group: 'Observe', icon: 'logs', nav: 'primary', navOrder: 95, navLabelKey: 'harness.title', platforms: ['web', 'desktop'], keepAlive: true } },
+  // ── 战术推演（tactics.catalog / simulate / replay）──
+  // 回答「蜂群 / 专家团 / 子智能体 / 主智能体该怎么组合」：DAG + 有限资源 + 验证闸门
+  // 三条物理规则下的确定性蒙特卡洛，用显式判据裁决，并把台账里的真实运行做反事实回放。
+  // 与 /harness（运行证据）、/team-board（谁在做什么）同组互补，排在两者之间。
+  { path: '/tactics', name: 'tactics', component: TacticsView, meta: { title: 'Tactical rehearsal', titleKey: 'tactics.title', group: 'Observe', icon: 'swarm', nav: 'primary', navOrder: 96, navLabelKey: 'tactics.title', platforms: ['web', 'desktop'], keepAlive: true } },
   // ── 团队看板（team.members：成员状态 / 当前步骤 / 工具调用 / token 消耗）──
   // 只读呈现当前会话里每个团队成员的动向（回答「谁在做什么」），
   // 归入 Observe 观测诊断分组，与 /harness（运行台账）同组互补。

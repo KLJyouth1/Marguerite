@@ -1,4 +1,4 @@
-﻿param(
+﻿﻿param(
     [string]$Configuration = "Release",
     [string]$Payload,
     [string]$OutputRoot,

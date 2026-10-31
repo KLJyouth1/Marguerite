@@ -87,15 +87,18 @@ pub struct SessionContext {
     /// 这里**只累计 token 数、不保存原文**，保证落盘有界；`#[serde(default)]` 兼容
     /// 既有磁盘 JSON（缺该字段时反序列化为 0）。
     ///
-    /// 口径边界（2026-10-24 核实，避免注释再次漂移）：这里的账只有一个来源——
+    /// 口径边界（2026-10-30 核实，避免注释再次漂移）：这里的账只有一个来源——
     /// **工具文本真正进入模型上下文**（工具调用入参 + `Message::Tool.output`）。
     /// 写入点：
-    /// - `agent::stream_loop`（真流式回路，完整输出）与 `agent::runtime`
-    ///   （非流式回路，完整入参 + 输出）—— 主路径（在 `Message::Tool` 入历史处同步记）；
+    /// - `agent::stream_loop`（真流式回路）、`agent::runtime`（非流式回路）与
+    ///   `agent::multi_strategy`（多策略回路，不发事件，只能自记）—— 主路径，在
+    ///   `Message::Tool` 入历史处同步记。**入参按原样**计；**输出**先经
+    ///   `context::middle_truncate::truncate_for_context`（D11），记的是截断后文本，
+    ///   与真正入历史的 `Message::Tool.output` 逐字节相同。被砍掉的原文进工具活动台账
+    ///   与磁盘留底（`context::spool`），不在这个口径里；
     /// - `gateway::chat` 的事件桥与 `plan::runner` 的 `LedgerTap` —— 工具结果**兜底**
     ///   （引擎侧已按同一 `call_id` 记过则被幂等键跳过）；流式路径的**调用入参**
-    ///   目前由事件桥记一次；
-    /// - `agent::multi_strategy`（多策略工具回路，不发事件，只能自记）。
+    ///   目前由事件桥记一次。
     ///
     /// **工具 schema 与系统提示不计**：它们是每轮恒定的基线，既不随对话增长、
     /// 也不由本台账的「累计」语义表达；若需要把它们纳入，应作为 `used_tokens()`
@@ -188,6 +191,58 @@ pub struct ContextLedger {
     /// 与网关事件桥（`ToolResult` 事件回流兜底）。谁先记都行，但只能记一次 ——
     /// 这里按 `call_id`（缺 id 时按「工具名 + 内容 hash」）去重。
     recent_tool_keys: HashMap<String, RecentToolKeys>,
+    /// 每会话上一次把流式 `partial_text` **落盘**的时刻（**仅内存**，不落盘）。
+    ///
+    /// 为什么需要它：台账是「整份 JSON 原子重写」，而 `partial_text` 是累积串 ——
+    /// 每个流式帧都落盘 ⇒ 单轮写入字节数随回复长度**平方增长**（与 Codex 烧 SSD
+    /// 那批 issue 同形的缺陷，见 `docs/plans/2026-10-30-0.2.19-formal-release-plan.md` W-A）。
+    ///
+    /// 拆开两个口径：**内存永远即时**（`partial_text()` 读到最新帧，切走再切回不落后），
+    /// **磁盘限流**（同一会话两次落盘间隔 ≥ `PARTIAL_FLUSH_INTERVAL_MS`）。
+    /// 代价是有意的：进程崩溃最多丢一个窗口内的部分文本，而**已提交的 entries 不受影响**
+    /// —— 部分文本只是「这一轮还没说完的话」的恢复态，不是历史。
+    partial_flushed_at: HashMap<String, u64>,
+    /// 整档落盘次数（**只在测试里存在**）。
+    ///
+    /// W1 的回归网要按「一轮对话把整份台账重写了多少次」下断言，而 `io_report` 的计数是
+    /// **进程级**的 —— libtest 并发跑，别的用例会污染它。所以记在实例上，口径见
+    /// `tests::streaming_frames_do_not_rewrite_the_ledger_once_per_frame`。
+    #[cfg(test)]
+    persist_calls: std::cell::Cell<usize>,
+    /// 累计落盘字节（同样只在测试里存在，口径见 [`Self::persist_calls`]）。
+    #[cfg(test)]
+    persist_bytes: std::cell::Cell<u64>,
+}
+
+/// 流式 `partial_text` 两次落盘之间的最小间隔（毫秒）。
+///
+/// 1 s 是「恢复体验」与「写入量」的折中：切走再切回最多丢 1 s 内的增量，
+/// 而一轮回复的落盘次数从「帧数」降到「秒数」。
+/// `pub(crate)`：这两个数要随 `system.health` 的 `io` 段下发（W7），
+/// 面板显示的预算/节流必须取自同一处定义，不能各写一份字面量。
+pub(crate) const PARTIAL_FLUSH_INTERVAL_MS: u64 = 1_000;
+
+/// 台账目录的总字节预算（W4，256 MB）。
+///
+/// 本机活跃台账实测 7–32 KB ⇒ 这个预算够放上千个会话，正常使用永远碰不到；
+/// 它挡的是「几年不删、会话无限累积」那种必然会发生的增长。
+pub(crate) const CONTEXT_DIR_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 台账目录的字节预算回收。单独成一个函数，是为了让用例能用**小预算**驱动它 ——
+/// 生产预算 256 MB，测试不能真造 256 MB 的文件。
+///
+/// 口径与 [`crate::observability::rotation::prune_dir_matching_to_budget`] 一致：
+/// 只动 `.json` 台账、**排除** `*.corrupt-*.json`（损坏隔离件是唯一恢复凭据）、
+/// mtime 最新的一份永不删。
+fn prune_ledger_dir(
+    dir: &std::path::Path,
+    budget: u64,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    crate::observability::rotation::prune_dir_matching_to_budget(
+        dir,
+        budget,
+        &|name| name.ends_with(".json") && !name.contains(".corrupt-"),
+    )
 }
 
 /// 每会话保留的幂等键上限（超出按 FIFO 淘汰，内存有界）。
@@ -259,11 +314,48 @@ impl ContextLedger {
     fn new(data_dir: &std::path::Path) -> Self {
         let dir = data_dir.join("context");
         let _ = std::fs::create_dir_all(&dir);
+        // W4（2026-10-30）：目录级字节预算。
+        // 此前只有「每份 8192 条」的**条数**封顶，于是总量 = 会话数 × 每份大小，
+        // 完全没有上界 —— 几百个不活跃会话就能把 `~/.marguerite/context/` 堆到 GB 级，
+        // 而用户看不到任何信号。回收口径复用 `observability::rotation`（别再写第三份）：
+        // 按 mtime 从旧到新删到预算内，最新一份永不删（它极可能就是当前会话），
+        // `*.corrupt-*.json` 隔离件不删（那是损坏台账唯一的恢复凭据）。
+        match prune_ledger_dir(&dir, CONTEXT_DIR_BUDGET_BYTES) {
+            Ok(removed) if !removed.is_empty() => {
+                // 删的是**用户的历史**，必须留痕（AGENTS.md R57：不能静默把「没了」
+                // 表现成「本来就没有」）。名字全部打出来，便于事后从备份找回。
+                let names: Vec<String> = removed
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                    .map(|n| n.to_string())
+                    .collect();
+                tracing::warn!(
+                    dir = %dir.display(),
+                    removed = removed.len(),
+                    budget_bytes = CONTEXT_DIR_BUDGET_BYTES,
+                    files = %names.join(","),
+                    "台账目录超出字节预算，已按最旧回收这些会话历史（当前会话与损坏隔离件不在其中）"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    error = %err,
+                    "台账目录预算回收失败，本次跳过（不影响对话）"
+                );
+            }
+        }
         let sessions = HashMap::new();
         Self {
             dir,
             sessions,
             recent_tool_keys: HashMap::new(),
+            partial_flushed_at: HashMap::new(),
+            #[cfg(test)]
+            persist_calls: std::cell::Cell::new(0),
+            #[cfg(test)]
+            persist_bytes: std::cell::Cell::new(0),
         }
     }
 
@@ -355,6 +447,7 @@ impl ContextLedger {
     fn remove(&mut self, session: &str) -> bool {
         self.sessions.remove(session);
         self.recent_tool_keys.remove(session);
+        self.partial_flushed_at.remove(session);
         let mut removed = false;
         for path in [self.path(session), self.legacy_path(session)] {
             if std::fs::remove_file(&path).is_ok() {
@@ -397,6 +490,7 @@ impl ContextLedger {
         ctx.compression_ratio = None;
         ctx.snapshot_count = 0;
         self.recent_tool_keys.remove(session);
+        self.partial_flushed_at.remove(session);
         self.persist(&ctx);
         self.sessions.insert(session.to_string(), ctx);
         had_content || snapshots_removed > 0
@@ -411,8 +505,13 @@ impl ContextLedger {
     /// 聊了几十轮后某次崩溃重开 → 上下文全丢，`memory_search` / 压缩 / 令牌
     /// 计量同时失去依据，且界面看不出「曾经有过历史」。
     /// 改原子写后，读者要么看到旧完整内容、要么看到新完整内容。
+    ///
+    /// W2（2026-10-30）：不再 `to_string_pretty`。缩进和换行对一份**只有程序读**的
+    /// 台账没有任何价值，却让每次重写多吐约 1/4 的字节（本机活跃台账 7–32 KB、
+    /// 单轮最多被重写 `3 + 2K` 次）。`serde_json::from_str` 与是否 pretty 无关，
+    /// 读侧与损坏隔离逻辑都不受影响。
     fn persist(&self, ctx: &SessionContext) {
-        let raw = match serde_json::to_string_pretty(ctx) {
+        let raw = match serde_json::to_string(ctx) {
             Ok(raw) => raw,
             Err(err) => {
                 tracing::warn!(session = %ctx.session, error = %err, "会话台账序列化失败，本轮未落盘");
@@ -420,6 +519,13 @@ impl ContextLedger {
             }
         };
         let path = self.path(&ctx.session);
+        // 计数点放在序列化之后：序列化失败根本没有写盘，不算一次写入。
+        #[cfg(test)]
+        self.persist_calls.set(self.persist_calls.get() + 1);
+        // 字节数也记一份：W1 的收益要用「写了多少字节」验收，只数次数会漏掉
+        // 「文件越写越大」这半个平方项。
+        #[cfg(test)]
+        self.persist_bytes.set(self.persist_bytes.get() + raw.len() as u64);
         if let Err(err) = crate::persistence::write_json_atomic(&path, &raw) {
             // 曾经这里连 `NotFound`（父目录缺失）都被吞掉，台账静默永远为空；
             // 任何落盘失败都必须留痕，否则「聊完重开历史没了」在日志里零证据。
@@ -431,6 +537,60 @@ impl ContextLedger {
                 "会话台账落盘失败"
             );
         }
+    }
+
+    /// 流式帧到达时的写入：**内存即时、磁盘限流**（口径见 [`Self::partial_flushed_at`]）。
+    ///
+    /// `at_ms` 由调用方给出 —— 测试可以伪造时刻来确定性验证限流窗口，不必 sleep。
+    fn set_partial(&mut self, session: &str, text: &str, at_ms: u64) {
+        // 冷会话先 load（含旧文件名迁移；load 自己会回填缓存），之后一律原地改 ——
+        // `load()` 会 clone 整份 entries，每帧 clone 一遍历史等于把 CPU 也做成平方增长。
+        if !self.sessions.contains_key(session) {
+            self.load(session);
+        }
+        // 空文本 = 回合边界（清位）。
+        let boundary = text.is_empty();
+        if let Some(ctx) = self.sessions.get_mut(session) {
+            ctx.partial_text = if boundary {
+                None
+            } else {
+                Some(text.to_string())
+            };
+        }
+        // 清位必须**无条件**落盘：否则「这一轮已经结束」只存在于内存，
+        // 进程重启会恢复出一段永远不会说完的部分文本。
+        if !boundary && !self.partial_flush_due(session, at_ms) {
+            return;
+        }
+        if let Some(ctx) = self.sessions.get(session) {
+            self.persist(ctx);
+        }
+        if boundary {
+            // 清位后作废窗口：下一轮的第一帧应当立即留下恢复点，不被上一轮拖住。
+            self.partial_flushed_at.remove(session);
+        } else {
+            self.partial_flushed_at.insert(session.to_string(), at_ms);
+        }
+    }
+
+    /// 本会话现在是否该把 `partial_text` 写盘。
+    fn partial_flush_due(&self, session: &str, at_ms: u64) -> bool {
+        match self.partial_flushed_at.get(session) {
+            // 本进程还没为这个会话落过盘：先落一次，给「切走再切回」留一个恢复点。
+            None => true,
+            // `saturating_sub`：系统时钟回拨时差值取 0（本帧不落盘），
+            // 而不是 panic 或把「刚写过」误判成「很久没写」而狂写。
+            Some(last) => at_ms.saturating_sub(*last) >= PARTIAL_FLUSH_INTERVAL_MS,
+        }
+    }
+
+    /// 回合结束：清位并**无条件**落盘。
+    ///
+    /// 直接走 [`Self::set_partial`] 的空文本分支，而不是再抄一遍清位逻辑 ——
+    /// 两条清位路径（`clear_partial` 与 `record_partial(session, "")`）语义必须一致。
+    fn clear_partial_state(&mut self, session: &str) {
+        let at_ms = now_ms();
+        self.set_partial(session, "", at_ms);
     }
 
     /// 记录一轮对话（role: user / assistant），返回更新后的用量占比
@@ -457,12 +617,28 @@ impl ContextLedger {
     ///
     /// 只保存 token 数（不保存原文），因此落盘与内存都有界；饱和加法防止溢出。
     fn record_overhead(&mut self, session: &str, tokens: u64) -> f64 {
+        if tokens == 0 {
+            // W2：0 token 不改变任何一个字节 —— 整档重写一次纯属白烧 SSD。
+            // 典型来源是空工具输出（`append_tool_activity(.., "")`）。
+            return self.ratio_only(session);
+        }
         let mut ctx = self.load(session);
         ctx.overhead_tokens = ctx.overhead_tokens.saturating_add(tokens);
         let ratio = ctx.ratio();
         self.persist(&ctx);
         self.sessions.insert(session.to_string(), ctx);
         ratio
+    }
+
+    /// 只读当前占比：不为了一个 `f64` 而 clone 整份 entries。
+    fn ratio_only(&mut self, session: &str) -> f64 {
+        if !self.sessions.contains_key(session) {
+            self.load(session);
+        }
+        self.sessions
+            .get(session)
+            .map(SessionContext::ratio)
+            .unwrap_or(0.0)
     }
 
     /// 带幂等键的工具文本记账。
@@ -492,7 +668,7 @@ impl ContextLedger {
                 }
             };
             if already {
-                return self.load(session).ratio();
+                return self.ratio_only(session);
             }
         }
         self.record_overhead(session, tokens)
@@ -653,6 +829,14 @@ impl ContextLedger {
             Some(1.0 - tokens_after as f64 / tokens_before as f64)
         };
         ctx.snapshot_count = ctx.snapshot_count.saturating_add(1);
+        // M1 Task 4：结构化交接状态。**只用已经持有的 ctx** —— `collect_for` 里绝不能再
+        // 走 `context_status()` / `session_project()`，它们各自再取一次 `ledger()` 互斥锁，
+        // 而本函数正是拿着那把锁被调进来的（自死锁）。
+        ctx.compact_state = Some(crate::context::compact_state::collect_for(
+            session,
+            ctx.project_path.as_deref(),
+            ctx.snapshot_count,
+        ));
         self.persist(&ctx);
         self.sessions.insert(session.to_string(), ctx);
         Some(CompactReport {
@@ -1249,16 +1433,17 @@ pub fn record_tool_output_event_fallback(
 }
 
 /// 增量持久化流式「部分文本」（F1）：turn 进行中调用，切走再切回可恢复。
+///
+/// **内存即时、磁盘限流**：本函数每个流式帧都会被调用，而台账是整份 JSON 原子重写，
+/// 逐帧落盘会让单轮写入字节数随回复长度平方增长。拆开两个口径后，
+/// [`partial_text`]（走内存）看不到任何延迟，只有磁盘恢复点被限流到
+/// [`PARTIAL_FLUSH_INTERVAL_MS`]。签名与读取口径不变，调用方零改动。
 pub fn record_partial(session: &str, text: &str) {
-    let mut g = ledger().lock().unwrap_or_else(|e| e.into_inner());
-    let mut ctx = g.load(session);
-    ctx.partial_text = if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    };
-    g.persist(&ctx);
-    g.sessions.insert(session.to_string(), ctx);
+    let at_ms = now_ms();
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_partial(session, text, at_ms)
 }
 
 /// 读取会话的流式部分文本（无则 None）。
@@ -1272,12 +1457,14 @@ pub fn partial_text(session: &str) -> Option<String> {
 }
 
 /// 清除部分文本（turn 完成后调用，避免残留占位）。
+///
+/// 这是限流的**例外**：清位必须当场落盘，否则「这一轮结束了」只存在于内存里，
+/// 进程重启后前端会恢复出一段永远不会说完的部分文本。
 pub fn clear_partial(session: &str) {
-    let mut g = ledger().lock().unwrap_or_else(|e| e.into_inner());
-    let mut ctx = g.load(session);
-    ctx.partial_text = None;
-    g.persist(&ctx);
-    g.sessions.insert(session.to_string(), ctx);
+    ledger()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear_partial_state(session)
 }
 
 /// 读取会话的全部上下文条目（供网关把会话历史落盘到 sessions.db / 水合 chat.history）。
@@ -1694,6 +1881,347 @@ mod tests {
         assert_eq!(l.status("none").entries.len(), 0);
     }
 
+    // ---- W1（2026-10-30）：流式 partial_text 落盘限流 -------------------------------
+    //
+    // 病灶：`orchestration/mod.rs` 的 TextDelta 分支每帧都调 `record_partial`，而台账是
+    // **整份 JSON 原子重写** ⇒ 单轮写入字节数随回复长度平方增长（Codex 烧 SSD 的同形缺陷）。
+    // 下面这组用例钉的是**两个口径必须分开**：内存即时、磁盘限流。
+
+    /// 只看**盘上真的写了什么**（绕开内存缓存，否则测了个寂寞）。
+    fn disk_partial(l: &ContextLedger, session: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(l.path(session)).expect("台账文件应存在");
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .expect("台账 JSON 应可解析")
+            .get("partial_text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn partial_frames_are_immediate_in_memory_but_rate_limited_on_disk() {
+        let (mut l, _d) = tmp_ledger("partial-throttle");
+        let s = "s-partial-throttle";
+        let t0 = now_ms();
+        // 200 帧，帧间隔 1ms ⇒ 全程落在同一个限流窗口内。
+        for i in 0..200u64 {
+            l.set_partial(s, &format!("frame-{i}"), t0 + i);
+        }
+        assert_eq!(
+            l.status(s).partial_text.as_deref(),
+            Some("frame-199"),
+            "内存必须读到最新帧：前端切走再切回不能落后一帧"
+        );
+        assert_eq!(
+            disk_partial(&l, s).as_deref(),
+            Some("frame-0"),
+            "窗口内不得逐帧重写整份台账 —— 这正是平方写入的来源"
+        );
+    }
+
+    #[test]
+    fn partial_flush_happens_once_the_interval_elapses() {
+        let (mut l, _d) = tmp_ledger("partial-interval");
+        let s = "s-partial-interval";
+        let t0 = now_ms();
+        l.set_partial(s, "first", t0);
+        l.set_partial(s, "still-within-window", t0 + PARTIAL_FLUSH_INTERVAL_MS - 1);
+        assert_eq!(disk_partial(&l, s).as_deref(), Some("first"));
+        l.set_partial(s, "after-window", t0 + PARTIAL_FLUSH_INTERVAL_MS);
+        assert_eq!(
+            disk_partial(&l, s).as_deref(),
+            Some("after-window"),
+            "跨过窗口必须补一次落盘，否则恢复点会一直停在第一轮"
+        );
+    }
+
+    /// W1 的**回归网**：一轮流式回复只能按窗口落盘，不能按帧落盘。
+    ///
+    /// 改 W1 之前这里会失败：200 帧 ⇒ 200 次整档重写（且文件随帧越长越大 ⇒ 写入字节
+    /// 平方增长）。断言写在**计数**上而不是 sleep 上，所以它在任何机器上都是确定的。
+    #[test]
+    fn streaming_frames_do_not_rewrite_the_ledger_once_per_frame() {
+        let (mut l, _d) = tmp_ledger("w1-write-count");
+        let s = "s-w1-write-count";
+        let before = l.persist_calls.get();
+
+        let t0 = 100_000_000;
+        let mut partial = String::new();
+        for i in 0..200u64 {
+            partial.push_str(&format!("帧{i} "));
+            l.set_partial(s, &partial, t0 + i); // 200 帧全落在同一个 1 s 窗口内
+        }
+        let within_window = l.persist_calls.get() - before;
+        assert!(
+            within_window <= 2,
+            "200 帧在同一个限流窗口内最多只能落盘 2 次（第一帧建立恢复点 + 跨窗口补一次），实测 {within_window} 次 —— 逐帧落盘就是平方写入"
+        );
+        assert_eq!(
+            l.status(s).partial_text.as_deref(),
+            Some(partial.as_str()),
+            "磁盘限流不能拖累内存：读到的一定是最新帧"
+        );
+
+        // 回合结束清位必须无条件落盘，并且作废窗口。
+        l.set_partial(s, "", t0 + 200);
+        assert_eq!(
+            l.persist_calls.get() - before,
+            within_window + 1,
+            "回合边界必须补这一次落盘"
+        );
+        assert!(l.status(s).partial_text.is_none());
+    }
+
+    /// 跑一轮「K 帧流式回复」，返回 `(落盘次数, 落盘字节)`。
+    ///
+    /// `step_ms` 决定每帧之间的间隔：`1` ⇒ 全部落在同一个限流窗口内（W1 之后的真实
+    /// 行为）；`PARTIAL_FLUSH_INTERVAL_MS` ⇒ 每帧都「到期」，等价于 **W1 之前**的
+    /// 逐帧整档重写。同一个入口、同一份文本，只差时刻 —— 这样对照组不需要把生产
+    /// 常量改掉再改回来（那种实测做完就没人能保证源文件还原干净）。
+    fn run_streaming_turn(tag: &str, frames: u64, step_ms: u64) -> (usize, u64) {
+        let (mut l, _d) = tmp_ledger(tag);
+        let s = format!("s-{tag}");
+        let mut partial = String::new();
+        for i in 0..frames {
+            // 每帧 ~36 字节增量 ⇒ 200 帧约 7 KB，接近一轮真实回复的量级。
+            partial.push_str(&format!("f{i} 这是一段流式增量输出 payload "));
+            l.set_partial(&s, &partial, i * step_ms);
+        }
+        // 真实流水线在回合结束时会把这轮回复**提交成 entry**（这一次整档重写两种口径
+        // 都逃不掉）；不把它算进来的话，收益会被明显夸大。
+        l.record(&s, "assistant", &partial);
+        // 回合边界：这一轮说完必须清位并落盘，两种口径都逃不掉这一次写。
+        l.clear_partial_state(&s);
+        (l.persist_calls.get(), l.persist_bytes.get())
+    }
+
+    /// W1 的收益必须是**数字**（发布计划 §7：没有数字就宣称「省了 100 倍」＝伪完成）。
+    ///
+    /// 这里同时钉两件事：① 窗口限流确实只写两次；② 对照组（逐帧）确实写了 200 次 ——
+    /// 没有 ② 的话，任何一次「把 set_partial 改成不落盘」的改动都会让对比假绿。
+    #[test]
+    fn windowed_flush_writes_orders_of_magnitude_fewer_bytes_than_per_frame() {
+        const FRAMES: u64 = 200;
+        let (windowed_calls, windowed_bytes) = run_streaming_turn("w1-windowed", FRAMES, 1);
+        let (per_frame_calls, per_frame_bytes) =
+            run_streaming_turn("w1-per-frame", FRAMES, PARTIAL_FLUSH_INTERVAL_MS);
+
+        assert!(
+            windowed_calls <= 3,
+            "200 帧挤在一个窗口内最多落盘 3 次（首帧恢复点 + 提交 entry + 清位），实测 {windowed_calls} 次"
+        );
+        assert!(
+            per_frame_calls as u64 >= FRAMES,
+            "对照组必须真的逐帧落盘（W1 之前的行为），实测 {per_frame_calls} 次 —— 它不再逐帧就说明对比失效了"
+        );
+        assert!(
+            per_frame_bytes >= 20 * windowed_bytes.max(1),
+            "逐帧重写至少要多写 20 倍字节，实测只有 {per_frame_bytes} vs {windowed_bytes}"
+        );
+        println!(
+            "W1 实测（{FRAMES} 帧 / 一轮回复）：逐帧落盘 {per_frame_calls} 次 · {per_frame_bytes} 字节 \
+             → 窗口限流 {windowed_calls} 次 · {windowed_bytes} 字节；字节省 {} 倍，次数省 {} 倍",
+            per_frame_bytes / windowed_bytes.max(1),
+            per_frame_calls / windowed_calls.max(1)
+        );
+    }
+
+    #[test]
+    fn turn_boundary_clear_always_flushes_and_opens_next_window() {
+        let (mut l, _d) = tmp_ledger("partial-boundary");
+        let s = "s-partial-boundary";
+        let t0 = now_ms();
+        l.set_partial(s, "frame", t0);
+        // 清位就发生在**同一毫秒**：限流绝不能把「这一轮结束了」挡在内存里。
+        l.clear_partial_state(s);
+        assert_eq!(l.status(s).partial_text, None);
+        assert_eq!(
+            disk_partial(&l, s),
+            None,
+            "清位必须当场落盘，否则进程重启会恢复出一段永远不会说完的部分文本"
+        );
+        // 窗口作废：下一轮第一帧应当立即留下恢复点。
+        assert!(
+            !l.partial_flushed_at.contains_key(s),
+            "清位后必须作废限流记录"
+        );
+        l.set_partial(s, "next-turn-first-frame", t0);
+        assert_eq!(disk_partial(&l, s).as_deref(), Some("next-turn-first-frame"));
+    }
+
+    #[test]
+    fn partial_throttle_is_per_session() {
+        let (mut l, _d) = tmp_ledger("partial-per-session");
+        let t0 = now_ms();
+        l.set_partial("s-a", "a-frame-1", t0);
+        l.set_partial("s-a", "a-frame-2", t0 + 5);
+        assert_eq!(disk_partial(&l, "s-a").as_deref(), Some("a-frame-1"));
+        // B 会话在本进程第一次落盘：不能被 A 的窗口压住。
+        l.set_partial("s-b", "b-frame-1", t0 + 6);
+        assert_eq!(
+            disk_partial(&l, "s-b").as_deref(),
+            Some("b-frame-1"),
+            "限流状态必须按会话隔离"
+        );
+    }
+
+    /// 「崩溃」口径：窗口内被 kill 后重开，**已提交的历史必须还在**，
+    /// 允许只恢复到窗口内第一个恢复点。这是采用限流的代价，不是缺陷。
+    #[test]
+    fn partial_throttle_never_loses_committed_entries() {
+        let (mut l, d) = tmp_ledger("partial-entries");
+        let s = "s-partial-entries";
+        let t0 = now_ms();
+        l.record(s, "user", "q1");
+        for i in 0..50u64 {
+            l.set_partial(s, &format!("f{i}"), t0 + i);
+        }
+        // 换一个实例从盘上读 = 进程重启（不能复用内存缓存，否则证明不了落盘）。
+        let mut reopened = ContextLedger::new(&d);
+        let ctx = reopened.status(s);
+        assert_eq!(ctx.entries.len(), 1, "限流绝不能挡住已提交的历史");
+        assert_eq!(ctx.entries[0].text, "q1");
+        assert_eq!(
+            ctx.partial_text.as_deref(),
+            Some("f0"),
+            "重启允许只恢复到窗口内第一个恢复点"
+        );
+    }
+
+    /// 写入量的直接测量（W1 的验收口径，不是推算）：
+    /// 同样 200 帧、同样真实量级的台账，
+    /// **改动前** = 每帧一次「整档 + 累积 partial」的序列化重写（逐帧算，用的是旧代码那套
+    /// `to_string_pretty`）；**改动后** = 盘上实际存在的那一次写的字节数（真实读文件）。
+    ///
+    /// 断言留 50× 余量：这条用例的作用是让「以后有人把限流改回每帧一写」立刻变红，
+    /// 而不是记一个会随文案长度漂移的精确数字。
+    #[test]
+    fn partial_path_writes_orders_of_magnitude_fewer_bytes() {
+        let (mut l, _d) = tmp_ledger("partial-bytes");
+        let s = "s-partial-bytes";
+        // 造一份真实量级的台账：20 轮 × 每轮 400 字符（本机活跃会话实测 7–32 KB 档）。
+        for _ in 0..20 {
+            l.record(s, "user", &"问".repeat(200));
+            l.record(s, "assistant", &"答".repeat(200));
+        }
+        let base = l.status(s);
+        let base_bytes = serde_json::to_string_pretty(&base).unwrap().len() as u64;
+        assert!(
+            base_bytes >= 8_000,
+            "台账至少要有真实量级，否则这条测量没有意义：{base_bytes} B"
+        );
+
+        // 旧实现：200 帧，每帧重写「整档 + 该帧的累积文本」。
+        let mut before = 0u64;
+        let mut ghost = base.clone();
+        for i in 1..=200u64 {
+            ghost.partial_text = Some("x".repeat((i * 40) as usize));
+            before += serde_json::to_string_pretty(&ghost).unwrap().len() as u64;
+        }
+
+        // 新实现：同一批帧全部落在一个窗口内 ⇒ 盘上只有一次写。
+        let t0 = now_ms();
+        for i in 1..=200u64 {
+            l.set_partial(s, &"x".repeat((i * 40) as usize), t0 + i);
+        }
+        let after = std::fs::metadata(l.path(s)).unwrap().len();
+        assert!(
+            after * 50 < before,
+            "改动前 {before} B vs 改动后 {after} B —— 写入放大没有被消掉"
+        );
+    }
+
+    // ---- W2（2026-10-30）：序列化体积 + 空写剔除 ------------------------------------
+
+    /// 盘上的原始字节（判断「到底有没有被重写」比看内容更直接）。
+    fn disk_raw(l: &ContextLedger, session: &str) -> String {
+        std::fs::read_to_string(l.path(session)).expect("台账文件应存在")
+    }
+
+    #[test]
+    fn ledger_is_stored_compact_and_still_roundtrips() {
+        let (mut l, d) = tmp_ledger("w2-compact");
+        let s = "s-w2-compact";
+        l.record(s, "user", "hello");
+        l.record(s, "assistant", "world");
+        let raw = disk_raw(&l, s);
+        assert!(
+            !raw.contains('\n'),
+            "缩进对一份只有程序读的台账没有价值，只让每次重写多吐约 1/4 字节：{raw}"
+        );
+        // 换实例从盘上读 = 进程重启：compact 与 pretty 对 `from_str` 同价，
+        // 这条断言才是「去掉 pretty 不影响读侧」的证明。
+        let mut reopened = ContextLedger::new(&d);
+        let ctx = reopened.status(s);
+        assert_eq!(ctx.entries.len(), 2);
+        assert_eq!(ctx.entries[1].text, "world");
+    }
+
+    #[test]
+    fn zero_token_overhead_does_not_rewrite_the_ledger() {
+        let (mut l, _d) = tmp_ledger("w2-noop");
+        let s = "s-w2-noop";
+        l.record(s, "user", "q");
+        // 用哨兵字节占住文件：如果这次调用真的重写了台账，哨兵一定消失。
+        let sentinel = r#"{"session":"s-w2-noop","entries":[],"overhead_tokens":0,"budget":0}"#;
+        std::fs::write(l.path(s), sentinel).unwrap();
+
+        let ratio = l.record_overhead(s, 0);
+        assert_eq!(disk_raw(&l, s), sentinel, "0 token 不改变任何字节，不该整档重写");
+        // 占比口径必须与正常路径**完全一致**：短路省的是写盘，不是算数。
+        // （不是 0.0 —— 已缓存的会话用的是默认 128k 预算，哨兵那串字节只是盘上内容，
+        // 不会反向改写内存里的 ctx；这里若去比 0.0 就是在断言一个不存在的行为。）
+        assert_eq!(ratio, l.status(s).ratio(), "短路只省写盘，不改口径");
+
+        // 对照：真的有增量时**必须**落盘（否则这条剔除就变成了丢数据）。
+        l.record_overhead(s, 7);
+        assert_ne!(disk_raw(&l, s), sentinel);
+        assert_eq!(l.status(s).overhead_tokens, 7);
+    }
+
+    #[test]
+    fn zero_token_overhead_keeps_reporting_the_real_ratio() {
+        let (mut l, _d) = tmp_ledger("w2-ratio");
+        let s = "s-w2-ratio";
+        {
+            let mut ctx = l.load(s);
+            ctx.budget = 1_000;
+            l.persist(&ctx);
+            l.sessions.insert(s.to_string(), ctx);
+        }
+        l.record(s, "user", "hello hello hello");
+        let before = l.status(s).ratio();
+        assert!(before > 0.0, "用例本身要成立：此时占比应已非零");
+        // 走的是 ratio_only（不再 clone 整档），口径必须与直接读一致。
+        assert_eq!(l.record_overhead(s, 0), before);
+        assert!(l.record_overhead(s, 100) > before);
+    }
+
+    // ---- W4（2026-10-30）：台账目录字节预算 -------------------------------------------
+
+    /// 预算回收的三条口径：认 `.json`、放过 `*.corrupt-*.json`、保住 mtime 最新一份。
+    /// 用 1 字节预算驱动，免得测试真造 256 MB 文件。
+    #[test]
+    fn ledger_dir_prunes_oldest_but_keeps_quarantine_and_current() {
+        let dir = std::env::temp_dir().join(format!("mgt-ctx-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("sess-old.json");
+        let corrupt = dir.join("sess-z.corrupt-1.json");
+        let newest = dir.join("sess-new.json");
+        std::fs::write(&old, "a".repeat(2000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&corrupt, "c".repeat(2000)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&newest, "n".repeat(2000)).unwrap();
+
+        let removed = prune_ledger_dir(&dir, 1).unwrap();
+        assert_eq!(removed.len(), 1, "只应回收最旧那一份: {removed:?}");
+        assert!(!old.exists(), "超预算时最旧的一份台账必须被回收");
+        assert!(corrupt.exists(), "损坏隔离件是唯一恢复凭据，不许被预算回收");
+        assert!(newest.exists(), "最新一份可能就是当前会话，永不删");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 旧文件名把 `:` 与 `_` 混为一谈：`web:1` 与 `web_1` 共用一份文件并串会话。
     /// 单射编码必须让两者各自落盘、各自读回。
     #[test]
@@ -2050,6 +2578,44 @@ mod tests {
         assert_eq!(ctx.last_mode.as_deref(), Some("deterministic"));
         assert!(ctx.compression_ratio.unwrap_or(0.0) > 0.0);
         assert!(ctx.snapshot_count >= 1, "压缩应保存预压缩快照");
+    }
+
+    /// M1 Task 4：压缩必须留下**结构化交接状态**，且空白可解释。
+    ///
+    /// 这里刻意用未绑定项目的会话（`project_path == None`）：`branch` 必须是 `None`
+    /// 而不是 `""`/`"main"`，并且每个取不到的字段都要在 `source_gaps` 里点名 ——
+    /// 这是 AGENTS.md R57「『不知道』不得被渲染成『不存在』」的落盘版。
+    #[test]
+    fn test_compact_writes_structured_state_with_explainable_gaps() {
+        let (mut l, d) = tmp_ledger("cstate");
+        for i in 0..20 {
+            l.record("s9", "user", &format!("交接任务 {i}：修 FTS5"));
+            l.record("s9", "assistant", &format!("已完成 {i}"));
+        }
+        l.compact("s9", "cmp-9", None).expect("长会话应压缩");
+        let state = l
+            .status("s9")
+            .compact_state
+            .clone()
+            .expect("压缩后必须有交接状态");
+        assert!(
+            state.branch.is_none(),
+            "未绑定项目不得凭空给分支：{:?}",
+            state.branch
+        );
+        assert!(
+            state.source_gaps.iter().any(|g| g.contains("branch")),
+            "空白必须可解释：{:?}",
+            state.source_gaps
+        );
+        assert!(state.generated_at_ms > 0, "必须有生成时间");
+        assert!(state.snapshot_count >= 1);
+        // 换一个**全新实例**从磁盘读回：证明落盘真的带了这一栏（内存缓存不算）。
+        let mut l2 = ContextLedger::new(&d);
+        assert!(
+            l2.status("s9").compact_state.is_some(),
+            "交接状态必须落盘并能重新解析"
+        );
     }
 
     #[test]

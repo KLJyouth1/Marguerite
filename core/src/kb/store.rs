@@ -357,6 +357,25 @@ impl KnowledgeBase {
         docs
     }
 
+    /// 登记/更新一条**文件来源记录**（供启动自检与增量索引对账）。
+    ///
+    /// 同一路径重复入库时按路径更新（doc_id / mtime / size 一起刷新），
+    /// 不产生重复来源记录；`delete_document` 会连带清掉对应记录。
+    pub fn record_source(&mut self, path: &str, doc_id: &str, mtime_ms: u64, size: u64) {
+        if let Some(existing) = self.sources.iter_mut().find(|s| s.path == path) {
+            existing.doc_id = doc_id.to_string();
+            existing.mtime_ms = mtime_ms;
+            existing.size = size;
+            return;
+        }
+        self.sources.push(KbSource {
+            path: path.to_string(),
+            doc_id: doc_id.to_string(),
+            mtime_ms,
+            size,
+        });
+    }
+
     /// 删除指定文档的所有分块（同时清掉它的文件来源记录，避免自检误报「已索引」）
     pub fn delete_document(&mut self, doc_id: &str) -> bool {
         let before = self.documents.len();

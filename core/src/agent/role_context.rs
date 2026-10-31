@@ -535,6 +535,8 @@ mod tests {
                 text: "0.2.19 修了启动 panic".to_string(),
                 source: "project:marguerite".to_string(),
                 score: 0.8,
+                id: None,
+                deletable: false,
             }],
             ..Default::default()
         });
@@ -576,6 +578,8 @@ mod tests {
                 text: format!("第{i}条跨项目事实：{}", "很长的说明文字".repeat(4)),
                 source: format!("cross_project:notes-{i}.md"),
                 score: 1.0 - (i as f64) * 0.01,
+                id: None,
+                deletable: false,
             })
             .collect();
         let brief = crate::assistant::compose_brief(crate::assistant::BriefInput {

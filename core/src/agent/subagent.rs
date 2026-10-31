@@ -230,6 +230,13 @@ pub struct SubAgentManager {
     /// 编排级取消信号（「停止」按钮）：Some 时成员执行会与它 `select!`，
     /// 命中后立刻收口，不再等模型/工具自己跑完。
     cancel: Arc<std::sync::RwLock<Option<Arc<crate::orchestration::cancel::CancelSignal>>>>,
+    /// 单成员执行超时的**上限**（`None` = 完全按 `budget_policy` 自适应，生产默认）。
+    ///
+    /// 存在的唯一理由是离线矩阵测试：`spawn_with_spec` 按任务体量解析出的预算
+    /// 通常是分钟级，而测试里的模型端点必失败、只是走一遍 spawn/wait/收集链路。
+    /// 没有上限时，几十个组合会串行叠加成分钟级（实测 356s），把单测拖成「假死」。
+    /// 生产路径不设置它，因此行为逐字节不变。
+    timeout_cap: Option<std::time::Duration>,
 }
 
 impl SubAgentManager {
@@ -255,7 +262,14 @@ impl SubAgentManager {
             session: None,
             progress: Arc::new(std::sync::RwLock::new(None)),
             cancel: Arc::new(std::sync::RwLock::new(None)),
+            timeout_cap: None,
         }
+    }
+
+    /// 设置单成员执行超时上限（只用于测试；`None` 时行为不变）。
+    pub fn with_timeout_cap(mut self, cap: std::time::Duration) -> Self {
+        self.timeout_cap = Some(cap);
+        self
     }
 
     /// 按本次团队 / 蜂群规模抬升并发上限（**只升不降**）。
@@ -473,14 +487,19 @@ impl SubAgentManager {
         intent: IntentType,
         complexity: Complexity,
     ) -> Result<String> {
+        // 超时按任务体量自适应（模型可用 `[[budget:deep]]` 显式升档）；
+        // 仅在显式设置上限时（离线矩阵测试）才收紧，生产路径不受影响。
+        let mut timeout = crate::agent::budget_policy::resolve(task, 1, 0).run_timeout;
+        if let Some(cap) = self.timeout_cap {
+            timeout = timeout.min(cap);
+        }
         self.spawn_spec_with_timeout(
             task,
             context,
             role_prompt,
             intent,
             complexity,
-            // 超时按任务体量自适应（模型可用 `[[budget:deep]]` 显式升档）。
-            crate::agent::budget_policy::resolve(task, 1, 0).run_timeout,
+            timeout,
         )
         .await
     }

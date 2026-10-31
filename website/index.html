@@ -52,24 +52,29 @@
       <span class="brand__name">MARGUERITE</span>
     </a>
     <nav class="nav__links" aria-label="主导航">
-      <a href="#film">85 秒影片</a>
+      <a href="#film" title="85 秒卡点短片">影片</a>
       <a href="#entries">四入口</a>
-      <a href="#shots">真实界面</a>
-      <a href="#demo">操作演示</a>
-      <a href="#compare">差异</a>
-      <a href="#capabilities">能力全景</a>
-      <a href="#discipline">工程纪律</a>
-      <a href="#cases">案例复盘</a>
+      <a href="#shots" title="真实界面实录">界面</a>
+      <a href="#demo" title="操作演示">演示</a>
+      <a href="#compare" title="形态差异">差异</a>
+      <a href="#capabilities" title="能力全景">能力</a>
+      <a href="#tactics" title="战术推演系统">战术</a>
+      <a href="#discipline" title="工程纪律">纪律</a>
+      <a href="#cases" title="案例复盘">案例</a>
       <a href="#trust">承诺</a>
       <a href="#story">开发史</a>
-      <a href="#evidence">可验证</a>
-      <a href="#faq">常见问题</a>
-      <a href="#changelog">更新日志</a>
+      <a href="#evidence" title="可验证的证据">可验证</a>
+      <a href="#faq">FAQ</a>
+      <a href="#changelog" title="更新日志">日志</a>
       <a href="#download">下载</a>
     </nav>
     <button class="sound" id="soundToggle" type="button" aria-pressed="false" aria-label="开启背景音乐 focus-pulse">
       <span class="sound__bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <span class="sound__label" data-sound-label>声音关</span>
+    </button>
+    <button class="proof-toggle" id="proofToggle" type="button" aria-pressed="false" aria-controls="proofPanel" title="证据模式：标出每条宣称对应的命令与实测值">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span class="proof-toggle__label" data-proof-label>证据</span>
     </button>
     <a class="nav__lang" href="index.en.html" hreflang="en" lang="en" aria-label="Switch to English">EN</a>
     <a class="btn btn--solid nav__cta" href="#download">下载桌面端</a>
@@ -84,6 +89,7 @@
     <a href="#demo">操作演示</a>
     <a href="#compare">差异</a>
     <a href="#capabilities">能力全景</a>
+    <a href="#tactics">战术推演</a>
     <a href="#discipline">工程纪律</a>
     <a href="#cases">案例复盘</a>
     <a href="#trust">承诺</a>
@@ -561,6 +567,63 @@
       <p class="cmp__note">
         对比仅描述产品形态差异，不含对任何第三方产品的评测或评分。Marguerite 一列的每条都对应仓库里可复跑的命令或可在界面中看到的面。
       </p>
+
+      <!-- 5 Whys：把「为什么」问到能做决定的那一层；每一层都带可伪证条件 -->
+      <div class="why reveal-up" data-proof="why-chain">
+        <header class="why__hd">
+          <p class="why__k">5 WHYS · 问到能做决定为止</p>
+          <h3 class="why__t">为什么是工作台，而不是又一个聊天框？</h3>
+          <p class="why__lede">每一次追问都要落到一个可执行、可伪证的机制上；问不到第五层，说明理由还停在口号。每一层都写了「怎么证明它是错的」。</p>
+        </header>
+        <ol class="why__chain">
+          <li class="why__step">
+            <span class="why__no" aria-hidden="true">01</span>
+            <div class="why__body">
+              <p class="why__q"><b>为什么</b>最终回答不够？</p>
+              <p class="why__a">因为可复用的不是一句话，而是过程：计划怎么拆、工具回了什么、产物落在哪、哪一步失败过。只留答案，下一次还得从头问。</p>
+              <p class="why__e"><span class="why__tag">机制</span>计划 DAG · 工具回执 · 产物台账 <code>core/src/plan/</code> <code>artifacts.*</code></p>
+              <p class="why__f">可伪证：把产物台账删掉，这一层立刻退化成聊天记录。</p>
+            </div>
+          </li>
+          <li class="why__step">
+            <span class="why__no" aria-hidden="true">02</span>
+            <div class="why__body">
+              <p class="why__q"><b>为什么</b>过程可见还不够？</p>
+              <p class="why__a">因为可见的过程仍会撒谎：失败被写成成功、未知被填成 0、空态被一句「暂无数据」盖住。看得见不等于看得懂，更不等于没被修饰。</p>
+              <p class="why__e"><span class="why__tag">机制</span>「未报告」纪律 · 未知 ≠ 0 · 空 / 错 / 骨架三态分离</p>
+              <p class="why__f">可伪证：把任意一处「未报告」改成 0，案例 01 的假绿就会重演。</p>
+            </div>
+          </li>
+          <li class="why__step">
+            <span class="why__no" aria-hidden="true">03</span>
+            <div class="why__body">
+              <p class="why__q"><b>为什么</b>要靠机制而不是承诺？</p>
+              <p class="why__a">因为承诺不可执行，机制会拦人。门禁红了就不许说完成；契约里声明了但没实现的方法，构建直接失败；被跳过的检查永远不算通过。</p>
+              <p class="why__e"><span class="why__tag">机制</span>26 项全量门禁 · RPC 契约守卫 · RPC 方法 471 条 · 幽灵声明 0 条</p>
+              <p class="why__f">可伪证：摘掉脚本，任意一项红都不会再有人知道。</p>
+            </div>
+          </li>
+          <li class="why__step">
+            <span class="why__no" aria-hidden="true">04</span>
+            <div class="why__body">
+              <p class="why__q"><b>为什么</b>机制还要被看见？</p>
+              <p class="why__a">因为看不见的机制无法被信任。所以数字要能被重跑，安装包要能被校验，装进去的引擎要能通过「真启动 + 真请求」的冒烟，而不是只看文件在不在。</p>
+              <p class="why__e"><span class="why__tag">机制</span>本页 23 个台账数字逐条重测 · SHA256 · 侧车 <code>/health</code> · <code>/ws</code> 冒烟</p>
+              <p class="why__f">可伪证：删掉 <code>check-website-claims.py</code>，这里的数字三天内必然漂。</p>
+            </div>
+          </li>
+          <li class="why__step">
+            <span class="why__no" aria-hidden="true">05</span>
+            <div class="why__body">
+              <p class="why__q"><b>为什么</b>信任之后还要推演？</p>
+              <p class="why__a">因为「这一次做对」不等于「任意组合都做对」。主智能体、专家团、子智能体、蜂群的组合空间是指数级的；开工前先算失败概率，比事后复盘的代价低一个量级。</p>
+              <p class="why__e"><span class="why__tag">机制</span>7 条战术覆盖 5 种拓扑 · 确定性推演 · 先验未知不填 0 · 反事实复盘</p>
+              <p class="why__f">可伪证：同一个种子重跑两次，结果不一致就说明推演不可复现。</p>
+            </div>
+          </li>
+        </ol>
+        <p class="why__foot">这不是文案结构，是产品结构：下一节的 <a href="#tactics">战术推演</a>，就是第 05 层从一句话变成一套可运行的机制。</p>
+      </div>
     </div>
   </section>
 
@@ -569,8 +632,8 @@
     <div class="wrap">
       <header class="sec-head reveal-up">
         <p class="sec-index">CAPABILITIES</p>
-        <h2 class="sec-title" id="capTitle">一个核心，八项硬功夫</h2>
-        <p class="sec-take">八项全在代码里，没有一项写「即将支持」。</p>
+        <h2 class="sec-title" id="capTitle">一个核心，九项硬功夫</h2>
+        <p class="sec-take">九项全在代码里，没有一项写「即将支持」。</p>
         <p class="sec-dek">不是功能清单，是写进代码、能在你自己机器上验证的事实——每张卡都标注了它住在仓库哪个目录。</p>
       </header>
 
@@ -590,7 +653,7 @@
           </span>
           <h3 class="card__title">本地优先网关</h3>
           <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
-          <p class="card__where"><code>core/src/gateway/</code> · 461 条 RPC 方法声明</p>
+          <p class="card__where"><code>core/src/gateway/</code> · 471 条 RPC 方法声明</p>
         </article>
 
         <article class="card reveal-up">
@@ -646,7 +709,79 @@
           <p class="card__body">每个产物登记造册、可回放、可在编辑器内联修改；<code>/handoff</code> 把会话产物清单写成工作区交接单，下一个模型或会话直接承接，不经对话传文件。</p>
           <p class="card__where"><code>core/src/gateway/artifacts.rs</code> · <code>artifacts.*</code></p>
         </article>
+
+        <article class="card reveal-up">
+          <span class="card__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/></svg>
+          </span>
+          <h3 class="card__title">注意力货架：屏幕空间按紧迫度分配</h3>
+          <p class="card__body">正在阻塞你的事（待批的工具调用、被卡住的回合）不再随聊天记录一起滚走，而是沉淀到左下角一枚胶囊里；没有待办时它<strong>一个像素都不占</strong>，也不挂任何定时器。排序有一条硬保证：<em>搁置两小时的审批永远压过刚出现的次要选项</em>——这条写成单测断言（`RECENCY_MAX` 必须小于任意两个类别基座之差），不是文案。动效只编码因果：没有状态跃迁就不播动画。</p>
+          <p class="card__where"><code>webui/src/composables/ui/attentionQueue.ts</code> · <code>attention-system.css</code></p>
+        </article>
       </div>
+    </div>
+  </section>
+
+  <!-- ================= TACTICS · 战术推演 ================= -->
+  <section class="band band--alt band--tactics" id="tactics" aria-labelledby="tacTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">TACTICAL REHEARSAL · 战术推演</p>
+        <h2 class="sec-title" id="tacTitle">开火之前，先让失败发生一次</h2>
+        <p class="sec-take">把主智能体、专家团、子智能体、蜂群的组合，先放进一台可复现的推演机里跑一遍。</p>
+        <p class="sec-dek">协作不是人越多越好。同一张任务 DAG，换一种拓扑，失败概率、耗时与 token 账单会走向相反的方向。下面每一种拓扑都对应 <code>core/src/tactics/</code> 里可执行的模型；交互台只演示机制，不产生可引用数字。</p>
+      </header>
+
+      <div class="tac reveal-up">
+        <div class="tac__main">
+          <div class="tac__tabs" role="tablist" aria-label="协作拓扑">
+            <button class="tac__tab is-active" type="button" role="tab" id="topoSolo" aria-selected="true" aria-controls="tacStage" data-topo="solo"><b>Solo</b><span>单人</span></button>
+            <button class="tac__tab" type="button" role="tab" id="topoStar" aria-selected="false" aria-controls="tacStage" data-topo="star"><b>Star</b><span>星型</span></button>
+            <button class="tac__tab" type="button" role="tab" id="topoPanel" aria-selected="false" aria-controls="tacStage" data-topo="panel"><b>Panel</b><span>专家团</span></button>
+            <button class="tac__tab" type="button" role="tab" id="topoSwarm" aria-selected="false" aria-controls="tacStage" data-topo="swarm"><b>Swarm</b><span>蜂群</span></button>
+            <button class="tac__tab" type="button" role="tab" id="topoRelay" aria-selected="false" aria-controls="tacStage" data-topo="relay"><b>Relay</b><span>接力</span></button>
+          </div>
+
+          <div class="tac__stage" id="tacStage" role="tabpanel" aria-labelledby="topoSolo">
+            <svg class="tac__svg" viewBox="0 0 640 300" role="img" aria-label="单人拓扑的任务流向示意" data-tac-svg></svg>
+            <div class="tac__hud">
+              <p class="tac__status" data-tac-status aria-live="polite">选择拓扑，然后点「跑一次」。</p>
+              <button class="btn btn--ghost btn--sm" type="button" data-tac-run>跑一次</button>
+            </div>
+            <div class="tac__log" data-tac-log aria-live="polite" aria-label="推演日志"></div>
+          </div>
+        </div>
+
+        <aside class="tac__side">
+          <p class="tac__k">GATE · 验证闸门</p>
+          <label class="tac__switch">
+            <input type="checkbox" data-tac-gate checked>
+            <span class="tac__track" aria-hidden="true"></span>
+            <span class="tac__switch-t"><b>把闸门打开</b><em data-tac-gate-desc>检出率 85% · 误报 5% · token +10% · 耗时 ×1.15</em></span>
+          </label>
+          <p class="tac__hint" data-tac-hint>有闸门：未被发现的缺陷变成一次可重试的显式失败。</p>
+          <p class="tac__disclaim">机制演示用固定种子画流程，<b>不产生可引用数字</b>。真实胜率由 <code>tactics.simulate</code> 对七条战术各跑 2,000 次得出；先验不足时进 <code>unknowns</code>，不填 0。</p>
+          <p class="tac__preflight"><b>预检线 0.15</b>：失败概率超过阈值直接判不合格，附 <code>whyNot</code>，不靠人眼挑。</p>
+        </aside>
+      </div>
+
+      <div class="tac__chips" role="group" aria-label="七条内置战术">
+        <button class="tac__chip is-active" type="button" data-tactic="solo" data-topo="solo" data-gate="0"><b>solo</b><span>单人 · 无闸门</span><em>赌任务简单到一次做对</em></button>
+        <button class="tac__chip" type="button" data-tactic="solo-gated" data-topo="solo" data-gate="1"><b>solo + gate</b><span>单人 · 有闸门</span><em>多花一次检查，换错误不悄悄交出去</em></button>
+        <button class="tac__chip" type="button" data-tactic="star" data-topo="star" data-gate="0"><b>star</b><span>星型 · 3 并行</span><em>并行买时间；风险是没人检查整合结果</em></button>
+        <button class="tac__chip" type="button" data-tactic="star-gated" data-topo="star" data-gate="1"><b>star + gate</b><span>星型 · 有闸门</span><em>并行 + 整合后验收：速度与正确性都要</em></button>
+        <button class="tac__chip" type="button" data-tactic="panel" data-topo="panel" data-gate="1"><b>panel</b><span>专家团 · 3 专家</span><em>独立作答降低漏判；同一节点付三份钱</em></button>
+        <button class="tac__chip" type="button" data-tactic="swarm" data-topo="swarm" data-gate="1"><b>swarm</b><span>蜂群 · 6 分片</span><em>宽 DAG 靠分片压平时间；分片边界丢上下文</em></button>
+        <button class="tac__chip" type="button" data-tactic="relay" data-topo="relay" data-gate="1"><b>relay</b><span>接力 · 串行专精</span><em>专职接力降低单点失误；串行意味着时间换正确率</em></button>
+      </div>
+
+      <ol class="tac__rules">
+        <li><span>01</span><b>未知不填 0</b><p>每条先验都带样本数 <code>n</code>；<code>n = 0</code> 一律进 <code>unknowns</code>，界面必须写明「这数字没有实测支撑」。</p></li>
+        <li><span>02</span><b>反事实回放</b><p>用台账里的一次真实运行做 <code>tactics.replay</code>：台账没有的字段进 <code>gaps</code>，不补零；5-Why 链只指到证据为止。</p></li>
+        <li><span>03</span><b>同一场景，七条战术</b><p>胜负不靠偏好：所有战术在同一条 DAG、同一组先验、同一批试验次数下比较，换参数就重跑。</p></li>
+      </ol>
+
+      <p class="tac__provenance">证据路径：<code>core/src/tactics/</code> · <code>core/src/gateway/tactics_rpc.rs</code> · <code>core/src/tools/tactics_tool.rs</code> · <code>webui/src/views/TacticsView.vue</code> · 入口 <code>tactics.catalog</code> / <code>tactics.simulate</code> / <code>tactics.replay</code></p>
     </div>
   </section>
 
@@ -661,10 +796,10 @@
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="49">49</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="62">62</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="74">74</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">agent.selfcheck · tools.count</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="461">461</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
+        <div class="stat reveal-up" data-proof="views"><b class="stat__n"><span data-count="50">50</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
+        <div class="stat reveal-up" data-proof="core-modules"><b class="stat__n"><span data-count="65">65</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
+        <div class="stat reveal-up" data-proof="tools"><b class="stat__n"><span data-count="76">76</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">agent.selfcheck · tools.count</code></div>
+        <div class="stat reveal-up" data-proof="rpc"><b class="stat__n"><span data-count="471">471</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
       </div>
 
       <div class="guards reveal-up" role="list" aria-label="十三道架构守卫">
@@ -681,6 +816,31 @@
         <span class="guard" role="listitem">RPC 契约</span>
         <span class="guard" role="listitem">索引注入契约</span>
         <span class="guard" role="listitem">启动素材编解码</span>
+      </div>
+
+      <div class="native reveal-up">
+        <div class="native__hd">
+          <p class="native__k">NATIVE HARDENING · 安装包防反编译</p>
+          <h3 class="native__t">把 Python 侧车编译成原生码，也把没编的部分写清楚</h3>
+          <p class="native__d">Cython 3.3.0 把模块翻译成 C，再由 MSVC 对随包的 Python 3.12 编译成原生扩展。它防的是「解包就能读源码」，不是宣称不可破解；真正会误导人的，是把没编译的部分藏在「已加密」四个字后面。</p>
+        </div>
+        <div class="native__stats">
+          <div class="native__stat"><b>1,018</b><span>Python 模块总数</span></div>
+          <div class="native__stat"><b>858</b><span>已编译为原生扩展</span></div>
+          <div class="native__stat"><b>134</b><span>按设计排除</span></div>
+          <div class="native__stat"><b>26</b><span>编译失败 · 已声明</span></div>
+        </div>
+        <div class="native__grid">
+          <div class="native__cell">
+            <b>剩下的 160 个 .py 是什么</b>
+            <p>134 个是包存根、runpy 入口、按文件执行的技能脚本、运行时要读自身源码的模块；26 个是 Cython 对 PEP 695 <code>type</code> 别名与部分泛型语法的限制导致的编译失败。两类都在清单里逐名列出，没有「已全部加密」这种话。</p>
+          </div>
+          <div class="native__cell">
+            <b>三道闸门，各管一段</b>
+            <p>清单闸：源指纹变了却没重编，校验直接红。残留闸：声称已编译、旁边却躺着明文 <code>.py</code>，拒绝发布。启动闸：真启动打包侧车，打 <code>/health</code>、<code>/api/config</code> 与 <code>/ws</code>——文件在，不等于跑得起来。</p>
+          </div>
+        </div>
+        <p class="native__foot">编译 <code>scripts/compile_pyengine_native.py</code> · 资源闸门 <code>scripts/check-shipped-resources.py</code> · 启动冒烟 <code>scripts/check-sidecar-boot.py</code> · 清单 NATIVE.json（打包产物，不进 git）</p>
       </div>
 
       <div class="cards cards--honest">
@@ -1211,11 +1371,11 @@ webui/e2e/approval-card.spec.ts</pre>
       </div>
 
       <div class="ledger reveal-up">
-        <div class="ledger__i"><b class="ledger__n">284,089<em> 行</em></b><span class="ledger__l">Rust · 570 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">341,111<em> 行</em></b><span class="ledger__l">前端 · 1,231 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">463,684<em> 行</em></b><span class="ledger__l">Python · 1,016 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">300,497<em> 行</em></b><span class="ledger__l">Rust · 591 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">355,638<em> 行</em></b><span class="ledger__l">前端 · 1,277 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">463,769<em> 行</em></b><span class="ledger__l">Python · 1,016 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
-        <div class="ledger__i"><b class="ledger__n">31<em> 个</em></b><span class="ledger__l">工具模块</span></div>
+        <div class="ledger__i"><b class="ledger__n">32<em> 个</em></b><span class="ledger__l">工具模块</span></div>
         <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
       </div>
 
@@ -1225,7 +1385,7 @@ webui/e2e/approval-card.spec.ts</pre>
       </blockquote>
 
       <p class="story__meta reveal-up">
-        数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-29），只数<strong>随仓库发布</strong>的那一份（被 <code>.gitignore</code> 的目录不计）；
+        数据口径：代码行数、文件数、技能数量、工具模块与提交时段来自本仓库实测（2026-10-31），只数<strong>随仓库发布</strong>的那一份（被 <code>.gitignore</code> 的目录不计）；
         这些数字由 <code>python scripts/check-website-claims.py</code> 逐条重跑对账，漂一处就红。三年、3 万美元、就医与作息为作者自述；
         token 数为按混合单价反推的估算，不是账单。故事板块不写没发生过的事。
       </p>
@@ -1331,6 +1491,19 @@ ollama run  KLJyouth-office-V0.17-C
 # 否则推理分布与训练不一致，字母概率会失真</code></pre>
       </div>
 
+      <div class="lm__proto reveal-up">
+        <h3 class="lm__h">云端与自建端点，协议由你选</h3>
+        <p>
+          模型选择器 → 自定义：填 <code>base_url</code>、模型名与密钥，再选协议——OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三选一。
+          选 Anthropic 会以 <code>custom_anthropic</code> 家族落档，请求走 <code>/messages</code> 而不是 <code>/chat/completions</code>；
+          「测试连接」按同一协议发探测，不会拿 OpenAI 的探针去测 Anthropic 端点。
+        </p>
+        <p class="lm__note">
+          协议映射与保存前校验在 <code>core/src/gateway/llm_profile.rs</code>，界面在 <code>webui/src/components/chat/ChatModelPicker.vue</code>；
+          未知协议与不可能组合（例如 Anthropic + Responses）在落盘前就被拒绝，不会出现「选完提示成功、请求还打旧协议」。
+        </p>
+      </div>
+
       <div class="lm__limits reveal-up">
         <h3 class="lm__h">这一版做不到什么</h3>
         <ul>
@@ -1355,24 +1528,24 @@ ollama run  KLJyouth-office-V0.17-C
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4341">4341</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="4927">4927</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="26">26</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
-        <div class="stat reveal-up"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
+        <div class="stat reveal-up" data-proof="core-tests"><b class="stat__n"><span data-count="4533">4533</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up" data-proof="webui-tests"><b class="stat__n"><span data-count="5085">5085</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up" data-proof="gate"><b class="stat__n"><span data-count="26">26</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
+        <div class="stat reveal-up" data-proof="cli-routes"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
       </div>
 
       <div class="gate reveal-up">
-        <div class="term term--gate">
+        <div class="term term--gate" data-proof="gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4259 passed / 0 failed</p>
-          <p class="term__line term__ok">[PASS] webui tests · 4902 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4508 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 5015 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
           <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
-          <p class="term__line term__ok">================ 25/25 全绿 · exit 0 ================</p>
+          <p class="term__line term__ok">================ 26/26 全绿 · exit 0 ================</p>
         </div>
         <p class="gate__note">
-          基线为 2026-10-29 的全量闸门复测（<code>verify.sh --clean --all</code>，25/25 全绿、exit 0、汇总里没有 [SKIP]）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+          基线为 2026-10-31 的全量闸门复测（<code>verify.sh --clean --all</code>，26/26 全绿、exit 0、汇总里没有 [SKIP]）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
           源码树在发布之后持续演进（以上游仓库实际提交为准），收口口径始终是同一句话：<code>verify.sh</code> 全绿才算数。
         </p>
       </div>
@@ -1386,7 +1559,7 @@ ollama run  KLJyouth-office-V0.17-C
         <p class="sec-index">FAQ</p>
         <h2 class="sec-title" id="faqTitle">把该问的先问完</h2>
         <p class="sec-take">答案都指向文件或命令，没有一句「视情况而定」。</p>
-        <p class="sec-dek">六条，答案都对得上仓库里的文件或命令；没有把握的我们不写。</p>
+        <p class="sec-dek">八条，答案都对得上仓库里的文件或命令；没有把握的我们不写。</p>
       </header>
 
       <div class="faq__list">
@@ -1421,6 +1594,11 @@ ollama run  KLJyouth-office-V0.17-C
         </details>
 
         <details class="faq__item reveal-up">
+          <summary>安装包里的 Python 源码会被直接读走吗？<span class="faq__mark" aria-hidden="true"></span></summary>
+          <div class="faq__body"><p>多数侧车模块已编译为原生扩展：1,018 个模块里 858 个不再以 <code>.py</code> 形式发布，清单记录每个模块的源指纹与编译状态。剩下 160 个明文文件不是「漏了」：134 个是包存根、<code>runpy</code> 入口、按文件执行的技能脚本与需要读自身源码的模块，26 个是 Cython 对 PEP 695 <code>type</code> 别名及部分泛型语法的限制。它们逐名列在清单里，不宣称「全部加密」。资源闸门还会拒绝「声称已编译、旁边却躺着明文 <code>.py</code>」的目录。</p></div>
+        </details>
+
+        <details class="faq__item reveal-up">
           <summary>可以自己从源码构建吗？<span class="faq__mark" aria-hidden="true"></span></summary>
           <div class="faq__body"><p>仓库还没对外开放构建。内核是 Rust（<code>cargo build --release -p marguerite-core</code>），桌面壳在仓库的 <code>gui/</code> 目录下，与内核共用同一个引擎；开放之后这条就是标准流程，现在先留个位置。</p></div>
         </details>
@@ -1442,11 +1620,20 @@ ollama run  KLJyouth-office-V0.17-C
         <article class="chg__current reveal-up">
           <p class="chg__k">当前版本</p>
           <h3 class="chg__ver" data-current-version data-ver>0.2.19</h3>
-          <p class="chg__date">2026-10-29</p>
+          <p class="chg__date">2026-10-31 · 含 10-30 → 10-31 近两日增量</p>
           <ul class="chg__notes">
-            <li><b>修掉 Linux / macOS 编译不过的三处根因</b>：SSH 传输层把 Windows 专属的 <code>CREATE_NO_WINDOW</code> 无条件引入；Landlock 沙箱还在按 0.3 的 API 写（lockfile 锁的是 <code>0.4.7</code>）；内存围栏里一个恒为 unused 的 trait 导入会被 <code>clippy -D warnings</code> 判红。</li>
-            <li>结果：CI 与 Release 的 <b>Linux / macOS job 从全红变成能编译</b>。Windows 行为不变 —— 改用的 <code>SilentCommand::silent()</code> 与原来那条 Win32 调用等价。</li>
-            <li>如实说明：安装包仍只在 <b>Windows x64</b> 上验证；非 Windows 平台本轮只拿到「能编译」的证据，没有真机运行证据。</li>
+            <li><b>新增战术推演</b>：<code>core/src/tactics/</code> 把协作表达成可计算的数据——五种拓扑、七条战术、失败概率预检（超过 <code>0.15</code> 直接判不合格并给出理由）、先验不足进 <code>unknowns</code> 而不填 0、用真实台账做反事实回放。入口为 <code>tactics.catalog</code> / <code>tactics.simulate</code> / <code>tactics.replay</code>，控制台有 <code>/tactics</code> 视图，主智能体可用 <code>tactics</code> 工具。</li>
+            <li><b>会话分支与助理记忆（跃迁三批）</b>：<code>sessions.fork</code> / <code>resume</code> / <code>replay</code> / <code>forkThroughTurn</code> 把分支点换算到具体 turn（不存在返回 <code>TURN_NOT_FOUND</code>，不静默降级成全量分支）；设置页新增「助理」分区——作用域切换、钉住清单、可解释偏好，偏好<b>没有删除按钮</b>（后端没有该能力就不伪造）；记忆写回必须先过 <code>promote::decide</code>，<code>Drop</code> 不落盘、<code>Promote</code> 才跨项目、同 key 冲突走 supersede；聊天提示词注入 <code>pinned / preferences / facts</code>（带来源、全空不注入、800 字符硬上限）；长任务熔断命中后暂停并落回滚点、发 <code>CIRCUIT_TRIPPED</code>，不 abort 进程、不丢已完成步骤。</li>
+            <li><b>安装包防反编译</b>：Python 侧车 1,018 个模块中 858 个经 Cython → C → MSVC 编译为原生扩展；清单记录源指纹与编译状态，资源闸门拒绝明文残留，发布层新增「真启动侧车 + 打 <code>/health</code> / <code>/api/config</code> / <code>/ws</code>」冒烟。</li>
+            <li><b>写入放大治理（W1–W7）</b>：单轮会话持久化从 <b>202 次写 / 952,987 字节</b>降到 <b>3 次 / 27,125 字节</b>（写次数约 1/67，字节数约 1/35）；WAL 模式与 <code>io_report</code> 让每次读写的来源可查，不再靠「感觉变快了」。</li>
+            <li><b>模型接入补齐</b>：Anthropic Messages 协议补全流式 usage、<code>finish_reason</code> 与请求体；自定义端点支持 <code>base_url</code> 与 <code>wire_api</code> 协议选择；「测试连接」按端点真实协议发请求，本地模型中心提供统一入口。</li>
+            <li><b>注意力优先工作台（10-30 → 10-31）</b>：<code>webui/src/composables/ui/attentionQueue.ts</code> 把审批、阻塞、失败、待选四类信号折成一个复合分——30 分钟内按新鲜度加成，同分按时间与 id 稳定排序；<code>webui/src/components/ui/AttentionShelf.vue</code> 负责呈现，没有需要人的事就整块不渲染；动效只在状态变化时触发（<code>webui/src/composables/ui/motionGrammar.ts</code>），减少动效时降为纯透明度。</li>
+            <li><b>指挥台与工作相位</b>：<code>webui/src/components/shell/CommandDeck.vue</code> 把「当前相位 · 原因 · 下一步动作」摊在工作区顶部，动作只由上层传入、没有动作就不渲染；相位由 <code>webui/src/composables/shell/useWorkPhase.ts</code> 纯函数推导（review &gt; execute &gt; explore &gt; idle），信号缺失一律落 idle，不猜。</li>
+            <li><b>桌面标题栏</b>：<code>webui/src/components/shell/TitleBarControls.vue</code> 只在 Tauri 壳内渲染最小化 / 最大化 / 关闭与拖拽区，浏览器直连网关时不渲染这些死控件。</li>
+            <li><b>两层助理的投影规则</b>：<code>core/src/assistant/projection.rs</code> 让 L1 只留「当前工作区推不出来」的事实、L2 只留本项目来源与用户画像，pinned 事实两层都不丢——此前两层读的是同一份 brief，只差字符预算。</li>
+            <li><b>知识库启动漂移自检</b>：<code>core/src/kb/gateway.rs</code> 在启动时把索引里的来源记录与磁盘逐条对账，有漂移就写 <code>rebuild_required.json</code> 并记 warn，无漂移则清掉陈旧标记；不自动重建、不阻塞启动，也不静默吞掉。</li>
+            <li><b>纪律基线</b>：全量门禁 26 项、RPC 声明 471 条且幽灵声明 0 条、核心测试 4,533 / 控制台单测 5,085；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
+            <li>如实说明：安装包仍只在 <b>Windows x64</b> 上真机验证；非 Windows 平台本轮只拿到「能编译」的证据，没有运行证据。</li>
           </ul>
           <div class="chg__actions">
             <a class="btn btn--solid"
@@ -1773,7 +1960,7 @@ ollama run  KLJyouth-office-V0.17-C
         <li>版本 <code data-ver>0.2.19</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
-        <li>RPC 方法 461 条 · 内置工具 74 个</li>
+        <li>RPC 方法 471 条 · 内置工具 76 个</li>
         <li>架构守卫 13 道 · 界面语言 6 种</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
       </ul>
@@ -1791,6 +1978,27 @@ ollama run  KLJyouth-office-V0.17-C
   <a class="btn btn--solid"
      href="https://github.com/KLJyouth1/Marguerite-Releases/releases/latest/download/MargueriteDownloader.exe"
      rel="noopener" aria-label="下载 Marguerite 专用下载器">专用下载</a>
+</div>
+
+<!-- 证据模式：把「每条宣称对应哪条命令」做成可开合的一层，而不是写在页脚的一行小字 -->
+<dialog class="proof" id="proofPanel" aria-labelledby="proofTitle">
+  <div class="proof__hd">
+    <div>
+      <p class="proof__k">EVIDENCE MODE</p>
+      <h2 class="proof__t" id="proofTitle">每条宣称，都能落到一条命令</h2>
+    </div>
+    <button class="proof__close" type="button" data-proof-close aria-label="关闭证据面板">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6 18 18M18 6 6 18"/></svg>
+    </button>
+  </div>
+  <p class="proof__lede">打开证据模式后，页面里被标出的数字会亮起来。下面每一条都写明命令、当前值与来源；跑不出来，就算我们写错。</p>
+  <div class="proof__list" data-proof-list></div>
+  <p class="proof__foot">快照日期 2026-10-31 · 由 <code>scripts/check-website-claims.py</code> 与门禁复测生成；页面数字与命令输出不一致时，以命令输出为准。</p>
+</dialog>
+
+<div class="proofbar" data-proof-bar hidden>
+  <span>证据模式 · 已标出 <b data-proof-count>0</b> 条</span>
+  <button type="button" data-proof-open>查看证据表</button>
 </div>
 
 <!-- preload 改 metadata：用户没点「声音开」之前，不该为 1.1 MB 的 mp3 买单 -->

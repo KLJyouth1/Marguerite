@@ -808,7 +808,9 @@ check_pyengine_tests() {
 #
 # 与 tests/unit 分成两条检查是刻意的：161s 与「纯单测」不同量级，混进同一条 [PASS]
 # 会掩盖新增的慢测。该目录**不含**任何 llm/live/browser 标记的用例（实测 0 处），
-# 所以不需要 marker 过滤 —— 也就不存在第二份会漂移的排除清单。-rs 让 skip 的具名
+# 所以不需要 marker 过滤 —— 也就不存在第二份会漂移的排除清单。-rfs 让**失败与 skip 都具名**
+# （只写 -rs 会覆盖 pytest 默认的 -rfE，失败用例名就从证据里消失了 —— CI 曾经因此
+#   只报「3 failed」而没有任何用例名，白白多跑一轮）。
 # 原因出现在证据里：本仓铁律是跳过 ≠ 通过。
 check_pyengine_gateway_tests() {
   require_python "pyengine 网关契约 (tests/test_gateway，无网络/无 LLM)" "${PYENGINE_PY_MODULES[@]}" || return 0
@@ -818,7 +820,7 @@ check_pyengine_gateway_tests() {
     return 0
   fi
   run_check "pyengine 网关契约 (tests/test_gateway，无网络/无 LLM)" \
-    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rs"
+    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rfs"
 }
 
 # pyengine 契约族（tests/test_ci / test_migrations / test_sandbox /
@@ -859,7 +861,7 @@ check_pyengine_contract_tests() {
   echo
   echo "${C_HEAD}=== [CHECK] $name ===${C_RST}"
   for suite in test_ci test_migrations test_sandbox test_onboarding test_tools test_recovery; do
-    out="$(bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rs" 2>&1)"
+    out="$(bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rfs" 2>&1)"
     rc=$?
     local evidence summary
     # 失败/收集错误逐条打印；跳过的具名理由留在下面的汇总行里（-rs）。
@@ -898,13 +900,15 @@ check_release_build() {
 # 为什么**构建前那一次不够**：`gui/src-tauri/build.rs` 在 `cargo tauri build` 期间会
 # 重新铺 `resources/pyengine` 与内嵌控制台 `static/dist`（无条件 remove + 全量 copy），
 # 时机在 Step 5c 之后 —— 于是「构建前干净」并不等于「装进去的干净」。
-# 只有构建产物里的 `release/resources` 是安装包实际携带的那棵树（check_shipped_payload）。
 #
-# 产物根不能写死成 `target/`：`scripts/package_full.cmd` 用
-# `CARGO_TARGET_DIR=marguerite_build_target` 把产物挪开（规避被占用/被锁的 target/），
-# 打包机上真实物化树就在那里。写死会让后置检查报「树不存在」，把一次正常发版判成失败。
-CARGO_OUT_DIR="${CARGO_TARGET_DIR:-target}"
-CARGO_OUT_DIR="${CARGO_OUT_DIR%/}"
+# 构建后必须扫描 **bundler 真正读的那棵树**：Tauri 2.11 生成的
+# `target/release/wix/x64/main.wxs` 与 `target/release/nsis/x64/installer.nsi` 里，
+# 每条 Source/File 都直接指向 `gui/src-tauri/resources`，不再在
+# `target/release/resources` 下物化副本（2026-10-31 实测：该目录里是 10-29 的旧快照，
+# 本次构建未刷新任何一个文件；拿它当证据会报 2,060 条「明文源码随包发布」的假红，
+# 而安装包实际携带的是原生树）。`bundle.resources` 本就相对 src-tauri 解析，
+# 所以这里扫的就是配置语义下的发货源。
+SHIPPED_RESOURCES="gui/src-tauri/resources"
 #
 # rc=2（一棵树都扫不到）在这里是 **FAIL 而不是 SKIP**：`--release` 的语义是「我要产出
 # 安装包」，资源树不存在说明这次发布没有素材，不是「工具缺失所以放过」。
@@ -925,17 +929,17 @@ check_shipped_resources() {
     "$PY" scripts/check-shipped-resources.py
 }
 
-# 构建后再扫一次**物化**的资源树：这是「安装包里到底有什么」的唯一直接证据。
+# 构建后再扫一次**真实发货树**：这是「安装包里到底有什么」的直接证据。
 # 目录不存在即 FAIL —— 拿不到证据不能记成通过，也不能记成跳过。
 check_shipped_payload() {
-  require_python "安装包资源卫生 (构建后物化树)" || return 0
-  if [ ! -d "$CARGO_OUT_DIR/release/resources" ]; then
-    fail_check "安装包资源卫生 (构建后物化树)" \
-      "$CARGO_OUT_DIR/release/resources 不存在：构建没有产出可扫描的资源树，无法证明安装包携带了什么"
+  require_python "安装包资源卫生 (构建后真实树)" || return 0
+  if [ ! -d "$SHIPPED_RESOURCES" ]; then
+    fail_check "安装包资源卫生 (构建后真实树)" \
+      "$SHIPPED_RESOURCES 不存在：构建没有可扫描的资源树，无法证明安装包携带了什么"
     return 1
   fi
-  run_check "安装包资源卫生 (构建后物化树)" \
-    "$PY" scripts/check-shipped-resources.py --root "$CARGO_OUT_DIR/release/resources"
+  run_check "安装包资源卫生 (构建后真实树)" \
+    "$PY" scripts/check-shipped-resources.py --root "$SHIPPED_RESOURCES"
 }
 
 # 物化树「干净」只证明文件对得上，**不证明它能跑**。Cython 编译后的函数不是
@@ -945,13 +949,13 @@ check_shipped_payload() {
 # 所以发布层必须真的把侧车启动起来、打几个真实请求（含 /ws 握手）。
 check_shipped_sidecar_boot() {
   require_python "安装包侧车启动冒烟 (check-sidecar-boot.py)" || return 0
-  if [ ! -d "$CARGO_OUT_DIR/release/resources/python" ]; then
+  if [ ! -d "$SHIPPED_RESOURCES/python" ]; then
     fail_check "安装包侧车启动冒烟 (check-sidecar-boot.py)" \
-      "$CARGO_OUT_DIR/release/resources/python 不存在：安装包里没有可启动的 Python 运行时，侧车必死"
+      "$SHIPPED_RESOURCES/python 不存在：安装包里没有可启动的 Python 运行时，侧车必死"
     return 1
   fi
   run_check "安装包侧车启动冒烟 (check-sidecar-boot.py)" \
-    "$PY" scripts/check-sidecar-boot.py --root "$CARGO_OUT_DIR/release/resources"
+    "$PY" scripts/check-sidecar-boot.py --root "$SHIPPED_RESOURCES"
 }
 
 # workbench/ 是**第五个入口**：Python 后端（engine · api · cli · llmlab · ttc ·

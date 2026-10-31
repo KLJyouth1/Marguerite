@@ -1,10 +1,11 @@
 //! 两层助理（L1 全局 / L2 项目）MVP 后端骨架 —— 计划 §4（P1-1 / P1-2）。
 //!
-//! 三个子模块，各管一件事：
+//! 四个子模块，各管一件事：
 //! - [`scope`]：当前助理作用域 `global` / `project{workspace}`，落盘 `assistant_scope.json`；
 //! - [`profile`]：只记**稳定偏好**（语言 / 技术栈 / 禁忌），落盘 `user_profile.md`，可手改；
+//! - [`projection`]：L1 → L2 的**投影规则**（L1 只留不可推导的、L2 只留本项目可用的），纯函数；
 //! - [`brief`]：把 scope + profile + 跨项目记忆事实合成**结构化**简报（每条事实带 `source`/`score`），
-//!   并按 `pinned → preferences → facts(按分值) → open_loops` 的顺序做字符预算裁剪。
+//!   先过投影再按 `pinned → preferences → facts(按分值) → open_loops` 的顺序做字符预算裁剪。
 //!
 //! 路径全部基于 [`Config::config_dir`](crate::persistence::config::Config::config_dir)
 //! （默认 `~/.marguerite/`），单测经线程局部的 `set_config_dir_override` 隔离，
@@ -15,10 +16,14 @@
 
 pub mod brief;
 pub mod profile;
+pub mod projection;
 pub mod scope;
 
 pub use brief::{build_brief, compose_brief, BriefInput, DEFAULT_MAX_CHARS};
 pub use profile::UserProfile;
+pub use projection::{
+    project, Layer, ProjectionInput, ProjectionOutcome, MIN_FACT_SCORE, POLICY_L1, POLICY_L2,
+};
 pub use scope::{AssistantScope, AssistantScopeState};
 
 /// 原子写文本：先写同目录 `*.tmp` 再 rename，避免半截文件被下次读取当成合法状态。

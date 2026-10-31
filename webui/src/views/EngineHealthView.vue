@@ -35,6 +35,22 @@
       <div v-if="narrative.length" class="engine-note">{{ t('engineHealth.planned', { list: narrative.join(' / ') }) }}</div>
     </section>
 
+    <!-- 写入量自观测（W7）。这一轮「少写盘」的收益没有功能症状——撤掉照样跑得对，
+         于是会在下次重构里悄悄流失，所以唯一守住它的办法是把读数摆在界面上。
+         读数缺失（旧网关不带 io 段）时整块不渲染，不摆一片「—」冒充有数据。 -->
+    <section v-if="ioAvailable(io)" class="engine-card">
+      <div class="engine-card__title">{{ t('engineHealth.io.title') }}</div>
+      <table class="engine-table">
+        <tbody>
+          <tr v-for="row in ioReadings" :key="row.id">
+            <td>{{ row.name }}</td>
+            <td :class="row.warn ? 'engine-io engine-io--warn' : 'engine-io'">{{ row.value }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="engine-note">{{ t('engineHealth.io.note') }}</div>
+    </section>
+
     <!-- 模型档案 -->
     <section v-if="models" class="engine-card">
       <div class="engine-card__title">{{ t('engineHealth.profilesTitle') }}</div>
@@ -213,6 +229,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { sidecarDegradedText, type SidecarHealth } from '@/utils/engine/sidecarHealth'
+import { ioAvailable, ioRows, type IoHealth } from '@/utils/engine/ioHealth'
 import Icon from '@/components/Icon.vue'
 import GateReport from '@/components/model/GateReport.vue'
 import type { GateReport as GateReportData } from '@/components/model/gateTypes'
@@ -328,13 +345,17 @@ async function safe<T>(fn: () => Promise<T>, label?: string): Promise<T | null> 
 // 侧车能力预检结论（`health.sidecar`）。字段全部可选：旧网关不带这个键。
 const sidecar = ref<SidecarHealth | null>(null)
 
-// 文案逻辑抽到 `utils/engine/sidecarHealth`（纯函数、有单测）：
-// 视图只负责"要不要渲染"，不负责"怎么说清影响"。
+// 写入量自观测结论（`health.io`）。同样按可选处理：取不到 = 整块不渲染。
+const io = ref<IoHealth | null>(null)
+
+// 文案逻辑抽到 `utils/engine/sidecarHealth` / `utils/engine/ioHealth`（纯函数、有单测）：
+// 视图只负责"要不要渲染"，不负责"怎么说清影响 / 怎么把读数排成行"。
 // `params` 转 `never`：vue-i18n 的 `t` 是按 messages schema 推导的重载签名，
 // 这里传的是运行时拼出来的参数对象，类型层无法静态验证 —— 断言在这里，
-// 而不是把整个 util 的类型放宽（那会让 6 处调用点都失去检查）。
-const sidecarTranslate = (key: string, params?: Record<string, unknown>) => t(key, params as never)
-const sidecarDegraded = computed(() => sidecarDegradedText(sidecar.value, sidecarTranslate))
+// 而不是把 util 的类型放宽（那会让所有调用点都失去检查）。
+const engineTranslate = (key: string, params?: Record<string, unknown>) => t(key, params as never)
+const sidecarDegraded = computed(() => sidecarDegradedText(sidecar.value, engineTranslate))
+const ioReadings = computed(() => ioRows(io.value, engineTranslate))
 
 async function loadAll() {
   error.value = ''
@@ -349,8 +370,10 @@ async function loadAll() {
       safe(() => rpc.call<CapabilitiesPayload>('plans.capabilities', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<McpPayload>('mcp.servers.list', {}), t('engineHealth.loadFailed')),
       safe(() => rpc.call<LongTasksPayload>('long_running.list', {}), t('engineHealth.loadFailed')),
-      // 侧车能力预检（缺依赖时 degraded=true）：不属于"加载失败"，取不到就保持 null。
-      safe(() => rpc.call<{ sidecar?: SidecarHealth | null }>('health', {}), ''),
+      // 侧车能力预检（缺依赖时 degraded=true）+ 写入量读数：都不属于"加载失败"，取不到就保持 null。
+      // 自 W7 起 `health` 会做三次只读 SQLite open 和两个目录扫描，所以这份数据**只在手动刷新时
+      // 取一次**，不给这个视图加轮询（心跳请走协议层 ping，见 `core/src/gateway/system.rs` 的 health 文档）。
+      safe(() => rpc.call<{ sidecar?: SidecarHealth | null; io?: IoHealth | null }>('health', {}), ''),
     ])
     if (rt) runtimes.value = Array.isArray(rt) ? rt : []
     if (mp) models.value = mp
@@ -360,7 +383,7 @@ async function loadAll() {
     if (caps) { stats.value = caps.stats ?? null; narrative.value = caps.narrativeIds ?? [] }
     if (mc) mcp.value = mc
     if (lr) longTasks.value = Array.isArray(lr.tasks) ? lr.tasks : []
-    if (hl) sidecar.value = hl.sidecar ?? null
+    if (hl) { sidecar.value = hl.sidecar ?? null; io.value = hl.io ?? null }
   } catch (e) {
     error.value = `${t('engineHealth.loadFailed')}: ${e instanceof Error ? e.message : String(e)}`
   } finally {
@@ -514,6 +537,9 @@ onMounted(loadAll)
 .engine-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .engine-table th, .engine-table td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--hairline); }
 .engine-code { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+/* 写入量读数：等宽便于纵向对比，warn 只上色不加底色（与「降级不是错误」同一口径）。 */
+.engine-io { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.engine-io--warn { color: var(--warn); font-weight: 600; }
 .engine-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .engine-actions--footer { margin-top: 12px; }
 .runtime-row { border-top: 1px solid var(--hairline); padding: 10px 0; }

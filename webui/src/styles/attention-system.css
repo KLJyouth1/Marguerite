@@ -1,0 +1,416 @@
+/*
+ * Attention system — layout + motion grammar for the Attention Shelf.
+ *
+ * Two rules this file exists to enforce, both from
+ * `docs/design/2026-10-31-attention-first-workbench.md`:
+ *
+ * 1. **Periphery, not focus.** The shelf sits at the bottom-left corner — the one
+ *    region of the console that is not already claimed by the composer (centre),
+ *    the pet / floating ball (bottom-right) or the topbar. Calm technology: an
+ *    agent should be *visible in the corner of the eye*, never a modal that
+ *    steals the caret you were about to type into.
+ *
+ * 2. **Motion encodes causality.** Every animation below is keyed to a
+ *    `data-motion` value that the renderer only sets when a *state transition*
+ *    actually happened (`src/composables/ui/motionGrammar.ts`). Nothing here
+ *    fires on a timer.
+ *
+ * Token discipline: durations/easings/radii/colours all come from
+ * `assets/foundation.css` + the active theme's `tokens.css`. Raw literals would
+ * be rejected by `check-webui-motion.mjs` / `check-webui-radius.mjs` /
+ * `check-webui-colors.mjs` — and rightly so.
+ */
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+
+.attn-rail {
+  position: fixed;
+  left: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  /* The rail itself must never eat clicks in the transcript underneath. */
+  pointer-events: none;
+}
+
+.attn-rail > * {
+  pointer-events: auto;
+}
+
+/* Narrow viewports: clear the mobile tab bar. */
+@media (max-width: 720px) {
+  .attn-rail {
+    bottom: calc(var(--mobile-tabbar-h) + var(--sp-3));
+    left: var(--sp-3);
+  }
+}
+
+/* The pet / floating-ball windows load the same bundle but are 360×420 and
+   120×120 transparent frames — a corner shelf there would be the only thing on
+   screen. Same convention base.css uses to hide the topbar on those surfaces. */
+html:is([data-surface='pet-overlay'], [data-surface='task-overlay']) .attn-rail {
+  display: none;
+}
+
+/* ── Collapsed pill ────────────────────────────────────────────────────── */
+
+.attn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-eyebrow);
+  letter-spacing: var(--label-track);
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.attn-pill:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.attn-pill:active {
+  transform: scale(0.975);
+}
+
+.attn-pill:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The count is the only number here; tabular figures stop it from jittering
+   when 9 becomes 10 while the user is reading it. */
+.attn-pill__count {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.attn-pill__kinds {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* ── Kind dots ─────────────────────────────────────────────────────────── */
+
+.attn-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.attn-dot--approval {
+  background: var(--warn);
+}
+.attn-dot--blocked {
+  background: var(--danger);
+}
+.attn-dot--failed {
+  background: var(--danger);
+  opacity: 0.65;
+}
+.attn-dot--choice {
+  background: var(--info);
+}
+
+/* ── Expanded panel ────────────────────────────────────────────────────── */
+
+.attn-panel {
+  width: min(340px, calc(100vw - var(--sp-8)));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.attn-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.attn-panel__title {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-eyebrow);
+  letter-spacing: var(--eyebrow-track);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.attn-panel__list {
+  margin: 0;
+  padding: var(--sp-1);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  /* A peripheral surface that needs scrolling is no longer peripheral. Past
+     five rows the user is working the queue, not glancing at it. */
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+/* The row is a grid, NOT a button: an approval row hosts its own approve/reject
+   buttons, and a button inside a button is invalid HTML that swallows clicks. */
+.attn-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-2);
+  align-items: start;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+
+.attn-item:hover {
+  background: var(--bg-hover);
+}
+
+/* The "open this" hit target — bare, so the row's chrome stays on the row. */
+.attn-item__hit {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: start;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.attn-item__hit:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.attn-item__dot {
+  margin-top: 0.45em;
+}
+
+.attn-item__body {
+  min-width: 0;
+}
+
+.attn-item__meta {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.attn-empty {
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.attn-item__title {
+  display: block;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.45;
+  /* Long tool commands must wrap, never push the panel wider. */
+  overflow-wrap: anywhere;
+}
+
+.attn-item__detail {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.attn-item__age {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* ── Actions ───────────────────────────────────────────────────────────── */
+
+.attn-act {
+  min-height: 28px;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+
+.attn-act:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.attn-act:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Motion grammar keyframes ──────────────────────────────────────────── */
+
+@keyframes attn-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes attn-arrive-static {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* settle: the item became final. A single sub-pixel overshoot reads as
+   "committed" without the celebration of a bounce. */
+@keyframes attn-settle {
+  from {
+    opacity: 0.4;
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes attn-settle-static {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* yield: still working, not stuck. Same period as the console's single ambient
+   pulse (`--dur-pulse`) so the shelf breathes with the rest of the app instead
+   of introducing a second rhythm. */
+@keyframes attn-yield {
+  0%,
+  100% {
+    opacity: 0.78;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes attn-yield-static {
+  0%,
+  100% {
+    opacity: 0.9;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes attn-refuse {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-1px);
+  }
+  75% {
+    transform: translateX(1px);
+  }
+}
+
+@keyframes attn-refuse-static {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── Motion wiring ─────────────────────────────────────────────────────── */
+
+[data-motion='arrive'] {
+  animation: attn-arrive var(--dur-base) var(--ease-out) 1;
+}
+
+[data-motion='settle'] {
+  animation: attn-settle var(--dur-enter) var(--ease-spring) 1;
+}
+
+[data-motion='yield'][data-motion-loop='true'] {
+  animation: attn-yield var(--dur-pulse) var(--ease-standard) infinite;
+}
+
+[data-motion='refuse'] {
+  animation: attn-refuse var(--dur-fast) var(--ease-in) 1;
+}
+
+/* Reduced motion: no displacement, but the cue is still visible as a change in
+   opacity. Removing feedback entirely is a different (worse) failure. */
+[data-motion][data-motion-static='true'] {
+  animation-name: attn-arrive-static;
+}
+
+[data-motion='settle'][data-motion-static='true'] {
+  animation-name: attn-settle-static;
+}
+
+[data-motion='yield'][data-motion-static='true'] {
+  animation-name: attn-yield-static;
+}
+
+[data-motion='refuse'][data-motion-static='true'] {
+  animation-name: attn-refuse-static;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-motion] {
+    animation-duration: var(--dur-fast);
+    animation-iteration-count: 1;
+  }
+
+  .attn-pill:active {
+    transform: none;
+  }
+}
