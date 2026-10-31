@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from opensquilla.sandbox.backend.linux_payload import HelperPayload
-from opensquilla.sandbox.runtime_launcher import ChildRole, internal_child_argv
+from opensquilla.sandbox.runtime_launcher import (
+    ChildRole,
+    internal_child_argv,
+    internal_child_env,
+)
 
 
 async def run_filesystem_payload(payload: HelperPayload) -> dict[str, Any]:
@@ -27,7 +31,7 @@ async def run_filesystem_payload(payload: HelperPayload) -> dict[str, Any]:
             args=(str(worker_payload_path),),
         ),
         cwd=Path(payload.cwd),
-        env={**os.environ, **payload.env},
+        env=internal_child_env({**os.environ, **payload.env}),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

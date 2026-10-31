@@ -73,7 +73,11 @@ from opensquilla.sandbox.run_mode_policy import (
     coerce_run_mode_for_principal,
     run_mode_allowed_for_principal,
 )
-from opensquilla.sandbox.runtime_launcher import ChildRole, internal_child_argv
+from opensquilla.sandbox.runtime_launcher import (
+    ChildRole,
+    internal_child_argv,
+    internal_child_env,
+)
 from opensquilla.sandbox.setup_runtime import (
     current_sandbox_capability_report,
     current_sandbox_setup_runtime_status,
@@ -381,6 +385,7 @@ async def _pick_directory_path_windows(initial_dir: str | None = None) -> str | 
 
     process = await asyncio.create_subprocess_exec(
         *command,
+        env=internal_child_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         creationflags=_WINDOWS_CREATE_NO_WINDOW,

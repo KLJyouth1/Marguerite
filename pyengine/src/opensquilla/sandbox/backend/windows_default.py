@@ -58,7 +58,11 @@ from opensquilla.sandbox.permissions import (
     logical_absolute_path,
 )
 from opensquilla.sandbox.run_mode import normalize_run_mode
-from opensquilla.sandbox.runtime_launcher import ChildRole, internal_child_argv
+from opensquilla.sandbox.runtime_launcher import (
+    ChildRole,
+    internal_child_argv,
+    internal_child_env,
+)
 from opensquilla.sandbox.types import SandboxBackendError, SandboxRequest, SandboxResult
 from opensquilla.subprocess_encoding import decode_subprocess_output
 
@@ -160,7 +164,7 @@ class WindowsDefaultBackend(Backend):
         )
         if prepare_cache:
             ensure_cache_dirs(request.cwd)
-        helper_env = dict(os.environ)
+        helper_env = internal_child_env()
         helper_env[_HELPER_PAYLOAD_ENV] = json.dumps(
             payload,
             separators=(",", ":"),

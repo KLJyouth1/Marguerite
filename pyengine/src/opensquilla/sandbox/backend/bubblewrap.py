@@ -80,7 +80,11 @@ from opensquilla.sandbox.operation_runtime import (
     SandboxOperationDomain,
     SandboxOperationResult,
 )
-from opensquilla.sandbox.runtime_launcher import ChildRole, internal_child_argv
+from opensquilla.sandbox.runtime_launcher import (
+    ChildRole,
+    internal_child_argv,
+    internal_child_env,
+)
 from opensquilla.sandbox.types import (
     MountSpec,
     NetworkMode,
@@ -450,6 +454,7 @@ async def _run_linux_helper_payload(payload: HelperPayload) -> dict[str, object]
                 ChildRole.LINUX_HELPER,
                 args=("--payload", str(payload_path)),
             ),
+            env=internal_child_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,

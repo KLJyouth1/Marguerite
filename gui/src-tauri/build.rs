@@ -303,6 +303,28 @@ fn main() {
     //   · autostart_*      —— components/settings/SettingsAdvancedPanel.vue
     // 新增前端 invoke 时必须同步这里 + 对应 capability（main 走 capabilities/default.json，
     // 浮窗走 pet-overlay.json / task-overlay.json），两处缺一即失败。
+    // 干净检出（CI / 新克隆）里 `gui/src-tauri/resources/**` 不存在 —— `.gitignore` 把整个
+    // 暂存区排除了，而 `bundle.resources` 又声明了它，tauri-build 会**校验路径必须存在**，
+    // 于是 `cargo test --workspace` 在干净检出上直接 panic（实测 ubuntu 作业
+    // `build.rs:323: resource path resources/modes doesn't exist`）。
+    // 这里只补**空目录**：真资源仍由 `scripts/package_app.cmd` 在打包前覆盖进去，
+    // 构建期不再依赖「这台机器先跑过打包脚本」这个隐含前置。
+    for dir in [
+        "resources",
+        "resources/modes",
+        "resources/pyengine",
+        "resources/btpanel-mcp",
+        "resources/docs",
+        "resources/scripts",
+    ] {
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            if let Err(e) = std::fs::create_dir_all(path) {
+                panic!("创建 bundle 资源占位目录失败（{dir}）: {e}");
+            }
+        }
+    }
+
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "sidecar_status",

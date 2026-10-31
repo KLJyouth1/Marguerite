@@ -145,6 +145,28 @@ def internal_child_argv(
     )
 
 
+def internal_child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment for an internal child, with the package root on ``PYTHONPATH``.
+
+    ``-m opensquilla.…`` 只在**子进程自己**能 import 到包时才成立。父进程里
+    `pytest` 的 `pythonpath = ["src"]` 只改父进程的 `sys.path`，不会写进环境变量，
+    于是干净检出（CI 的 ubuntu 作业）上子进程直接
+    `ModuleNotFoundError: No module named 'opensquilla'` —— 实测 3 条用例因此判红，
+    而在「先 pip install -e .」的开发机上永远复现不出来。
+
+    这里按**本文件的真实位置**推导包根（`src/`），只在缺失时前插，不覆盖调用方
+    已有的 `PYTHONPATH`（原生打包运行时靠它定位随包分发的依赖）。
+    """
+
+    env = dict(os.environ if base is None else base)
+    root = str(Path(__file__).resolve().parents[2])
+    parts = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if root not in parts:
+        parts.insert(0, root)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
+
+
 def _run_filesystem_worker(args: Sequence[str]) -> int:
     from opensquilla.sandbox.filesystem_worker import main
 
