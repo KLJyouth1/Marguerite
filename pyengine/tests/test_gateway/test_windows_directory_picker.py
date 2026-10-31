@@ -123,11 +123,19 @@ async def test_gateway_windows_picker_waits_in_child_process_without_blocking(
         "opensquilla.gateway.windows_directory_picker",
         r"C:\repos",
     )
-    assert kwargs == {
-        "stdout": asyncio.subprocess.PIPE,
-        "stderr": asyncio.subprocess.PIPE,
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    }
+    assert kwargs["stdout"] is asyncio.subprocess.PIPE
+    assert kwargs["stderr"] is asyncio.subprocess.PIPE
+    assert kwargs["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 子进程必须能 import 到 opensquilla：包根要进 PYTHONPATH。
+    # 干净检出（CI 的 ubuntu 作业）上 pytest 的 pythonpath=["src"] 只改父进程
+    # sys.path、不写环境变量，子进程会 ModuleNotFoundError（实测 linux helper 3 条判红）。
+    import os
+    from pathlib import Path
+
+    import opensquilla
+
+    package_root = str(Path(opensquilla.__file__).resolve().parents[1])
+    assert package_root in (kwargs["env"]["PYTHONPATH"] or "").split(os.pathsep)
 
 
 @pytest.mark.asyncio

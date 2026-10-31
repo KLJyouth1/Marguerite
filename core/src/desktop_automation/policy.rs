@@ -120,18 +120,69 @@ impl Policy {
     /// 后端在 `desktop.action` 中若未带 `approved=true` 则拒绝。
     ///
     /// 除 kind 白名单外，`click`/`invoke` 的目标名称命中危险词也算敏感
-    /// （「点一下删除」不比「delete 动作」更安全）。
+    /// （「点一下删除」不比「delete 动作」更安全）；**按坐标点击**同样算敏感，
+    /// 因为落点是什么在这一层无从判断（见 [`Policy::confirmation_reason`]）。
     pub fn require_confirmation(action: &UiAction) -> bool {
-        if SENSITIVE_KINDS.contains(&action.kind.as_str()) {
-            return true;
+        Self::confirmation_reason(action).is_some()
+    }
+
+    /// 需要确认的**理由**（不需要确认则为 `None`）。
+    ///
+    /// 2026-10-31 修：旧实现只按 `kind` 与目标名称判定，于是「点击坐标 (x, y)」
+    /// 这一整类动作**永远**命中不了敏感词 —— 模型只要不写控件名、改给坐标，
+    /// 删除/支付/发送这类高危控件就静默免确认地被执行。裸坐标无法在纯策略层
+    /// 解析成控件语义，所以按「未知目标按不可信处理」要求确认。
+    pub fn confirmation_reason(action: &UiAction) -> Option<String> {
+        let kind = action.kind.as_str();
+        if SENSITIVE_KINDS.contains(&kind) {
+            return Some(format!("动作 `{kind}` 本身属于敏感类别"));
         }
-        matches!(action.kind.as_str(), "click" | "invoke" | "double_click")
-            && Self::sensitive_target(action).is_some()
+        if !matches!(kind, "click" | "invoke" | "double_click") {
+            return None;
+        }
+        if let Some(term) = Self::sensitive_target(action) {
+            return Some(format!("目标命中危险操作词「{term}」"));
+        }
+        if let Some((x, y)) = Self::point(action) {
+            return Some(format!(
+                "按坐标 ({x:.1}, {y:.1}) 点击时无法确定落点控件，请携带 approved=true 或改用目标名称"
+            ));
+        }
+        None
+    }
+
+    /// 动作的落点坐标：`point:{x,y}` 优先，其次顶层 `x`/`y`（数字）。
+    /// 只接受有限数（`NaN`/`inf` 不是坐标）。
+    pub fn point(action: &UiAction) -> Option<(f64, f64)> {
+        fn finite(v: &serde_json::Value) -> Option<f64> {
+            v.as_f64().filter(|n| n.is_finite())
+        }
+        let params = &action.params;
+        if let Some(serde_json::Value::Object(p)) = params.get("point") {
+            if let (Some(x), Some(y)) = (p.get("x").and_then(finite), p.get("y").and_then(finite)) {
+                return Some((x, y));
+            }
+        }
+        match (
+            params.get("x").and_then(finite),
+            params.get("y").and_then(finite),
+        ) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
+        }
     }
 
     /// 点击/调用目标是否命中危险文案；命中返回命中的词，便于回执说明原因。
     pub fn sensitive_target(action: &UiAction) -> Option<String> {
-        for key in ["name", "target", "label", "text"] {
+        for key in [
+            "name",
+            "target",
+            "label",
+            "text",
+            "automation_id",
+            "automationId",
+            "help_text",
+        ] {
             let Some(raw) = action.param_str(key) else {
                 continue;
             };
@@ -262,5 +313,60 @@ mod tests {
     fn sensitive_kinds_still_require_confirmation() {
         assert!(Policy::require_confirmation(&action("delete", json!({}))));
         assert!(Policy::require_confirmation(&action("pay", json!({}))));
+    }
+
+    #[test]
+    fn coordinate_click_requires_confirmation() {
+        // 回归：旧实现只按名称判定，坐标点击永远免确认 —— 于是一个只给坐标的
+        // 「点删除按钮」可以静默越过二次确认。落点未知就必须问。
+        let blind = action("click", json!({ "x": 812.0, "y": 604.0 }));
+        assert!(Policy::require_confirmation(&blind));
+        assert!(Policy::confirmation_reason(&blind)
+            .unwrap_or_default()
+            .contains("无法确定落点控件"));
+        let via_point = action("click", json!({ "point": { "x": 10, "y": 20 } }));
+        assert!(Policy::require_confirmation(&via_point));
+        let double = action("double_click", json!({ "x": 1, "y": 2 }));
+        assert!(Policy::require_confirmation(&double));
+        // 只给一半坐标不是坐标点击（不猜），交给既有的目标判定。
+        let half = action("click", json!({ "x": 10.0, "name": "Settings" }));
+        assert!(!Policy::require_confirmation(&half));
+        // 非点击类动作不受这条规则影响（type 有文本、scroll 只有方向）。
+        assert!(!Policy::require_confirmation(&action(
+            "type",
+            json!({ "x": 1.0, "y": 2.0, "text": "hi" })
+        )));
+    }
+
+    #[test]
+    fn coordinate_click_still_named_sensitive_wins_the_reason() {
+        let both = action("click", json!({ "x": 5, "y": 6, "name": "删除" }));
+        let reason = Policy::confirmation_reason(&both).unwrap_or_default();
+        assert!(reason.contains("删除"), "命名命中应优先解释：{reason}");
+    }
+
+    #[test]
+    fn point_rejects_non_finite_and_partial_coordinates() {
+        assert_eq!(Policy::point(&action("click", json!({ "x": 1.0 }))), None);
+        assert_eq!(
+            Policy::point(&action("click", json!({ "x": null, "y": 3 }))),
+            None
+        );
+        assert_eq!(
+            Policy::point(&action("click", json!({ "point": { "x": 7, "y": 8 } }))),
+            Some((7.0, 8.0))
+        );
+        // 顶层 x/y 也可以直接是整数。
+        assert_eq!(
+            Policy::point(&action("click", json!({ "x": 7, "y": 8 }))),
+            Some((7.0, 8.0))
+        );
+    }
+
+    #[test]
+    fn automation_id_participates_in_sensitivity() {
+        // 有些框架（Chromium/UIA）把可读名称藏在 AutomationId 里，Name 为空。
+        let a = action("click", json!({ "automation_id": "DeleteButton" }));
+        assert!(Policy::require_confirmation(&a));
     }
 }

@@ -360,6 +360,13 @@ pub fn execute_ui_action(
     params: Value,
     session: &str,
 ) -> Result<ActionReceipt, DesktopError> {
+    // 与 `AppRegistry::run_action` 同一道闸：这条入口直接拿驱动，不经注册表，
+    // 漏掉它等于留了一条关不掉的后门。
+    if !crate::desktop_automation::policy::Policy::is_enabled() {
+        return Err(DesktopError::ActionDenied(
+            "桌面自动化已被全局关闭（kill-switch）：请先在设置中重新开启".into(),
+        ));
+    }
     driver.run_action(handle, &UiAction::new(kind, params), session)
 }
 

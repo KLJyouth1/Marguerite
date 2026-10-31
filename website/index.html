@@ -599,7 +599,7 @@
             <div class="why__body">
               <p class="why__q"><b>为什么</b>要靠机制而不是承诺？</p>
               <p class="why__a">因为承诺不可执行，机制会拦人。门禁红了就不许说完成；契约里声明了但没实现的方法，构建直接失败；被跳过的检查永远不算通过。</p>
-              <p class="why__e"><span class="why__tag">机制</span>26 项全量门禁 · RPC 契约守卫 · RPC 方法 471 条 · 幽灵声明 0 条</p>
+              <p class="why__e"><span class="why__tag">机制</span>26 项全量门禁 · RPC 契约守卫 · RPC 方法 475 条 · 幽灵声明 0 条</p>
               <p class="why__f">可伪证：摘掉脚本，任意一项红都不会再有人知道。</p>
             </div>
           </li>
@@ -653,7 +653,7 @@
           </span>
           <h3 class="card__title">本地优先网关</h3>
           <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
-          <p class="card__where"><code>core/src/gateway/</code> · 471 条 RPC 方法声明</p>
+          <p class="card__where"><code>core/src/gateway/</code> · 475 条 RPC 方法声明</p>
         </article>
 
         <article class="card reveal-up">
@@ -799,7 +799,7 @@
         <div class="stat reveal-up" data-proof="views"><b class="stat__n"><span data-count="50">50</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
         <div class="stat reveal-up" data-proof="core-modules"><b class="stat__n"><span data-count="65">65</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
         <div class="stat reveal-up" data-proof="tools"><b class="stat__n"><span data-count="76">76</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">agent.selfcheck · tools.count</code></div>
-        <div class="stat reveal-up" data-proof="rpc"><b class="stat__n"><span data-count="471">471</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
+        <div class="stat reveal-up" data-proof="rpc"><b class="stat__n"><span data-count="475">475</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
       </div>
 
       <div class="guards reveal-up" role="list" aria-label="十三道架构守卫">
@@ -1371,9 +1371,9 @@ webui/e2e/approval-card.spec.ts</pre>
       </div>
 
       <div class="ledger reveal-up">
-        <div class="ledger__i"><b class="ledger__n">300,497<em> 行</em></b><span class="ledger__l">Rust · 591 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">300,713<em> 行</em></b><span class="ledger__l">Rust · 591 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">355,638<em> 行</em></b><span class="ledger__l">前端 · 1,277 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">463,769<em> 行</em></b><span class="ledger__l">Python · 1,016 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">463,809<em> 行</em></b><span class="ledger__l">Python · 1,016 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
         <div class="ledger__i"><b class="ledger__n">32<em> 个</em></b><span class="ledger__l">工具模块</span></div>
         <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
@@ -1632,7 +1632,7 @@ ollama run  KLJyouth-office-V0.17-C
             <li><b>桌面标题栏</b>：<code>webui/src/components/shell/TitleBarControls.vue</code> 只在 Tauri 壳内渲染最小化 / 最大化 / 关闭与拖拽区，浏览器直连网关时不渲染这些死控件。</li>
             <li><b>两层助理的投影规则</b>：<code>core/src/assistant/projection.rs</code> 让 L1 只留「当前工作区推不出来」的事实、L2 只留本项目来源与用户画像，pinned 事实两层都不丢——此前两层读的是同一份 brief，只差字符预算。</li>
             <li><b>知识库启动漂移自检</b>：<code>core/src/kb/gateway.rs</code> 在启动时把索引里的来源记录与磁盘逐条对账，有漂移就写 <code>rebuild_required.json</code> 并记 warn，无漂移则清掉陈旧标记；不自动重建、不阻塞启动，也不静默吞掉。</li>
-            <li><b>纪律基线</b>：全量门禁 26 项、RPC 声明 471 条且幽灵声明 0 条、核心测试 4,533 / 控制台单测 5,085；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
+            <li><b>纪律基线</b>：全量门禁 26 项、RPC 声明 475 条且幽灵声明 0 条、核心测试 4,533 / 控制台单测 5,085；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
             <li>如实说明：安装包仍只在 <b>Windows x64</b> 上真机验证；非 Windows 平台本轮只拿到「能编译」的证据，没有运行证据。</li>
           </ul>
           <div class="chg__actions">
@@ -1960,7 +1960,7 @@ ollama run  KLJyouth-office-V0.17-C
         <li>版本 <code data-ver>0.2.19</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
-        <li>RPC 方法 471 条 · 内置工具 76 个</li>
+        <li>RPC 方法 475 条 · 内置工具 76 个</li>
         <li>架构守卫 13 道 · 界面语言 6 种</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
       </ul>

@@ -164,6 +164,11 @@ static RUST_OWNED_METHODS: &[&str] = &[
     // 被 check-rpc-contract 的双实现守卫判为"新增双实现"——而它本就只该由 Rust 回答，
     // 因为路径真值来自 Rust 的 Config::config_dir()。
     "models.config_path",
+    // 澄清问卷：RPC 面由 Rust 独占（`gateway/clarify.rs`）。它命中 `chat.` 前缀，不登记会
+    // 被双实现守卫判为「新增双实现」。注意：独占的是**RPC 面**——模块内部在「本地无队列」
+    // 时仍会显式转发侧车（forward-on-miss），那是实现细节，不经过通用代理。
+    "chat.clarify",
+    "chat.clarify_submit",
 ];
 
 /// Python 优先的方法（读写对称）：双引擎（侧车在线）模式下先代理 Python，
@@ -1015,14 +1020,19 @@ pub async fn dispatch(
         }
         // 对话产线派单：阶段串行、每阶段打模型，只能异步（见 ASYNC_ONLY_METHODS）。
         "line.run" => return crate::gateway::line::line_run(ctx, &params).await,
+        // 澄清问卷由 Rust 网关自己服务（见 gateway/clarify.rs）：必须在下方
+        // is_python_method 代理之前拦截，否则纯 Rust 模式整条澄清链只剩 NOT_IMPLEMENTED。
+        // `PY_ENGINE_PREFIXES` 的 "chat.clarify" 保留 —— 本地无队列时 clarify.rs 仍转发侧车
+        // （approvals 同款 forward-on-miss），且同步路径（dispatch_sync）口径不变。
+        //
+        // 写成**显式 match 臂**而不是 match 之后的 `if method == …`：后者功能等价，但
+        // `check-rpc-contract.mjs` 是按臂识别的，会把两条声明判成「幽灵」—— 守卫看不见的
+        // 接线等于没有接线（CI 的 pyengine 作业正是这样红过一次）。
+        "chat.clarify" => return crate::gateway::clarify::dispatch(ctx, method, &params).await,
+        "chat.clarify_submit" => {
+            return crate::gateway::clarify::dispatch(ctx, method, &params).await;
+        }
         _ => {}
-    }
-    // 澄清问卷由 Rust 网关自己服务（见 gateway/clarify.rs）：必须在下方
-    // is_python_method 代理之前拦截，否则纯 Rust 模式整条澄清链只剩 NOT_IMPLEMENTED。
-    // `PY_ENGINE_PREFIXES` 的 "chat.clarify" 保留 —— 本地无队列时 clarify.rs 仍转发侧车
-    // （approvals 同款 forward-on-miss），且同步路径（dispatch_sync）口径不变。
-    if method == "chat.clarify" || method == "chat.clarify_submit" {
-        return crate::gateway::clarify::dispatch(ctx, method, &params).await;
     }
     // 审批状态查询：`exec.approval.` 在 PY_ENGINE_PREFIXES 里，但两侧是**两套队列**
     // （见 gateway/approvals.rs 模块头）。Rust 抬起的审批只存在于本进程注册表，直接
@@ -2341,7 +2351,9 @@ fn dispatch_rust(ctx: &GatewayContext, method: &str, params: &Value) -> Value {
         // W6.2：附着已打开的应用（handle 可选化后的统一入口），返回可复用句柄
         "desktop.attach" => desktop::desktop_attach(params),
         "desktop.snapshots" => desktop::desktop_snapshots(params),
-        "desktop.stop" => desktop::desktop_stop(),
+        "desktop.stop" => desktop::desktop_stop(params),
+        // 全局 kill-switch 的开关（没有它，desktop.stop 就是个单向阀）
+        "desktop.automation.set" => desktop::desktop_automation_set(params),
         // 文件变更回滚（前端「文件更改卡片」的拒绝操作：恢复 before 快照）
         "workspace.file_changes.revert" => workspace::file_changes_revert(params),
         // ── 内置工作区编辑器（多文件）：读取 / 写入文本文件 ──

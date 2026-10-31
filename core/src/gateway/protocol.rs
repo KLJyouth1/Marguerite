@@ -286,6 +286,10 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "desktop.a11y",
     "desktop.snapshots",
     "desktop.stop",
+    // 全局 kill-switch 开关：`desktop.stop` 关掉后必须能再打开，
+    // 否则它就是个单向阀（只能重启进程恢复）。此前只在 dispatch 里有分支、
+    // 没在这里声明，`supportsMethod()` 于是返回 false，UI 永远拿不到这个能力。
+    "desktop.automation.set",
     "workspaces.update",
     "workspaces.pin",
     "workspaces.remove",
@@ -564,7 +568,18 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "exec.proposals.settings.set",
     "exec.proposals.auto_enabled.list",
     "exec.proposals.auto_enabled.disable",
+    // 审批状态查询：**先问本进程注册表、未命中再转发侧车**（见
+    // `dispatch` 里的同名特判与 `gateway/approvals.rs` 模块头）。此前这两个
+    // 方法只在 dispatch 里有分支、没在这里声明 —— 前端 `useChatApprovals`
+    // 又用模板串拼方法名，静态扫描看不见，于是「重连后恢复挂起审批」这条
+    // 路径的声明面一直是空的。
+    "exec.approval.status",
+    "plugin.approval.status",
     // 其他缺失方法
+    // `chat.clarify` 与 `chat.clarify_submit` 是成对的：前者开澄清卡（Rust 网关
+    // `gateway/clarify.rs` 服务，纯 Rust 模式也可用），后者提交回答。此前只声明了
+    // submit，`supportsMethod('chat.clarify')` 为 false —— 一处实现、一处声明的半边声明。
+    "chat.clarify",
     "chat.clarify_submit",
     "providers.status",
     "sandbox.resume",

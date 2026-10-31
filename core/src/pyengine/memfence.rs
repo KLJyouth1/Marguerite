@@ -11,7 +11,11 @@
 //!
 //! 设计依据：docs/sidecar-stability-research.md §3.2 P1-5。
 
-use anyhow::{anyhow, Context, Result};
+// `anyhow!` / `Context` 只被 `#[cfg(windows)]` 的实现用到；无条件导入会在
+// Linux 上变成 unused_imports，而门禁是 `-D warnings`（CI 的 ubuntu 作业实测红）。
+#[cfg(windows)]
+use anyhow::{anyhow, Context};
+use anyhow::Result;
 
 /// 默认内存上限（MiB）。保守取值：覆盖 embedding 索引 / 正常多任务，
 /// 仍能拦住失控泄漏（本机真实压测见报告）。

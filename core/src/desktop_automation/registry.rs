@@ -103,6 +103,14 @@ impl AppRegistry {
         action: &UiAction,
         session: &str,
     ) -> Result<ActionReceipt, DesktopError> {
+        // Kill-switch 落在这条唯一漏斗上：任何入口（RPC / 工具 / 未来新调用方）
+        // 只要走注册表执行动作，就绕不过全局开关。此前 `Policy::is_enabled()`
+        // 零调用点，关掉开关等于什么都没发生。
+        if !crate::desktop_automation::policy::Policy::is_enabled() {
+            return Err(DesktopError::ActionDenied(
+                "桌面自动化已被全局关闭（kill-switch）：请先在设置中重新开启".into(),
+            ));
+        }
         let (kind, handle) = {
             let guard = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             guard

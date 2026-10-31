@@ -525,6 +525,9 @@ mod file_access_tests {
         let f = WsFixture::new("escape");
         // `..\escape.txt` 只在 Windows 上是「上一级」；Unix 上它是一个合法文件名
         // （含反斜杠），不构成越界 —— 断言它「必须被拒绝」等于断言了错的行为。
+        // `mut` 只在 Windows 分支被用到（追加反斜杠那条），Linux 上会触发
+        // unused_mut —— 门禁是 `-D warnings`，所以按平台放宽这一条。
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut evil: Vec<&str> = vec!["../escape.txt", "a/../../escape.txt"];
         #[cfg(windows)]
         evil.push("..\\escape.txt");

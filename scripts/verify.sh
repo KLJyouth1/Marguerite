@@ -87,6 +87,16 @@ run_check() {
   end=$(date +%s); dur=$((end - start))
   # 打印尾部证据（失败时常含关键错误行）
   printf '%s\n' "$out" | tail -n "$EVIDENCE_LINES"
+  if [ "$rc" -ne 0 ]; then
+    # 失败时补打**具名失败行**：只 tail 30 行会把 pytest / libtest 的 FAILED 名单截掉，
+    # 日志里只剩一个「3 failed」—— 排查时等于没有证据（CI 上连跑三轮都拿不到用例名）。
+    local named
+    named="$(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) |^failures:$|^    [a-zA-Z0-9_]+::' | head -n 25)"
+    if [ -n "$named" ]; then
+      echo "  --- 具名失败（自动补打）---"
+      printf '%s\n' "$named" | sed 's/^/  ! /'
+    fi
+  fi
   if [ "$rc" -eq 0 ]; then
     echo "${C_PASS}[PASS]${C_RST} $name  (${dur}s)"
     PASSED+=("$name")

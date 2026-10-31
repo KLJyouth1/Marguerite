@@ -165,19 +165,25 @@ fn desktop_action_with(registry: &AppRegistry, ctx: &GatewayContext, params: &Va
         );
     }
     // 安全闸门：敏感动作需二次确认（前端携带 approved=true 才放行）。
-    // 点击目标命中危险词（删除/支付/发送…）同样走确认，而不是只看 kind。
-    if Policy::require_confirmation(&action)
-        && !params
+    // 命中危险词（删除/支付/发送…）与**按坐标点击**同样走确认 —— 后者无法在这一层
+    // 判断落点是什么控件，按「未知目标不可信」处理，而不是静默放行。
+    if let Some(reason) = Policy::confirmation_reason(&action) {
+        if !params
             .get("approved")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-    {
-        let reason = Policy::sensitive_target(&action)
-            .map(|term| {
-                format!("该动作需要二次确认：目标命中危险操作词「{term}」（前端请携带 approved=true）")
-            })
-            .unwrap_or_else(|| "该动作需要二次确认（前端请携带 approved=true）".into());
-        return rpc_err(2403, &format!("ACTION_DENIED: {reason}"));
+        {
+            return rpc_err(
+                2403,
+                &format!("ACTION_DENIED: 该动作需要二次确认：{reason}（前端请携带 approved=true）"),
+            );
+        }
+    }
+    if !Policy::is_enabled() {
+        return rpc_err(
+            2403,
+            "ACTION_DENIED: 桌面自动化已被全局关闭（kill-switch）；请在设置中重新开启后再试",
+        );
     }
     // 注入扫描：只扫会进入命令/终端的字段（普通文本输入不再误拦）
     if let Some(reason) = Policy::scan_command_text(&action) {
@@ -280,10 +286,43 @@ pub fn desktop_snapshots(params: &Value) -> Value {
     rpc_ok(json!({ "snapshots": snaps }))
 }
 
-/// `desktop.stop`：急停所有运行中应用。
-pub fn desktop_stop() -> Value {
-    let _ = AppRegistry::global().stop_all();
-    rpc_ok(json!({ "ok": true }))
+/// `desktop.stop`：急停 —— 关掉桌面自动化的总开关，**不**替用户关掉应用。
+///
+/// 2026-10-31 修语义：旧实现直接 `quit` 所有已附着应用再清空句柄表，于是
+/// 「停一下自动化」会连带把用户正在写的文档/浏览器关掉 —— 一个停止按钮不该
+/// 有破坏性副作用。现在默认只停自动化；确实要关应用由调用方显式传
+/// `close_apps: true`（那正是 `AppRegistry::stop_all` 的语义）。
+pub fn desktop_stop(params: &Value) -> Value {
+    Policy::set_enabled(false);
+    let close_apps = params
+        .get("close_apps")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let closed = if close_apps {
+        match AppRegistry::global().stop_all() {
+            Ok(()) => true,
+            Err(e) => return desktop_error(&e),
+        }
+    } else {
+        false
+    };
+    rpc_ok(json!({
+        "ok": true,
+        "automation_enabled": Policy::is_enabled(),
+        "closed_apps": closed,
+    }))
+}
+
+/// `desktop.automation.set`：开关全局 kill-switch（`{"enabled": bool}`）。
+///
+/// 没有这个入口，`desktop.stop` 就是一个单向阀：关掉之后没有任何办法再打开，
+/// 只能重启进程 —— 这也是旧实现里 `Policy::set_enabled` 零调用点的另一半原因。
+pub fn desktop_automation_set(params: &Value) -> Value {
+    let Some(enabled) = params.get("enabled").and_then(Value::as_bool) else {
+        return rpc_err(2402, "missing required boolean parameter: enabled");
+    };
+    Policy::set_enabled(enabled);
+    rpc_ok(json!({ "enabled": Policy::is_enabled() }))
 }
 
 #[cfg(test)]
