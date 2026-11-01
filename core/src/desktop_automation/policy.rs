@@ -67,26 +67,53 @@ const SENSITIVE_TARGETS: &[&str] = &[
     "sign out",
 ];
 
+/// 按分隔符与 camelCase 驼峰切词的小写词表。
+///
+/// `AutomationId` 常是 `DeleteButton` / `sendMessageBtn`：只按非字母数字切分时它们
+/// 是一个整词，永远匹配不到 `delete` / `send` —— 而这正是最需要确认的控件。
+fn split_words(label: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut prev_was_lower = false;
+    for ch in label.chars() {
+        if !ch.is_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            prev_was_lower = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_was_lower && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        prev_was_lower = ch.is_lowercase() || ch.is_numeric();
+        current.extend(ch.to_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 /// 目标标签是否命中危险词。
 ///
-/// - ASCII 词：按非字母数字切分后的整词匹配（`Delete file` 命中，`sender` 不命中）；
-///   含空格的短语（`sign out`）按子串匹配。
+/// - ASCII 词：按分隔符与 camelCase 切词后的整词匹配（`Delete file`、`DeleteButton`
+///   命中，`sender` 不命中）；含空格的短语（`sign out`）按子串匹配。
 /// - CJK 词：整词相等，或位于标签首/尾且余量 ≤ 2 个字。这样 `删除文件`（余 2）命中，
 ///   `发送者信息`（余 3 且是名词短语）不命中。
 fn label_matches(term: &str, label: &str) -> bool {
-    let label = label.trim().to_lowercase();
+    let label = label.trim();
     let term = term.to_lowercase();
     if term.is_empty() || label.is_empty() {
         return false;
     }
     if term.is_ascii() {
         if term.contains(' ') {
-            return label.contains(&term);
+            return label.to_lowercase().contains(&term);
         }
-        return label
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|word| word == term);
+        return split_words(label).iter().any(|word| word == &term);
     }
+    let label = label.to_lowercase();
     if label == term {
         return true;
     }
@@ -368,5 +395,20 @@ mod tests {
         // 有些框架（Chromium/UIA）把可读名称藏在 AutomationId 里，Name 为空。
         let a = action("click", json!({ "automation_id": "DeleteButton" }));
         assert!(Policy::require_confirmation(&a));
+    }
+
+    #[test]
+    fn camel_case_automation_ids_split_into_words() {
+        for id in ["DeleteButton", "btnDelete", "delete_file", "sendMessageBtn"] {
+            assert!(
+                Policy::require_confirmation(&action("click", json!({ "automation_id": id }))),
+                "{id} 应命中危险词"
+            );
+        }
+        // 含词素但不是整词的不算：`SenderList` 只是发件人列表。
+        assert!(!Policy::require_confirmation(&action(
+            "click",
+            json!({ "automation_id": "SenderList" })
+        )));
     }
 }

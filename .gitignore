@@ -50,6 +50,10 @@ _*.txt
 
 # 构建输出目录（任意层级，含 gui/dist、pyengine/*/dist、根级 dist）
 dist/
+# 例外：`opensquilla.dist` 是**源码包**（`opensquilla dist` 子命令读的 workspace_state），
+# 只是名字撞上了构建目录的惯例 —— 干净检出缺了它，CI 实测 ModuleNotFoundError。
+!/pyengine/src/opensquilla/dist/
+!/pyengine/src/opensquilla/dist/**
 # 带后缀的旧构建快照（`dist.v1/`、`dist.bak/` …）：`dist/` 只匹配名字**正好**是 dist 的目录，
 # 实测 `webui/dist.v1/`（280 个文件的旧整包产物）就这样漏进了未跟踪列表。补 `dist.*/` 兜住。
 # 注意不要写成 `dist*/`——那会把 Python 的 `distutils/` 之类目录一并误伤。

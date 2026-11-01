@@ -70,6 +70,7 @@ use super::tests::{setup, put};
                     x: 160.0,
                     y: 120.0,
                     confidence: 0.99,
+                    space: crate::vision::CoordSpace::Pixels,
                 })
             }
         }

@@ -112,7 +112,7 @@ NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
 | `--webui` | webui typecheck + webui 单测 + **lockfile 自洽** + **依赖审计** | 前端栈隔离 |
 | `--gui` | gui typecheck + lint + 单测 + 构建 + **lockfile 自洽** | 桌面壳 React 栈隔离 |
 | `--pyengine` | Python 侧车 `tests/unit`（按 marker 排除网络/LLM/浏览器/真实终端） | Python 栈隔离 |
-| `--all`（默认） | `--core` + `--webui` + `--gui` + `--pyengine` + `--workbench` + `cargo build --workspace` + clippy(workspace) = **26 项检查** | 日常全量 |
+| `--all`（默认） | `--core` + `--webui` + `--gui` + `--pyengine` + `--workbench` + `cargo build --workspace` + clippy(workspace) = **27 项检查** | 日常全量 |
 | `--clean --all` | 上述 + 先 clean core | **完成声明用此档** |
 | `--release` | `--all` + `cargo tauri build` + 资源卫生（staged/物化两遍）+ **侧车启动冒烟**（`check-sidecar-boot.py`：真启动打包侧车，打 `/health`、`/api/config`、`/ws`） | 发版门禁 |
 

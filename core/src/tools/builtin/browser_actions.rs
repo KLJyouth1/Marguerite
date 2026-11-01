@@ -251,8 +251,18 @@ pub(crate) async fn run_browser_action(
             let meta = image_metadata(&png);
             let png_w = meta.width.unwrap_or(v_w as u32) as f64;
             let png_h = meta.height.unwrap_or(v_h as u32) as f64;
-            let x_css = loc.x * v_w / png_w;
-            let y_css = loc.y * v_h / png_h;
+            // 先按模型声明的单位换成截图像素，再缩放到视口；非法坐标直接拒绝。
+            let Some((px, py)) = loc.pixels(png_w, png_h) else {
+                return err(
+                    format!(
+                        "视觉定位返回了非法坐标: x={}, y={}, space={:?}",
+                        loc.x, loc.y, loc.space
+                    ),
+                    "VISION_LOCATE_ERROR",
+                );
+            };
+            let x_css = px * v_w / png_w;
+            let y_css = py * v_h / png_h;
             if let Err(e) = page.session.click_at(x_css, y_css).await {
                 return err(format!("点击失败: {e}"), "BROWSER_ERROR");
             }

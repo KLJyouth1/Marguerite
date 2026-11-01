@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -365,6 +367,13 @@ def test_build_outer_bwrap_command_reenters_helper_inner_mode(tmp_path) -> None:
     assert inner[:3] == [sys.executable, "-m", "opensquilla.sandbox.backend.linux_helper"]
     assert "--inner" in inner
     assert str(payload_path) in inner
+    # --clearenv 之后内层要能 `-m opensquilla.…`：包根必须显式 --setenv 进 PYTHONPATH。
+    # 干净检出（CI 的 ubuntu 作业）没有 `pip install -e .`，实测缺这条就 ModuleNotFoundError。
+    setenv_at = argv.index("--setenv")
+    assert argv[setenv_at + 1] == "PYTHONPATH"
+    package_root = str(Path(linux_helper.__file__).resolve().parents[3])
+    pythonpath_value = argv[setenv_at + 2]
+    assert package_root in pythonpath_value.split(os.pathsep)
 
 
 def test_build_outer_bwrap_command_wraps_proxy_allowlist_with_bridge(tmp_path) -> None:

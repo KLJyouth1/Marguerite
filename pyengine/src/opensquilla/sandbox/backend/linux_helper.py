@@ -185,6 +185,15 @@ def build_outer_bwrap_plan(
         str(payload_path),
     ]
     env: dict[str, str] = {}
+    # bwrap 计划默认 --clearenv，父进程的 PYTHONPATH 传不进内层；而内层是
+    # `-m opensquilla.sandbox.backend.linux_helper --inner` —— 源码运行时（CI 的
+    # 干净检出）必须把包根显式 setenv 进去，否则实测 ModuleNotFoundError。
+    # 已有 linuxProxyBridge 时下面会整体重建 env，那里的端口/UDS 变量与本键无冲突。
+    package_root = str(Path(__file__).resolve().parents[3])
+    inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if package_root not in inherited:
+        inherited.insert(0, package_root)
+    env["PYTHONPATH"] = os.pathsep.join(inherited)
     bridge = payload.policy.get("linuxProxyBridge")
     if isinstance(bridge, dict):
         uds_path = Path(str(bridge["udsPath"]))

@@ -353,6 +353,70 @@ pub(super) fn setup() -> (ToolRegistry, PathBuf) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// P0#1：同会话内重复读同一文件、且文件未改动时，第二次只回存根，不再重复下发全文。
+    ///
+    /// 这条用例守的是**省 token 不许改变可读性**：
+    /// - 存根必须是 `Success`（"内容没变"不是"读取失败"，回 Err 会让模型去重试）；
+    /// - 存根不得夹带正文（否则省下来的 token 又花回去了）；
+    /// - `force=true` 必须能拿回全文（用户/模型要复核时不能被缓存挡住）；
+    /// - 文件一旦改动必须回全文（存根只对「真没变」生效，且 limit 要进键）。
+    #[tokio::test]
+    async fn read_file_dedupes_unchanged_reread_and_force_bypasses() {
+        let (reg, dir) = setup();
+
+        let mut a = HashMap::new();
+        put(&mut a, "path", "hello.txt");
+        match reg.execute_local_tool("read_file", &a).await.unwrap() {
+            ToolResult::Success { data, .. } => assert_eq!(data, "line1\nline2\nline3\n"),
+            other => panic!("首读应成功: {other:?}"),
+        }
+
+        // 第二次：文件没变、limit 也没变 → 存根（成功，但不带正文）
+        match reg.execute_local_tool("read_file", &a).await.unwrap() {
+            ToolResult::Success { data, .. } => {
+                assert!(
+                    data.starts_with("[FILE_UNCHANGED]"),
+                    "未改动的重复读应回存根，实际: {data}"
+                );
+                assert!(
+                    !data.contains("line2"),
+                    "存根不得夹带正文，否则等于没省: {data}"
+                );
+            }
+            other => panic!("重复读应是成功结果（存根不是错误）: {other:?}"),
+        }
+
+        // force=true：拒绝去重，必须拿回全文
+        let mut f = HashMap::new();
+        put(&mut f, "path", "hello.txt");
+        put(&mut f, "force", "true");
+        match reg.execute_local_tool("read_file", &f).await.unwrap() {
+            ToolResult::Success { data, .. } => assert_eq!(data, "line1\nline2\nline3\n"),
+            other => panic!("force=true 应拿回全文: {other:?}"),
+        }
+
+        // 文件改动后必须回全文 —— 存根只对「真没变」生效
+        std::fs::write(dir.join("hello.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+        match reg.execute_local_tool("read_file", &a).await.unwrap() {
+            ToolResult::Success { data, .. } => {
+                assert!(data.contains("line4"), "改动后应回全文，实际: {data}")
+            }
+            other => panic!("改动后读应成功: {other:?}"),
+        }
+
+        // 不同 limit 是不同 payload，不得被去重吃掉
+        std::fs::write(dir.join("hello.txt"), "line1\nline2\nline3\n").unwrap();
+        let mut l = HashMap::new();
+        put(&mut l, "path", "hello.txt");
+        put(&mut l, "limit", "1");
+        match reg.execute_local_tool("read_file", &l).await.unwrap() {
+            ToolResult::Success { data, .. } => assert_eq!(data, "line1"),
+            other => panic!("limit=1 读应成功: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// P2-9 多项目工作区：文件域工具跨根读写；新建文件仍落主根。
     ///
     /// 这是「工具侧多根」的端到端证据：读附加根已有文件 → 改附加根文件 →

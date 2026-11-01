@@ -386,6 +386,18 @@ check_doc_drift() {
     scripts/check-doc-cli-drift.py
 }
 
+# RPC/事件契约双向对账（2026-10-31 接入）。两类漂移各自致命且都只能静态发现：
+#   有实现未声明 → supportsMethod() 为 false，前端永远不调（可达但不可见）；
+#   声明但无实现 → UI 显示入口，一调就失败（孤儿声明）。
+# 该脚本此前自身是坏的（30 KB 截断扫描把 200 个正常方法判成缺陷）；修好后两个
+# 集合恒为空，因此可以当棘轮——任何一侧再漂移，这条检查立刻变红。
+# 事件面（[D]）与侧车面（[E]）只报不拦：事件没有单一权威声明表，硬拦会把
+# 「前端订阅了侧车动态拼出的名字」判成缺陷。
+check_rpc_surface() {
+  run_py_doc_check "RPC/事件契约对账 (audit_rpc_surface2.py)" \
+    scripts/audit_rpc_surface2.py
+}
+
 check_version_sync() {
   run_py_doc_check "四端版本号一致 (check-version-sync.py)" \
     scripts/check-version-sync.py
@@ -818,7 +830,7 @@ check_pyengine_tests() {
 #
 # 与 tests/unit 分成两条检查是刻意的：161s 与「纯单测」不同量级，混进同一条 [PASS]
 # 会掩盖新增的慢测。该目录**不含**任何 llm/live/browser 标记的用例（实测 0 处），
-# 所以不需要 marker 过滤 —— 也就不存在第二份会漂移的排除清单。-rfs 让**失败与 skip 都具名**
+# 所以不需要 marker 过滤 —— 也就不存在第二份会漂移的排除清单。-rfsE 让**失败、error 与 skip 都具名**
 # （只写 -rs 会覆盖 pytest 默认的 -rfE，失败用例名就从证据里消失了 —— CI 曾经因此
 #   只报「3 failed」而没有任何用例名，白白多跑一轮）。
 # 原因出现在证据里：本仓铁律是跳过 ≠ 通过。
@@ -830,7 +842,7 @@ check_pyengine_gateway_tests() {
     return 0
   fi
   run_check "pyengine 网关契约 (tests/test_gateway，无网络/无 LLM)" \
-    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rfs"
+    bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/test_gateway -q --no-header -p no:cacheprovider -rfsE"
 }
 
 # pyengine 契约族（tests/test_ci / test_migrations / test_sandbox /
@@ -871,7 +883,7 @@ check_pyengine_contract_tests() {
   echo
   echo "${C_HEAD}=== [CHECK] $name ===${C_RST}"
   for suite in test_ci test_migrations test_sandbox test_onboarding test_tools test_recovery; do
-    out="$(bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rfs" 2>&1)"
+    out="$(bash -c "cd pyengine && PYTHONUTF8=1 '$PY' -m pytest tests/$suite -q --no-header -p no:cacheprovider -rfsE" 2>&1)"
     rc=$?
     local evidence summary
     # 失败/收集错误逐条打印；跳过的具名理由留在下面的汇总行里（-rs）。
@@ -1115,6 +1127,7 @@ if [ "$MODE_CORE" -eq 1 ]; then
   check_core_build
   check_clippy_core
   check_doc_drift
+  check_rpc_surface
   check_version_sync
   check_secrets
   check_doc_links
@@ -1161,6 +1174,7 @@ if [ "$MODE_ALL" -eq 1 ]; then
   check_core_build
   check_clippy_ws
   check_doc_drift
+  check_rpc_surface
   check_version_sync
   # ⚠️ 这三项必须留在 --all 里：R27 曾把 check_secrets 只接进 --fast/--core，
   # 于是 --all 少跑一项而文档仍写 18/18。check_readme_claims 现在会核对这个总数。

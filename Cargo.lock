@@ -3244,6 +3244,7 @@ dependencies = [
  "md5",
  "notify",
  "pbkdf2",
+ "png",
  "portable-pty",
  "rand 0.8.7",
  "ratatui",

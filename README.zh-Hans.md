@@ -336,7 +336,7 @@ bash scripts/verify.sh --workbench    # 只跑 workbench 子项目（71 个离�
 bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 ```
 
-当前基线 —— 整道闸门调度 26 项检查，最近一次完整跑到 **26/26 全绿**是 2026-10-31；
+当前基线 —— 整道闸门调度 27 项检查，最近一次完整跑到 **27/27 全绿**是 2026-10-31；
 下表每一行数字都来自那次运行。其余每一层都在 CI
 （[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）里跑，**只有新增的 web e2e
 层暂时只在本机闸门里跑**：CI 需要把 Playwright 浏览器缓存与 Rust 构建出的网关放进
@@ -344,7 +344,7 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test -p marguerite-core --lib` | 4533 passed / 0 failed / 25 ignored |
+| `cargo test -p marguerite-core --lib` | 4566 passed / 0 failed / 25 ignored |
 | core 集成测试（`core/tests/{e2e,plugin_manifest_gate,plugin_patch_gate,tui_model_panel}`） | 离线且确定性；`third_party/` 缺失时 `third_party_integration` 记 `[SKIP]`（跳过永不计入通过） |
 | `webui` 单测（Vitest） | 5085 passed / 0 failed（516 个文件） |
 | `pyengine` 单测（pytest，`tests/unit`） | 823 passed / 0 failed / 7 skipped |
@@ -353,6 +353,7 @@ bash scripts/verify.sh --release      # 追加 Tauri 发布打包
 | `cargo clippy --workspace --all-targets -- -D warnings` | 零告警 |
 | `npm run check:architecture` | 13 项架构守卫全绿 |
 | `scripts/check-doc-cli-drift.py` | 文档里的每个 CLI 记号都能解析到真实代码 |
+| `scripts/audit_rpc_surface2.py` | RPC 声明 ↔ 分派面 ↔ 前端调用双向对账：实现了却没声明的方法，前端被 `supportsMethod()` 挡住永远调不到；声明了却没实现的方法，一调就失败。两个集合都必须为空；事件面与侧车面只报告、不拦截 |
 | `scripts/check-version-sync.py` | core / tui / gui / webui 版本号全部钉到 `core/Cargo.toml`（含两个 npm lockfile 的包自身条目） |
 | `npm ci --dry-run` | 控制台 lockfile 与 `package.json` 自洽（这条 `npm audit` 看不见） |
 | `npm audit --audit-level=moderate` | 控制台依赖树无 moderate 及以上公告 |

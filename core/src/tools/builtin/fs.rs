@@ -5,17 +5,99 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// 工具工厂
+// read_file：未改动文件的重复读去重（P0#1）
 // ---------------------------------------------------------------------------
+//
+// 真实痛点：一个任务里同一份文件常被读 3–5 次（先看结构、再定位、改完复核），
+// 每次都把全文重新塞进上下文。文件没变的时候，这部分 token 是纯浪费，而且会把
+// 真正有用的历史挤出窗口。
+//
+// 语义与 Claude Code 的 `readFileCache` 对齐：**同会话 + 同路径 + 同 limit +
+// (mtime, len) 都没变** → 第二次只回一行 `[FILE_UNCHANGED]` 存根；`force=true`
+// 强制重发全文。存根是**成功结果**，不是错误 —— 模型读到的应该是「内容没变」，
+// 而不是「读取失败」。
+//
+// 刻意不做成全局静态缓存：缓存活在当前 `read_file` 工具实例（= 一个 ToolRegistry 的
+// 寿命）里，不落盘、不跨进程。盘上缓存一旦比文件旧，就是一类很难复现的脏读 bug，
+// 省下来的那点 token 不值得。
+
+/// `(mtime 纳秒, 文件字节数)` —— 判定「文件是否没变」的指纹。
+type ReadStamp = (u64, u64);
+
+/// 去重键：`(会话, 解析后的绝对路径, limit)`。
+///
+/// limit 必须进键：同一个文件按 10 行截断和按全文返回是两个不同的 payload，
+/// 混在一起去重会把「要看全文」的请求答成 10 行。
+type ReadKey = (String, String, Option<usize>);
+
+/// 见过哪些文件：`ReadKey -> 上次下发时的指纹`。
+///
+/// 这里刻意写全 `std::sync::` 路径（不依赖父模块的 `use` 是否被 glob 带进来）——
+/// 工具模块是高频改动区，少一个隐式依赖就少一类"改了别人先红"的编译错。
+type ReadSeen = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ReadKey, ReadStamp>>>;
+
+/// 缓存条数上限。超了直接清空 —— 这里不需要 LRU：清空只是让下一轮少省一次 token，
+/// 而 LRU 的实现成本和 bug 面都比它贵。
+const READ_SEEN_CAP: usize = 512;
+
+/// 取文件的 `(mtime, len)`。取不到（权限、竞态删除）就返 `None`，
+/// 调用方据此**跳过**去重 —— 宁可多发一次全文，也不要在拿不准的时候回存根。
+fn read_file_stamp(abs: &std::path::Path) -> Option<ReadStamp> {
+    let md = std::fs::metadata(abs).ok()?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)?;
+    Some((mtime, md.len()))
+}
+
+/// 宽松布尔参数：`true` / `1` / `yes`（大小写不敏感）算真。
+///
+/// 工具参数一律以 `String` 传递给 `ToolFn`（schema 里写 boolean，落到这里是 `"true"`），
+/// 所以不能直接 `parse::<bool>()` —— 那个只认 `"true"`/`"false"`。
+fn read_force_flag(args: &std::collections::HashMap<String, String>, key: &str) -> bool {
+    match args.get(key) {
+        Some(v) => {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes")
+        }
+        None => false,
+    }
+}
+
+/// 去重总开关：默认开，`MARGUERITE_READ_DEDUPE=0|false|off` 关掉。
+///
+/// 为什么留这个开关：`harness/ledger.rs` 的确定性重放是「同一份调用序列必须复现同一结果」。
+/// 去重会让「第二次读」的 payload 从全文变成存根 —— 一旦某条历史 ledger 是在旧语义下录的，
+/// 重放就会对不上。修 ledger 是对的长期做法，但在那之前，线上/回放出现对不上时
+/// 必须有一个**不用重新编译**就能退回旧语义的把手。
+fn read_dedupe_enabled() -> bool {
+    match std::env::var("MARGUERITE_READ_DEDUPE") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    }
+}
 
 pub(crate) fn read_file_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecutor> {
     let workspace: RootSet = workspace.into();
+    let seen: ReadSeen = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    ));
     boxed(
         "read_file",
-        "读取工作区内文本文件内容（多根会话会按注册顺序查找同名文件）。参数: path(相对路径), limit(可选, 限制行数)",
-        json!({"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number"}}}),
+        "读取工作区内文本文件内容（多根会话会按注册顺序查找同名文件）。参数: path(相对路径), limit(可选, 限制行数), force(可选, true=文件未改动也重发全文)",
+        json!({"type":"object","properties":{
+            "path":{"type":"string"},
+            "limit":{"type":"number"},
+            "force":{"type":"boolean","description":"true 时忽略「未改动」去重，强制重发全文"}
+        }}),
         Arc::new(move |args| {
             let ws = workspace.clone();
+            let seen = seen.clone();
             Box::pin(async move {
                 let p = args.get("path").ok_or_else(|| anyhow!("missing 'path'"))?;
                 let abs = ws.resolve(p)?;
@@ -27,15 +109,40 @@ pub(crate) fn read_file_tool(workspace: impl Into<RootSet>) -> Box<dyn ToolExecu
                 if !abs.is_file() {
                     return err(format!("not a file: {}", p), "NOT_FOUND");
                 }
+
+                let limit: Option<usize> = args.get("limit").and_then(|l| l.parse().ok());
+                let force = read_force_flag(args, "force");
+                // 指纹在读取**之前**取：万一读的瞬间文件正在被改，我们记下的是旧指纹，
+                // 下次读会因为指纹不匹配而重发全文 —— 错的方向是「多给一次」，
+                // 而不是「该给的时候给了存根」。
+                let stamp = read_file_stamp(&abs);
+                let key = (current_session(), abs.to_string_lossy().into_owned(), limit);
+
+                if !force && read_dedupe_enabled() {
+                    if let (Some(now), Ok(map)) = (stamp, seen.lock()) {
+                        if map.get(&key).copied() == Some(now) {
+                            return ok(format!(
+                                "[FILE_UNCHANGED] {} 自上次读取后未修改（{} bytes）。\
+                                 内容与上次返回完全一致，已省略重复下发；\
+                                 需要再次获取全文请传 force=true。",
+                                p, now.1
+                            ));
+                        }
+                    }
+                }
+
                 let content =
                     std::fs::read_to_string(&abs).map_err(|e| anyhow!("read {}: {}", p, e))?;
-                let shown = match args.get("limit") {
-                    Some(l) => {
-                        let n: usize = l.parse().unwrap_or(usize::MAX);
-                        content.lines().take(n).collect::<Vec<_>>().join("\n")
-                    }
+                let shown = match limit {
+                    Some(n) => content.lines().take(n).collect::<Vec<_>>().join("\n"),
                     None => content,
                 };
+                if let (Some(now), Ok(mut map)) = (stamp, seen.lock()) {
+                    if map.len() >= READ_SEEN_CAP {
+                        map.clear();
+                    }
+                    map.insert(key, now);
+                }
                 ok(shown)
             })
         }),

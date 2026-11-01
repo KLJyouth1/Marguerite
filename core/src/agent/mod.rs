@@ -10,8 +10,10 @@ pub mod capability;
 pub mod capability_bench;
 pub mod capability_cards;
 pub mod capability_guard;
+pub mod cost;
 pub mod expertise;
 pub mod multi_strategy;
+pub mod obs;
 pub mod prefix_scope;
 pub mod profile;
 pub mod role_context;
@@ -34,10 +36,12 @@ pub use bloom_cache::{
     embedding_similarity, BloomDecisionCache, BloomParallelPrefix, CacheQuery, SemanticHit,
     SemanticIntentCache, SimilarityFn, SnapshotCache,
 };
+pub use cost::{cost_usd, Price, Pricing, TurnCost};
 pub use multi_strategy::{
     run_multi_strategy, strategy, tool_strategy, MultiResult, MultiStrategyStats, Strategy,
     ToolLoopBackend,
 };
+pub use obs::CompressionReport;
 pub use prefix_scope::{stable_prefix_key, SharedPrefixCache};
 pub use profile::{apply_auto_profile, auto_profile, Persona};
 pub use runtime::{AgentRuntime, AgentState, Message, SessionContext};

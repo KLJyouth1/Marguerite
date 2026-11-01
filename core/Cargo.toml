@@ -51,6 +51,11 @@ sha2 = "0.10"
 md5 = "0.8"
 tar = "0.4.36"
 ruzstd = "0.9"
+# 高分辨率截图的**原生分辨率**裁剪（`tools/computer_use.rs::crop_png`）：
+# ScreenSpot-Pro 分块 grounding 必须把 4K 截图切成 patch 再逐块定位，整图降采样
+# 会把小控件抹平。纯 Rust、只处理 PNG（截图链路恒出 PNG），已在 workspace
+# lockfile 内（`tauri → image → png`），不新增下载。
+png = "0.18"
 
 # 模型密钥加密（BYOK）：纯 Rust 的 AES-256-GCM（Fernet 风格令牌），
 # 不依赖 openssl，Windows MSVC 下可直接编译。

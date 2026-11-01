@@ -52,7 +52,7 @@ marguerite/
 - `dslash.rs` — 工作台 `/` 斜杠命令解析。
 - `output.rs` — 统一输出（JSON 成功/错误、退出码）。
 
-### 权威子命令表（19 个，与 `program.rs` 注册一致）
+### 权威子命令表（20 个，与 `program.rs` 注册一致）
 
 | 子命令 | 处理函数 | 说明 |
 | --- | --- | --- |
@@ -75,6 +75,7 @@ marguerite/
 | `cache` | `cache_handler` | KV 缓存命中率与可缓存比 |
 | `dispatch` | `dispatch_handler` | 无头分发任务到外部 agent CLI（meta-agent 调度一体内置） |
 | `games` | `games_handler` | 内置小游戏（`list` / `play <id> <动作>`） |
+| `export-diagnostics` | `export_diagnostics_handler` | 导出脱敏诊断包（tar；所有文本过 `scrub_text`） |
 
 > 新增子命令必须同步 `argv.rs::SUBCOMMANDS`、`program.rs` 注册与本文档表格，否则 `check-doc-cli-drift.py` 失败。
 

@@ -15,11 +15,19 @@ These tests pin the resolution order so the fallback cannot silently regress.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from opensquilla.gateway import control_ui
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows 安装布局的路径语义：`C:/` 前缀在 POSIX 上只是相对目录名，"
+    "Path.resolve() 会把它挂到 CWD 下，断言等于在验证一个错误行为（CI 实测红）",
+)
 def test_install_root_maps_module_path_to_install_root() -> None:
     fake = Path("C:/App/Marguerite/resources/pyengine/src/opensquilla/gateway/control_ui.py")
     assert control_ui._install_root_from(fake) == Path("C:/App/Marguerite")

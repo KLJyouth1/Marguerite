@@ -39,7 +39,7 @@ use crate::mcp::registry::ToolRegistry;
 use crate::security::{sandboxed_exec, CommandGuard, DEFAULT_TIMEOUT};
 use crate::tools::builtin::make_local_tool;
 use crate::vision::image_metadata;
-use crate::vision::VisionCapability;
+use crate::vision::{CoordSpace, VisionCapability};
 
 /// 桌面操控增强（DPI 感知 / 批量动作 / 窗口与应用操控 / VK 键位）。
 #[path = "computer_use_pilot.rs"]
@@ -707,17 +707,13 @@ impl GuiGrounding for OsComputerUse {
 pub fn map_locate_coords(
     model_x: f64,
     model_y: f64,
-    normalized: bool,
+    space: CoordSpace,
     shot_w: f64,
     shot_h: f64,
     real_w: f64,
     real_h: f64,
 ) -> (f64, f64) {
-    let (px, py) = if normalized {
-        (model_x * shot_w, model_y * shot_h)
-    } else {
-        (model_x, model_y)
-    };
+    let (px, py) = space.to_pixels(model_x, model_y, shot_w, shot_h);
     let sx = if shot_w > 0.0 { real_w / shot_w } else { 1.0 };
     let sy = if shot_h > 0.0 { real_h / shot_h } else { 1.0 };
     (px * sx, py * sy)
@@ -863,7 +859,7 @@ mod tests {
     #[test]
     fn map_normalized_no_downsample_identity() {
         // 未降采样：归一化(0.5,0.5) × 截图(1920×1080) = (960,540)，real==shot → 不变
-        let (x, y) = map_locate_coords(0.5, 0.5, true, 1920.0, 1080.0, 1920.0, 1080.0);
+        let (x, y) = map_locate_coords(0.5, 0.5, CoordSpace::Normalized, 1920.0, 1080.0, 1920.0, 1080.0);
         assert!((x - 960.0).abs() < 1e-6, "x={x}");
         assert!((y - 540.0).abs() < 1e-6, "y={y}");
     }
@@ -871,7 +867,7 @@ mod tests {
     #[test]
     fn map_absolute_no_downsample_identity() {
         // 绝对坐标且未降采样：直接透传
-        let (x, y) = map_locate_coords(123.0, 456.0, false, 1920.0, 1080.0, 1920.0, 1080.0);
+        let (x, y) = map_locate_coords(123.0, 456.0, CoordSpace::Pixels, 1920.0, 1080.0, 1920.0, 1080.0);
         assert!((x - 123.0).abs() < 1e-6, "x={x}");
         assert!((y - 456.0).abs() < 1e-6, "y={y}");
     }
@@ -880,7 +876,7 @@ mod tests {
     fn map_downsample_inverts_scale_normalized() {
         // 截图降采样到 1280 长边（real 2560×1440 → shot 1280×720），模型归一化(0.5,0.5)
         // 截图空间 = (640,360)；反推 real = (640×2, 360×2) = (1280,720) → 必须回到真实设备像素
-        let (x, y) = map_locate_coords(0.5, 0.5, true, 1280.0, 720.0, 2560.0, 1440.0);
+        let (x, y) = map_locate_coords(0.5, 0.5, CoordSpace::Normalized, 1280.0, 720.0, 2560.0, 1440.0);
         assert!((x - 1280.0).abs() < 1e-6, "x={x}");
         assert!((y - 720.0).abs() < 1e-6, "y={y}");
     }
@@ -888,7 +884,7 @@ mod tests {
     #[test]
     fn map_downsample_inverts_scale_absolute() {
         // 即便模型给绝对截图坐标(640,360)，也必须反推回真实(1280,720)
-        let (x, y) = map_locate_coords(640.0, 360.0, false, 1280.0, 720.0, 2560.0, 1440.0);
+        let (x, y) = map_locate_coords(640.0, 360.0, CoordSpace::Pixels, 1280.0, 720.0, 2560.0, 1440.0);
         assert!((x - 1280.0).abs() < 1e-6, "x={x}");
         assert!((y - 720.0).abs() < 1e-6, "y={y}");
     }
@@ -896,11 +892,11 @@ mod tests {
     #[test]
     fn map_zero_shot_dim_keeps_ratio_one() {
         // 截图尺寸未知（0）→ 比例退化为 1（无除零），绝对坐标原样透传，不产生 NaN/inf
-        let (x, y) = map_locate_coords(123.0, 456.0, false, 0.0, 0.0, 2560.0, 1440.0);
+        let (x, y) = map_locate_coords(123.0, 456.0, CoordSpace::Pixels, 0.0, 0.0, 2560.0, 1440.0);
         assert!((x - 123.0).abs() < 1e-6, "x={x}");
         assert!((y - 456.0).abs() < 1e-6, "y={y}");
         // 归一化坐标在缺截图尺寸时必然塌缩为 (0,0)：无法凭空还原，但绝不能 panic/除零
-        let (nx, ny) = map_locate_coords(0.5, 0.5, true, 0.0, 0.0, 2560.0, 1440.0);
+        let (nx, ny) = map_locate_coords(0.5, 0.5, CoordSpace::Normalized, 0.0, 0.0, 2560.0, 1440.0);
         assert!(
             nx.is_finite() && ny.is_finite(),
             "normalized collapse must stay finite"
@@ -1036,8 +1032,8 @@ mod tests {
 /// ScreenSpot-Pro 的核心发现：对 4K/retina 高 DPI 截图做整图降采样再 grounding，
 /// 会丢失小控件细节；改为「原生分辨率切重叠 patch → 逐 patch grounding → 缝回全图
 /// 坐标 → 跨 patch 置信度排序」可显著提升定位准确率。本模块实现其中「与视觉模型
-/// 无关的纯几何/排序核心」，真实像素裁剪由 `crop_png` 注入（当前未编入 image 后端，
-/// 退化为整图单 patch）。坐标缝合与 C3 的 `map_locate_coords` 共用同一套 scale 反推思路。
+/// 无关的纯几何/排序核心」，真实像素裁剪由 [`crop_png`] 完成（PNG 原生分辨率，
+/// 不重采样）。坐标缝合与 C3 的 `map_locate_coords` 共用同一套 scale 反推思路。
 /// ───────────────────────────────────────────────────────────────────────────
 /// 全图坐标系下的一个 patch 矩形（截图像素，含相邻重叠）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1105,20 +1101,11 @@ pub fn stitch_patch_coords(
     patch: &Patch,
     model_x: f64,
     model_y: f64,
-    normalized: bool,
+    space: CoordSpace,
     patch_render_w: f64,
     patch_render_h: f64,
 ) -> (f64, f64) {
-    let px = if normalized {
-        model_x * patch_render_w
-    } else {
-        model_x
-    };
-    let py = if normalized {
-        model_y * patch_render_h
-    } else {
-        model_y
-    };
+    let (px, py) = space.to_pixels(model_x, model_y, patch_render_w, patch_render_h);
     let sx = if patch_render_w > 0.0 {
         patch.width() as f64 / patch_render_w
     } else {
@@ -1172,16 +1159,16 @@ pub fn ground_by_patches<F>(
     mut locate_patch: F,
 ) -> Vec<GroundedCandidate>
 where
-    F: FnMut(&Patch) -> Option<(f64, f64, bool, f64)>,
+    F: FnMut(&Patch) -> Option<(f64, f64, CoordSpace, f64)>,
 {
     let mut cands = Vec::new();
     for p in patches {
-        if let Some((mx, my, norm, conf)) = locate_patch(p) {
+        if let Some((mx, my, space, conf)) = locate_patch(p) {
             let (fx, fy) = stitch_patch_coords(
                 p,
                 mx,
                 my,
-                norm,
+                space,
                 patch_render_w as f64,
                 patch_render_h as f64,
             );
@@ -1195,22 +1182,100 @@ where
     rank_grounding_candidates(cands, merge_dist)
 }
 
-/// 从整图字节裁剪出 `patch` 矩形子图。
-/// ⚠️ marguerite-core 当前未编入 `image` 后端，恒返回 None（裁剪不可用）；
-/// 接入 `image` crate 后即可实现原生分辨率 patch 裁剪，使分块 grounding 真正生效。
-fn crop_png(_bytes: &[u8], _patch: &Patch) -> Option<Vec<u8>> {
-    None
+/// 从整图字节裁剪出 `patch` 矩形子图，**原生分辨率、不重采样**。
+///
+/// 这是分块 grounding 能不能真正生效的唯一门槛：喂给模型的必须是 1024×1024 的
+/// 原始像素，而不是整张 4K 图缩到 1024 —— 后者正是 ScreenSpot-Pro 报告里小控件
+/// 定位崩掉的原因。
+///
+/// 刻意只处理**非隔行 8bit PNG**（截图链路的实际形状：Windows `Bitmap.Save` /
+/// macOS `screencapture` / Linux `scrot` 都出 `.png`）。其它形状一律 `None`：
+///
+/// - 调色板 / 16bit / <8bit 灰度先经 `normalize_to_color8` 归一，因此这三类实际
+///   是被支持的（解码后恒为 8bit RGB(A)/Gray(A)）；
+/// - **隔行（Adam7）图拒绝**：它的行是按交互行分多趟产出的，按 `y` 直接切会裁出
+///   错位的图。宁可退化成整图单定位，也不给一个「坐标看着对、点下去偏半屏」的结果。
+fn crop_png(bytes: &[u8], patch: &Patch) -> Option<Vec<u8>> {
+    // 64 MiB 是 png crate 的默认上限，按行读用不到那么多，但 8K 截图的解码缓冲
+    // 会顶破它——这里的字节数只用于逐行缓冲，放宽没有内存风险。
+    let mut decoder = png::Decoder::new_with_limits(
+        std::io::Cursor::new(bytes.to_vec()),
+        png::Limits {
+            bytes: 256 * 1024 * 1024,
+        },
+    );
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    if reader.info().interlaced {
+        return None;
+    }
+    let (w, h) = reader.info().size();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (color_type, bit_depth) = reader.output_color_type();
+    let line = reader.output_line_size(w)?;
+    let x0 = patch.x0.min(w);
+    let y0 = patch.y0.min(h);
+    let x1 = patch.x1.min(w).max(x0);
+    let y1 = patch.y1.min(h).max(y0);
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    if cw == 0 || ch == 0 {
+        return None;
+    }
+    // 归一到 8bit 后行宽必为宽度的整数倍；`line / w` 即字节/像素。
+    let bpp = line / w as usize;
+    let crop_line = cw as usize * bpp;
+
+    let mut rows: Vec<u8> = Vec::with_capacity(crop_line * ch as usize);
+    let mut y = 0u32;
+    while y < h {
+        let Some(row) = reader.next_row().ok()? else { break };
+        if y >= y0 && y < y1 {
+            let start = x0 as usize * bpp;
+            let data = row.data();
+            if data.len() < start + crop_line {
+                // 行比声明的宽度短 = 输入不是普通 PNG。截错比不截更糟。
+                return None;
+            }
+            rows.extend_from_slice(&data[start..start + crop_line]);
+        }
+        y += 1;
+    }
+    if rows.len() != crop_line * ch as usize {
+        return None;
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, cw, ch);
+        encoder.set_color(color_type);
+        encoder.set_depth(bit_depth);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&rows).ok()?;
+        writer.finish().ok()?;
+    }
+    Some(out)
 }
 
+/// 分块 grounding 的**调用预算**上限。
+///
+/// 每个 patch 是一次视觉模型往返：4K 屏按 1024/0.25 切是 15 块，不设闸就等于
+/// 一次定位花 15 次调用。超出预算时按「行主序保留前 N 块」——覆盖左上角，
+/// 并把截断如实写进 `grounding.patches_truncated`，绝不假装覆盖了整屏。
+const MAX_PATCH_CALLS: usize = 9;
+
 /// ScreenSpot-Pro 分块 grounding 编排（高 DPI 刚需）：高分辨率截图切重叠 patch，
-/// 逐 patch 定位后缝合排序。无 image 后端时 `crop_png` 恒 None → 整体返回 None
-/// （调用方 `locate` 退化为整图单定位）。
+/// 逐 patch 在**原生分辨率**上定位后缝回全图坐标并排序。
+///
+/// 返回 `None` 的含义是「本路径不适用，请走整图定位」：长边 <1600、非 PNG、
+/// 裁剪失败或一个候选都没拿到。返回 `Some(vec![])` 不出现（用 `None` 表达）。
 pub async fn ground_via_patches(
     bytes: &[u8],
     v: &Arc<VisionCapability>,
     description: &str,
     _threshold: f64,
-) -> Option<Vec<GroundedCandidate>> {
+) -> Option<PatchGrounding> {
     let meta = image_metadata(bytes);
     let (w, h) = (meta.width?, meta.height?);
     let long = w.max(h);
@@ -1218,15 +1283,22 @@ pub async fn ground_via_patches(
     if long < 1600 {
         return None;
     }
-    let patches = build_patch_grid(w, h, 1024, 0.25);
+    let grid = build_patch_grid(w, h, 1024, 0.25);
+    let total = grid.len();
+    let patches = &grid[..total.min(MAX_PATCH_CALLS)];
     let mut cands = Vec::new();
-    for p in &patches {
-        // 真实像素裁剪需 image 后端；当前退化为整图单 patch（crop_png 恒 None → ? 提前返回）
+    let mut calls = 0usize;
+    for p in patches {
+        // 裁剪失败（非 PNG / 隔行 / 坏数据）→ 整条分块路径不适用，交回整图定位。
         let cropped = crop_png(bytes, p)?;
+        calls += 1;
         if let Some(r) = v.locate(&cropped, description).await {
-            let norm = r.x.abs() <= 1.0 && r.y.abs() <= 1.0;
+            // 单位由产出方声明；越界或非有限的坐标是模型输出错误，不猜、不夹取。
+            let Some((px, py)) = r.pixels(p.width() as f64, p.height() as f64) else {
+                continue;
+            };
             let (fx, fy) =
-                stitch_patch_coords(p, r.x, r.y, norm, p.width() as f64, p.height() as f64);
+                stitch_patch_coords(p, px, py, CoordSpace::Pixels, p.width() as f64, p.height() as f64);
             cands.push(GroundedCandidate {
                 x: fx,
                 y: fy,
@@ -1235,11 +1307,29 @@ pub async fn ground_via_patches(
         }
     }
     if cands.is_empty() {
-        None
-    } else {
-        Some(rank_grounding_candidates(cands, (long as f64) * 0.02))
+        return None;
     }
+    Some(PatchGrounding {
+        candidates: rank_grounding_candidates(cands, (long as f64) * 0.02),
+        model_calls: calls,
+        patches_total: total,
+        patches_used: patches.len(),
+    })
 }
+
+/// 分块 grounding 的结果 + 它的**成本事实**（调用了几次、网格本来多大）。
+///
+/// 单独成类型而不是只返 `Vec<GroundedCandidate>` 的原因：分块路径比整图贵一个
+/// 数量级，回执里必须能看出「这次花了 N 次模型调用、还剩 M-N 个区域没看」，
+/// 否则它就是个隐性的成本黑洞。
+#[derive(Debug, Clone)]
+pub struct PatchGrounding {
+    pub candidates: Vec<GroundedCandidate>,
+    pub model_calls: usize,
+    pub patches_total: usize,
+    pub patches_used: usize,
+}
+
 
 #[cfg(test)]
 mod patch_grounding_tests {
@@ -1302,7 +1392,7 @@ mod patch_grounding_tests {
             x1: 300,
             y1: 300,
         };
-        let (x, y) = stitch_patch_coords(&p, 0.5, 0.5, true, 200.0, 200.0);
+        let (x, y) = stitch_patch_coords(&p, 0.5, 0.5, CoordSpace::Normalized, 200.0, 200.0);
         assert!((x - 200.0).abs() < 1e-6, "x={x}");
         assert!((y - 200.0).abs() < 1e-6, "y={y}");
     }
@@ -1316,7 +1406,7 @@ mod patch_grounding_tests {
             x1: 300,
             y1: 300,
         };
-        let (x, y) = stitch_patch_coords(&p, 50.0, 50.0, false, 100.0, 100.0);
+        let (x, y) = stitch_patch_coords(&p, 50.0, 50.0, CoordSpace::Pixels, 100.0, 100.0);
         assert!((x - 200.0).abs() < 1e-6, "x={x}");
         assert!((y - 200.0).abs() < 1e-6, "y={y}");
     }
@@ -1355,7 +1445,7 @@ mod patch_grounding_tests {
         // 绝对坐标：patch(0,0,100,100) 内 (50,50) → 全图(50,50)
         let abs = ground_by_patches(&patches, 100, 100, 10.0, |p: &Patch| {
             if p.x0 == 0 && p.y0 == 0 {
-                Some((50.0, 50.0, false, 0.9))
+                Some((50.0, 50.0, CoordSpace::Pixels, 0.9))
             } else {
                 None
             }
@@ -1366,7 +1456,7 @@ mod patch_grounding_tests {
         // 归一化：patch(0,0,100,100) 内 (0.5,0.5) → 全图(50,50)
         let norm = ground_by_patches(&patches, 100, 100, 10.0, |p: &Patch| {
             if p.x0 == 0 && p.y0 == 0 {
-                Some((0.5, 0.5, true, 0.8))
+                Some((0.5, 0.5, CoordSpace::Normalized, 0.8))
             } else {
                 None
             }
@@ -1392,6 +1482,254 @@ mod patch_grounding_tests {
         // 空描述不注入 description（保持字段最小化）
         let empty = grounding_metadata(0.0, 0.0, 0.0, "");
         assert!(!empty.contains_key("grounding.description"));
+    }
+
+    // ---- `crop_png`：分块 grounding 的唯一真门槛 --------------------------------
+    //
+    // 这组测试存在的意义：`crop_png` 返回 `None` 时整条分块路径会**静默退化成整图定位**，
+    // 而整图定位在 4K 屏上正是失效的那一档。所以「裁剪到底裁没裁对」必须有像素级断言，
+    // 不能只看它返回了 `Some`。
+
+    /// 确定性可辨图案：`R=x`、`G=y`、`B=(x+y)%256` —— 裁错位置或裁错宽高都能立刻看出。
+    fn rgb_pattern(w: u32, h: u32) -> Vec<u8> {
+        let mut px = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                px.push(x as u8);
+                px.push(y as u8);
+                px.push(((x + y) % 256) as u8);
+            }
+        }
+        px
+    }
+
+    fn encode_png(w: u32, h: u32, color: png::ColorType, px: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(color);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().expect("header");
+            wr.write_image_data(px).expect("pixels");
+            wr.finish().expect("finish");
+        }
+        out
+    }
+
+    fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut d = png::Decoder::new(std::io::Cursor::new(bytes.to_vec()));
+        d.set_transformations(png::Transformations::normalize_to_color8());
+        let mut r = d.read_info().expect("read_info");
+        let (w, h) = r.info().size();
+        let mut buf = vec![0u8; r.output_buffer_size().expect("buffer size")];
+        r.next_frame(&mut buf).expect("decode");
+        (w, h, buf)
+    }
+
+    /// 逐像素比对裁剪结果与原图在 `patch` 处的对应区域。
+    fn assert_crop_matches_source(cropped: &[u8], src: &[u8], w: u32, bpp: usize, p: &Patch) {
+        let (cw, ch, buf) = decode_png(cropped);
+        assert_eq!((cw, ch), (p.width(), p.height()), "裁剪尺寸必须等于 patch 尺寸");
+        assert_eq!(buf.len(), (cw * ch as u32 * bpp as u32) as usize, "字节数必须等于尺寸×bpp");
+        for y in 0..ch {
+            for x in 0..cw {
+                let src_x = p.x0 + x;
+                let src_y = p.y0 + y;
+                let s = (src_y as usize * w as usize + src_x as usize) * bpp;
+                let d = (y as usize * cw as usize + x as usize) * bpp;
+                assert_eq!(
+                    &buf[d..d + bpp],
+                    &src[s..s + bpp],
+                    "像素 ({x},{y}) 处裁剪结果与源图不一致 → 偏移或行宽算错了"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn crop_png_crops_at_native_resolution() {
+        let (w, h) = (8u32, 6u32);
+        let px = rgb_pattern(w, h);
+        let png_bytes = encode_png(w, h, png::ColorType::Rgb, &px);
+        let patch = Patch {
+            x0: 2,
+            y0: 1,
+            x1: 5,
+            y1: 4,
+        };
+        let cropped = crop_png(&png_bytes, &patch).expect("裁剪必须成功");
+        assert_crop_matches_source(&cropped, &px, w, 3, &patch);
+    }
+
+    #[test]
+    fn crop_png_clamps_a_patch_that_overruns_the_image() {
+        // 网格最后一块经常超出图宽（1024 步进 × N > 3840）。超出部分必须夹到图内，
+        // 而不是把行尾多读出来的字节当数据、也不是整块放弃。
+        let (w, h) = (8u32, 6u32);
+        let px = rgb_pattern(w, h);
+        let png_bytes = encode_png(w, h, png::ColorType::Rgb, &px);
+        let patch = Patch {
+            x0: 6,
+            y0: 4,
+            x1: 20,
+            y1: 20,
+        };
+        let cropped = crop_png(&png_bytes, &patch).expect("越界应夹取而非拒绝");
+        let (cw, ch, _) = decode_png(&cropped);
+        assert_eq!((cw, ch), (2, 2), "夹取后必须是图内剩余区域");
+        assert_crop_matches_source(&cropped, &px, w, 3, &Patch {
+            x0: 6,
+            y0: 4,
+            x1: 8,
+            y1: 6,
+        });
+    }
+
+    #[test]
+    fn crop_png_keeps_alpha_and_gray_channels() {
+        // `bpp` 是从 `output_line_size / w` 推的（png 的 `bytes_per_pixel` 不是 pub）。
+        // 只测 RGB 的话，4 通道与 1 通道的错位会完全测不出来。
+        let (w, h) = (6u32, 4u32);
+        let rgba: Vec<u8> = rgb_pattern(w, h)
+            .chunks(3)
+            .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 0x80])
+            .collect();
+        let patch = Patch {
+            x0: 1,
+            y0: 1,
+            x1: 4,
+            y1: 3,
+        };
+        let out = encode_png(w, h, png::ColorType::Rgba, &rgba);
+        assert_crop_matches_source(
+            &crop_png(&out, &patch).expect("RGBA 裁剪"),
+            &rgba,
+            w,
+            4,
+            &patch,
+        );
+
+        let gray: Vec<u8> = (0..h).flat_map(|y| (0..w).map(move |x| (x * 16 + y) as u8)).collect();
+        let out = encode_png(w, h, png::ColorType::Grayscale, &gray);
+        assert_crop_matches_source(
+            &crop_png(&out, &patch).expect("灰度裁剪"),
+            &gray,
+            w,
+            1,
+            &patch,
+        );
+    }
+
+    #[test]
+    fn crop_png_refuses_instead_of_guessing() {
+        let (w, h) = (4u32, 4u32);
+        let px = rgb_pattern(w, h);
+        let png_bytes = encode_png(w, h, png::ColorType::Rgb, &px);
+        let ok = Patch {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+
+        // 非 PNG（例如 JPEG / 半截文件）：解码失败 → None，让调用方退回整图路径。
+        assert_eq!(crop_png(b"\xff\xd8\xff\xe0not a png at all", &ok), None);
+        assert_eq!(crop_png(&png_bytes[..png_bytes.len() / 2], &ok), None);
+        assert_eq!(crop_png(&[], &ok), None);
+
+        // 退化矩形（零宽 / 零高 / 完全在图外）：产出 0 字节的图比不产出更糟——
+        // 视觉模型会对着空图给出一个看起来合法的坐标。
+        assert_eq!(
+            crop_png(
+                &png_bytes,
+                &Patch {
+                    x0: 1,
+                    y0: 1,
+                    x1: 1,
+                    y1: 3
+                }
+            ),
+            None,
+            "零宽 patch 必须拒绝"
+        );
+        assert_eq!(
+            crop_png(
+                &png_bytes,
+                &Patch {
+                    x0: 10,
+                    y0: 10,
+                    x1: 20,
+                    y1: 20
+                }
+            ),
+            None,
+            "完全在图外的 patch 必须拒绝"
+        );
+    }
+
+    #[test]
+    fn crop_png_refuses_interlaced_images() {
+        // Adam7 的行是按 pass 分趟产出的，按 `y` 直接切会裁出错位的图——
+        // 而错位的图给出的坐标**看着完全合法**。所以必须显式拒绝。
+        let (w, h) = (4u32, 4u32);
+        let px = rgb_pattern(w, h);
+        let mut bytes = encode_png(w, h, png::ColorType::Rgb, &px);
+
+        // signature(8) + len(4) + type(4) + IHDR data(13) + CRC(4)
+        let (type_start, data_start, data_end, crc_end) = (12usize, 16usize, 29usize, 33usize);
+        assert_eq!(&bytes[type_start..data_start], b"IHDR");
+        assert_eq!(bytes[data_end - 1], 0, "原图必须是非隔行，否则本测试没改到东西");
+        bytes[data_end - 1] = 1; // Adam7
+        let crc = crc32_ieee(&bytes[type_start..data_end]);
+        bytes[data_end..crc_end].copy_from_slice(&crc.to_be_bytes());
+
+        assert_eq!(
+            crop_png(
+                &bytes,
+                &Patch {
+                    x0: 0,
+                    y0: 0,
+                    x1: 2,
+                    y1: 2
+                }
+            ),
+            None,
+            "隔行图必须拒绝（宁可退回整图定位）"
+        );
+    }
+
+    /// PNG 用的 CRC-32（IEEE 多项式，无表实现，只服务上面那个 IHDR 改写）。
+    fn crc32_ieee(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn patch_budget_truncates_on_a_4k_screen_and_says_so() {
+        // 预算必须**真的会触发**，否则 `grounding.patches_truncated` 是个装饰字段；
+        // 同时它必须**截断在行主序的前 N 块**（覆盖左上角），不能随机丢块。
+        let grid = build_patch_grid(3840, 2160, 1024, 0.25);
+        assert!(
+            grid.len() > MAX_PATCH_CALLS,
+            "4K 屏按 1024/0.25 应切出 {} 块，必须大于预算 {MAX_PATCH_CALLS} 才会需要如实上报截断",
+            grid.len()
+        );
+        let used = &grid[..grid.len().min(MAX_PATCH_CALLS)];
+        assert_eq!(used.len(), MAX_PATCH_CALLS);
+        assert_eq!(used[0].x0, 0);
+        assert_eq!(used[0].y0, 0);
+        assert_eq!(used[1].y0, used[0].y0, "第二个块必须与第一个同行（行主序）");
+        assert!(used[1].x0 < used[0].x1, "相邻块必须仍带重叠");
     }
 }
 
@@ -1651,47 +1989,117 @@ pub async fn dispatch(
                         let shot_h = meta.height.unwrap_or(0) as f64;
                         let (rw, rh) = read_dim_sidecar(&format!("{p}.dim"))
                             .unwrap_or((meta.width.unwrap_or(0), meta.height.unwrap_or(0)));
-                        // C1 分块 grounding：高分辨率截图 + 开启 patch_grounding 时，
-                        // 先走 ScreenSpot-Pro 分块路径；返回 None（长边<1600 或当前无 image
-                        // 后端裁剪 patch）则退化为整图单定位（既有路径）。
-                        if patch_grounding {
-                            if let Some(cands) =
+                        // 分块 grounding 的编排（2026-11-01 重排）：**先整图、后分块**。
+                        // 原顺序是分块优先，于是开着 `patch_grounding` 的每一次定位都要
+                        // 为高分辨率付满一网格的模型调用；而整图一次调用通常就够。
+                        // 只在整图「没结果 / 置信度不过阈 / 坐标非法」时升级——那恰恰是
+                        // 整图降采样把小控件抹平的情形，此时分块才买得到它值的那点钱。
+                        let direct = v.locate(&bytes, &description).await;
+                        let escalate = patch_grounding
+                            && match direct.as_ref() {
+                                Some(r) => {
+                                    r.confidence < threshold
+                                        || r.pixels(shot_w, shot_h).is_none()
+                                }
+                                None => true,
+                            };
+                        if escalate {
+                            if let Some(pg) =
                                 ground_via_patches(&bytes, v, &description, threshold).await
                             {
-                                if let Some(top) = cands.first() {
-                                    let (cx, cy) = map_locate_coords(
-                                        top.x, top.y, false, shot_w, shot_h, rw as f64, rh as f64,
-                                    );
-                                    let low_conf = top.confidence < threshold;
-                                    let clicked = auto_click
-                                        && !low_conf
-                                        && cu
-                                            .auto_click(cx.round() as i64, cy.round() as i64)
-                                            .await?;
-                                    let _ = std::fs::remove_file(format!("{p}.dim"));
-                                    let status = if low_conf { "[低置信度] " } else { "" };
-                                    return Ok(ToolResult::Success {
-                                        data: format!(
-                                            "{status}[分块grounding] 定位成功: x={:.1}, y={:.1}, confidence={:.2}\n截图: {}\n自动点击: {}",
-                                            cx, cy, top.confidence, p, clicked
-                                        ),
-                                        metadata: grounding_metadata(
-                                            cx,
-                                            cy,
-                                            top.confidence,
-                                            &description,
-                                        ),
-                                    });
+                                if let Some(top) = pg.candidates.first() {
+                                    // 分块候选不比整图好就退回整图结果：升级是为了纠错，
+                                    // 不是为了换一个同样差的坐标再多花一次点击。
+                                    let beats_direct = match direct.as_ref() {
+                                        Some(r) => top.confidence > r.confidence,
+                                        None => true,
+                                    };
+                                    if beats_direct {
+                                        // 分块候选已在 `ground_via_patches` 内缝回全图像素。
+                                        let (cx, cy) = map_locate_coords(
+                                            top.x,
+                                            top.y,
+                                            CoordSpace::Pixels,
+                                            shot_w,
+                                            shot_h,
+                                            rw as f64,
+                                            rh as f64,
+                                        );
+                                        let low_conf = top.confidence < threshold;
+                                        let clicked = auto_click
+                                            && !low_conf
+                                            && cu
+                                                .auto_click(cx.round() as i64, cy.round() as i64)
+                                                .await?;
+                                        let _ = std::fs::remove_file(format!("{p}.dim"));
+                                        let status = if low_conf { "[低置信度] " } else { "" };
+                                        let mut metadata =
+                                            grounding_metadata(cx, cy, top.confidence, &description);
+                                        // 成本与**覆盖面**一起透出：`used/total` 不相等时
+                                        // 说明网格被预算截断，右下区域根本没看过。
+                                        metadata.insert(
+                                            "grounding.mode".to_string(),
+                                            "patches".to_string(),
+                                        );
+                                        metadata.insert(
+                                            "grounding.model_calls".to_string(),
+                                            pg.model_calls.to_string(),
+                                        );
+                                        metadata.insert(
+                                            "grounding.patches_used".to_string(),
+                                            format!("{}/{}", pg.patches_used, pg.patches_total),
+                                        );
+                                        metadata.insert(
+                                            "grounding.patches_truncated".to_string(),
+                                            if pg.patches_used < pg.patches_total { "true" } else { "false" }.to_string(),
+                                        );
+                                        metadata.insert(
+                                            "grounding.candidates".to_string(),
+                                            pg.candidates.len().to_string(),
+                                        );
+                                        return Ok(ToolResult::Success {
+                                            data: format!(
+                                                "{status}[分块grounding {}/{}块·{}次调用] 定位成功: x={:.1}, y={:.1}, confidence={:.2}\n截图: {}\n自动点击: {}",
+                                                pg.patches_used,
+                                                pg.patches_total,
+                                                pg.model_calls,
+                                                cx,
+                                                cy,
+                                                top.confidence,
+                                                p,
+                                                clicked
+                                            ),
+                                            metadata,
+                                        });
+                                    }
                                 }
                             }
                         }
                         // 整图单定位（既有路径）
-                        match v.locate(&bytes, &description).await {
+                        match direct {
                             Some(r) => {
-                                let normalized = r.x.abs() <= 1.0 && r.y.abs() <= 1.0;
-                                let (cx, cy) = map_locate_coords(
-                                    r.x, r.y, normalized, shot_w, shot_h, rw as f64, rh as f64,
-                                );
+                                // 单位由 `LocateResult.space` 声明；越界/非有限坐标直接
+                                // 报错，绝不按数值范围猜归一化（4K 图上的像素 0.7 会被猜成图中心）。
+                                let (cx, cy) = match r.pixels(shot_w, shot_h) {
+                                    Some((px, py)) => map_locate_coords(
+                                        px,
+                                        py,
+                                        CoordSpace::Pixels,
+                                        shot_w,
+                                        shot_h,
+                                        rw as f64,
+                                        rh as f64,
+                                    ),
+                                    None => {
+                                        return Ok(ToolResult::Error {
+                                            message: format!(
+                                                "视觉定位返回了非法坐标: x={}, y={}, space={:?}（已拒绝按范围猜测）",
+                                                r.x, r.y, r.space
+                                            ),
+                                            code: "VISION_INVALID_COORDINATES".to_string(),
+                                        });
+                                    }
+                                };
                                 let low_conf = r.confidence < threshold;
                                 let clicked = auto_click
                                     && !low_conf
@@ -2037,7 +2445,7 @@ pub fn register_computer_use_tools(
                 "mode": { "type": "string", "enum": ["primary","all","window"], "description": "screenshot/locate 的采集模式：主屏/多屏/活动窗口" },
                 "max_edge": { "type": "integer", "description": "截图长边上限像素（>0 时降采样，降低 VLMM 输入体积）" },
                 "threshold": { "type": "number", "description": "locate 置信度阈值（0..1），低于则视为低置信度不自动点击" },
-                "patch_grounding": { "type": "boolean", "description": "locate 高分辨率截图时启用 ScreenSpot-Pro 分块 grounding（仅长边≥1600 生效；需 image 后端裁剪 patch）" },
+                "patch_grounding": { "type": "boolean", "description": "locate 的整图定位没拿到/低置信时，升级到 ScreenSpot-Pro 分块 grounding（仅长边≥1600 生效；每块一次视觉调用，预算上限 9 块，回执的 grounding.patches_used 会如实标注是否被截断）" },
                 "rulers": { "type": "boolean", "description": "截图上画坐标刻度（上沿/左沿每 200px，标注屏幕坐标；默认 false）" },
                 "steps": { "type": "string", "description": "sequence 的动作数组（JSON 字符串）。每项形如 {\"action\":\"click\",\"x\":100,\"y\":200}；可用动作：click/double_click/right_click/middle_click/move/drag/scroll/type/key/key_combo/wait(ms)/focus(title)，可选 settle_ms" },
                 "risk": { "type": "string", "enum": ["low","medium","high"], "description": "sequence 的风险声明（默认 low；含 win+r / alt+f4 等危险快捷键会自动升级）" },

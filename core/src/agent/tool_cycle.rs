@@ -1592,8 +1592,10 @@ mod tests {
         fn name(&self) -> &str {
             // 用**真实只读工具名**，才能被默认幂等策略（只读白名单）缓存 ——
             // 这正是这两个用例要验证的缓存机制。历史上用的是 `count`，而新策略
-            // 只缓存已知只读工具，故改名以保持用例意图。
-            "read_file"
+            // 只缓存已知只读工具，故改名以保持用例意图。注意不能用 `read_file`：
+            // 它已因「键里没有新鲜度」被刻意移出缓存白名单（见 tool_cache.rs），
+            // 拿它当样本会把本用例变成在验证一个**错误**行为。
+            "list_dir"
         }
         fn description(&self) -> &str {
             "counts executions"
@@ -1622,8 +1624,8 @@ mod tests {
         let cycle = ToolCycle::new(registry).with_tool_cache(cache.clone());
         let args = HashMap::from([("x".to_string(), "1".to_string())]);
 
-        let _r1 = cycle.call_tool("read_file", &args).await;
-        let _r2 = cycle.call_tool("read_file", &args).await;
+        let _r1 = cycle.call_tool("list_dir", &args).await;
+        let _r2 = cycle.call_tool("list_dir", &args).await;
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1653,8 +1655,8 @@ mod tests {
 
         let args = HashMap::from([("x".to_string(), "1".to_string())]);
         let calls_tc = vec![
-            ToolCall::new("read_file", args.clone()),
-            ToolCall::new("read_file", args),
+            ToolCall::new("list_dir", args.clone()),
+            ToolCall::new("list_dir", args),
         ];
         let _ = cycle.execute_sequential(calls_tc).await.unwrap();
 

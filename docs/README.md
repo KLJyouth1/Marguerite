@@ -53,6 +53,9 @@ See [Contributing](../CONTRIBUTING.md) for the individual gates and what each on
 `docs/` contains the documents above, plus:
 
 - `decisions/` — decision records and open questions.
+- `design/`, `plans/`, `product/`, `qa/` — dated point-in-time working documents:
+  the liquid-glass and provenance specs, remediation roadmaps, the PRD, and a test
+  plan. They describe a moment, not the running contract.
 - `internal/` — phase progress logs, the dated L3 sandbox security audit, and the
   local-model workbench design. Internal engineering records, not documentation.
 - `planning/`, `reports/`, `research/`, `uiux/`, `archive/` — historical working
@@ -60,6 +63,16 @@ See [Contributing](../CONTRIBUTING.md) for the individual gates and what each on
   **not** part of the user-facing contract; where they disagree with the code, the
   code wins.
 
-Everything under `internal/`, `planning/`, `reports/`, `research/`, `uiux/` and
-`archive/` is excluded from the `docs/*.md` CLI-drift scan (`scripts/check-doc-cli-drift.py`
-globs only the top level), so only the documents above carry the CLI contract.
+`internal/`, `planning/`, `reports/`, `research/`, `uiux/`, `archive/`,
+`decisions/`, `legacy/`, `prd/`, `plans/`, `product/`, `qa/` and `design/` are
+excluded from the CLI-drift scan (`scripts/check-doc-cli-drift.py`) — they are
+history or working notes, not contract. Exclusion is a classification, never a
+silencing: a `docs/<sub>/` directory that is neither scanned nor listed here
+fails the gate instead of being skipped.
+
+The scan covers `docs/*.md` **plus** `docs/agents/*.md`: the split-out AGENTS.md
+volumes restate the route table, so they are held to it (they previously carried
+a count that disagreed with `docs/architecture.md` and nothing noticed). Every
+route count or `### 权威子命令表` table asserted in a scanned file must match the
+code, and any new `docs/<sub>/` directory that is neither classified as scanned
+nor as excluded fails the gate instead of being skipped silently.

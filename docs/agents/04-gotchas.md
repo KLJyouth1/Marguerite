@@ -1009,3 +1009,26 @@
   ⚠️ 两条可复用的：① 依赖"能力是否被声明"的 store 加载，**必须挂在可用性翻转上重试**，不能只做 setup 期一次；
   ② 写这类单测时 mock 的 `supportsMethod` 必须**返回真响应式源**（`ref`），返回 `vi.fn()` 常量会让 computed
   缓存成常量，测试"永远通过"却什么都没测（本轮把 `useLineWorkflow.test.ts` 的 rpc mock 改成共享 `ref` 才测出这条）。
+
+- **📖 `read_file` 第二次读同一份未改动的文件，回来的是存根不是正文**（P0#1 引入；未编译验证）。
+  `tools/builtin/fs.rs::read_file_tool` 现在带会话级去重：**同会话 + 同解析后绝对路径 + 同 `limit` +
+  `(mtime 纳秒, 文件长度)` 都没变** → 第二次回一行 `[FILE_UNCHANGED] …`，不再重发全文；
+  `force=true` 强制重发。动机是「一个任务里同一份文件被读 3–5 次」的重复 token。
+  ⚠️ 三个必须知道的边界：
+  ① **存根是 `Success` 不是 `Error`**（"内容没变"≠"读失败"，回 Err 会让模型去重试并放大 token）；
+  ② **任何消费 `read_file` 返回值的内部代码都不能假设拿到的是全文** —— 要么传 `force=true`，要么自己
+  `std::fs::read_to_string`（`editor.rs::editor_view` 就是后者，所以 `str_replace_editor` 不受影响）。
+  新增这类内部调用前先问一句「它会不会是同一 session 里的第二次读」；
+  ③ `current_session()` 是 **tokio task-local**，CLI 单次运行/无 SESSION 上下文时它是**空串** —— 此时
+  同一进程内所有读共享 `""` 这个会话键（路径仍分行，不会串内容，但别指望它区分"两次不同的 CLI 调用"）。
+  ⚠️ `MARGUERITE_READ_DEDUPE=0|false|off` 可整体关闭去重。**这个开关是为 `harness/ledger.rs` 的确定性重放留的**：
+  去重把「第二次读」的 payload 从全文改成存根，历史 ledger 若是在旧语义下录的，重放就会对不上。
+  正确做法是让 ledger 记录「本次是否去重」，在修好之前，回放对不上就用这个 env 退回旧语义，
+  不要靠改测试基线把它"修绿"。
+  ⚠️ **为什么不能只靠 `agent/tool_cache.rs` 的 `ToolCache` 兜**（P0#1 落点的一次自我更正）：
+  `ToolCache` 的键是 `(tool, args)`，**不含 `(mtime, len)`**，命中条件是「参数一样」而不是「文件没变」。
+  于是同一路径被 `write_file`/`shell_exec` 改过之后再读，会拿到**改动前**的正文 —— 没有任何信号能让
+  旧条目失效，属于查不出来的脏读；而且它命中时回吐的是**全文**，重复读一个 token 也省不下。
+  因此 2026-11 起 `read_file` / `read` **已移出 `default_is_idempotent` 白名单**，复用只由工具体内那层
+  按 `(mtime, len)` 判定的去重负责（文件一改指纹就变，天然失效）。判断口径：
+  **「重跑很便宜 + 结果会变」的工具不该进结果缓存；要缓存就得先把新鲜度放进键里。**

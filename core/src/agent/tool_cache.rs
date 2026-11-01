@@ -74,13 +74,22 @@ pub struct ToolCache {
 ///
 /// 白名单方向是安全的：漏判只是「少缓存、变慢」，绝不会把写操作缓存成假结果。
 /// 新增只读工具时按需补入；有副作用的工具一律**不要**加进来。
+///
+/// ⚠️ 第二条判据：**键里有新鲜度吗？** 键只有 `(tool, args)` 的工具，只要结果随外部
+/// 状态变化（文件被改、网页更新），缓存就是一个**查不出来的脏读源** —— 没有任何信号
+/// 会让旧条目失效。所以「重跑很便宜 + 结果会变」的工具不该进这里：`read_file` 就是
+/// 这一类（见下方白名单注释），网页抓取类同理，只是它们重跑贵、暂时留观。
 pub fn default_is_idempotent(tool: &str) -> bool {
     matches!(
         tool,
         // 文件系统只读
-        "read_file"
-            | "read"
-            | "list_dir"
+        // ⚠️ `read_file` / `read` **刻意不在此列**（P0#1）：缓存键是 `(tool, args)`，
+        // 不含 `(mtime, len)` —— 同一路径被写过之后再读，会命中缓存拿到**改动前**的
+        // 正文，而且命中时回吐的是**全文**，重复读一个 token 也省不下。
+        // 正确的复用点在工具体内：`tools/builtin/fs.rs::read_file_tool` 按
+        // `(session, abs, limit) -> (mtime, len)` 判「未改动」并回 `[FILE_UNCHANGED]`
+        // 存根（文件一改指纹就变，天然失效、无需任何 clear），要全文可传 `force=true`。
+        "list_dir"
             | "grep"
             | "find_files"
             | "glob_file_search"
@@ -300,14 +309,14 @@ mod tests {
         let cache = ToolCache::with_default_policy(8, None);
         let a = args(&[("path", "/x")]);
         cache.put(
-            "read",
+            "grep",
             &a,
             ToolResult::Success {
                 data: "cached".into(),
                 metadata: HashMap::new(),
             },
         );
-        let hit = cache.get("read", &a).expect("应命中");
+        let hit = cache.get("grep", &a).expect("应命中");
         assert!(hit.is_success());
         assert_eq!(hit.data(), Some("cached"));
     }
@@ -316,16 +325,16 @@ mod tests {
     async fn cache_miss_then_put_then_hit() {
         let cache = ToolCache::with_default_policy(8, None);
         let a = args(&[("path", "/y")]);
-        assert!(cache.get("read", &a).is_none(), "未写入前应未命中");
+        assert!(cache.get("grep", &a).is_none(), "未写入前应未命中");
         cache.put(
-            "read",
+            "grep",
             &a,
             ToolResult::Success {
                 data: "ok".into(),
                 metadata: HashMap::new(),
             },
         );
-        assert!(cache.get("read", &a).is_some(), "写入后应命中");
+        assert!(cache.get("grep", &a).is_some(), "写入后应命中");
     }
 
     #[tokio::test]
@@ -387,7 +396,7 @@ mod tests {
         for i in 0..4u64 {
             let a = args(&[("k", &format!("v{i}"))]);
             cache.put(
-                "read",
+                "grep",
                 &a,
                 ToolResult::Success {
                     data: format!("d{i}"),
@@ -397,8 +406,8 @@ mod tests {
         }
         let old = args(&[("k", "v0")]);
         let recent = args(&[("k", "v3")]);
-        assert!(cache.get("read", &old).is_none(), "最旧条目应被 FIFO 驱逐");
-        assert!(cache.get("read", &recent).is_some(), "最近条目应仍在");
+        assert!(cache.get("grep", &old).is_none(), "最旧条目应被 FIFO 驱逐");
+        assert!(cache.get("grep", &recent).is_some(), "最近条目应仍在");
     }
 
     #[tokio::test]
@@ -427,7 +436,6 @@ mod tests {
         // 只读工具 → 可缓存。
         for t in [
             "search",
-            "read_file",
             "grep",
             "list_dir",
             "git_status",
@@ -438,6 +446,11 @@ mod tests {
         // 有副作用工具 → 永不缓存。含此前被黑名单**漏掉**的真实工具名
         // （shell_exec/code_exec/git/copy_file/… 名字里没有变更动词，却被误判幂等）。
         for t in [
+            // `read_file` / `read` 不是「有副作用」，是**新鲜度**问题：键里只有
+            // `(tool, args)`、没有 `(mtime, len)`，写入后同参再读会回改动前的正文，
+            // 而且命中回吐全文、省不下 token。详见 `default_is_idempotent` 文档注释。
+            "read_file",
+            "read",
             "write_file",
             "send_email",
             "delete_record",

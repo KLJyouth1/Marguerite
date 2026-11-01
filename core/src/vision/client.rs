@@ -34,16 +34,62 @@ pub trait VisionTransport: Send + Sync {
     }
 }
 
-/// 视觉定位结果：元素中心坐标（相对截图左上角，像素）+ 置信度 0..1
+/// 坐标单位：由**产出方**声明，消费方不再按数值范围猜。
+///
+/// 旧实现让每个调用方嗅探 `x.abs() <= 1.0 && y.abs() <= 1.0` 推断「归一化」，
+/// 于是 4K 截图上真正的像素 (0.7, 0.7)（左上角）会被当成图中心附近
+/// （约 2688,1512）—— 点偏一整屏。单位写进类型后，这类误判在编译期就不可能。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordSpace {
+    /// 相对截图左上角的绝对像素。
+    Pixels,
+    /// 左上角 (0,0)、右下角 (1,1) 的比例。
+    Normalized,
+}
+
+impl CoordSpace {
+    /// 按本空间换算为像素；调用方需自行保证输入有限（见 `LocateResult::pixels`）。
+    pub fn to_pixels(self, x: f64, y: f64, width: f64, height: f64) -> (f64, f64) {
+        match self {
+            CoordSpace::Pixels => (x, y),
+            CoordSpace::Normalized => (x * width, y * height),
+        }
+    }
+}
+
+/// 视觉定位结果：元素中心坐标（单位见 [`CoordSpace`]）+ 置信度 0..1
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocateResult {
     pub x: f64,
     pub y: f64,
     pub confidence: f64,
+    pub space: CoordSpace,
+}
+
+impl LocateResult {
+    /// 换算成截图内的绝对像素。
+    ///
+    /// 非有限值、或 `Normalized` 下越出 0..=1 的值返回 None —— 不猜、不夹取：
+    /// 一个「1.5 倍图宽」的归一化坐标是模型输出错误，猜成图边缘只会点错地方。
+    pub fn pixels(&self, width: f64, height: f64) -> Option<(f64, f64)> {
+        if !self.x.is_finite() || !self.y.is_finite() {
+            return None;
+        }
+        match self.space {
+            CoordSpace::Pixels => Some((self.x, self.y)),
+            CoordSpace::Normalized => {
+                let unit = |v: f64| (0.0..=1.0).contains(&v);
+                if !unit(self.x) || !unit(self.y) {
+                    return None;
+                }
+                Some(self.space.to_pixels(self.x, self.y, width, height))
+            }
+        }
+    }
 }
 
 /// 定位提示词：要求模型仅输出坐标 JSON（供 `LlmVisionTransport::locate` 使用）
-const LOCATE_HINT: &str = r#"你是 GUI 元素定位器。根据截图与对目标元素的描述，找出该元素中心的坐标。仅输出一个 JSON 对象，不要任何其他文字，格式：{"x": 123.4, "y": 456.7, "confidence": 0.95}。confidence 为 0..1 的置信度。"#;
+const LOCATE_HINT: &str = r#"你是 GUI 元素定位器。根据截图与对目标元素的描述，找出该元素中心的坐标。仅输出一个 JSON 对象，不要任何其他文字，格式：{"x": 123.4, "y": 456.7, "space": "pixels", "confidence": 0.95}。坐标必须是相对截图左上角的像素值（space 固定为 "pixels"）；confidence 为 0..1 的置信度。"#;
 
 /// 从模型输出中解析定位 JSON（容忍前后缀与 ```json 围栏）
 fn parse_locate_json(raw: &str) -> Option<LocateResult> {
@@ -58,7 +104,18 @@ fn parse_locate_json(raw: &str) -> Option<LocateResult> {
     let x = v.get("x")?.as_f64()?;
     let y = v.get("y")?.as_f64()?;
     let confidence = v.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.0);
-    Some(LocateResult { x, y, confidence })
+    // 模型可显式声明单位；缺省按提示词约定为像素。`"normalized"` 之外的一律不认，
+    // 免得一个拼写错误把像素值当成比例再放大 4K 倍。
+    let space = match v.get("space").and_then(Value::as_str) {
+        Some("normalized") => CoordSpace::Normalized,
+        _ => CoordSpace::Pixels,
+    };
+    Some(LocateResult {
+        x,
+        y,
+        confidence,
+        space,
+    })
 }
 
 /// 构造降级文本：明确原因 + 图片元数据 + 修复指引。
@@ -329,7 +386,8 @@ mod tests {
             LocateResult {
                 x: 123.5,
                 y: 456.25,
-                confidence: 0.92
+                confidence: 0.92,
+                space: CoordSpace::Pixels
             }
         );
     }
@@ -349,6 +407,53 @@ mod tests {
     fn parse_locate_rejects_garbage() {
         assert!(parse_locate_json("抱歉，我无法定位该元素。").is_none());
         assert!(parse_locate_json("{}").is_none());
+    }
+
+    #[test]
+    fn parse_locate_reads_explicit_space_and_defaults_to_pixels() {
+        let default = parse_locate_json(r#"{"x": 0.7, "y": 0.7, "confidence": 0.5}"#).unwrap();
+        assert_eq!(default.space, CoordSpace::Pixels, "缺省必须按提示词约定为像素");
+        let normalized =
+            parse_locate_json(r#"{"x": 0.5, "y": 0.25, "space": "normalized"}"#).unwrap();
+        assert_eq!(normalized.space, CoordSpace::Normalized);
+        // 拼错/未知的单位不猜，回落像素。
+        let typo = parse_locate_json(r#"{"x": 3, "y": 4, "space": "normailsed"}"#).unwrap();
+        assert_eq!(typo.space, CoordSpace::Pixels);
+    }
+
+    #[test]
+    fn small_pixel_coordinates_are_not_mistaken_for_normalized() {
+        // 回归：旧实现用 `abs() <= 1.0` 嗅探，4K 截图左上角附近的像素 (0.7, 0.7)
+        // 会被放大成 (2688, 1512)，点击落到屏幕别处。
+        let r = LocateResult {
+            x: 0.7,
+            y: 0.7,
+            confidence: 0.9,
+            space: CoordSpace::Pixels,
+        };
+        assert_eq!(r.pixels(3840.0, 2160.0), Some((0.7, 0.7)));
+    }
+
+    #[test]
+    fn invalid_coordinates_are_rejected_not_clamped() {
+        let normal = |x: f64, y: f64| LocateResult {
+            x,
+            y,
+            confidence: 0.9,
+            space: CoordSpace::Normalized,
+        };
+        // 越界归一化值是模型输出错误，夹到边缘只会点错地方。
+        assert_eq!(normal(1.5, 0.5).pixels(100.0, 100.0), None);
+        assert_eq!(normal(-0.1, 0.5).pixels(100.0, 100.0), None);
+        assert_eq!(normal(f64::NAN, 0.5).pixels(100.0, 100.0), None);
+        assert_eq!(normal(0.5, 1.0).pixels(200.0, 100.0), Some((100.0, 100.0)));
+        let inf = LocateResult {
+            x: f64::INFINITY,
+            y: 1.0,
+            confidence: 0.1,
+            space: CoordSpace::Pixels,
+        };
+        assert_eq!(inf.pixels(100.0, 100.0), None);
     }
 
     #[tokio::test]

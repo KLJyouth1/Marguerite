@@ -16,8 +16,8 @@ pub mod stitch;
 
 pub use binary_html::{binary_to_html, binary_to_img_tag, image_metadata_to_prompt};
 pub use client::{
-    describe_image, LlmVisionTransport, LocateResult, MockVisionResolver, MockVisionTransport,
-    VisionProviderResolver, VisionTransport,
+    describe_image, CoordSpace, LlmVisionTransport, LocateResult, MockVisionResolver,
+    MockVisionTransport, VisionProviderResolver, VisionTransport,
 };
 pub use metadata::image_metadata;
 pub use metadata::ImageMeta;
@@ -154,6 +154,7 @@ mod tests {
                 x: 30.0,
                 y: 20.0,
                 confidence: 0.9,
+                space: CoordSpace::Pixels,
             }),
         }));
         let r = cap.locate(&png(), "按钮").await;
@@ -162,7 +163,8 @@ mod tests {
             Some(LocateResult {
                 x: 30.0,
                 y: 20.0,
-                confidence: 0.9
+                confidence: 0.9,
+                space: CoordSpace::Pixels,
             })
         );
     }
