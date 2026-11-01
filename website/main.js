@@ -776,3 +776,295 @@
     return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 })();
+
+/* ============================================================================
+   2026-11-01 · 首屏背景视频（三段无缝轮播）
+   ---------------------------------------------------------------------------
+   规则（与页面上写的一样）：
+   · 默认**静音**自动播放 —— 页面不该一进来就出声；
+   · 「背景声」按钮是用户显式选择，才解除静音；
+   · 自动播放被浏览器策略拒绝、或用户开了「减少动态效果」时，保留 poster 静帧，
+     视频不抢流量也不抢性能；
+   · 滚出视口 / 标签页不可见时暂停，回来再播。
+
+   无缝的做法：两个 <video> 叠放。当前段播到结尾时，备用段**早已缓冲好**（preload=auto
+   + 提前赋 src），直接 play() 然后交叉淡入（900ms opacity 过渡），最后把两个元素的
+   角色对调并释放上一段。没有黑帧，也没有「等下载」的空档。
+   ========================================================================== */
+(function () {
+  var active = document.querySelector('[data-hero-video]');
+  var standby = document.querySelector('[data-hero-standby]');
+  if (!active) return;
+
+  var btn = document.querySelector('[data-hero-sound]');
+  var label = btn ? btn.querySelector('[data-hero-sound-label]') : null;
+  var band = document.querySelector('[data-band-video]');
+
+  // 轮播顺序：品牌片 → 鱼群 → 瀑布 → 回到品牌片
+  // 品牌片用的是「背景剪辑」clip-promo-bg.mp4（42–54s 霓虹网络 + 78–90s 山顶加冕，
+  // 中间 1s 交叉溶解）：完整 90s 片里有开头/结尾的大字标题卡，直接当首屏底图会和站点
+  // 自己的 logo 打架。剪辑保留最有电影感的两段，且没有烧录文字。
+  var CLIPS = [
+    'assets/video/clip-promo-bg.mp4',
+    'assets/video/hero.mp4',
+    'assets/video/band.mp4',
+  ];
+  var CLIP_NAMES = ['品牌片', '深海鱼群', '瀑布'];
+
+  var clipIdx = 0;
+  var userWantsSound = false;
+  var swapping = false;
+
+  // 暴露给自检脚本：轮播清单必须恰好三段（网站自检会断言这个数）
+  window.MARGUERITE_HERO_CLIPS = CLIPS.slice();
+
+  function reduced() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
+  // 指示器：第几段 / 共几段（01 / 03）
+  var nowLabel = document.querySelector('[data-hero-now-label]');
+  var nowCount = document.querySelector('[data-hero-now-count]');
+  function paintNow() {
+    if (nowLabel) nowLabel.textContent = '正在播放 · ' + CLIP_NAMES[clipIdx];
+    if (nowCount) {
+      var n = String(clipIdx + 1).padStart(2, '0');
+      nowCount.textContent = n + ' / ' + String(CLIPS.length).padStart(2, '0');
+    }
+  }
+
+  function applySound(v) {
+    v.muted = !userWantsSound;
+    v.volume = userWantsSound ? 0.55 : 0;
+  }
+
+  function playActive() {
+    // 开屏还在放的时候别起第二路视频：两路解码互相抢带宽，而且观众也看不见
+    if (document.body.classList.contains('splash-lock')) {
+      document.addEventListener('splash:done', function () { playActive(); }, { once: true });
+      return;
+    }
+    if (reduced()) { active.pause(); return; }
+    var p = active.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(function () { /* 被策略拒绝 → 静帧兜底，不报错 */ });
+    }
+  }
+
+  // 提前把下一段塞进备用位，让浏览器在后台缓冲。
+  // ⚠️ 但**不要**在首屏就拉：品牌片 16.7 MB + 环境片 6.7 MB 会把首屏初始下载推高，
+  // 实测自检脚本连页面都等不到 load 事件。所以策略是：
+  //   · 当前片够长（>60s）→ 立刻预载下一段（时间充裕）；
+  //   · 当前片短（30s）→ 播到离片尾 12s 再预载，留出缓冲时间。
+  var preloadedFor = -1;
+  function preloadNext(force) {
+    if (!standby) return;
+    var nextIdx = (clipIdx + 1) % CLIPS.length;
+    var next = CLIPS[nextIdx];
+    if (!force && preloadedFor === nextIdx) return;
+    if (standby.getAttribute('src') !== next) {
+      standby.setAttribute('src', next);
+      standby.load();
+    }
+    applySound(standby);
+    preloadedFor = nextIdx;
+  }
+
+  function watchForNext() {
+    active.addEventListener('timeupdate', function onTick() {
+      var d = active.duration;
+      if (!isFinite(d) || d <= 0) return;
+      if (d - active.currentTime <= 12) {
+        active.removeEventListener('timeupdate', onTick);
+        preloadNext(true);
+      }
+    });
+  }
+
+  function rotate() {
+    if (swapping || !standby) return;
+    swapping = true;
+    // 兜底：预载没赶上（短片被手动结束、或网络慢）时先赋 src 再播，
+    // 否则会把「空 video」淡入进来 —— 表现就是首屏整块变黑。
+    var nextIdx = (clipIdx + 1) % CLIPS.length;
+    var nextSrc = CLIPS[nextIdx];
+    if (standby.getAttribute('src') !== nextSrc) {
+      standby.setAttribute('src', nextSrc);
+      standby.load();
+    }
+    applySound(standby);
+
+    var done = false;
+    function swapIn() {
+      if (done) return;
+      done = true;
+      standby.classList.add('is-on');
+      active.classList.remove('is-on');
+      var prev = active;
+      active = standby;
+      standby = prev;
+      clipIdx = nextIdx;
+      // 释放上一段，避免两个大文件同时驻留
+      prev.removeAttribute('src');
+      prev.load();
+      prev.classList.remove('is-on');
+      active.addEventListener('ended', rotate);
+      watchForNext();
+      if (active.duration > 60) preloadNext(true);
+      paintNow();
+      swapping = false;
+    }
+
+    // 关键：等**真的有帧**再淡入。只等 play() 的 Promise 会在「已开始解码但首帧未出」
+    // 时提前换场，于是淡入了一个还没画面的元素（自检里表现为 src 为空 / 整块黑）。
+    standby.addEventListener('playing', swapIn, { once: true });
+    var tick = function () {
+      if (standby.currentTime > 0.04 || standby.readyState >= 2) {
+        standby.removeEventListener('timeupdate', tick);
+        swapIn();
+      }
+    };
+    standby.addEventListener('timeupdate', tick);
+
+    var p = standby.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(function () { swapping = false; done = true; });
+    }
+    // 4s 还没就绪：放弃这次切段，保持当前画面（不黑屏、不跳帧）
+    window.setTimeout(function () {
+      if (!done) {
+        standby.removeEventListener('timeupdate', tick);
+        swapping = false;
+      }
+    }, 4000);
+  }
+
+  // 双保险：HTML 的 muted 属性 + JS 显式置位（Safari 对未 mute 的自动播放一律拒绝）
+  applySound(active);
+  if (standby) applySound(standby);
+  active.addEventListener('ended', rotate);
+  watchForNext();
+  paintNow();
+  // 只有当前片够长时才立刻预载下一段
+  if (active.duration > 60) preloadNext(true);
+  playActive();
+
+  if (btn) {
+    btn.addEventListener('click', function () {
+      userWantsSound = !userWantsSound;
+      applySound(active);
+      if (standby) applySound(standby);
+      btn.setAttribute('aria-pressed', userWantsSound ? 'true' : 'false');
+      btn.setAttribute('aria-label', userWantsSound ? '关闭首屏背景声' : '开启首屏背景声');
+      if (label) label.textContent = userWantsSound ? '背景声开' : '背景声关';
+      if (userWantsSound) playActive();
+    });
+    btn.setAttribute('aria-pressed', 'false');
+    if (label) label.textContent = '背景声关';
+  }
+
+  if (band) {
+    // 板块背景视频是纯装饰，永远静音
+    band.muted = true;
+    band.defaultMuted = true;
+    band.volume = 0;
+    var bp = band.play();
+    if (bp && typeof bp.catch === 'function') bp.catch(function () {});
+  }
+
+  // 滚出视口就停：首屏视频有几十 MB，没必要在下面几节还在播
+  if (window.IntersectionObserver) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { if (!reduced()) { active.play().catch(function () {}); } }
+        else active.pause();
+      });
+    }, { threshold: 0.05 });
+    io.observe(active);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      active.pause();
+      if (standby) standby.pause();
+      if (band) band.pause();
+    } else {
+      playActive();
+      if (band && !reduced()) { var bp2 = band.play(); if (bp2 && bp2.catch) bp2.catch(function () {}); }
+    }
+  });
+})();
+
+/* ============================================================================
+   2026-11-01 · 访问开屏
+   ---------------------------------------------------------------------------
+   品牌片的片头（0:00–0:07）与片尾（0:26–0:33）两张 logo 卡，0.6s 溶接成 13.4s 的
+   splash.mp4；播完走收尾：整幅画面从四周圆形收缩（淡墨压边）→ 收成一枚星光点 → 消失。
+   规则：
+   · 默认静音（浏览器策略 + 礼貌）；同一次会话只放一次，?splash=1 强制重看；
+   · 「减少动态效果」直接跳过 —— 全屏且不可控的动画对这类用户是伤害；
+   · 跳过按钮 1s 后出现，Esc 也能跳；收尾过程中重复触发被忽略。
+   ========================================================================== */
+(function () {
+  var splash = document.querySelector('[data-splash]');
+  if (!splash) return;
+
+  var video = splash.querySelector('[data-splash-video]');
+  var skip = splash.querySelector('[data-splash-skip]');
+  var body = document.body;
+  var KEY = 'mrg.splash.seen';
+  var params = new URLSearchParams(location.search);
+  var force = params.get('splash') === '1';
+  var disabled = params.get('splash') === '0';
+  var reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var seen = false;
+  try { seen = sessionStorage.getItem(KEY) === '1'; } catch (e) { /* 隐私模式忽略 */ }
+
+  function unlock() {
+    body.classList.remove('splash-lock');
+    document.dispatchEvent(new CustomEvent('splash:done'));
+  }
+
+  function remove() {
+    if (!splash.parentNode) return;
+    splash.remove();
+    unlock();
+  }
+
+  function finish() {
+    if (splash.classList.contains('is-closing')) return;
+    try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
+    splash.classList.add('is-closing');
+    window.setTimeout(function () { splash.classList.add('is-star'); }, 820);
+    window.setTimeout(function () { splash.classList.add('is-done'); }, 1500);
+    window.setTimeout(remove, 2050);
+  }
+
+  // 对外暴露：自检脚本要在不看 13s 动画的前提下验证收尾状态
+  window.MARGUERITE_SPLASH = { present: true, finish: finish };
+
+  if (disabled || reduced || (seen && !force)) {
+    remove();          // 不放：直接进页面（保留 poster 兜底也不需要）
+    return;
+  }
+
+  video.muted = true;
+  video.defaultMuted = true;
+  video.volume = 0;
+
+  var guard = window.setTimeout(finish, 16000);   // ended 不触发的兜底
+  video.addEventListener('ended', function () {
+    window.clearTimeout(guard);
+    finish();
+  });
+  var p = video.play();
+  if (p && typeof p.catch === 'function') {
+    p.catch(function () { /* 被策略拒绝：停在 poster，到点仍会收尾 */ });
+  }
+
+  window.setTimeout(function () { if (skip) skip.hidden = false; }, 1000);
+  if (skip) skip.addEventListener('click', finish);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') finish();
+  });
+})();

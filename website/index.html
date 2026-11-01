@@ -28,7 +28,25 @@
 <link rel="stylesheet" href="styles.css">
 <script>document.documentElement.classList.add('js');</script>
 </head>
-<body id="top">
+<body id="top" class="splash-lock">
+
+<!-- ================= 访问开屏 =================
+     素材取自品牌片的两张 logo 卡（0:00–0:07 片头 / 0:26–0:33 片尾，0.6s 溶接），
+     静音自动播放；播完立刻走「圆形淡墨收缩 → 收成一枚星光点 → 消失」的收尾。
+     · 跳过按钮 1s 后出现；同一次会话只放一次；?splash=1 可强制重看；
+     · 系统开了「减少动态效果」时不放（直接进入页面），不做无法关闭的全屏动画。 -->
+<div class="splash" data-splash role="dialog" aria-modal="true" aria-label="Marguerite 开场动画">
+  <div class="splash__stage" data-splash-stage>
+    <video class="splash__video" data-splash-video muted playsinline preload="auto" poster="assets/video/splash-poster.jpg" aria-hidden="true">
+      <source src="assets/video/splash.mp4" type="video/mp4">
+    </video>
+  </div>
+  <!-- 墨圈放在裁切层**外面**：只有这样才能「从四周压进来」，放里面会被同一刀裁掉 -->
+  <span class="splash__edge" aria-hidden="true"></span>
+  <span class="splash__star" aria-hidden="true"></span>
+  <button class="splash__skip" data-splash-skip type="button" hidden>跳过</button>
+</div>
+
 
 <a class="skip" href="#main">跳到正文</a>
 
@@ -53,6 +71,8 @@
     </a>
     <nav class="nav__links" aria-label="主导航">
       <a href="#film" title="85 秒卡点短片">影片</a>
+      <a href="#pitch" title="规格与权益">规格</a>
+      <a href="#onepager" title="一次排查只留一页纸">一页纸</a>
       <a href="#entries">四入口</a>
       <a href="#shots" title="真实界面实录">界面</a>
       <a href="#demo" title="操作演示">演示</a>
@@ -84,6 +104,8 @@
   </div>
   <nav class="nav__mobile" id="navMenu" aria-label="移动端导航" hidden>
     <a href="#film">85 秒影片</a>
+    <a href="#pitch">规格与权益</a>
+    <a href="#onepager">一页纸</a>
     <a href="#entries">四入口</a>
     <a href="#shots">真实界面</a>
     <a href="#demo">操作演示</a>
@@ -105,6 +127,18 @@
 
   <!-- ================= HERO ================= -->
   <section class="hero" aria-labelledby="heroTitle">
+    <!-- 首屏背景视频：三段无缝轮播（品牌片 → 鱼群 → 瀑布），默认静音自动播放。
+         素材：assets/video/{clip-promo,hero,band}.mp4（H.264 / yuv420p / faststart）。
+         两个 <video> 叠放做交叉淡入：当前段播到结尾时，备用段已经缓冲好，直接淡入接上，
+         没有黑帧也没有下载空档。poster 是同源抽帧：自动播放被拒或用户开了「减少动态效果」时用它兜底。 -->
+    <div class="hero__media" aria-hidden="true">
+      <video class="hero__video is-on" data-hero-video data-hero-clip="0" autoplay muted playsinline preload="auto" poster="assets/video/hero-poster.jpg">
+        <source src="assets/video/clip-promo-bg.mp4" type="video/mp4">
+      </video>
+      <video class="hero__video" data-hero-standby muted playsinline preload="auto"></video>
+      <span class="hero__scrim"></span>
+    </div>
+
     <div class="hero__inner">
       <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.19"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-ver data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.19">本地优先 · 桌面 AI Agent 工作台 · 0.2.19</span><span class="hero__cmd-caret"></span></span></p>
 
@@ -152,19 +186,16 @@
       </ul>
     </div>
 
-    <div class="hero__visual" aria-hidden="true">
-      <picture><source type="image/webp" srcset="assets/ui/chat.webp"><img src="assets/ui/chat.png" alt="" width="1440" height="900" loading="eager" decoding="async"></picture>
-      <span class="hero__badge">真实界面 · 玛格丽特·星夜</span>
-      <div class="loopback">
-        <p class="loopback__hd"><span class="loopback__dot"></span>127.0.0.1:18790 · 回环监听</p>
-        <ul class="loopback__rows">
-          <li><span>GET /api/health</span><b>200</b><i>engine=rust</i></li>
-          <li><span>GET /control/</span><b>200</b><i>text/html</i></li>
-          <li><span>GET /api/&lt;未实现&gt;</span><b>501</b><i>not_implemented</i></li>
-          <li><span>LAN 192.168.* → 18790</span><b class="loopback__x">REFUSED</b><i>不对外</i></li>
-        </ul>
-      </div>
-    </div>
+    <p class="hero__now" aria-live="polite">
+      <span class="hero__now-dot" aria-hidden="true"></span>
+      <span data-hero-now-label>正在播放 · 品牌片</span>
+      <span class="hero__now-count" data-hero-now-count>01 / 03</span>
+    </p>
+
+    <button class="hero__sound" data-hero-sound type="button" aria-pressed="false" aria-label="开启首屏背景声">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M17 8.5a5 5 0 0 1 0 7" data-on="1"/></svg>
+      <span data-hero-sound-label>背景声关</span>
+    </button>
   </section>
 
   <!-- ================= FILM ================= -->
@@ -334,6 +365,160 @@
           打字与点击是演示节奏的重放，不会向任何服务器发送内容。
         </figcaption>
       </figure>
+    </div>
+  </section>
+
+
+  <!-- ================= PITCH · 规格与权益（广告创意版式） ================= -->
+  <section class="band band--pitch" id="pitch" aria-labelledby="pitchTitle">
+    <div class="pitch__bg" aria-hidden="true">
+      <video class="pitch__video" data-band-video muted loop playsinline preload="none" poster="assets/video/band-poster.jpg">
+        <source src="assets/video/band.mp4" type="video/mp4">
+      </video>
+      <span class="pitch__scrim"></span>
+    </div>
+    <div class="wrap">
+      <div class="pitch__hero reveal-up">
+        <div class="pitch__copy">
+          <header class="sec-head">
+            <p class="sec-index">THE SPEC SHEET / 002</p>
+            <h2 class="sec-title" id="pitchTitle">一台只为你干活的机器</h2>
+            <p class="sec-take">0 元、0 账号、0 上传——你付出去的只是一次安装。</p>
+            <p class="sec-dek">
+              图里是真实界面，不是渲染图。下面每一行都能在仓库里复核：MIT 协议、17.6 MB 的下载器、
+              回环端口、六种界面语言。广告位最容易说的话是「更好用」，这里只写能被指认的东西。
+            </p>
+          </header>
+          <div class="pitch__price">
+            <b>¥0</b>
+            <span>MIT 协议 · 没有订阅制<br><em>也没有「升级解锁」的按钮</em></span>
+          </div>
+          <div class="pitch__cta">
+            <a class="btn btn--solid" href="#download">下载桌面端</a>
+            <a class="btn btn--ghost" href="#film">先看 85 秒</a>
+          </div>
+        </div>
+
+        <div class="pitch__shot">
+          <span class="pitch__badge"><b>0.2.19</b> · Windows x64</span>
+          <div class="pitch__shotframe">
+            <picture><source type="image/webp" srcset="assets/ui/chat.webp"><img src="assets/ui/chat.png" alt="Marguerite 聊天界面实录：真实会话、工具回执与模型选择" width="1440" height="900" loading="lazy" decoding="async"></picture>
+          </div>
+          <div class="loopback pitch__loop">
+            <p class="loopback__hd"><span class="loopback__dot"></span>127.0.0.1:18790 · 回环监听</p>
+            <ul class="loopback__rows">
+              <li><span>GET /api/health</span><b>200</b><i>engine=rust</i></li>
+              <li><span>GET /control/</span><b>200</b><i>text/html</i></li>
+              <li><span>GET /api/&lt;未实现&gt;</span><b>501</b><i>not_implemented</i></li>
+              <li><span>LAN 192.168.* → 18790</span><b class="loopback__x">REFUSED</b><i>不对外</i></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="pitch__stats reveal-up">
+        <div class="pstat"><b>0<small> 元</small></b><span>MIT 协议 · 没有订阅制</span></div>
+        <div class="pstat"><b>17.6<small> MB</small></b><span>专用下载器（MargueriteDownloader.exe）</span></div>
+        <div class="pstat"><b>0<small> 个</small></b><span>对外开放的端口</span></div>
+        <div class="pstat"><b>6<small> 种</small></b><span>界面语言</span></div>
+      </div>
+
+      <div class="pitch__grid">
+        <article class="pcard">
+          <span class="pcard__ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 3 4.5 6v6c0 4.3 3.1 8.2 7.5 9 4.4-.8 7.5-4.7 7.5-9V6L12 3Z"/><path d="m9 12 2 2 4-4"/></svg>
+          </span>
+          <p class="pcard__k">DATA · 数据边界</p>
+          <h3>数据不出机器</h3>
+          <p>网关只监听 <code>127.0.0.1:18790</code>，局域网访问直接被拒。记忆、会话与台账都写在本地目录，不需要注册账号，也不靠云端同步。</p>
+        </article>
+        <article class="pcard">
+          <span class="pcard__ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M3 12h4l2.5 6 4-12L16 12h5"/></svg>
+          </span>
+          <p class="pcard__k">TRACE · 过程可见</p>
+          <h3>不是「模型说了就算」</h3>
+          <p>工具回执、完成门禁与决策台账都能回放。每条结论都带来源与指纹——查不到来源的句子不算证据。</p>
+        </article>
+        <article class="pcard">
+          <span class="pcard__ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+          </span>
+          <p class="pcard__k">REVOKE · 可撤销</p>
+          <h3>说错了能删掉</h3>
+          <p>引擎写回的事实可以硬删除（不是打墓碑）；外部工具写的 Markdown 记忆则不假装能删——权限边界写在界面上。</p>
+        </article>
+      </div>
+
+      <div class="pitch__spec reveal-up" role="group" aria-label="产品规格">
+        <div class="pspec__row"><span>形态</span><b>单个 Rust 可执行文件 · CLI / TUI / 桌面 / Web 四入口同源，换界面不换引擎</b></div>
+        <div class="pspec__row"><span>平台</span><b>Windows x64 · 安装包内置离线 WebView2，安装过程不需要联网</b></div>
+        <div class="pspec__row"><span>界面语言</span><b>简体中文 / English / 日本語 / Deutsch / Español / Français（六语键位对齐）</b></div>
+        <div class="pspec__row"><span>网络边界</span><b>回环 <code>127.0.0.1:18790</code> · 对外开放端口 0 个 · 局域网访问被拒</b></div>
+        <div class="pspec__row"><span>数据落点</span><b>会话 / 台账 / 记忆写在本地目录 · 无账号体系 · 不上传文件</b></div>
+        <div class="pspec__row"><span>授权</span><b>MIT License · 0.2.19</b></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ONE PAGER · 一次排查只留一页纸 ================= -->
+  <section class="band band--alt" id="onepager" aria-labelledby="opTitle">
+    <div class="wrap">
+      <header class="sec-head reveal-up">
+        <p class="sec-index">ONE PAGER · 三段就够</p>
+        <h2 class="sec-title" id="opTitle">一次排查，最后只留一页纸</h2>
+        <p class="sec-take">根因、证据、下一步——过程可以很长，交付物应该只有三段。</p>
+        <p class="sec-dek">
+          下面这张纸是真的产物形状：左边是三步流程，右边是它们的产出。每一句都能点开溯源，
+          写回引擎层的事实还可以被删掉。
+        </p>
+      </header>
+
+      <div class="op reveal-up">
+        <ol class="op__steps">
+          <li>
+            <b>01</b>
+            <h3>检索</h3>
+            <p>跨项目搜索、向量、词法三条腿一起召回，取回的是原文而不是摘要——摘要会把「大概」变成「就是」。</p>
+          </li>
+          <li>
+            <b>02</b>
+            <h3>取证</h3>
+            <p>每条事实都带来源文件、行号与时间戳；写回层的事实可硬删除，外部工具的记忆则如实标成「不可删」。</p>
+          </li>
+          <li>
+            <b>03</b>
+            <h3>成文</h3>
+            <p>按「根因 / 证据 / 下一步」落成一页纸：能直接执行，而不是再读三屏日志。</p>
+          </li>
+        </ol>
+
+        <article class="op__paper" aria-label="一页纸示例：跨平台 CI 红项的根因定位">
+          <header class="op__paperhd">
+            <h3>把这轮排查整理成一页纸</h3>
+            <p class="op__k">PAGER · 2026-10-31</p>
+          </header>
+          <div class="op__cols">
+            <section>
+              <h4>根因</h4>
+              <p>系统目录前缀用 <code>Path::starts_with</code> 判定；在 Linux 上 <code>C:\Windows</code> 只是一个组件名，永远匹配不上——于是本该拒绝的删除路径被放行。</p>
+            </section>
+            <section>
+              <h4>证据</h4>
+              <p>CI 日志具名失败：<code>scanner_l3::denies_delete_in_windows_system</code> 期望 <code>Deny</code>，实得 <code>Info</code>；本机同一条用例全绿。</p>
+            </section>
+            <section>
+              <h4>下一步</h4>
+              <p>判定改为与宿主无关：分隔符归一 + 目录边界 + 盘符大小写折叠，并补一条跨宿主回归用例锁住它。</p>
+            </section>
+          </div>
+          <footer class="op__prov">
+            <span>core/src/security/scanner_l3.rs</span>
+            <span>CI · ubuntu · 具名失败</span>
+            <span>可删除 · 本地写回</span>
+          </footer>
+        </article>
+      </div>
     </div>
   </section>
 
@@ -599,7 +784,7 @@
             <div class="why__body">
               <p class="why__q"><b>为什么</b>要靠机制而不是承诺？</p>
               <p class="why__a">因为承诺不可执行，机制会拦人。门禁红了就不许说完成；契约里声明了但没实现的方法，构建直接失败；被跳过的检查永远不算通过。</p>
-              <p class="why__e"><span class="why__tag">机制</span>27 项全量门禁 · RPC 契约守卫 · RPC 方法 475 条 · 幽灵声明 0 条</p>
+              <p class="why__e"><span class="why__tag">机制</span>28 项全量门禁 · RPC 契约守卫 · RPC 方法 475 条 · 幽灵声明 0 条</p>
               <p class="why__f">可伪证：摘掉脚本，任意一项红都不会再有人知道。</p>
             </div>
           </li>
@@ -1156,7 +1341,7 @@ webui/e2e/approval-card.spec.ts</pre>
         <article class="trust__card reveal-up">
           <p class="trust__k">03 · 可复核</p>
           <h3 class="trust__t">每个数字都对应一条命令</h3>
-          <p class="trust__d">版本号 15 处同步、安装包 SHA256、27 项发版门禁——下面证据区的每个数字，都能在仓库里跑同一条命令复核。</p>
+          <p class="trust__d">版本号 15 处同步、安装包 SHA256、28 项发版门禁——下面证据区的每个数字，都能在仓库里跑同一条命令复核。</p>
           <p class="trust__how">验证：<code>bash scripts/verify.sh --clean --all</code>，全绿才算数；<br>本页 23 个代码台账数字另有 <code>python scripts/check-website-claims.py</code> 逐条重测，漂一处就红；本地模型那一节的数字对的是 v0.17-C 发布物与模型仓库 README，不在这份台账里。</p>
         </article>
       </div>
@@ -1371,9 +1556,9 @@ webui/e2e/approval-card.spec.ts</pre>
       </div>
 
       <div class="ledger reveal-up">
-        <div class="ledger__i"><b class="ledger__n">302,029<em> 行</em></b><span class="ledger__l">Rust · 593 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">355,638<em> 行</em></b><span class="ledger__l">前端 · 1,277 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">463,980<em> 行</em></b><span class="ledger__l">Python · 1,018 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">302,625<em> 行</em></b><span class="ledger__l">Rust · 593 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">356,744<em> 行</em></b><span class="ledger__l">前端 · 1,285 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">463,984<em> 行</em></b><span class="ledger__l">Python · 1,018 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
         <div class="ledger__i"><b class="ledger__n">32<em> 个</em></b><span class="ledger__l">工具模块</span></div>
         <div class="ledger__i"><b class="ledger__n">69<em> 个</em></b><span class="ledger__l">GitHub 仓库，最早的一个在 2025-06</span></div>
@@ -1528,24 +1713,24 @@ ollama run  KLJyouth-office-V0.17-C
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up" data-proof="core-tests"><b class="stat__n"><span data-count="4566">4566</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
-        <div class="stat reveal-up" data-proof="webui-tests"><b class="stat__n"><span data-count="5085">5085</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
-        <div class="stat reveal-up" data-proof="gate"><b class="stat__n"><span data-count="26">26</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
+        <div class="stat reveal-up" data-proof="core-tests"><b class="stat__n"><span data-count="4570">4570</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up" data-proof="webui-tests"><b class="stat__n"><span data-count="5107">5107</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up" data-proof="gate"><b class="stat__n"><span data-count="28">28</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
         <div class="stat reveal-up" data-proof="cli-routes"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
       </div>
 
       <div class="gate reveal-up">
         <div class="term term--gate" data-proof="gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4508 passed / 0 failed</p>
-          <p class="term__line term__ok">[PASS] webui tests · 5015 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4570 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 5107 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
           <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
-          <p class="term__line term__ok">================ 27/27 全绿 · exit 0 ================</p>
+          <p class="term__line term__ok">================ 28/28 全绿 · exit 0 ================</p>
         </div>
         <p class="gate__note">
-          基线为 2026-10-31 的全量闸门复测（<code>verify.sh --clean --all</code>，27/27 全绿、exit 0、汇总里没有 [SKIP]）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
+          基线为 2026-11-01 的全量闸门复测（<code>verify.sh --clean --all</code>，28/28 全绿、exit 0、汇总里没有 [SKIP]）。「跳过 ≠ 通过」：被跳过的检查在汇总里单独列出，永远不计入通过。
           源码树在发布之后持续演进（以上游仓库实际提交为准），收口口径始终是同一句话：<code>verify.sh</code> 全绿才算数。
         </p>
       </div>
@@ -1632,7 +1817,7 @@ ollama run  KLJyouth-office-V0.17-C
             <li><b>桌面标题栏</b>：<code>webui/src/components/shell/TitleBarControls.vue</code> 只在 Tauri 壳内渲染最小化 / 最大化 / 关闭与拖拽区，浏览器直连网关时不渲染这些死控件。</li>
             <li><b>两层助理的投影规则</b>：<code>core/src/assistant/projection.rs</code> 让 L1 只留「当前工作区推不出来」的事实、L2 只留本项目来源与用户画像，pinned 事实两层都不丢——此前两层读的是同一份 brief，只差字符预算。</li>
             <li><b>知识库启动漂移自检</b>：<code>core/src/kb/gateway.rs</code> 在启动时把索引里的来源记录与磁盘逐条对账，有漂移就写 <code>rebuild_required.json</code> 并记 warn，无漂移则清掉陈旧标记；不自动重建、不阻塞启动，也不静默吞掉。</li>
-            <li><b>纪律基线</b>：全量门禁 27 项、RPC 声明 475 条且幽灵声明 0 条、核心测试 4,566 / 控制台单测 5,085；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
+            <li><b>纪律基线</b>：全量门禁 28 项、RPC 声明 475 条且幽灵声明 0 条、核心测试 4,570 / 控制台单测 5,107；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
             <li>如实说明：安装包仍只在 <b>Windows x64</b> 上真机验证；非 Windows 平台本轮只拿到「能编译」的证据，没有运行证据。</li>
           </ul>
           <div class="chg__actions">

@@ -14,6 +14,19 @@ const SIZES = [
 // 校验目标同步为新首屏标题，避免脚本与新文案脱节。
 const SLOGAN = '让思考 成为你的工作台';
 
+// 2026-11-01：访问开屏会全屏覆盖，测量前必须先收掉它（走真实收尾序列，2.1s）。
+async function dismissSplash(page) {
+  const had = await page.evaluate(() => {
+    if (window.MARGUERITE_SPLASH && window.MARGUERITE_SPLASH.present) {
+      window.MARGUERITE_SPLASH.finish();
+      return true;
+    }
+    return false;
+  });
+  if (had) await page.waitForTimeout(2200);
+  return had;
+}
+
 (async () => {
   const browser = await chromium.launch();
   const errors = [];
@@ -29,7 +42,9 @@ const SLOGAN = '让思考 成为你的工作台';
       if (u.startsWith('http')) errors.push(s.name + ' external-requestfailed: ' + u);
     });
 
-    await page.goto(URL, { waitUntil: 'load' });
+    await page.goto(URL, { waitUntil: 'domcontentloaded' });
+
+    await dismissSplash(page);
     await page.waitForTimeout(900);
 
     // 懒加载的图在隐藏面板里不会触发加载：先滚到四入口并点开 TUI 标签，
@@ -161,6 +176,31 @@ const SLOGAN = '让思考 成为你的工作台';
           if (ys.some((y) => y === null)) return false;
           return ys.every((y, i) => i === 0 || y > ys[i - 1]);
         })(),
+        // 2026-11-01 新增：首屏背景视频（默认静音）+ 两个新板块的结构。
+        // 视频必须**默认静音**且带 poster：自动播放被拒时页面仍要有画面。
+        heroVideo: !!document.querySelector('[data-hero-video]'),
+        heroVideoMuted: (() => {
+          const v = document.querySelector('[data-hero-video]');
+          return !!v && v.muted === true && v.hasAttribute('muted');
+        })(),
+        heroVideoPoster: (() => {
+          const v = document.querySelector('[data-hero-video]');
+          return !!v && !!v.getAttribute('poster');
+        })(),
+        heroSoundBtn: !!document.querySelector('[data-hero-sound]'),
+        bandVideo: !!document.querySelector('[data-band-video]'),
+        // 三段轮播：两个 video 叠放 + 清单恰好三段
+        heroStandby: !!document.querySelector('[data-hero-standby]'),
+        heroClipCount: (window.MARGUERITE_HERO_CLIPS || []).length,
+        heroVideoOn: document.querySelectorAll('.hero__video.is-on').length,
+        // 规格与权益板块：4 个数字 / 3 张权益卡 / 6 行规格表
+        pitchStats: document.querySelectorAll('#pitch .pstat').length,
+        pitchCards: document.querySelectorAll('#pitch .pcard').length,
+        pitchRows: document.querySelectorAll('#pitch .pspec__row').length,
+        // 一页纸板块：3 步 / 3 段 / 3 条溯源
+        opSteps: document.querySelectorAll('#onepager .op__steps li').length,
+        opCols: document.querySelectorAll('#onepager .op__cols section').length,
+        opProv: document.querySelectorAll('#onepager .op__prov span').length,
         // 2026-10-29 新增：社交卡片与图片格式必须有守卫，否则「加了又被人改回去」没人发现。
         ogImage: !!document.querySelector('meta[property="og:image"]'),
         twitterCard: !!document.querySelector('meta[name="twitter:card"]'),
@@ -176,7 +216,11 @@ const SLOGAN = '让思考 成为你的工作台';
       m.notice && m.ask && m.faq === 8 && m.dl === 3 && m.bar && m.dock &&
       m.entryTabs === 4 && m.entryPanels === 4 && m.entryActive === 1 && m.tuiImgLoaded &&
       m.loopback && m.trustCards === 3 && m.counters === 8 && m.gateLines === 7 &&
-      m.navLinks === 15 && m.navOrderAscending && m.secTakes === 15 && m.bento === 9 && m.honestCards === 4 && m.bentoRowsFull &&
+      m.navLinks === 17 && m.navOrderAscending && m.secTakes === 17 && m.bento === 9 && m.honestCards === 4 && m.bentoRowsFull &&
+      m.heroVideo && m.heroVideoMuted && m.heroVideoPoster && m.heroSoundBtn && m.bandVideo &&
+      m.heroStandby && m.heroClipCount === 3 && m.heroVideoOn === 1 &&
+      m.pitchStats === 4 && m.pitchCards === 3 && m.pitchRows === 6 &&
+      m.opSteps === 3 && m.opCols === 3 && m.opProv === 3 &&
       m.caseCards === 6 && m.caseOpen === 1 &&
       m.storyChaps === 4 && m.storyBars === 24 && m.storyLedger === 6 && m.storyScene &&
       m.lmRows === 6 && m.lmBars === 4 && m.lmCards === 3 &&
@@ -225,7 +269,7 @@ const SLOGAN = '让思考 成为你的工作台';
     console.log('  排版可读    : ' + (typographyOk ? 'PASS（导航单行 · 终端块不裁切）'
       : 'FAIL（导航逐字换行 ' + m.navWrapped + ' 项 / 终端块裁切 ' + m.termClipped + ' 处）'));
     console.log('  事实条目    : ' + m.facts + (m.facts === 4 ? ' OK' : ' *** 期望 4 ***'));
-    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 8 · 下载 3 · 15 项导航顺序=文档顺序 · 每节一句话结论 15 · 推演 5/7 · 5-Why 5 · 证据标记 ' + m.proofMarked + '）' : 'FAIL ' + JSON.stringify(m)));
+    console.log('  结构（短片/演示/对比/公告/提问/FAQ/下载）: ' + (structureOk ? 'PASS（7 幕 · 56 BPM · FAQ 8 · 下载 3 · 17 项导航顺序=文档顺序 · 每节一句话结论 17 · 推演 5/7 · 5-Why 5 · 首屏三段轮播默认静音 · 规格 4/3/6 · 一页纸 3/3/3 · 证据标记 ' + m.proofMarked + '）' : 'FAIL ' + JSON.stringify(m)));
     console.log('  社交卡片/图片格式: ' + (seoOk
       ? 'PASS（og+twitter+canonical · WebP 生效 ' + m.webpServed + '/' + m.pictureCount + '）'
       : 'FAIL'));
@@ -247,7 +291,8 @@ const SLOGAN = '让思考 成为你的工作台';
   for (const w of [1024, 1100, 1180, 1220, 1280, 1360]) {
     const bandCtx = await browser.newContext({ viewport: { width: w, height: 900 } });
     const bandPage = await bandCtx.newPage();
-    await bandPage.goto(URL, { waitUntil: 'load' });
+    await bandPage.goto(URL, { waitUntil: 'domcontentloaded' });
+    await dismissSplash(bandPage);
     await bandPage.waitForTimeout(300);
     const band = await bandPage.evaluate(() => {
       const navWrapped = Array.from(document.querySelectorAll('.nav__links a')).filter((a) => {
@@ -288,7 +333,8 @@ const SLOGAN = '让思考 成为你的工作台';
     const ip = await ictx.newPage();
     ip.on('console', (m) => { if (m.type() === 'error') errors.push('interaction: ' + m.text()); });
     ip.on('pageerror', (e) => errors.push('interaction pageerror: ' + e.message));
-    await ip.goto(URL, { waitUntil: 'load' });
+    await ip.goto(URL, { waitUntil: 'domcontentloaded' });
+    await dismissSplash(ip);
     await ip.waitForTimeout(500);
 
     await ip.click('#proofToggle');
@@ -321,6 +367,37 @@ const SLOGAN = '让思考 成为你的工作台';
     console.log('  开启并生成证据表: ' + (proofOnOk
       ? 'PASS（' + proofOn.rows + ' 条 / 标记 ' + proofOn.marked + ' 处）'
       : 'FAIL ' + JSON.stringify(proofOn)));
+
+    // ── 2026-11-01：首屏三段视频轮播必须真的切段（静态计数证明不了「无缝」）──
+    // 触发一次 ended，看备用段是否接过并交叉淡入：切段后「可见的那段」必须是另一���元素，
+    // 且它的 src 必须是清单里的下一段；旧段必须被释放（不留两个大文件驻留）。
+    const clipBefore = await ip.evaluate(() => {
+      const on = document.querySelector('.hero__video.is-on');
+      return { el: on, src: on ? (on.getAttribute('src') || (on.querySelector('source') || {}).src || '') : '' };
+    });
+    await ip.evaluate(() => {
+      const v = document.querySelector('[data-hero-video]');
+      v.dispatchEvent(new Event('ended'));
+    });
+    await ip.waitForTimeout(3000);
+    const clipAfter = await ip.evaluate(() => {
+      const on = document.querySelector('.hero__video.is-on');
+      const others = Array.from(document.querySelectorAll('.hero__video'));
+      return {
+        src: on ? (on.getAttribute('src') || '') : '',
+        onCount: others.filter((v) => v.classList.contains('is-on')).length,
+        muted: on ? on.muted : null,
+        clips: window.MARGUERITE_HERO_CLIPS || [],
+        released: others.filter((v) => !v.classList.contains('is-on') && !v.getAttribute('src')).length,
+      };
+    });
+    const clipOk = clipAfter.onCount === 1 && clipAfter.clips.indexOf(clipAfter.src) >= 0
+      && clipAfter.src !== clipBefore.src && clipAfter.muted === true;
+    if (!clipOk) { allPass = false; errors.push('首屏轮播切段: ' + JSON.stringify(clipAfter)); }
+    console.log('--- 首屏三段轮播 ---');
+    console.log('  切段与交叉淡入: ' + (clipOk
+      ? 'PASS（' + clipBefore.src.split('/').pop() + ' → ' + clipAfter.src.split('/').pop() + ' · 可见 ' + clipAfter.onCount + ' 段 · 仍静音 · 已释放旧段 ' + clipAfter.released + '）'
+      : 'FAIL ' + JSON.stringify(clipAfter)));
 
     await ip.keyboard.press('Escape');
     await ip.waitForTimeout(150);
@@ -386,7 +463,8 @@ const SLOGAN = '让思考 成为你的工作台';
 
   const ctx2 = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
   const p2 = await ctx2.newPage();
-  await p2.goto(URL, { waitUntil: 'load' });
+  await p2.goto(URL, { waitUntil: 'domcontentloaded' });
+  await dismissSplash(p2);
   await p2.waitForTimeout(300);
   const rm = await p2.evaluate(() => {
     const t = document.querySelector('.hero__title');
@@ -413,7 +491,8 @@ const SLOGAN = '让思考 成为你的工作台';
       const pg = await c.newPage();
       const enErrors = [];
       pg.on('console', (m) => { if (m.type() === 'error') enErrors.push(m.text().slice(0, 120)); });
-      await pg.goto(EN, { waitUntil: 'load' });
+      await pg.goto(EN, { waitUntil: 'domcontentloaded' });
+      await dismissSplash(pg);
       await pg.waitForTimeout(300);
       const r = await pg.evaluate(() => ({
         overflowX: document.documentElement.scrollWidth - window.innerWidth,
@@ -433,6 +512,84 @@ const SLOGAN = '让思考 成为你的工作台';
       console.log('--- index.en.html (' + w + 'px) --- ' + (ok ? 'PASS' : 'FAIL ' + JSON.stringify(r)));
       await c.close();
     }
+  }
+
+  // ── 2026-11-01：访问开屏 ─────────────────────────────────────────────
+  // 三步都必须是真的：① 进站时全屏盖住且锁滚动；② 收尾走「圆形收缩 + 星光点」并移除；
+  // ③ 收掉之后首屏视频才起播（两路视频不该同时解码）。?splash=0 必须能关掉。
+  {
+    const sctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const sp = await sctx.newPage();
+    const sErrors = [];
+    sp.on('pageerror', (e) => sErrors.push('pageerror: ' + e.message));
+    await sp.goto(URL, { waitUntil: 'domcontentloaded' });
+    await sp.waitForTimeout(500);
+
+    const born = await sp.evaluate(() => {
+      const el = document.querySelector('[data-splash]');
+      const v = document.querySelector('[data-splash-video]');
+      const st = document.querySelector('[data-splash-stage]');
+      return {
+        present: !!el,
+        lock: document.body.classList.contains('splash-lock'),
+        covers: !!el && el.getBoundingClientRect().width >= window.innerWidth - 1
+          && el.getBoundingClientRect().height >= window.innerHeight - 1,
+        muted: !!v && v.muted === true,
+        clip: st ? getComputedStyle(st).clipPath : '',
+        zIndex: el ? getComputedStyle(el).zIndex : '',
+      };
+    });
+
+    await sp.evaluate(() => window.MARGUERITE_SPLASH.finish());
+    await sp.waitForTimeout(400);
+    const closing = await sp.evaluate(() => {
+      const el = document.querySelector('[data-splash]');
+      const st = document.querySelector('[data-splash-stage]');
+      return {
+        closing: !!el && el.classList.contains('is-closing'),
+        clip: st ? getComputedStyle(st).clipPath : '',
+        edge: (() => { const e = document.querySelector('.splash__edge'); return e ? Number(getComputedStyle(e).opacity) : 0; })(),
+      };
+    });
+
+    await sp.waitForTimeout(2300);
+    const after = await sp.evaluate(() => ({
+      gone: !document.querySelector('[data-splash]'),
+      lock: document.body.classList.contains('splash-lock'),
+      heroPlaying: (() => {
+        const v = document.querySelector('.hero__video.is-on');
+        return !!v && !v.paused && v.readyState >= 2;
+      })(),
+    }));
+
+    const splashOk = born.present && born.lock && born.covers && born.muted
+      && /circle/i.test(born.clip) && Number(born.zIndex) >= 100
+      && closing.closing && closing.edge > 0.5
+      && after.gone && !after.lock && sErrors.length === 0;
+    if (!splashOk) { allPass = false; errors.push('访问开屏: ' + JSON.stringify({ born, closing, after, sErrors })); }
+    console.log('--- 访问开屏 ---');
+    console.log('  进站覆盖 + 默认静音: ' + (born.present && born.lock && born.covers && born.muted && Number(born.zIndex) >= 100
+      ? 'PASS（z=' + born.zIndex + ' · 锁滚动 · muted）' : 'FAIL ' + JSON.stringify(born)));
+    console.log('  圆形收缩 + 淡墨: ' + (closing.closing && closing.edge > 0.5
+      ? 'PASS（clip=' + closing.clip + ' · edge=' + closing.edge.toFixed(2) + '）' : 'FAIL ' + JSON.stringify(closing)));
+    console.log('  收尾移除 + 首屏接播: ' + (after.gone && !after.lock
+      ? 'PASS（已移除 · 解锁滚动 · 首屏视频 ' + (after.heroPlaying ? '已接播' : '未接播') + '）' : 'FAIL ' + JSON.stringify(after)));
+    await sctx.close();
+  }
+
+  // ?splash=0 必须能整段关掉（给不想看动画的人／自动化一个干净入口）
+  {
+    const c0 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const p0 = await c0.newPage();
+    await p0.goto(URL + '?splash=0', { waitUntil: 'domcontentloaded' });
+    await p0.waitForTimeout(600);
+    const off = await p0.evaluate(() => ({
+      gone: !document.querySelector('[data-splash]'),
+      unlocked: !document.body.classList.contains('splash-lock'),
+    }));
+    if (!(off.gone && off.unlocked)) { allPass = false; errors.push('?splash=0 未生效: ' + JSON.stringify(off)); }
+    console.log('--- ?splash=0 --- ' + (off.gone && off.unlocked ? 'PASS（不显示也不锁滚动）' : 'FAIL ' + JSON.stringify(off)));
+    await c0.close();
   }
 
   console.log('\n=== 控制台错误 / 失败请求 ===');
