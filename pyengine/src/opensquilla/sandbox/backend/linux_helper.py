@@ -193,7 +193,7 @@ def build_outer_bwrap_plan(
     inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
     if package_root not in inherited:
         inherited.insert(0, package_root)
-    env["PYTHONPATH"] = os.pathsep.join(inherited)
+    pythonpath_value = os.pathsep.join(inherited)
     bridge = payload.policy.get("linuxProxyBridge")
     if isinstance(bridge, dict):
         uds_path = Path(str(bridge["udsPath"]))
@@ -212,6 +212,10 @@ def build_outer_bwrap_plan(
             },
             port=port,
         )
+    # 放在桥分支**之后**：proxy_env_for_inner_port 会整体重建 env，先设会被覆盖
+    # （CI 实测 test_real_bubblewrap_proxy_allowlist_reaches_managed_proxy 因此红）。
+    # 桥分支自己不产生 PYTHONPATH 键，这里统一兜底，两个分支都不丢。
+    env["PYTHONPATH"] = pythonpath_value
     return build_bwrap_plan(
         command=inner,
         command_cwd=Path(payload.cwd),
