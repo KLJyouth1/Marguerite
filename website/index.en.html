@@ -30,7 +30,7 @@
 <body>
 
 <div class="notice" data-notice>
-  <p class="notice__text"><span class="notice__tag" data-ver>0.2.19</span>Windows x64 installer ships offline WebView2 — it installs with no network. <a href="#download">Download &amp; checksum →</a></p>
+  <p class="notice__text"><span class="notice__tag" data-ver>0.2.20</span>Windows x64 installer ships offline WebView2 — it installs with no network. <a href="#download">Download &amp; checksum →</a></p>
   <button class="notice__close" type="button" data-notice-close aria-label="Dismiss">
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6 18 18M18 6 6 18"/></svg>
   </button>
@@ -57,7 +57,7 @@
 
   <section class="hero" aria-labelledby="heroTitle" id="top">
     <div class="hero__inner">
-      <p class="hero__kicker rise d1" aria-label="Local-first desktop AI agent workbench, version 0.2.19"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-ver data-cmdline="Local-first desktop AI agent workbench · 0.2.19">Local-first desktop AI agent workbench · 0.2.19</span><span class="hero__cmd-caret"></span></span></p>
+      <p class="hero__kicker rise d1" aria-label="Local-first desktop AI agent workbench, version 0.2.20"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-ver data-cmdline="Local-first desktop AI agent workbench · 0.2.20">Local-first desktop AI agent workbench · 0.2.20</span><span class="hero__cmd-caret"></span></span></p>
 
       <h1 class="hero__title" id="heroTitle">
         <span class="ln"><span class="ln__in">Think it.</span></span>
@@ -177,16 +177,17 @@
   <section class="band band--alt" id="recent" aria-labelledby="recentTitle">
     <div class="wrap">
       <header class="sec-head">
-        <p class="sec-index">RECENT WORK · 30–31 OCTOBER</p>
-        <h2 class="sec-title" id="recentTitle">What shipped in the last two days</h2>
+        <p class="sec-index">RECENT WORK · 1 NOVEMBER</p>
+        <h2 class="sec-title" id="recentTitle">What shipped in 0.2.20</h2>
       </header>
       <div class="chg">
         <ul class="chg__notes">
-          <li><b>Attention-first workbench</b> — <code>webui/src/composables/ui/attentionQueue.ts</code> folds approvals, blockers, failures and pending choices into one composite score (recency bonus inside 30 minutes, stable tie-break by time then id); <code>webui/src/components/ui/AttentionShelf.vue</code> renders nothing when no human is needed, and motion fires only on state changes, degrading to opacity-only under reduced motion.</li>
-          <li><b>Command deck and work phase</b> — <code>webui/src/components/shell/CommandDeck.vue</code> shows the current phase, its reason and the next actions, with actions supplied only by the caller and an empty list rendering nothing; <code>webui/src/composables/shell/useWorkPhase.ts</code> derives the phase (review &gt; execute &gt; explore &gt; idle) and falls back to idle whenever a signal is missing.</li>
-          <li><b>Desktop title bar</b> — <code>webui/src/components/shell/TitleBarControls.vue</code> renders minimise, maximise, close and the drag region only inside the Tauri shell; a plain browser pointed at the gateway gets no dead controls.</li>
-          <li><b>Two-layer assistant projection</b> — <code>core/src/assistant/projection.rs</code> gives L1 only facts that cannot be derived from the current workspace and gives L2 only this project's sources and profile, while pinned facts survive both layers; before this, both layers read the same brief with only a different character budget.</li>
-          <li><b>Knowledge-base drift audit on startup</b> — <code>core/src/kb/gateway.rs</code> reconciles indexed source records against disk in a background task, writes <code>rebuild_required.json</code> plus a warning on drift and clears a stale marker when everything matches, without rebuilding implicitly.</li>
+          <li><b>Code review plugin (line A)</b> — <code>core/src/review/{mod,apply}.rs</code> ships the review engine and one-click fix (49 unit tests); RPC gains <code>review.diff</code> / <code>review.applyFix</code> with the plugin manifest at <code>plugins/manifests/dsh-code-review.plugin.json</code>; the console gets a <code>/review</code> view — report rendering, one-click fix, export — with all six locales level.</li>
+          <li><b>Miniapp plugin (line B)</b> — <code>core/src/miniapp/</code> provides scaffolds plus diagnose-and-fix for WeChat / Douyin / Alipay (<code>miniapp.scaffold</code> / <code>miniapp.diagnose</code>, 22 unit tests, re-runs never overwrite an existing project); the console gains a MiniappView.</li>
+          <li><b>Task float ball (line C)</b> — <code>core/src/gateway/task_ball.rs</code> defines the TaskBallHost trait (missing host answers <code>HOST_UNAVAILABLE</code> instead of faking a window), the desktop shell injects TauriTaskBallHost, ConversationFloatView renders the float window and the task badge click summons it; <code>EventType::ReviewDone</code> joins the event chain with from_wire round-trip tests, so no more ghost events.</li>
+          <li><b>Test coverage</b> — ReviewReportView had zero tests; this round adds 10 vitest cases (diff loading, one-click fix, failure and empty states); the three view suites pass 25/25 with a clean typecheck.</li>
+          <li><b>Release engineering</b> — directed core verification 179/179 green; RPC declares 489 methods with zero ghosts and the dual-implementation guard steady at 10 registered / 37 eliminated; 0.2.20 installers (MSI + NSIS) rebuilt with updater signatures, and the version-sync gate now pins the website's data-ver too.</li>
+          <li>Honest note: installers are still verified on <b>Windows x64</b> only; no runtime evidence exists for other platforms this round.</li>
         </ul>
       </div>
     </div>
@@ -257,7 +258,7 @@
     <div class="foot__col">
       <h2 class="foot__h">Build</h2>
       <ul>
-        <li>Version <code data-ver>0.2.19</code></li>
+        <li>Version <code data-ver>0.2.20</code></li>
         <li>Windows x64 · installer</li>
       </ul>
     </div>
