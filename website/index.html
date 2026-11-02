@@ -54,7 +54,7 @@
 
 <!-- 发版时硬编码版本号：下次发版把下面两处 0.2.19 改成新版本号，changelog section 同步追加。 -->
 <div class="notice" data-notice>
-  <p class="notice__text"><span class="notice__tag" data-ver>0.2.19</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
+  <p class="notice__text"><span class="notice__tag" data-ver>0.2.20</span>安装包内含离线 WebView2，断网也能装。<a href="#download">看下载与校验 →</a></p>
   <button class="notice__close" type="button" data-notice-close aria-label="关闭公告">
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6 18 18M18 6 6 18"/></svg>
   </button>
@@ -140,7 +140,7 @@
     </div>
 
     <div class="hero__inner">
-      <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.19"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-ver data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.19">本地优先 · 桌面 AI Agent 工作台 · 0.2.19</span><span class="hero__cmd-caret"></span></span></p>
+      <p class="hero__kicker rise d1" aria-label="本地优先 桌面 AI Agent 工作台 版本 0.2.20"><span class="hero__cmd" aria-hidden="true"><span class="hero__cmd-prompt">marguerite@localhost:~$</span> <span class="hero__cmd-text" data-ver data-cmdline="本地优先 · 桌面 AI Agent 工作台 · 0.2.20">本地优先 · 桌面 AI Agent 工作台 · 0.2.20</span><span class="hero__cmd-caret"></span></span></p>
 
       <h1 class="hero__title" id="heroTitle">
         <span class="ln"><span class="ln__in">让思考</span></span>
@@ -219,7 +219,7 @@
             <div class="hook__mark">
               <img src="assets/brand/logo-mark.svg" alt="" width="76" height="76" loading="lazy" decoding="async">
             </div>
-            <p class="act__eyebrow" data-ver>MARGUERITE · 0.2.19</p>
+            <p class="act__eyebrow" data-ver>MARGUERITE · 0.2.20</p>
             <h3 class="act__big">A DESK THAT<br>THINKS WITH YOU</h3>
             <p class="act__sub">本地优先的桌面 Agent 工作台</p>
           </div>
@@ -400,7 +400,7 @@
         </div>
 
         <div class="pitch__shot">
-          <span class="pitch__badge"><b>0.2.19</b> · Windows x64</span>
+          <span class="pitch__badge"><b>0.2.20</b> · Windows x64</span>
           <div class="pitch__shotframe">
             <picture><source type="image/webp" srcset="assets/ui/chat.webp"><img src="assets/ui/chat.png" alt="Marguerite 聊天界面实录：真实会话、工具回执与模型选择" width="1440" height="900" loading="lazy" decoding="async"></picture>
           </div>
@@ -456,7 +456,7 @@
         <div class="pspec__row"><span>界面语言</span><b>简体中文 / English / 日本語 / Deutsch / Español / Français（六语键位对齐）</b></div>
         <div class="pspec__row"><span>网络边界</span><b>回环 <code>127.0.0.1:18790</code> · 对外开放端口 0 个 · 局域网访问被拒</b></div>
         <div class="pspec__row"><span>数据落点</span><b>会话 / 台账 / 记忆写在本地目录 · 无账号体系 · 不上传文件</b></div>
-        <div class="pspec__row"><span>授权</span><b>MIT License · 0.2.19</b></div>
+        <div class="pspec__row"><span>授权</span><b>MIT License · 0.2.20</b></div>
       </div>
     </div>
   </section>
@@ -784,7 +784,7 @@
             <div class="why__body">
               <p class="why__q"><b>为什么</b>要靠机制而不是承诺？</p>
               <p class="why__a">因为承诺不可执行，机制会拦人。门禁红了就不许说完成；契约里声明了但没实现的方法，构建直接失败；被跳过的检查永远不算通过。</p>
-              <p class="why__e"><span class="why__tag">机制</span>28 项全量门禁 · RPC 契约守卫 · RPC 方法 475 条 · 幽灵声明 0 条</p>
+              <p class="why__e"><span class="why__tag">机制</span>28 项全量门禁 · RPC 契约守卫 · RPC 方法 489 条 · 幽灵声明 0 条</p>
               <p class="why__f">可伪证：摘掉脚本，任意一项红都不会再有人知道。</p>
             </div>
           </li>
@@ -838,7 +838,7 @@
           </span>
           <h3 class="card__title">本地优先网关</h3>
           <p class="card__body">内嵌网关默认只监听 <code>127.0.0.1:18790</code>。局域网内其他机器扫不到，你的代码不为了「检索」离开这台机器。</p>
-          <p class="card__where"><code>core/src/gateway/</code> · 475 条 RPC 方法声明</p>
+          <p class="card__where"><code>core/src/gateway/</code> · 489 条 RPC 方法声明</p>
         </article>
 
         <article class="card reveal-up">
@@ -984,7 +984,7 @@
         <div class="stat reveal-up" data-proof="views"><b class="stat__n"><span data-count="50">50</span></b><span class="stat__l">控制台视图（webui/src/views）</span><code class="stat__c">ls webui/src/views/*.vue</code></div>
         <div class="stat reveal-up" data-proof="core-modules"><b class="stat__n"><span data-count="65">65</span></b><span class="stat__l">内核子系统模块（core/src）</span><code class="stat__c">ls -d core/src/*/</code></div>
         <div class="stat reveal-up" data-proof="tools"><b class="stat__n"><span data-count="76">76</span></b><span class="stat__l">内置工具（含终端/沙箱/工作台）</span><code class="stat__c">agent.selfcheck · tools.count</code></div>
-        <div class="stat reveal-up" data-proof="rpc"><b class="stat__n"><span data-count="475">475</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
+        <div class="stat reveal-up" data-proof="rpc"><b class="stat__n"><span data-count="489">489</span></b><span class="stat__l">RPC 方法声明 · 幽灵声明 0 条</span><code class="stat__c">npm run typecheck</code></div>
       </div>
 
       <div class="guards reveal-up" role="list" aria-label="十三道架构守卫">
@@ -1557,7 +1557,7 @@ webui/e2e/approval-card.spec.ts</pre>
 
       <div class="ledger reveal-up">
         <div class="ledger__i"><b class="ledger__n">302,625<em> 行</em></b><span class="ledger__l">Rust · 593 个文件</span></div>
-        <div class="ledger__i"><b class="ledger__n">356,744<em> 行</em></b><span class="ledger__l">前端 · 1,285 个文件</span></div>
+        <div class="ledger__i"><b class="ledger__n">357,192<em> 行</em></b><span class="ledger__l">前端 · 1,287 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">463,984<em> 行</em></b><span class="ledger__l">Python · 1,018 个文件</span></div>
         <div class="ledger__i"><b class="ledger__n">1,631<em> 份</em></b><span class="ledger__l">技能文档（随仓库发布）</span></div>
         <div class="ledger__i"><b class="ledger__n">32<em> 个</em></b><span class="ledger__l">工具模块</span></div>
@@ -1713,8 +1713,8 @@ ollama run  KLJyouth-office-V0.17-C
       </header>
 
       <div class="stats">
-        <div class="stat reveal-up" data-proof="core-tests"><b class="stat__n"><span data-count="4570">4570</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
-        <div class="stat reveal-up" data-proof="webui-tests"><b class="stat__n"><span data-count="5107">5107</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
+        <div class="stat reveal-up" data-proof="core-tests"><b class="stat__n"><span data-count="4720">4720</span></b><span class="stat__l">核心测试通过 · 0 失败</span><code class="stat__c">cargo test -p marguerite-core --lib</code></div>
+        <div class="stat reveal-up" data-proof="webui-tests"><b class="stat__n"><span data-count="5142">5142</span></b><span class="stat__l">控制台单测通过 · 0 失败</span><code class="stat__c">npm run test:unit</code></div>
         <div class="stat reveal-up" data-proof="gate"><b class="stat__n"><span data-count="28">28</span></b><span class="stat__l">全量门禁检查项</span><code class="stat__c">scripts/verify.sh --all</code></div>
         <div class="stat reveal-up" data-proof="cli-routes"><b class="stat__n"><span data-count="20">20</span></b><span class="stat__l">CLI 路由 · 三处同步</span><code class="stat__c">core/src/cli/program.rs</code></div>
       </div>
@@ -1722,8 +1722,8 @@ ollama run  KLJyouth-office-V0.17-C
       <div class="gate reveal-up">
         <div class="term term--gate" data-proof="gate">
           <p class="term__line"><span class="term__ps1">$</span> bash scripts/verify.sh --clean --all</p>
-          <p class="term__line term__ok">[PASS] core tests · 4570 passed / 0 failed</p>
-          <p class="term__line term__ok">[PASS] webui tests · 5107 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] core tests · 4720 passed / 0 failed</p>
+          <p class="term__line term__ok">[PASS] webui tests · 5142 passed / 0 failed</p>
           <p class="term__line term__ok">[PASS] clippy --workspace · 0 warnings</p>
           <p class="term__line term__ok">[PASS] pyengine · unit + gateway + 契约族</p>
           <p class="term__line term__ok">[PASS] workbench · 71 passed</p>
@@ -1804,21 +1804,16 @@ ollama run  KLJyouth-office-V0.17-C
         <!-- 当前版本 -->
         <article class="chg__current reveal-up">
           <p class="chg__k">当前版本</p>
-          <h3 class="chg__ver" data-current-version data-ver>0.2.19</h3>
-          <p class="chg__date">2026-10-31 · 含 10-30 → 10-31 近两日增量</p>
+          <h3 class="chg__ver" data-current-version data-ver>0.2.20</h3>
+          <p class="chg__date">2026-11-01</p>
           <ul class="chg__notes">
-            <li><b>新增战术推演</b>：<code>core/src/tactics/</code> 把协作表达成可计算的数据——五种拓扑、七条战术、失败概率预检（超过 <code>0.15</code> 直接判不合格并给出理由）、先验不足进 <code>unknowns</code> 而不填 0、用真实台账做反事实回放。入口为 <code>tactics.catalog</code> / <code>tactics.simulate</code> / <code>tactics.replay</code>，控制台有 <code>/tactics</code> 视图，主智能体可用 <code>tactics</code> 工具。</li>
-            <li><b>会话分支与助理记忆（跃迁三批）</b>：<code>sessions.fork</code> / <code>resume</code> / <code>replay</code> / <code>forkThroughTurn</code> 把分支点换算到具体 turn（不存在返回 <code>TURN_NOT_FOUND</code>，不静默降级成全量分支）；设置页新增「助理」分区——作用域切换、钉住清单、可解释偏好，偏好<b>没有删除按钮</b>（后端没有该能力就不伪造）；记忆写回必须先过 <code>promote::decide</code>，<code>Drop</code> 不落盘、<code>Promote</code> 才跨项目、同 key 冲突走 supersede；聊天提示词注入 <code>pinned / preferences / facts</code>（带来源、全空不注入、800 字符硬上限）；长任务熔断命中后暂停并落回滚点、发 <code>CIRCUIT_TRIPPED</code>，不 abort 进程、不丢已完成步骤。</li>
-            <li><b>安装包防反编译</b>：Python 侧车 1,018 个模块中 858 个经 Cython → C → MSVC 编译为原生扩展；清单记录源指纹与编译状态，资源闸门拒绝明文残留，发布层新增「真启动侧车 + 打 <code>/health</code> / <code>/api/config</code> / <code>/ws</code>」冒烟。</li>
-            <li><b>写入放大治理（W1–W7）</b>：单轮会话持久化从 <b>202 次写 / 952,987 字节</b>降到 <b>3 次 / 27,125 字节</b>（写次数约 1/67，字节数约 1/35）；WAL 模式与 <code>io_report</code> 让每次读写的来源可查，不再靠「感觉变快了」。</li>
-            <li><b>模型接入补齐</b>：Anthropic Messages 协议补全流式 usage、<code>finish_reason</code> 与请求体；自定义端点支持 <code>base_url</code> 与 <code>wire_api</code> 协议选择；「测试连接」按端点真实协议发请求，本地模型中心提供统一入口。</li>
-            <li><b>注意力优先工作台（10-30 → 10-31）</b>：<code>webui/src/composables/ui/attentionQueue.ts</code> 把审批、阻塞、失败、待选四类信号折成一个复合分——30 分钟内按新鲜度加成，同分按时间与 id 稳定排序；<code>webui/src/components/ui/AttentionShelf.vue</code> 负责呈现，没有需要人的事就整块不渲染；动效只在状态变化时触发（<code>webui/src/composables/ui/motionGrammar.ts</code>），减少动效时降为纯透明度。</li>
-            <li><b>指挥台与工作相位</b>：<code>webui/src/components/shell/CommandDeck.vue</code> 把「当前相位 · 原因 · 下一步动作」摊在工作区顶部，动作只由上层传入、没有动作就不渲染；相位由 <code>webui/src/composables/shell/useWorkPhase.ts</code> 纯函数推导（review &gt; execute &gt; explore &gt; idle），信号缺失一律落 idle，不猜。</li>
-            <li><b>桌面标题栏</b>：<code>webui/src/components/shell/TitleBarControls.vue</code> 只在 Tauri 壳内渲染最小化 / 最大化 / 关闭与拖拽区，浏览器直连网关时不渲染这些死控件。</li>
-            <li><b>两层助理的投影规则</b>：<code>core/src/assistant/projection.rs</code> 让 L1 只留「当前工作区推不出来」的事实、L2 只留本项目来源与用户画像，pinned 事实两层都不丢——此前两层读的是同一份 brief，只差字符预算。</li>
-            <li><b>知识库启动漂移自检</b>：<code>core/src/kb/gateway.rs</code> 在启动时把索引里的来源记录与磁盘逐条对账，有漂移就写 <code>rebuild_required.json</code> 并记 warn，无漂移则清掉陈旧标记；不自动重建、不阻塞启动，也不静默吞掉。</li>
-            <li><b>纪律基线</b>：全量门禁 28 项、RPC 声明 475 条且幽灵声明 0 条、核心测试 4,570 / 控制台单测 5,107；同时修掉 Linux / macOS 编译不过的三处根因，Windows 行为不变。</li>
-            <li>如实说明：安装包仍只在 <b>Windows x64</b> 上真机验证；非 Windows 平台本轮只拿到「能编译」的证据，没有运行证据。</li>
+            <li><b>代码审查插件（线 A）</b>：<code>core/src/review/{mod,apply}.rs</code> 落地审查引擎与一键修复（49 条单测），RPC 新增 <code>review.diff</code> / <code>review.applyFix</code>，插件清单 <code>plugins/manifests/dsh-code-review.plugin.json</code>；控制台新增 <code>/review</code> 视图——报告渲染、一键修复、导出，六语言齐平。</li>
+            <li><b>小程序插件（线 B）</b>：<code>core/src/miniapp/</code> 提供微信 / 抖音 / 支付宝三平台脚手架与诊断修复（<code>miniapp.scaffold</code> / <code>miniapp.diagnose</code>，22 条单测，重跑不覆盖已有工程），控制台新增 MiniappView。</li>
+            <li><b>任务悬浮球（线 C）</b>：<code>core/src/gateway/task_ball.rs</code> 定义 TaskBallHost trait（宿主缺位回 <code>HOST_UNAVAILABLE</code>，不伪造窗口），桌面壳注入 TauriTaskBallHost，新增 ConversationFloatView 浮窗、任务角标点击唤起；<code>EventType::ReviewDone</code> 补进事件链（from_wire 往返单测），不再有幽灵事件。</li>
+            <li><b>测试补齐</b>：ReviewReportView 此前零测试，本轮补 10 条 vitest 用例（diff 加载 / 一键修复 / 失败与空态）；控制台三视图 25 用例全绿，typecheck 0 错。</li>
+            <li><b>六语言与契约</b>：miniapp / review / taskBall 三组键六语言齐平（全量 6,836 键与 en 等集）；RPC 声明 489 条、幽灵 0 条，双实现守卫 10 在册 / 37 已消除，与 10-29 基线一致零漂移。</li>
+            <li><b>发布链路</b>：定向核心验证 179/179 全绿；0.2.20 安装包（MSI + NSIS）带更新器签名重建，官网与版本门禁同步升版。</li>
+            <li>如实说明：安装包仍只在 <b>Windows x64</b> 上真机验证；非 Windows 平台本轮没有运行证据。</li>
           </ul>
           <div class="chg__actions">
             <a class="btn btn--solid"
@@ -1839,6 +1834,18 @@ ollama run  KLJyouth-office-V0.17-C
         <details class="chg__history reveal-up">
           <summary>更早版本</summary>
           <div class="chg__history-body">
+            <article class="chg__item">
+              <h4 class="chg__ver chg__ver--sm">0.2.19</h4>
+              <p class="chg__date">2026-10-31</p>
+              <ul class="chg__notes">
+                <li>修安装后打不开：updater 插件缺 <code>pubkey</code> 导致启动即 panic（<code>lib.rs:3689</code>），补公钥后恢复正常。</li>
+                <li><b>战术推演</b>：<code>core/src/tactics/</code> 五种拓扑、七条战术、失败概率预检（超 0.15 判不合格并给理由）、真实台账反事实回放；RPC <code>tactics.catalog / simulate / replay</code> 与控制台 <code>/tactics</code>。</li>
+                <li><b>会话分支与助理记忆</b>：<code>sessions.fork / resume / replay / forkThroughTurn</code> 把分支点换算到具体 turn；记忆写回过 <code>promote::decide</code>，聊天提示词注入 pinned / preferences / facts；长任务熔断落回滚点并发 <code>CIRCUIT_TRIPPED</code>。</li>
+                <li><b>写入放大治理（W1–W7）</b>：单轮会话持久化从 202 次写 / 953KB 降到 3 次 / 27KB，WAL 与 <code>io_report</code> 让读写来源可查。</li>
+                <li><b>模型接入补齐</b>：Anthropic 流式 usage / finish_reason 补全，自定义端点支持 <code>base_url</code> 与 <code>wire_api</code>，本地模型中心统一入口。</li>
+                <li><b>安装包防反编译</b>：1,018 个侧车模块中 858 个经 Cython 编译为原生扩展，资源闸门拒绝明文残留；另落地注意力优先工作台、指挥台工作相位与桌面标题栏。</li>
+              </ul>
+            </article>
             <article class="chg__item">
               <h4 class="chg__ver chg__ver--sm">0.2.18</h4>
               <p class="chg__date">2026-10-29</p>
@@ -2142,10 +2149,10 @@ ollama run  KLJyouth-office-V0.17-C
     <div class="foot__col">
       <h2 class="foot__h">运行信息</h2>
       <ul class="foot__plain">
-        <li>版本 <code data-ver>0.2.19</code></li>
+        <li>版本 <code data-ver>0.2.20</code></li>
         <li>网关 <code>127.0.0.1:18790</code></li>
         <li>CLI 路由 20 条 · 四入口共用</li>
-        <li>RPC 方法 475 条 · 内置工具 76 个</li>
+        <li>RPC 方法 489 条 · 内置工具 76 个</li>
         <li>架构守卫 13 道 · 界面语言 6 种</li>
         <li>配乐 <code>focus-pulse.mp3</code> · 56 BPM</li>
       </ul>
@@ -2157,7 +2164,7 @@ ollama run  KLJyouth-office-V0.17-C
 <!-- 窄屏常驻下载条：过了首屏才出现，到下载区自动收起 -->
 <div class="dock" data-dock>
   <div class="dock__meta">
-    <b data-ver>Marguerite 0.2.19</b>
+    <b data-ver>Marguerite 0.2.20</b>
     <span>Windows x64 · 约 411 MB</span>
   </div>
   <a class="btn btn--solid"
